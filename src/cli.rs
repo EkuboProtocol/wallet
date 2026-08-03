@@ -1,5 +1,6 @@
 use crate::{
     VERSION,
+    approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi, TerminalApprovalUi},
     config::ConfigStore,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     human_presence::PlatformHumanPresence,
@@ -101,19 +102,58 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
         WalletCommand::Create { wallet_id } => print_json(&custody.create(&wallet_id)?),
         WalletCommand::Import { wallet_id } => {
             require_interactive("wallet import")?;
-            let mut input = rpassword::prompt_password("Private key (input hidden): ")
+            cliclack::intro("Import an existing wallet")?;
+            let mut input = cliclack::password("Private key")
+                .mask('•')
+                .interact()
                 .context("failed to read private key")?;
             let key = PrivateKeyMaterial::from_hex(&input)?;
             input.zeroize();
-            print_json(&custody.import(&wallet_id, key)?)
+
+            let progress = cliclack::spinner();
+            progress.start("Saving the key in the platform credential store");
+            let result = custody.import(&wallet_id, key);
+            match result {
+                Ok(wallet) => {
+                    progress.stop("Wallet imported");
+                    cliclack::outro("Imported wallets are marked as externally known.")?;
+                    print_json(&wallet)
+                }
+                Err(error) => {
+                    progress.error("Wallet import failed");
+                    Err(error)
+                }
+            }
         }
         WalletCommand::Export { wallet_id } => {
-            require_interactive("wallet export")?;
-            confirm_phrase(
-                &format!("export {wallet_id}"),
-                "Export permanently ends the wallet's exclusive-policy guarantee.",
-            )?;
-            let key = custody.export(&wallet_id).await?;
+            let wallet = config.wallet(&wallet_id)?;
+            require_approval(
+                ApprovalRequest::new(
+                    ApprovalKind::ExportPrivateKey,
+                    "Export private key",
+                    "Reveal the raw private key for this wallet.",
+                )
+                .fact("Wallet", &wallet.id)
+                .fact("Address", format!("{:#x}", wallet.address))
+                .warning(
+                    "Export permanently ends the wallet's exclusive-policy guarantee. Anyone with the key can bypass this service.",
+                ),
+            )
+            .await?;
+
+            let progress = cliclack::spinner();
+            progress.start("Waiting for owner authentication");
+            let result = custody.export(&wallet_id).await;
+            let key = match result {
+                Ok(key) => {
+                    progress.stop("Owner authenticated; custody state updated");
+                    key
+                }
+                Err(error) => {
+                    progress.error("Private key export failed");
+                    return Err(error);
+                }
+            };
             let mut stdout = io::stdout().lock();
             stdout.write_all(key.as_bytes())?;
             stdout.write_all(b"\n")?;
@@ -121,14 +161,42 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
             Ok(())
         }
         WalletCommand::Remove { wallet_id } => {
-            require_interactive("wallet remove")?;
-            confirm_phrase(
-                &format!("remove {wallet_id}"),
-                "This deletes the platform credential and local wallet metadata.",
-            )?;
-            print_json(&custody.remove(&wallet_id).await?)
+            let wallet = config.wallet(&wallet_id)?;
+            require_approval(
+                ApprovalRequest::new(
+                    ApprovalKind::RemoveWallet,
+                    "Remove wallet",
+                    "Delete this wallet's platform credential and local metadata.",
+                )
+                .fact("Wallet", &wallet.id)
+                .fact("Address", format!("{:#x}", wallet.address))
+                .warning("This operation cannot be undone unless a separate key backup exists."),
+            )
+            .await?;
+
+            let progress = cliclack::spinner();
+            progress.start("Waiting for owner authentication");
+            let result = custody.remove(&wallet_id).await;
+            match result {
+                Ok(wallet) => {
+                    progress.stop("Wallet removed");
+                    print_json(&wallet)
+                }
+                Err(error) => {
+                    progress.error("Wallet removal failed");
+                    Err(error)
+                }
+            }
         }
     }
+}
+
+async fn require_approval(request: ApprovalRequest) -> Result<()> {
+    ensure!(
+        TerminalApprovalUi.review(&request).await? == ApprovalDecision::Approved,
+        "action rejected"
+    );
+    Ok(())
 }
 
 fn run_network(config: &ConfigStore, command: &NetworkCommand) -> Result<()> {
@@ -161,20 +229,6 @@ fn require_interactive(operation: &str) -> Result<()> {
         io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal(),
         "{operation} requires an interactive terminal"
     );
-    Ok(())
-}
-
-fn confirm_phrase(expected: &str, warning: &str) -> Result<()> {
-    eprintln!("{warning}");
-    eprint!("Type `{expected}` to continue: ");
-    io::stderr().flush()?;
-    let mut confirmation = String::new();
-    io::stdin().read_line(&mut confirmation)?;
-    ensure!(
-        confirmation.trim() == expected,
-        "confirmation did not match"
-    );
-    confirmation.zeroize();
     Ok(())
 }
 

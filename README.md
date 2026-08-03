@@ -21,9 +21,12 @@ holds the signing key.
   path for that address.
 - Imported wallets are likewise marked as externally known.
 
-See [the architecture](docs/architecture.md) for the trust boundaries and
-[the release guide](docs/releasing.md) for CI, native code signing,
-notarization, provenance, and required account configuration.
+See [the threat model](docs/threat-model.md) for attacks, guarantees, and
+release-blocking controls; [the architecture](docs/architecture.md) for the
+trust boundaries; [approval UX](docs/approval-ux.md) for terminal, browser, and
+ChatGPT-compatible review flows; and [the release guide](docs/releasing.md) for
+CI, native code signing, notarization, provenance, and required account
+configuration.
 
 ## Development
 
