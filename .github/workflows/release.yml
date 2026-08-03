@@ -75,7 +75,7 @@ jobs:
           tar -C dist -czf "dist/$package.tar.gz" "$package"
 
       - name: Upload packaged binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -120,7 +120,7 @@ jobs:
           cp LICENSE unsigned/LICENSE
 
       - name: Upload unsigned binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unsigned-${{ matrix.target }}
           path: unsigned/
@@ -203,7 +203,7 @@ jobs:
           done
 
       - name: Upload signed macOS archives
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-macos
           path: dist/*.zip
@@ -261,7 +261,7 @@ jobs:
           Compress-Archive -Path "dist\$package" -DestinationPath "dist\$package.zip"
 
       - name: Upload signed Windows archive
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-windows
           path: dist/*.zip
