@@ -1,0 +1,352 @@
+name: Release signed binaries
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Match tag, package version, and main
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | sed -n '1p')"
+          test -n "$version"
+          test "$GITHUB_REF_NAME" = "v$version"
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install latest stable Rust
+        run: rustup update stable --no-self-update
+
+      - name: Test the tagged source
+        run: cargo test --locked --all-features
+
+  build-linux:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install target
+        run: |
+          rustup update stable --no-self-update
+          rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="ekubo-wallet-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/$package"
+          install -m 0755 "target/${{ matrix.target }}/release/ekubo-wallet" "dist/$package/ekubo-wallet"
+          install -m 0644 LICENSE "dist/$package/LICENSE"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-native-signing-targets:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: ekubo-wallet
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            binary: ekubo-wallet
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: ekubo-wallet.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install target
+        run: |
+          rustup update stable --no-self-update
+          rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Stage unsigned binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p unsigned
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "unsigned/${{ matrix.binary }}"
+          cp LICENSE unsigned/LICENSE
+
+      - name: Upload unsigned binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-${{ matrix.target }}
+          path: unsigned/
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-macos:
+    name: Sign and notarize macOS binaries
+    needs: [validate, build-native-signing-targets]
+    runs-on: macos-15
+    environment: release
+    steps:
+      - name: Download Intel binary
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: unsigned-x86_64-apple-darwin
+          path: unsigned/x86_64-apple-darwin
+
+      - name: Download Apple Silicon binary
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: unsigned-aarch64-apple-darwin
+          path: unsigned/aarch64-apple-darwin
+
+      - name: Sign, verify, and notarize
+        shell: bash
+        env:
+          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_NOTARY_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/ekubo-release-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          api_key_path="$RUNNER_TEMP/AuthKey.p8"
+          keychain_password="ekubo-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          cleanup() {
+            security delete-keychain "$keychain_path" >/dev/null 2>&1 || true
+            rm -f "$certificate_path" "$api_key_path"
+          }
+          trap cleanup EXIT
+
+          test -n "$APPLE_CODESIGN_IDENTITY"
+          test -n "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64"
+          test -n "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD"
+          test -n "$APPLE_NOTARY_API_KEY_P8_BASE64"
+          test -n "$APPLE_NOTARY_ISSUER_ID"
+          test -n "$APPLE_NOTARY_KEY_ID"
+
+          printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          mkdir -p dist
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            binary="unsigned/$target/ekubo-wallet"
+            codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$binary"
+            codesign --verify --strict --verbose=2 "$binary"
+            package="ekubo-wallet-${{ needs.validate.outputs.version }}-$target"
+            mkdir -p "dist/$package"
+            install -m 0755 "$binary" "dist/$package/ekubo-wallet"
+            install -m 0644 "unsigned/$target/LICENSE" "dist/$package/LICENSE"
+            ditto -c -k --sequesterRsrc --keepParent "dist/$package" "dist/$package.zip"
+            xcrun notarytool submit "dist/$package.zip" \
+              --key "$api_key_path" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID" \
+              --wait
+          done
+
+      - name: Upload signed macOS archives
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-macos
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-windows:
+    name: Sign Windows binary
+    needs: [validate, build-native-signing-targets]
+    runs-on: windows-2025
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download Windows binary
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: unsigned-x86_64-pc-windows-msvc
+          path: unsigned
+
+      - name: Authenticate to Azure with OIDC
+        uses: Azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Authenticode-sign executable
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\unsigned
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Ekubo Wallet
+          description-url: https://github.com/${{ github.repository }}
+
+      - name: Verify and package signed executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $signature = Get-AuthenticodeSignature "unsigned\ekubo-wallet.exe"
+          if ($signature.Status -ne "Valid") {
+            throw "Authenticode verification failed: $($signature.Status)"
+          }
+          $package = "ekubo-wallet-${{ needs.validate.outputs.version }}-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force -Path "dist\$package" | Out-Null
+          Copy-Item "unsigned\ekubo-wallet.exe" "dist\$package\ekubo-wallet.exe"
+          Copy-Item "unsigned\LICENSE" "dist\$package\LICENSE"
+          Compress-Archive -Path "dist\$package" -DestinationPath "dist\$package.zip"
+
+      - name: Upload signed Windows archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-windows
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Attest and publish immutable release
+    needs: [validate, build-linux, sign-macos, sign-windows]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          archive_count=0
+          : > SHA256SUMS
+          for archive in ekubo-wallet-*; do
+            test -f "$archive"
+            sha256sum "$archive" >> SHA256SUMS
+            archive_count=$((archive_count + 1))
+          done
+          test "$archive_count" -eq 5
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Keyless-sign archives and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$artifact.sigstore.json" "$artifact"
+          done
+
+      - name: Verify Sigstore bundles before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS; do
+            case "$artifact" in
+              *.sigstore.json) continue ;;
+            esac
+            cosign verify-blob \
+              --bundle "$artifact.sigstore.json" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "$artifact"
+          done
+
+      - name: Attest all published files
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/*
+
+      - name: Create GitHub Release with signed assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n' \
+            'Prebuilt archives are attached below. The macOS executables are Developer ID signed and notarized; the Windows executable is Authenticode signed with Azure Artifact Signing. Every archive and SHA256SUMS has a keyless Sigstore bundle and GitHub build-provenance attestation.' \
+            '' \
+            'Verification instructions: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/releasing.md#verify-a-download' \
+            > "$notes"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --target "$GITHUB_SHA" \
+            --title "Ekubo Wallet ${{ needs.validate.outputs.version }}" \
+            --generate-notes \
+            --notes-file "$notes"
