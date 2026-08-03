@@ -1,6 +1,6 @@
 [package]
 name = "ekubo-wallet"
-version = "2.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 description = "Local-first EVM wallet, CLI, and MCP server with policy-enforced signing"
