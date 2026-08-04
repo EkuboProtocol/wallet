@@ -20,6 +20,7 @@ use alloy::{
     sol,
     sol_types::SolCall,
 };
+use num_bigint::{BigInt, Sign};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -297,14 +298,23 @@ pub fn render_balance_changes(
         return Vec::new();
     };
     let mut lines = Vec::new();
-    let native = parse_signed(&changes.native.delta);
-    if native != 0 {
-        let currency = native_currency(network);
-        lines.push(format!(
-            "Native {}: {}",
-            currency.symbol,
-            format_signed_amount(native, Some(currency.decimals), Some(&currency.symbol))
-        ));
+    match parse_signed(&changes.native.delta) {
+        // Only a delta that parses and is exactly zero may be omitted. An
+        // unparseable value is reported verbatim rather than treated as "no
+        // change", which would hide an outflow from the reviewer.
+        Some(native) if native.sign() == Sign::NoSign => {}
+        Some(native) => {
+            let currency = native_currency(network);
+            lines.push(format!(
+                "Native {}: {}",
+                currency.symbol,
+                format_signed_amount(&native, Some(currency.decimals), Some(&currency.symbol))
+            ));
+        }
+        None => lines.push(format!(
+            "Native: unparseable net change reported as {:?}",
+            changes.native.delta
+        )),
     }
     for (raw_token, change) in &changes.tokens {
         let token = raw_token.parse::<Address>().ok();
@@ -312,9 +322,12 @@ pub fn render_balance_changes(
             .and_then(|token| metadata.get(&token).cloned())
             .unwrap_or_default();
         let label = token.map_or_else(|| raw_token.clone(), |token| token_label(token, &display));
-        let delta_text = match change.delta.as_ref().map(|delta| parse_signed(delta)) {
+        let delta_text = match change.delta.as_deref() {
             None => "net balance unavailable".to_string(),
-            Some(delta) => format_signed_amount(delta, display.decimals, display.symbol.as_deref()),
+            Some(raw) => parse_signed(raw).map_or_else(
+                || format!("unparseable net change reported as {raw:?}"),
+                |delta| format_signed_amount(&delta, display.decimals, display.symbol.as_deref()),
+            ),
         };
         let incoming = &change.incoming_transfers;
         let outgoing = &change.outgoing_transfers;
@@ -339,25 +352,23 @@ fn native_currency(network: &NetworkConfig) -> NativeCurrency {
         })
 }
 
-/// `i128` is intentional: a signed balance delta is bounded by the two u256
-/// balances that produced it, but only the human-scale magnitudes matter for
-/// display, and anything larger falls back to the exact decimal text.
-fn parse_signed(value: &str) -> i128 {
-    value.parse::<i128>().unwrap_or(0)
+/// A signed balance delta is the difference of two uint256 balances, so it does
+/// not fit any fixed-width integer. Arbitrary precision is required: silently
+/// saturating or wrapping would show a reviewer a number that is not the one
+/// being approved.
+fn parse_signed(value: &str) -> Option<BigInt> {
+    value.parse::<BigInt>().ok()
 }
 
-fn format_signed_amount(delta: i128, decimals: Option<u8>, symbol: Option<&str>) -> String {
-    let base_units = if delta > 0 {
-        format!("+{delta}")
-    } else {
-        delta.to_string()
-    };
+fn format_signed_amount(delta: &BigInt, decimals: Option<u8>, symbol: Option<&str>) -> String {
+    let negative = delta.sign() == Sign::Minus;
+    let magnitude = delta.magnitude().to_string();
+    let sign = if negative { "-" } else { "+" };
+    let base_units = format!("{sign}{magnitude}");
     let Some(decimals) = decimals else {
         return format!("{base_units} base units");
     };
-    let sign = if delta < 0 { "-" } else { "+" };
-    let magnitude = delta.unsigned_abs();
-    let scaled = format_fixed_point(&magnitude.to_string(), decimals);
+    let scaled = format_fixed_point(&magnitude, decimals);
     let unit = symbol.map_or(String::new(), |symbol| format!(" {symbol}"));
     format!("{sign}{scaled}{unit} ({base_units} base units)")
 }
@@ -557,6 +568,40 @@ mod tests {
         data
     }
 
+    fn simulation_with_native_delta(delta: &str) -> SimulationResult {
+        use crate::simulation::{
+            BalanceChanges, ExecutionMode, NativeBalanceChange, SimulationExecution,
+        };
+        SimulationResult {
+            digest: "0x00".into(),
+            allowed: true,
+            policy_findings: Vec::new(),
+            policy_revision: 1,
+            execution_mode: ExecutionMode::Direct,
+            implementation: None,
+            will_authorize_delegation: false,
+            replaces_delegated_implementation: None,
+            simulation: SimulationExecution {
+                success: true,
+                gas_used: None,
+                block_gas_limit: None,
+                output: None,
+                error: None,
+                failure: None,
+            },
+            token_spends: BTreeMap::new(),
+            balance_changes: Some(BalanceChanges {
+                native: NativeBalanceChange {
+                    before: "0".into(),
+                    after: "0".into(),
+                    delta: delta.into(),
+                },
+                tokens: BTreeMap::new(),
+            }),
+            block_number: "1".into(),
+        }
+    }
+
     fn usdc_metadata(token: Address) -> TokenMetadataMap {
         TokenMetadataMap::from([(
             token,
@@ -724,10 +769,49 @@ mod tests {
     #[test]
     fn signed_amounts_keep_sign_and_base_units() {
         assert_eq!(
-            format_signed_amount(-1_500_000, Some(6), Some("USDC")),
+            format_signed_amount(&BigInt::from(-1_500_000), Some(6), Some("USDC")),
             "-1.5 USDC (-1500000 base units)"
         );
-        assert_eq!(format_signed_amount(25, None, None), "+25 base units");
+        assert_eq!(
+            format_signed_amount(&BigInt::from(25), None, None),
+            "+25 base units"
+        );
+    }
+
+    #[test]
+    fn balance_deltas_beyond_fixed_width_integers_stay_exact() {
+        // A delta is the difference of two uint256 balances, so it can exceed
+        // any fixed-width type. Rendering it as zero, saturated, or wrapped
+        // would show a reviewer a number other than the one being approved.
+        let huge = "-".to_string() + &"9".repeat(60);
+        let delta = parse_signed(&huge).expect("arbitrary precision parses");
+        let rendered = format_signed_amount(&delta, Some(18), Some("TKN"));
+        assert!(
+            rendered.contains(&format!("({huge} base units)")),
+            "{rendered}"
+        );
+        assert!(rendered.starts_with('-'), "{rendered}");
+        assert_eq!(
+            parse_signed(&format!("-{}", U256::MAX)).map(|value| value.sign()),
+            Some(Sign::Minus)
+        );
+    }
+
+    #[test]
+    fn unparseable_deltas_are_reported_rather_than_shown_as_zero() {
+        assert!(parse_signed("not-a-number").is_none());
+        let simulation = simulation_with_native_delta("not-a-number");
+        let network = crate::config::default_networks().remove(0);
+        let lines = render_balance_changes(&simulation, &network, &TokenMetadataMap::new());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("unparseable"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_exactly_zero_native_delta_is_omitted() {
+        let simulation = simulation_with_native_delta("0");
+        let network = crate::config::default_networks().remove(0);
+        assert!(render_balance_changes(&simulation, &network, &TokenMetadataMap::new()).is_empty());
     }
 
     #[test]

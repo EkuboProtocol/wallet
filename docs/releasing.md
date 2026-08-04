@@ -83,6 +83,16 @@ release pipeline, keep them on the protected `release` environment with required
 reviewers rather than at repository scope, so a push to a branch cannot reach
 them.
 
+One consequence worth stating while the repository is private: keyless Sigstore
+signing records each signature in the **public** Rekor transparency log. Those
+entries contain this repository's full name, the workflow path, and the release
+tag. The artifacts themselves are not published, but the fact that
+`EkuboProtocol/secure-wallet-mcp-server` cut a given release at a given time
+becomes publicly discoverable. That is inherent to public-good transparency
+logging and is the price of the verifiability the bundles provide. If that
+disclosure is unacceptable before a public launch, remove the Cosign steps and
+rely on checksums until the repository is public.
+
 ## Accounts and one-time configuration
 
 ### GitHub
