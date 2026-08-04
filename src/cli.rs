@@ -1940,9 +1940,7 @@ async fn approve_message(
         for warning in siwe_warnings(
             siwe,
             request.chain_id.as_deref(),
-            siwe.chain_id
-                .parse::<u64>()
-                .is_ok_and(|_| config.network_by_chain_id(&siwe.chain_id).is_ok()),
+            config.network_by_chain_id(&siwe.chain_id).is_ok(),
             chrono::Utc::now(),
         ) {
             approval = approval.warning(warning);
@@ -1965,8 +1963,9 @@ async fn approve_message(
     for warning in &display.warnings {
         approval = approval.warning(warning.clone());
     }
-    approval = approval.fact("Signing hash", &request.digest);
-    approval.digest = Some(request.digest.clone());
+    approval = approval
+        .fact("Signing hash", &request.digest)
+        .digest(&request.digest);
     approval.id = request.request_id;
     approval.expires_at = request.expires_at;
 
