@@ -23,7 +23,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install latest stable Rust
         run: rustup update stable --no-self-update
@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install latest stable Rust
         run: rustup update stable --no-self-update
@@ -49,3 +49,13 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      # install.sh is piped to a shell by users, so it is linted like source.
+      - name: Lint the installer
+        run: shellcheck --shell=sh install.sh
+
+      - name: Install RustSec audit client
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit dependency advisories
+        run: cargo audit

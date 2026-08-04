@@ -1,52 +1,102 @@
-# Rust architecture
+# Architecture
 
-The `ekubo-wallet` artifact contains CLI, stdio MCP, and wallet-core service
-modes. The MCP and CLI surfaces are deliberately adapters over the same core
-services; there is no second signing implementation. On platforms where a
-same-user credential store cannot identify the Ekubo executable, the core runs
-under a dedicated OS service identity and is the only mode that opens
-security-state storage or loads keys.
+`ekubo-wallet` is one process. In server mode, the stdio MCP adapter, plan
+validation, RPC simulation, policy evaluation, key access, signing, envelope
+validation, durable lifecycle update, and broadcast pipeline all run in that
+process. There is no privileged daemon, subprocess core, service mode, or
+private IPC protocol.
 
-## Selected components
+Direct CLI commands use the same library but are separate invocations. They are
+management, recovery, and human-approval surfaces—not clients of a signing
+daemon. There is one signing implementation and no generic digest-signing API.
 
-- `rmcp`: official Rust MCP SDK and stdio transport.
-- `alloy`: Ethereum primitives, ABI support, HTTP JSON-RPC, EIP-7702 transaction
-  construction, signing, and receipt handling.
-- `revm` with `AlloyDB`: isolated in-process EVM execution with state fetched
-  lazily from the configured RPC at a fixed block.
-- `rusqlite` with bundled SQLite: policy revisions, reservations, spend
-  accounting, and transaction lifecycle state in one portable binary. All
-  authoritative records are MAC chained and checked against a credential-store
-  anti-rollback anchor; SQLite bytes are treated as attacker-writable.
-- `keyring`: platform credential-store abstraction. Production builds use
-  macOS Keychain, Windows Credential Manager, and Linux Secret Service.
-- `cliclack`: accessible, styled terminal prompts, warnings, and status for the
-  direct-CLI approval fallback. Machine-readable command output stays on
-  stdout; interactive UI stays on stderr.
-- `HumanPresence`: an application-owned abstraction implemented with macOS
-  LocalAuthentication, Windows UserConsentVerifier, and Linux polkit. Export
-  and exceptional approval cannot be completed by MCP input alone.
-- `ApprovalUi`: a presentation boundary with terminal, ephemeral loopback web,
-  and MCP Apps implementations. Every implementation displays the same
-  immutable server-authored request and can approve only its exact digest.
+## Components
 
-## Custody invariants
+- `rmcp` provides MCP and stdio transport.
+- `alloy` provides Ethereum primitives, RPC types, transaction construction,
+  signing, and post-signature recovery.
+- Alloy's typed `eth_simulateV1` client executes the exact direct call or
+  Calibur batch against a pinned parent block. The process validates response
+  parent linkage, simulated block number, call count, canonical Calibur runtime
+  hash, balance probes, and returned transfer logs. There is no local EVM fork,
+  `eth_getProof` reconstruction, or `eth_call` fallback for signing decisions.
+- `rusqlite` with vendored SQLCipher stores current policies and pending
+  transaction lifecycle rows in one encrypted `policies.db` file.
+- `keyring` stores wallet keys and a distinct 256-bit SQLCipher key under
+  separate service names.
+- `HumanPresence` uses Local Authentication, Windows Hello, or polkit for
+  consequential local operations.
 
-1. MCP inputs and results never contain a private key.
-2. A normal signing request is accepted only as a structured execution plan.
-   There is no generic `sign_hash` or `sign_transaction` command.
-3. The application independently simulates, evaluates the active policy,
-   reserves limits, prepares the transaction, signs, validates, and broadcasts.
-4. Raw-key export is an explicit recovery transition requiring platform human
-   presence. Export means the address may thereafter be controlled externally;
-   the application records that fact and cannot claim exclusive enforcement.
-5. Imported wallets are never described as exclusively controlled, because an
-   earlier copy of their key may exist.
+The database deliberately contains no daily counters, rolling windows,
+allowance reservations, spend history, or consumption ledger. Policy limits
+are stateless and apply to one transaction or atomic batch.
 
-`KeyStore`, `HumanPresence`, `Rpc`, and fork database boundaries are traits.
-This keeps platform code small and makes denial, cancellation, rollback, and
-tampering behavior testable without weakening production paths.
+## Signing pipeline
 
-See [the threat model](threat-model.md) for the authenticated SQLite protocol,
-platform limitations, residual attacks, and release blockers. See [approval
-UX](approval-ux.md) for terminal, browser, and ChatGPT-compatible review flows.
+```text
+structured plan
+   │ validate sender/chain/shape and compute canonical plan digest
+   ▼
+eth_simulateV1 at pinned block
+   │ exact call + optional EIP-7702 delegation override
+   ▼
+local policy evaluation
+   ├─ denied/failed ─▶ encrypted awaiting_approval row ─▶ separate CLI
+   │
+   └─ allowed ──────▶ resolve nonce/gas/fees ─▶ load key ─▶ sign
+                                                    │
+                                                    ▼
+                                       recover and validate envelope
+                                                    │
+                                                    ▼
+                                  persist exact bytes/hash before RPC send
+```
+
+For an exceptional approval, nonce/gas/fees are prepared before the terminal
+and OS review. The review digest commits to those fields and the exact call.
+After OS authentication the CLI reloads mutable local authority and signs the
+already-prepared object without another RPC lookup.
+
+One plan step becomes a direct EIP-1559 transaction. Multiple steps are encoded
+as a single atomic `execute` call to canonical Calibur. If the wallet does not
+already delegate to that implementation, the signer emits EIP-7702 with one
+authorization whose nonce is the sender transaction nonce plus one. Both the
+authorization and outer envelope are recovered and validated after signing.
+
+## Storage and lifecycle
+
+The platform data directory contains:
+
+- `config.json`: private-permission wallet metadata and network profiles;
+- `config.lock`: inter-process configuration update lock;
+- `policies.lock`: inter-process database/key initialization lock; and
+- `policies.db`: SQLCipher database containing separate `wallet_policies` and
+  `pending_transactions` tables.
+
+SQLCipher uses a credential-store key, authenticated pages, secure deletion,
+full synchronization, and DELETE journal mode so there is no persistent WAL.
+Startup runs cipher and logical integrity checks. A missing key for an existing
+database, wrong key, corrupt page, unsupported schema, or configured wallet
+without a policy fails closed.
+
+Policy revisions provide optimistic concurrency. Pending rows bind the full
+plan and digest, policy revision, expiry, approval status, optional review
+digest, signed bytes/hash, broadcast hash, block number, and lifecycle state.
+At most one signed/submitting/broadcast transaction exists for a wallet/chain.
+
+Submission first claims a durable lease. A crash or ambiguous RPC response is
+reconciled by exact transaction hash. If rebroadcast is needed, only the stored
+serialized envelope is sent again. No fee bump, nonce replacement, or re-sign
+occurs implicitly.
+
+## Rollback boundary
+
+There is no external database checkpoint. Restoring an older valid encrypted
+database can restore an older policy or pending lifecycle state. Since there is
+no consumed daily allowance, rollback cannot replenish a spending window. It
+can nevertheless restore a more permissive policy or a still-valid signed
+transaction; the latter may be rebroadcast after hash reconciliation. Protect
+the data directory and backups accordingly.
+
+See [the threat model](threat-model.md) for trust assumptions and
+[exceptional approval flow](approval-ux.md) for the human boundary.

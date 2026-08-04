@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/secure-wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 2,
+  "require_simulation": true,
+  "approval_expiry_seconds": 600,
+  "chains": {
+    "*": {
+      "label": "Deny every automatic signature; each transaction needs an explicit CLI approval",
+      "max_calls_per_batch": 1,
+      "native": { "max_value_per_transaction": "0" },
+      "targets": {},
+      "approval_spenders": {},
+      "tokens": {}
+    }
+  }
+}

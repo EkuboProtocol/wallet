@@ -1,0 +1,206 @@
+{
+  "note": "One complete wallet_batch_eth_call input per supported decode plan kind. Addresses and selectors are illustrative; replace them with the contract you are reading. Every plan below is parsed by the test suite, so these shapes cannot drift from the implementation.",
+  "function_result": {
+    "chain_id": "1",
+    "block_parameter": "latest",
+    "calls": [
+      {
+        "id": "balance",
+        "to": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "data": "0x70a082310000000000000000000000001111111111111111111111111111111111111111",
+        "decode": {
+          "kind": "function_result",
+          "abi": [
+            {
+              "type": "function",
+              "name": "balanceOf",
+              "stateMutability": "view",
+              "inputs": [{ "name": "account", "type": "address" }],
+              "outputs": [{ "name": "balance", "type": "uint256" }]
+            }
+          ],
+          "function_name": "balanceOf(address)",
+          "required": true
+        },
+        "include_raw": true
+      }
+    ]
+  },
+  "abi_parameters": {
+    "chain_id": "1",
+    "calls": [
+      {
+        "id": "packed-state",
+        "to": "0x1111111111111111111111111111111111111111",
+        "data": "0x12345678",
+        "decode": {
+          "kind": "abi_parameters",
+          "parameters": [
+            { "name": "sqrt_ratio", "type": "uint256" },
+            { "name": "tick", "type": "int32" },
+            { "name": "liquidity", "type": "uint128" }
+          ],
+          "required": true
+        }
+      }
+    ]
+  },
+  "multicall3": {
+    "note": "Decode an outer Multicall3 aggregate3 result. Every child's success flag and returnData are preserved; listed results may additionally require success and carry their own nested decode plan.",
+    "chain_id": "8453",
+    "calls": [
+      {
+        "id": "aggregate",
+        "to": "0xca11bde05977b3631167028862be2a173976ca11",
+        "data": "0x82ad56cb",
+        "decode": {
+          "kind": "multicall3",
+          "abi": [
+            {
+              "type": "function",
+              "name": "aggregate3",
+              "stateMutability": "payable",
+              "inputs": [
+                {
+                  "name": "calls",
+                  "type": "tuple[]",
+                  "components": [
+                    { "name": "target", "type": "address" },
+                    { "name": "allowFailure", "type": "bool" },
+                    { "name": "callData", "type": "bytes" }
+                  ]
+                }
+              ],
+              "outputs": [
+                {
+                  "name": "returnData",
+                  "type": "tuple[]",
+                  "components": [
+                    { "name": "success", "type": "bool" },
+                    { "name": "returnData", "type": "bytes" }
+                  ]
+                }
+              ]
+            }
+          ],
+          "function_name": "aggregate3",
+          "expected_result_count": 2,
+          "results": [
+            {
+              "index": 0,
+              "required_success": true,
+              "decode": {
+                "kind": "abi_parameters",
+                "parameters": [{ "type": "uint256" }],
+                "required": true
+              }
+            },
+            { "index": 1, "required_success": true }
+          ],
+          "required": true
+        }
+      }
+    ]
+  },
+  "function_result_bytes_array": {
+    "note": "For contracts whose outer function returns exactly one bytes[], such as a VeToken multicall.",
+    "chain_id": "1",
+    "calls": [
+      {
+        "id": "nested",
+        "to": "0x1111111111111111111111111111111111111111",
+        "data": "0xac9650d8",
+        "decode": {
+          "kind": "function_result_bytes_array",
+          "abi": [
+            {
+              "type": "function",
+              "name": "multicall",
+              "stateMutability": "payable",
+              "inputs": [{ "name": "data", "type": "bytes[]" }],
+              "outputs": [{ "name": "results", "type": "bytes[]" }]
+            }
+          ],
+          "function_name": "multicall(bytes[])",
+          "expected_result_count": 2,
+          "results": [
+            {
+              "index": 0,
+              "decode": {
+                "kind": "abi_parameters",
+                "parameters": [{ "type": "uint128" }],
+                "required": true
+              }
+            }
+          ],
+          "required": true
+        }
+      }
+    ]
+  },
+  "semantic_value": {
+    "note": "Applies one allowlisted, locally implemented codec to a whole custom payload. A request is a compatibility assertion only: it cannot install, fetch, import, or execute caller-supplied code. An unrecognized identity returns unsupported_codec and keeps the raw bytes.",
+    "chain_id": "1",
+    "calls": [
+      {
+        "id": "sqrt-ratio",
+        "to": "0x1111111111111111111111111111111111111111",
+        "data": "0x12345678",
+        "decode": {
+          "kind": "semantic_value",
+          "semantic_type": "ekubo.sqrt_ratio_float",
+          "codec": {
+            "id": "ekubo.sqrt_ratio_float_to_q128",
+            "version": 1,
+            "implementations": [
+              {
+                "ecosystem": "npm",
+                "registry": "https://registry.npmjs.org",
+                "package_url": "pkg:npm/%40ekubo/sdk@0.0.10-alpha.0",
+                "export_name": "floatSqrtRatioToFixed",
+                "integrity": "sha512-1koNXODon0kaQBX5CbYRyfvj5viEBmyxZFlOTWPlK79gItDoIEeJIUYM8IlTu3YTT8m2xb3XcvNXUCEXuCi0rw=="
+              }
+            ]
+          },
+          "required": false
+        }
+      }
+    ]
+  },
+  "semantic_codecs_on_a_decoded_field": {
+    "note": "The same codec can instead transform one field of a generically decoded result, addressed by path. Generic ABI decoding stays authoritative and the untransformed value is retained alongside it.",
+    "chain_id": "1",
+    "calls": [
+      {
+        "id": "pool-price",
+        "to": "0x1111111111111111111111111111111111111111",
+        "data": "0x12345678",
+        "decode": {
+          "kind": "abi_parameters",
+          "parameters": [{ "name": "sqrt_ratio", "type": "uint256" }],
+          "semantic_codecs": [
+            {
+              "path": "sqrt_ratio",
+              "semantic_type": "ekubo.sqrt_ratio_float",
+              "codec": {
+                "id": "ekubo.sqrt_ratio_float_to_q128",
+                "version": 1,
+                "implementations": [
+                  {
+                    "ecosystem": "npm",
+                    "registry": "https://registry.npmjs.org",
+                    "package_url": "pkg:npm/%40ekubo/sdk@0.0.10-alpha.0",
+                    "export_name": "floatSqrtRatioToFixed",
+                    "integrity": "sha512-1koNXODon0kaQBX5CbYRyfvj5viEBmyxZFlOTWPlK79gItDoIEeJIUYM8IlTu3YTT8m2xb3XcvNXUCEXuCi0rw=="
+                  }
+                ]
+              },
+              "required": false
+            }
+          ],
+          "required": true
+        }
+      }
+    ]
+  }
+}

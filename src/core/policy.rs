@@ -65,8 +65,6 @@ pub struct TokenPolicy {
     pub label: Option<String>,
     #[serde(default = "zero")]
     pub max_spend_per_transaction: String,
-    #[serde(default = "zero")]
-    pub max_spend_per_day: String,
     #[serde(default)]
     pub transfer_recipients: BTreeMap<String, NamedAddressPolicy>,
 }
@@ -76,15 +74,12 @@ pub struct TokenPolicy {
 pub struct NativePolicy {
     #[serde(default = "zero")]
     pub max_value_per_transaction: String,
-    #[serde(default = "zero")]
-    pub max_value_per_day: String,
 }
 
 impl Default for NativePolicy {
     fn default() -> Self {
         Self {
             max_value_per_transaction: zero(),
-            max_value_per_day: zero(),
         }
     }
 }
@@ -162,7 +157,6 @@ impl WalletPolicy {
                 max_calls_per_batch: 4096,
                 native: NativePolicy {
                     max_value_per_transaction: max_uint256(),
-                    max_value_per_day: max_uint256(),
                 },
                 targets: BTreeMap::from([(
                     "*".into(),
@@ -190,7 +184,6 @@ impl WalletPolicy {
                     TokenPolicy {
                         label: None,
                         max_spend_per_transaction: max_uint256(),
-                        max_spend_per_day: max_uint256(),
                         transfer_recipients: BTreeMap::from([(
                             "*".into(),
                             NamedAddressPolicy { label: None },
@@ -242,7 +235,6 @@ impl WalletPolicy {
             }
             validate_label(chain.label.as_deref())?;
             validate_decimal(&chain.native.max_value_per_transaction)?;
-            validate_decimal(&chain.native.max_value_per_day)?;
             normalize_target_map(&mut chain.targets)?;
             normalize_spender_map(&mut chain.approval_spenders)?;
             normalize_token_map(&mut chain.tokens, self.require_simulation)?;
@@ -600,7 +592,6 @@ fn normalize_token_map(
         ensure!(require_simulation, "token spend limits require simulation");
         validate_label(rule.label.as_deref())?;
         validate_decimal(&rule.max_spend_per_transaction)?;
-        validate_decimal(&rule.max_spend_per_day)?;
         let mut recipients = BTreeMap::new();
         for (recipient, recipient_rule) in rule.transfer_recipients {
             validate_label(recipient_rule.label.as_deref())?;
@@ -790,6 +781,22 @@ mod tests {
             WalletPolicy::parse(json!({
                 "chains": { "1": { "tokens": { "*": {} } } },
                 "require_simulation": false
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_removed_stateful_daily_limits() {
+        assert!(
+            WalletPolicy::parse(json!({
+                "chains": { "1": { "native": { "max_value_per_day": "1" } } }
+            }))
+            .is_err()
+        );
+        assert!(
+            WalletPolicy::parse(json!({
+                "chains": { "1": { "tokens": { "*": { "max_spend_per_day": "1" } } } }
             }))
             .is_err()
         );

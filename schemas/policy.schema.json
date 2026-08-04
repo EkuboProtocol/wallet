@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ekubo Wallet policy",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "format": "uint8",
+      "minimum": 0,
+      "maximum": 255,
+      "default": 2
+    },
+    "chains": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ChainPolicy"
+      }
+    },
+    "approval_expiry_seconds": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0,
+      "default": 600
+    },
+    "require_simulation": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "chains"
+  ],
+  "$defs": {
+    "ChainPolicy": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approval_expiry_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_calls_per_batch": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 16
+        },
+        "native": {
+          "$ref": "#/$defs/NativePolicy",
+          "default": {
+            "max_value_per_transaction": "0"
+          }
+        },
+        "targets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TargetPolicy"
+          },
+          "default": {}
+        },
+        "approval_spenders": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ApprovalSpenderPolicy"
+          },
+          "default": {}
+        },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/TokenPolicy"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "NativePolicy": {
+      "type": "object",
+      "properties": {
+        "max_value_per_transaction": {
+          "type": "string",
+          "default": "0"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TargetPolicy": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "allow_empty_calldata": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_any_calldata": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowed_selectors": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SelectorPolicy"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "SelectorPolicy": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ApprovalSpenderPolicy": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ApprovalTokenPolicy"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "ApprovalTokenPolicy": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_amount": {
+          "type": "string",
+          "default": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TokenPolicy": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_spend_per_transaction": {
+          "type": "string",
+          "default": "0"
+        },
+        "transfer_recipients": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/NamedAddressPolicy"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "NamedAddressPolicy": {
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "description": "Stateless per-transaction signing policy. Amounts are decimal strings in the asset's smallest unit. There are no daily limits, rolling windows, or spend counters."
+}

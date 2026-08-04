@@ -1,9 +1,14 @@
+use alloy::json_abi::JsonAbi;
 use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
 use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{fmt, str::FromStr};
+
+const MAX_EXECUTION_STEPS: usize = 4_096;
+const MAX_TOTAL_CALLDATA_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SERIALIZED_PLAN_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema)]
 #[schemars(transparent)]
@@ -103,6 +108,49 @@ pub struct ExecutionStep {
     pub transaction: PlannedTransaction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eip1193: Option<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert_decode: Option<RevertDecodePlan>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RevertDecodePlan {
+    ErrorResult {
+        abi: Vec<Value>,
+        #[serde(default)]
+        required: bool,
+    },
+}
+
+impl RevertDecodePlan {
+    #[must_use]
+    pub fn abi(&self) -> &[Value] {
+        match self {
+            Self::ErrorResult { abi, .. } => abi,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        const MAX_ABI_ENTRIES: usize = 128;
+        const MAX_ABI_BYTES: usize = 65_536;
+        let abi = self.abi();
+        ensure!(
+            (1..=MAX_ABI_ENTRIES).contains(&abi.len()),
+            "revert_decode ABI must contain 1-{MAX_ABI_ENTRIES} entries"
+        );
+        let encoded = serde_json::to_vec(abi)?;
+        ensure!(
+            encoded.len() <= MAX_ABI_BYTES,
+            "revert_decode ABI exceeds {MAX_ABI_BYTES} bytes"
+        );
+        let parsed: JsonAbi =
+            serde_json::from_slice(&encoded).context("revert_decode ABI is malformed")?;
+        ensure!(
+            parsed.errors.values().flatten().next().is_some(),
+            "revert_decode ABI must contain at least one error"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -136,6 +184,7 @@ pub struct ExecutionPlan {
     pub caip2_chain_id: String,
     #[schemars(with = "String")]
     pub sender: Address,
+    #[schemars(length(min = 1, max = 4096))]
     pub ordered_steps: Vec<ExecutionStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_policy: Option<Map<String, Value>>,
@@ -162,6 +211,10 @@ impl ExecutionPlan {
             "execution plan requires at least one step"
         );
         ensure!(
+            self.ordered_steps.len() <= MAX_EXECUTION_STEPS,
+            "execution plan exceeds {MAX_EXECUTION_STEPS} steps"
+        );
+        ensure!(
             self.caip2_chain_id == format!("eip155:{}", self.chain_id),
             "CAIP-2 chain does not match chain_id"
         );
@@ -178,7 +231,15 @@ impl ExecutionPlan {
                 "simulation_setup_error cannot recommend retrying identical calldata"
             );
         }
+        let mut total_calldata = 0_usize;
         for (index, step) in self.ordered_steps.iter().enumerate() {
+            total_calldata = total_calldata
+                .checked_add(step.transaction.data.len())
+                .context("execution plan calldata size overflow")?;
+            ensure!(
+                total_calldata <= MAX_TOTAL_CALLDATA_BYTES,
+                "execution plan calldata exceeds {MAX_TOTAL_CALLDATA_BYTES} bytes"
+            );
             ensure!(
                 step.step as usize == index + 1,
                 "steps must be consecutive and one-indexed"
@@ -191,7 +252,14 @@ impl ExecutionPlan {
                 step.transaction.from == self.sender,
                 "transaction sender does not match plan"
             );
+            if let Some(revert_decode) = &step.revert_decode {
+                revert_decode.validate()?;
+            }
         }
+        ensure!(
+            serde_json::to_vec(self)?.len() <= MAX_SERIALIZED_PLAN_BYTES,
+            "execution plan exceeds {MAX_SERIALIZED_PLAN_BYTES} serialized bytes"
+        );
         Ok(())
     }
 
@@ -275,5 +343,42 @@ mod tests {
         let mut input = plan();
         input["surprise"] = json!(true);
         assert!(ExecutionPlan::parse(input).is_err());
+    }
+
+    #[test]
+    fn accepts_only_bounded_error_result_decode_hints() {
+        let mut input = plan();
+        input["ordered_steps"][0]["revert_decode"] = json!({
+            "kind": "error_result",
+            "abi": [{
+                "type": "error",
+                "name": "Slippage",
+                "inputs": [{"name": "minimum", "type": "uint256"}]
+            }],
+            "required": false
+        });
+        assert!(ExecutionPlan::parse(input).is_ok());
+
+        let mut input = plan();
+        input["ordered_steps"][0]["revert_decode"] = json!({
+            "kind": "error_result",
+            "abi": []
+        });
+        assert!(ExecutionPlan::parse(input).is_err());
+    }
+
+    #[test]
+    fn rejects_execution_plans_over_the_step_limit() {
+        let mut parsed = ExecutionPlan::parse(plan()).unwrap();
+        let template = parsed.ordered_steps[0].clone();
+        parsed.ordered_steps = (1..=MAX_EXECUTION_STEPS + 1)
+            .map(|step| ExecutionStep {
+                step: u32::try_from(step).unwrap(),
+                ..template.clone()
+            })
+            .collect();
+
+        let error = parsed.validate().unwrap_err().to_string();
+        assert!(error.contains("exceeds 4096 steps"));
     }
 }

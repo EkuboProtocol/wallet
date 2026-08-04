@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/secure-wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 2,
+  "require_simulation": true,
+  "approval_expiry_seconds": 300,
+  "chains": {
+    "*": {
+      "label": "TEMPLATE: wildcard fallback that a per-chain entry can tighten",
+      "max_calls_per_batch": 16,
+      "native": { "max_value_per_transaction": "0" },
+      "targets": {
+        "*": {
+          "label": "Any target, but only these two selectors",
+          "allowed_selectors": {
+            "0x095ea7b3": { "label": "approve(address,uint256)" },
+            "0xa9059cbb": { "label": "transfer(address,uint256)" }
+          }
+        }
+      },
+      "approval_spenders": {
+        "0x1111111111111111111111111111111111111111": {
+          "label": "TEMPLATE: an exact spender entry always wins over the wildcard below",
+          "tokens": {
+            "*": {
+              "label": "Up to 100 units of any six-decimal token",
+              "max_amount": "100000000"
+            }
+          }
+        },
+        "*": {
+          "label": "Every other spender is capped far lower",
+          "tokens": { "*": { "max_amount": "1000000" } }
+        }
+      },
+      "tokens": {
+        "*": {
+          "label": "Applied separately to each observed token, not pooled across them",
+          "max_spend_per_transaction": "100000000",
+          "transfer_recipients": {}
+        }
+      }
+    },
+    "8453": {
+      "label": "TEMPLATE: Base overrides the wildcard entirely rather than extending it",
+      "max_calls_per_batch": 4,
+      "native": { "max_value_per_transaction": "0" },
+      "targets": {},
+      "approval_spenders": {},
+      "tokens": {}
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/secure-wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 2,
+  "require_simulation": true,
+  "approval_expiry_seconds": 600,
+  "chains": {
+    "1": {
+      "label": "TEMPLATE: replace every address and ceiling before use",
+      "max_calls_per_batch": 8,
+      "native": { "max_value_per_transaction": "50000000000000000" },
+      "targets": {
+        "0x1111111111111111111111111111111111111111": {
+          "label": "TEMPLATE: the router or protocol contract this wallet may call",
+          "allowed_selectors": {
+            "0x12345678": { "label": "TEMPLATE: the one function this wallet may invoke" }
+          }
+        }
+      },
+      "approval_spenders": {
+        "0x1111111111111111111111111111111111111111": {
+          "label": "TEMPLATE: the only spender that may hold an allowance",
+          "tokens": {
+            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+              "label": "TEMPLATE: USDC on Ethereum; cap the allowance at 1,000 USDC",
+              "max_amount": "1000000000"
+            }
+          }
+        }
+      },
+      "tokens": {
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+          "label": "TEMPLATE: at most 250 USDC may leave the wallet in one transaction",
+          "max_spend_per_transaction": "250000000",
+          "transfer_recipients": {
+            "0x2222222222222222222222222222222222222222": {
+              "label": "TEMPLATE: the only address that may receive a direct transfer"
+            }
+          }
+        }
+      }
+    }
+  }
+}

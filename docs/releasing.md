@@ -7,6 +7,33 @@ protected `release` environment, emits checksums, creates keyless Sigstore
 bundles and GitHub build-provenance attestations, and publishes all files in one
 GitHub Release.
 
+Each archive contains `ekubo-wallet`, its `ew` alias, the README, license, shell
+completions, the policy JSON Schema, and the policy/decoding examples. Linux
+archives also contain the polkit action required for owner-authenticated
+operations. The workflow source is release-ready; the
+repository/environment configuration and signing values below are the
+remaining operator inputs.
+
+## Platform signing is optional, and its absence is stated in the release
+
+Checksums, keyless Sigstore bundles, and GitHub build-provenance attestations
+are unconditional: every release has them, and the workflow fails rather than
+publishing without them.
+
+Apple and Azure platform code signing is detected per platform:
+
+- With a **complete** credential set, the platform binaries are signed (and, on
+  macOS, notarized). Verification failure fails the release.
+- With **no** credential for a platform, that platform is packaged unsigned, a
+  workflow warning is emitted, and the generated release notes say plainly that
+  the archive is unsigned and that Gatekeeper or SmartScreen will object.
+- With a **partial** credential set, the release fails. A half-configured
+  signing setup is an operator error, not a reason to silently downgrade.
+
+Sign before distributing to anyone outside the team. An unsigned release is
+appropriate for internal testing, where the recipient verifies the checksum and
+Sigstore bundle instead.
+
 The workflow deliberately does not publish to crates.io. A crates.io package is
 a public source archive, not a binary distribution, and publishing there would
 be inconsistent with keeping this code all-rights-reserved. If Ekubo later
@@ -108,6 +135,14 @@ or certificate in GitHub.
 5. Verify the release is shown as immutable and independently verify at least
    one asset using the commands below.
 
+Linux users must install the packaged polkit action before policy exceptions,
+policy/network changes, key export, or wallet removal can authenticate:
+
+```sh
+sudo install -m 0644 contrib/polkit/com.ekubo.wallet.policy \
+  /usr/share/polkit-1/actions/com.ekubo.wallet.policy
+```
+
 ## Verify a download
 
 First verify the checksum from the release directory:
@@ -138,6 +173,15 @@ On macOS, `codesign -dv --verbose=4 ekubo-wallet` shows the Developer ID and
 `spctl --assess --type execute --verbose=4 ekubo-wallet` asks Gatekeeper to
 assess it. On Windows, inspect the executable's **Digital Signatures** tab or
 run `Get-AuthenticodeSignature .\ekubo-wallet.exe` in PowerShell.
+
+Those two commands fail for an unsigned release, which is expected and is stated
+in that release's notes. Do not clear the macOS quarantine attribute or dismiss
+the SmartScreen warning until the checksum and Sigstore bundle above verify.
+
+`install.sh` performs the same verification automatically: it refuses to install
+without a matching `SHA256SUMS` entry and, when `cosign` is present, refuses to
+install unless the Sigstore bundle over `SHA256SUMS` verifies against this
+workflow's identity at the release tag.
 
 Supply-chain signatures prove which reviewed workflow produced a binary; they
 do not make a compromised source tree safe. Keep the release environment,

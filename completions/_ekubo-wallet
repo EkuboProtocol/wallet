@@ -1,0 +1,64 @@
+#compdef ekubo-wallet ew
+
+_ekubo-wallet() {
+  local -a choices
+
+  if (( CURRENT == 2 )); then
+    _values "command" server version wallet network policy transaction tx approve reject completion \
+      --data-dir --help --version
+    return
+  fi
+
+  if (( CURRENT == 3 )); then
+    case "$words[2]" in
+      wallet) _values "wallet command" list create import export remove ;;
+      network) _values "network command" list presets reset add remove delete ;;
+      policy) _values "policy command" show set allow-all validate schema ;;
+      transaction|tx) _values "transaction command" list show ;;
+      approve|reject)
+        choices=("${(@f)$(ekubo-wallet __complete approvals-described 2>/dev/null)}")
+        _describe "pending approval" choices
+        ;;
+      completion) _values "shell" bash zsh fish elvish powershell ;;
+    esac
+    return
+  fi
+
+  if (( CURRENT == 4 )); then
+    case "$words[2]:$words[3]" in
+      policy:validate) _files -g '*.json' ;;
+      wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|transaction:list|tx:list)
+        choices=("${(@f)$(ekubo-wallet __complete wallets-described 2>/dev/null)}")
+        _describe "wallet" choices
+        ;;
+      network:add)
+        choices=("${(@f)$(ekubo-wallet __complete defaults-described 2>/dev/null)}")
+        _describe "default network" choices
+        ;;
+      network:remove|network:delete)
+        choices=("${(@f)$(ekubo-wallet __complete networks-described 2>/dev/null)}")
+        _describe "network" choices
+        ;;
+    esac
+    return
+  fi
+
+  if (( CURRENT == 5 )); then
+    case "$words[2]:$words[3]" in
+      policy:set) _files -g '*.json' ;;
+      network:add)
+        _values "network option" --rpc-url --display-name --alias --native-currency-name \
+          --native-currency-symbol --native-currency-decimals --max-gas-limit \
+          --block-explorer-url --documentation-url
+        ;;
+    esac
+  fi
+
+  if (( CURRENT > 5 )) && [[ "$words[2]:$words[3]" == "network:add" ]]; then
+    _values "network option" --rpc-url --display-name --alias --native-currency-name \
+      --native-currency-symbol --native-currency-decimals --max-gas-limit \
+      --block-explorer-url --documentation-url
+  fi
+}
+
+_ekubo-wallet "$@"

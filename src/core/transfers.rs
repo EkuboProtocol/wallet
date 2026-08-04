@@ -102,6 +102,7 @@ fn make_plan(
                     gas: None,
                 },
                 eip1193: None,
+                revert_decode: None,
             })
             .collect(),
         execution_policy: None,

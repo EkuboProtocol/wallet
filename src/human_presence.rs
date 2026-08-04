@@ -5,6 +5,8 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PresenceAction {
     ExportPrivateKey,
+    ChangePolicy,
+    ChangeNetworkConfiguration,
     ApprovePolicyException,
     RemoveWallet,
 }
@@ -13,6 +15,8 @@ impl fmt::Display for PresenceAction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::ExportPrivateKey => "export the private key",
+            Self::ChangePolicy => "change the wallet policy",
+            Self::ChangeNetworkConfiguration => "change the wallet network configuration",
             Self::ApprovePolicyException => "approve a policy exception",
             Self::RemoveWallet => "remove the wallet and its private key",
         })

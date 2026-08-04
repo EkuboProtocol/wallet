@@ -1,0 +1,215 @@
+//! The schema, policy templates, and decode examples shipped in this repository
+//! are executable documentation. These tests fail if any of them drifts away
+//! from what the wallet actually parses and enforces.
+
+use assert_cmd::Command;
+use ekubo_wallet::{abi_decoder::AbiDecodePlan, core::policy::WalletPolicy};
+use serde_json::Value;
+use std::{fs, path::Path};
+
+fn repository_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read_json(relative: &str) -> Value {
+    let path = repository_root().join(relative);
+    let bytes = fs::read(&path).unwrap_or_else(|error| panic!("read {relative}: {error}"));
+    serde_json::from_slice(&bytes).unwrap_or_else(|error| panic!("parse {relative}: {error}"))
+}
+
+fn cli() -> Command {
+    Command::cargo_bin("ekubo-wallet").expect("ekubo-wallet binary builds")
+}
+
+#[test]
+fn committed_policy_schema_matches_the_enforced_types() {
+    let output = cli().arg("policy").arg("schema").output().unwrap();
+    assert!(output.status.success(), "policy schema exited non-zero");
+    let generated: Value = serde_json::from_slice(&output.stdout).expect("schema is valid JSON");
+    assert_eq!(
+        generated,
+        read_json("schemas/policy.schema.json"),
+        "schemas/policy.schema.json is stale; regenerate it with `ekubo-wallet policy schema`"
+    );
+}
+
+#[test]
+fn every_shipped_policy_example_parses() {
+    let mut checked = 0;
+    for relative in [
+        "examples/policy.json",
+        "examples/policies/allow-all-with-approval.template.json",
+        "examples/policies/approval-wildcards.template.json",
+        "examples/policies/deny-all.json",
+        "examples/policies/token-budget.template.json",
+    ] {
+        let policy = WalletPolicy::parse(read_json(relative))
+            .unwrap_or_else(|error| panic!("{relative} is not a valid policy: {error:#}"));
+        assert_eq!(
+            policy.version, 2,
+            "{relative} declares an unexpected version"
+        );
+        assert!(
+            policy.require_simulation,
+            "{relative} disables simulation, which no shipped example should do"
+        );
+        assert!(!policy.chains.is_empty(), "{relative} configures no chains");
+        checked += 1;
+    }
+    assert_eq!(checked, 5);
+}
+
+#[test]
+fn allow_all_template_matches_the_built_in_profile() {
+    // `policy allow-all` and the shipped template must install the same rules,
+    // so a reader can inspect the template to learn exactly what that command
+    // does.
+    let template = WalletPolicy::parse(read_json(
+        "examples/policies/allow-all-with-approval.template.json",
+    ))
+    .expect("template parses");
+    let built_in = WalletPolicy::allow_all_with_approval();
+    assert_eq!(template.chains, built_in.chains);
+    assert_eq!(
+        template.approval_expiry_seconds,
+        built_in.approval_expiry_seconds
+    );
+    assert_eq!(template.require_simulation, built_in.require_simulation);
+}
+
+#[test]
+fn deny_all_example_permits_nothing_automatically() {
+    let policy =
+        WalletPolicy::parse(read_json("examples/policies/deny-all.json")).expect("policy parses");
+    let chain = policy
+        .chain("1")
+        .expect("wildcard chain applies to any chain");
+    assert!(chain.targets.is_empty());
+    assert!(chain.tokens.is_empty());
+    assert!(chain.approval_spenders.is_empty());
+    assert_eq!(chain.native.max_value_per_transaction, "0");
+}
+
+#[test]
+fn every_documented_decode_plan_parses() {
+    let examples = read_json("examples/abi-decoding.json");
+    let object = examples.as_object().expect("examples are a JSON object");
+    let mut checked = 0;
+    for (name, example) in object {
+        let Some(calls) = example.get("calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for call in calls {
+            let plan = call.get("decode").unwrap_or_else(|| {
+                panic!("example {name} has a call without a decode plan");
+            });
+            serde_json::from_value::<AbiDecodePlan>(plan.clone())
+                .unwrap_or_else(|error| panic!("example {name} decode plan is invalid: {error}"));
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked, 6,
+        "expected one decode plan per documented example kind"
+    );
+}
+
+#[test]
+fn policy_validate_accepts_examples_and_rejects_malformed_documents() {
+    let valid = cli()
+        .arg("policy")
+        .arg("validate")
+        .arg(repository_root().join("examples/policy.json"))
+        .output()
+        .unwrap();
+    assert!(valid.status.success());
+    let report: Value = serde_json::from_slice(&valid.stdout).expect("report is JSON");
+    assert_eq!(report["valid"], Value::Bool(true));
+    assert!(
+        report["digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("0x")),
+        "validation reports the digest a reviewer would see when applying the file"
+    );
+
+    let unknown_field = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        unknown_field.path(),
+        br#"{"chains":{"*":{"unexpected_field":true}}}"#,
+    )
+    .unwrap();
+    cli()
+        .arg("policy")
+        .arg("validate")
+        .arg(unknown_field.path())
+        .assert()
+        .failure();
+}
+
+#[test]
+fn packaged_completions_offer_every_subcommand() {
+    // The completion scripts are hand-written for dynamic candidate lookups, so
+    // nothing regenerates them when a subcommand is added. This test is what
+    // catches that.
+    let expected = [
+        "server",
+        "version",
+        "wallet",
+        "network",
+        "policy",
+        "transaction",
+        "approve",
+        "reject",
+        "completion",
+        "create",
+        "import",
+        "export",
+        "remove",
+        "presets",
+        "reset",
+        "add",
+        "show",
+        "set",
+        "allow-all",
+        "validate",
+        "schema",
+    ];
+    for shell in ["bash", "zsh", "fish"] {
+        let output = cli().arg("completion").arg(shell).output().unwrap();
+        assert!(
+            output.status.success(),
+            "completion {shell} exited non-zero"
+        );
+        let script = String::from_utf8(output.stdout).expect("completion script is UTF-8");
+        for subcommand in expected {
+            assert!(
+                script.contains(subcommand),
+                "{shell} completion never offers `{subcommand}`"
+            );
+        }
+        assert!(
+            !script.contains("__configure-agent"),
+            "{shell} completion exposes a hidden internal subcommand"
+        );
+    }
+}
+
+#[test]
+fn policy_validate_never_touches_wallet_state() {
+    // Validation must work before any wallet exists, so drafting a policy needs
+    // neither the encrypted database nor owner authentication.
+    let empty_home = tempfile::tempdir().unwrap();
+    cli()
+        .arg("--data-dir")
+        .arg(empty_home.path())
+        .arg("policy")
+        .arg("validate")
+        .arg(repository_root().join("examples/policies/deny-all.json"))
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_dir(empty_home.path()).unwrap().count(),
+        0,
+        "validation wrote to the data directory"
+    );
+}

@@ -1,162 +1,105 @@
-# Approval UX architecture
+# Exceptional approval flow
 
-Approval is a security protocol with multiple presentations, not a boolean
-supplied by an MCP client. Terminal, local-browser, and MCP Apps experiences all
-review the same server-authored immutable request.
+An MCP client cannot approve a policy exception. It can create a pending
+request by attempting a plan that fails policy or simulation, and it can wait
+for or observe the result. The user must independently run the local CLI in a
+real terminal:
 
-## User experience goals
-
-- Make the default path easy to understand without teaching users wallet or MCP
-  internals.
-- Show what will happen, not just what method will be called.
-- Keep model-readable results useful when a client cannot render custom UI.
-- Default to rejection and make cancellation harmless.
-- Never mix interactive decoration with JSON or secret output on stdout.
-- Preserve a final OS-controlled human-presence step for consequential
-  exceptions, policy changes, key export, and removal.
-
-## Shared approval request
-
-The core owns a versioned `ApprovalRequest` containing:
-
-- random request ID and expiry;
-- operation kind;
-- wallet and derived address;
-- chain ID and network name;
-- server-normalized execution plan;
-- transaction fields and complete digest;
-- decoded calls, native value, token transfers, and approvals;
-- fee and nonce bounds;
-- simulation block, material state changes, and warnings;
-- active policy revision/digest and findings; and
-- the exact reservation made against policy limits.
-
-The presenter cannot replace those fields. Approval submits only the pending ID,
-the expected digest, and a one-time capability. The core reloads the immutable
-record, verifies authenticated policy state, consumes the capability atomically,
-performs OS human presence when required, and only then signs.
-
-## State machine
-
-```text
-requested
-   │ parse, normalize, simulate, evaluate, reserve
-   ▼
-pending_review ── timeout/reject ──▶ rejected_or_expired
-   │ exact digest + one-time capability
-   ▼
-owner_presence ── deny/fail ───────▶ rejected
-   │
-   ▼
-approved ── consume once ──▶ signing ──▶ broadcast_or_recorded_failure
+```sh
+ekubo-wallet approve <request-id>
 ```
 
-No transition returns to `pending_review`, and an approval cannot be reused for
-a reconstructed transaction. A changed nonce, fee, calldata, recipient, value,
-simulation, or policy revision creates a new request and digest.
+There is no loopback browser or MCP App approval surface in this release.
 
-## Direct CLI
+## What the user reviews
 
-`clap` remains the argument parser and stable scripting interface. `cliclack`
-provides passwords, confirmation, notes, warnings, progress, cancellation, and
-theme support for interactive commands.
+The CLI reloads the encrypted pending request and active policy, then runs a
+fresh `eth_simulateV1` simulation. Before asking for approval, it resolves the
+transaction's pending nonce, gas limit, EIP-1559 maximum and priority fees, and
+any EIP-7702 authorization. No signing key is loaded during these RPC calls.
 
-The terminal presenter:
+The review includes:
 
-- requires real stdin, stdout, and stderr terminals;
-- writes prompts and status to stderr;
-- sanitizes control characters before rendering untrusted labels or metadata;
-- selects **No** by default;
-- clearly distinguishes policy approval from OS owner authentication; and
-- leaves raw exported key material as the only stdout payload of export.
+- full wallet, network, chain, and sender identifiers;
+- every ordered call's kind, condition, full target, native value, selector,
+  and calldata size;
+- a supplemental human reading of each call whose calldata matches a standard
+  `approve`, `transfer`, `transferFrom`, `setApprovalForAll`, or
+  `multicall(bytes[])` shape, with amounts rendered using token symbols and
+  decimals when they can be read;
+- the portable execution-plan digest and simulation parent block;
+- transaction type, nonce, gas limit, fee fields, and worst-case fee;
+- the canonical Calibur implementation and authorization nonce, if applicable;
+- policy findings, decoded simulation failure details, balance changes, and
+  the active policy revision; and
+- a review digest that commits to the plan digest plus the exact outer target,
+  value, calldata, chain, nonce, gas, fees, transaction type, and delegation.
 
-An exact typed phrase is not the primary security boundary. A clear default-no
-review followed by native owner authentication gives a better experience while
-preserving the actual human-presence control.
+The terminal confirmation defaults to rejection. `--no-confirm` skips only that
+yes/no prompt; it still prints the review and still requires platform owner
+authentication.
 
-## Ephemeral loopback browser
+Decoded readings and token metadata are decoration on top of the exact fields,
+never a substitute for them. Calldata is decoded locally and only when it is
+canonically encoded; anything else is presented as an unrecognized selector
+rather than as a possibly wrong interpretation. Token symbols and decimals come
+from bounded, short-timeout, best-effort reads of the configured RPC, which is
+itself untrusted: a failed lookup degrades the line to exact base units, and a
+returned symbol is stripped of control and parenthesis characters so a hostile
+token cannot forge additional review fields. Effectively unlimited allowances and
+blanket `setApprovalForAll` grants are surfaced as explicit warnings. The review
+digest binds the exact calldata, not this rendering.
 
-For MCP hosts without component UI, the core may start a review server for one
-request and open the system browser.
+After terminal confirmation, the CLI binds the native authentication prompt to
+the review digest. It then reloads the pending row, wallet/network
+configuration, and encrypted policy. Signing is synchronous from that point
+and performs no further RPC request, so the signed fields are exactly those
+reviewed. The process validates the resulting envelope and atomically stores
+the review digest, exact bytes, and transaction hash.
 
-Required controls:
+## Lifecycle
 
-1. Bind only an explicit loopback address and an OS-assigned random port. Never
-   bind `0.0.0.0` or a LAN interface.
-2. Generate at least 256 random bits for a single-use capability. Put it in the
-   URL fragment so it is not sent in the initial HTTP request, logs, or referrer;
-   page JavaScript sends it only in the approval POST body or authorization
-   header.
-3. Serve a self-contained page with no third-party scripts, fonts, analytics,
-   images, or network requests.
-4. Set a strict CSP, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`,
-   `X-Content-Type-Options: nosniff`, and frame denial.
-5. Validate `Host`, reject unexpected `Origin`/fetch metadata, mutate only on
-   POST, compare capabilities in constant time, and rate limit failures.
-6. Escape every rendered field. The server supplies transaction data; the URL
-   and browser never supply HTML.
-7. Expire quickly, accept one decision, close all listeners immediately, and
-   treat browser closure as rejection after timeout.
-8. After the click, invoke OS human presence in the core. Possession of a
-   loopback capability alone never authorizes a required exception.
+```text
+awaiting_approval ── reject/timeout ─────────────▶ rejected | expired
+        │
+        │ terminal review + OS owner authentication
+        ▼
+      signed ── submission lease ──▶ submitting ──▶ broadcast
+                                                   │
+                                                   ▼
+                                          confirmed | reverted
+```
 
-The loopback server improves presentation; it does not turn a browser session
-into a trusted identity.
+Removing a wallet cancels its unsubmitted pending records. Changing the active
+policy invalidates approval or cancels a signed request before submission. A
+transient pre-submission failure can release the submission lease back to
+`signed`. Once submission may have reached the RPC, recovery can only reconcile
+or rebroadcast the identical persisted envelope; it never prepares or signs a
+replacement.
 
-## ChatGPT and MCP Apps
+Only one signed/submitting/broadcast transaction may exist per wallet and chain
+at a time. Identical outstanding plans reuse one pending request, and each
+wallet may have at most 64 requests awaiting approval. These are queue safety
+controls, not spending limits.
 
-Current OpenAI plugin guidance uses the open MCP Apps standard for optional UI.
-The review component is returned as a `text/html;profile=mcp-app` resource and
-linked with `_meta.ui.resourceUri`.
+## Platform owner authentication
 
-The model-visible prepare tool returns useful structured facts and an inline
-review component. A distinct approval tool is marked with
-`_meta.ui.visibility: ["app"]`, so it is callable by the component but not
-advertised to the model. The one-time approval capability is returned in tool
-result `_meta`, which the host delivers to the component but hides from the
-model. OS human presence remains the final authority.
+- macOS uses Local Authentication with device-owner authentication.
+- Windows uses Windows Hello's user-consent verifier.
+- Linux uses the `com.ekubo.wallet.human-presence` polkit action shipped under
+  `contrib/polkit`; the action must be installed by an administrator.
 
-The component has an empty network allowlist unless a reviewed requirement is
-added. It renders authoritative server results, treats all text as untrusted,
-does not use browser storage as durable state, and remains usable through a
-concise model-readable fallback.
-
-Relevant primary documentation:
-
-- [OpenAI: Add UI to your MCP server](https://developers.openai.com/plugins/build/chatgpt-ui)
-- [OpenAI plugin reference](https://developers.openai.com/plugins/reference)
-- [OpenAI security and privacy](https://developers.openai.com/plugins/guides/security-privacy)
-- [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
-
-For a private local wallet, Secure MCP Tunnel can connect ChatGPT developer
-mode to the stdio server without public inbound access. Public plugin submission
-requires a stable public HTTPS MCP endpoint and is not equivalent to this local
-custody design. A public product would need a separately threat-modeled broker
-or pairing architecture; it must not silently expose the local signer.
-
-## Presentation order
-
-The preferred transaction review order is:
-
-1. Plain-language action and severity.
-2. Wallet, chain, recipient/contract, and full address.
-3. Assets leaving and minimum assets expected back.
-4. New or changed token approvals.
-5. Fees, nonce, expiry, and slippage/deadline bounds.
-6. Simulation result and material state changes.
-7. Policy revision, limits consumed, exceptions, and warnings.
-8. Advanced raw calldata, selector, complete digest, and request ID.
-
-Addresses are never shown only in truncated form. Human-friendly labels are
-supplemental and cannot replace canonical identifiers.
+If the platform mechanism is missing, denied, canceled, or times out, the
+operation fails closed. The MCP server never receives an approval token and has
+no tool that can emulate this step.
 
 ## Failure behavior
 
-- Unsupported UI: return the pending ID and direct CLI review instructions.
-- Presenter crash or disconnect: keep the request pending only until its short
-  expiry, then release its reservation through an authenticated event.
-- OS presence denial: reject and consume the approval capability.
-- Policy or simulation changes while pending: invalidate the request and require
-  a new review.
-- Browser or component reports different transaction facts: ignore them and
-  reject a digest mismatch.
+- A presenter error, terminal disconnect, or authentication denial produces no
+  signature.
+- A changed pending row, wallet, network, or policy aborts before signing.
+- A request that expires during review cannot be stored as approved.
+- If another signed transaction is already in flight for that wallet and
+  chain, the newly reviewed signature is not persisted or returned; the
+  request remains available for a fresh approval after the first transaction
+  reaches a terminal state.

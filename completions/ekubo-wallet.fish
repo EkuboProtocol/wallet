@@ -1,0 +1,51 @@
+function __ekubo_wallet_needs_command
+    set -l tokens (commandline -opc)
+    test (count $tokens) -eq 1
+end
+
+function __ekubo_wallet_at_position
+    set -l tokens (commandline -opc)
+    test (count $tokens) -eq $argv[1]
+end
+
+complete -c ekubo-wallet -f
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a server -d 'Run the MCP server over stdio'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a version -d 'Print version information'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a wallet -d 'Create, import, inspect, export, or remove wallets'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a network -d 'Inspect, add, reset, or remove networks'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a policy -d 'Set or inspect wallet policies'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a transaction -d 'Inspect signed and broadcast transactions'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a tx -d 'Inspect signed and broadcast transactions'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a approve -d 'Approve a pending request locally'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a reject -d 'Reject a pending request locally'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a completion -d 'Print shell completions'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l data-dir -r -d 'Override the wallet data directory'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l help -d 'Show command help'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print version information'
+
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from list presets reset add remove delete' -a 'list presets reset add remove delete'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all validate schema' -a 'show set allow-all validate schema'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show' -a 'list show'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish elvish powershell' -a 'bash zsh fish elvish powershell'
+
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from export remove; and __fish_seen_subcommand_from wallet' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete defaults-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from remove delete; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show set allow-all; and __fish_seen_subcommand_from policy' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from list; and __fish_seen_subcommand_from transaction tx' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from approve' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from reject' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 4; and __fish_seen_subcommand_from set; and __fish_seen_subcommand_from policy' -F
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from validate; and __fish_seen_subcommand_from policy' -F
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l rpc-url -r -d 'Use an RPC URL instead of a preset or hidden prompt'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l display-name -r -d 'Set the human-readable network name'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l alias -r -d 'Add a repeatable network alias'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l native-currency-name -r -d 'Set the native currency name'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l native-currency-symbol -r -d 'Set the native currency symbol'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l native-currency-decimals -r -d 'Set native currency decimals'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l max-gas-limit -r -d 'Cap submitted transaction gas'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l block-explorer-url -r -d 'Set the block explorer URL'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l documentation-url -r -d 'Set the network documentation URL'
+
+complete -c ew -w ekubo-wallet

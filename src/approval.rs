@@ -10,6 +10,8 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
     Transaction,
+    PolicyChange,
+    NetworkChange,
     PolicyException,
     ExportPrivateKey,
     RemoveWallet,

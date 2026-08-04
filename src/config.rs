@@ -437,21 +437,75 @@ pub fn validate_wallet_id(id: &str) -> Result<()> {
 }
 
 fn validate_network(network: &NetworkConfig) -> Result<()> {
-    ensure!(
-        !network.name.trim().is_empty(),
-        "network name cannot be empty"
-    );
+    validate_network_identifier(&network.name, "network name")?;
+    let mut identifiers = BTreeSet::from([&network.name]);
+    for alias in &network.aliases {
+        validate_network_identifier(alias, "network alias")?;
+        ensure!(
+            identifiers.insert(alias),
+            "duplicate network name or alias {alias}"
+        );
+    }
     ensure!(network.chain_id > 0, "network chain ID must be positive");
     ensure!(
         matches!(network.rpc_url.scheme(), "http" | "https"),
         "RPC URL must use http:// or https://"
     );
     if let Some(limit) = &network.max_gas_limit {
+        ensure!(
+            !limit.starts_with('0') && limit.bytes().all(|byte| byte.is_ascii_digit()),
+            "max gas limit must be a canonical positive decimal integer"
+        );
         let limit = limit
             .parse::<u64>()
             .context("max gas limit must fit uint64")?;
         ensure!(limit > 0, "max gas limit must be positive");
     }
+    if let Some(display_name) = &network.display_name {
+        ensure!(
+            !display_name.trim().is_empty()
+                && display_name.len() <= 128
+                && !display_name.chars().any(char::is_control),
+            "network display name must contain 1-128 printable characters"
+        );
+    }
+    if let Some(currency) = &network.native_currency {
+        ensure!(
+            !currency.name.trim().is_empty()
+                && currency.name.len() <= 64
+                && !currency.name.chars().any(char::is_control),
+            "native currency name must contain 1-64 printable characters"
+        );
+        ensure!(
+            !currency.symbol.trim().is_empty()
+                && currency.symbol.len() <= 32
+                && !currency.symbol.chars().any(char::is_control),
+            "native currency symbol must contain 1-32 printable characters"
+        );
+    }
+    for (label, url) in [
+        ("block explorer URL", network.block_explorer_url.as_ref()),
+        ("documentation URL", network.documentation_url.as_ref()),
+    ] {
+        if let Some(url) = url {
+            ensure!(
+                matches!(url.scheme(), "http" | "https"),
+                "{label} must use http:// or https://"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_network_identifier(value: &str, label: &str) -> Result<()> {
+    ensure!(
+        !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+        "{label} must use 1-64 letters, numbers, underscores, or hyphens"
+    );
     Ok(())
 }
 
@@ -485,6 +539,59 @@ pub fn add_configured_network(
     }
     networks.push(next);
     Ok(())
+}
+
+/// Replace a network with the same canonical name, while rejecting chain-ID
+/// or identifier collisions with every other configured network.
+pub fn replace_configured_network(
+    networks: &mut Vec<NetworkConfig>,
+    next: NetworkConfig,
+) -> Result<()> {
+    validate_network(&next)?;
+    if let Some(existing) = networks
+        .iter()
+        .find(|network| network.name != next.name && network.chain_id == next.chain_id)
+    {
+        bail!(
+            "chain {} is already configured as {}; remove it before adding {}",
+            next.chain_id,
+            existing.name,
+            next.name
+        );
+    }
+    let identifiers = std::iter::once(&next.name)
+        .chain(next.aliases.iter())
+        .collect::<BTreeSet<_>>();
+    if let Some(existing) = networks.iter().find(|network| {
+        network.name != next.name
+            && std::iter::once(&network.name)
+                .chain(network.aliases.iter())
+                .any(|identifier| identifiers.contains(identifier))
+    }) {
+        bail!(
+            "network name or alias conflicts with configured network {}",
+            existing.name
+        );
+    }
+    networks.retain(|network| network.name != next.name);
+    networks.push(next);
+    Ok(())
+}
+
+pub fn remove_configured_network(
+    networks: &mut Vec<NetworkConfig>,
+    requested: &str,
+) -> Result<NetworkConfig> {
+    let index = networks
+        .iter()
+        .position(|network| network.name == requested)
+        .or_else(|| {
+            networks
+                .iter()
+                .position(|network| network.aliases.iter().any(|alias| alias == requested))
+        })
+        .with_context(|| format!("unknown network {requested}"))?;
+    Ok(networks.remove(index))
 }
 
 fn legacy_custody_status() -> CustodyStatus {
@@ -547,5 +654,42 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn cli_replacement_is_name_scoped_and_rejects_cross_network_collisions() {
+        let mut networks = default_networks();
+        let mut ethereum = networks
+            .iter()
+            .find(|network| network.name == "ethereum")
+            .unwrap()
+            .clone();
+        ethereum.rpc_url = "https://rpc.example.invalid".parse().unwrap();
+        replace_configured_network(&mut networks, ethereum.clone()).unwrap();
+        assert_eq!(
+            networks
+                .iter()
+                .find(|network| network.name == "ethereum")
+                .unwrap()
+                .rpc_url,
+            ethereum.rpc_url
+        );
+
+        let mut conflicting = ethereum;
+        conflicting.name = "custom".into();
+        assert!(replace_configured_network(&mut networks, conflicting).is_err());
+        assert_eq!(
+            remove_configured_network(&mut networks, "eth")
+                .unwrap()
+                .name,
+            "ethereum"
+        );
+    }
+
+    #[test]
+    fn network_identifiers_cannot_inject_terminal_or_completion_controls() {
+        let mut candidate = default_networks().remove(0);
+        candidate.aliases.push("bad\nvalue".into());
+        assert!(validate_network(&candidate).is_err());
     }
 }
