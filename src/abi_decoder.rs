@@ -8,6 +8,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Schemars renders `serde_json::Value` as the bare boolean schema `true`,
+/// which some MCP clients (Claude Code among them) reject when validating
+/// tool schemas. These helpers emit equivalent object-form schemas instead.
+#[must_use]
+pub fn any_json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({})
+}
+
+#[must_use]
+pub fn any_json_array_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "array", "items": {}})
+}
+
+#[must_use]
+pub fn any_json_object_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({"type": "object"})
+}
+
 pub const MAX_ABI_ENTRIES: usize = 128;
 pub const MAX_ABI_BYTES: usize = 65_536;
 pub const MAX_RETURN_DATA_BYTES: usize = 1_048_576;
@@ -83,6 +101,7 @@ pub struct BytesArraySelection {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AbiDecodePlan {
     FunctionResult {
+        #[schemars(schema_with = "any_json_array_schema")]
         abi: Vec<Value>,
         function_name: String,
         #[serde(default)]
@@ -104,6 +123,7 @@ pub enum AbiDecodePlan {
         required: bool,
     },
     Multicall3 {
+        #[schemars(schema_with = "any_json_array_schema")]
         abi: Vec<Value>,
         function_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,6 +134,7 @@ pub enum AbiDecodePlan {
         required: bool,
     },
     FunctionResultBytesArray {
+        #[schemars(schema_with = "any_json_array_schema")]
         abi: Vec<Value>,
         function_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -152,6 +173,7 @@ pub struct StructuredDecodeError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "any_json_object_schema")]
     pub details: Option<BTreeMap<String, Value>>,
 }
 
@@ -161,6 +183,7 @@ pub struct AbiDecodeResult {
     pub decode_status: DecodeStatus,
     pub usable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "any_json_schema")]
     pub decoded: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_error: Option<StructuredDecodeError>,

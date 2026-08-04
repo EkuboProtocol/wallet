@@ -125,6 +125,7 @@ pub struct SimulationFailure {
 pub struct WrappedSimulationError {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::abi_decoder::any_json_schema")]
     pub args: Option<Value>,
 }
 
@@ -132,6 +133,7 @@ pub struct WrappedSimulationError {
 pub struct DecodedSimulationError {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::abi_decoder::any_json_schema")]
     pub args: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,

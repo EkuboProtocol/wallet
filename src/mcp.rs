@@ -1608,6 +1608,52 @@ mod tests {
     }
 
     #[test]
+    fn tool_schemas_contain_no_boolean_schemas() {
+        // Schemars renders serde_json::Value as the boolean schema `true`,
+        // which Claude Code's MCP client rejects when it validates tools/list
+        // ("Invalid input at tools.N.outputSchema..."). Every position that
+        // holds a subschema must hold an object.
+        fn assert_no_boolean_schemas(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, child) in map {
+                        let child_path = format!("{path}.{key}");
+                        // additionalProperties is exempt: boolean forms are
+                        // universal there and clients accept them.
+                        let schema_position = matches!(key.as_str(), "items" | "contains" | "not")
+                            || path.ends_with(".properties")
+                            || path.ends_with(".$defs")
+                            || path.ends_with(".definitions");
+                        if schema_position {
+                            assert!(
+                                child.is_object(),
+                                "boolean or non-object schema at {child_path}: {child}"
+                            );
+                        }
+                        assert_no_boolean_schemas(child, &child_path);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        assert_no_boolean_schemas(item, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for tool in WalletMcpServer::tool_router().list_all() {
+            let name = tool.name.clone();
+            let input = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+            assert_no_boolean_schemas(&input, &format!("{name}.inputSchema"));
+            if let Some(output) = &tool.output_schema {
+                let output = serde_json::to_value(output.as_ref()).unwrap();
+                assert_no_boolean_schemas(&output, &format!("{name}.outputSchema"));
+            }
+        }
+    }
+
+    #[test]
     fn tool_inventory_exposes_implemented_parity_surface() {
         let names = WalletMcpServer::tool_router()
             .list_all()

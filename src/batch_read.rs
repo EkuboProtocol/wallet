@@ -103,6 +103,7 @@ pub struct BatchCallResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usable: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::abi_decoder::any_json_schema")]
     pub decoded: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_error: Option<StructuredDecodeError>,

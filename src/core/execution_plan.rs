@@ -107,6 +107,7 @@ pub struct ExecutionStep {
     pub submit_condition: SubmitCondition,
     pub transaction: PlannedTransaction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::abi_decoder::any_json_object_schema")]
     pub eip1193: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert_decode: Option<RevertDecodePlan>,
@@ -116,6 +117,7 @@ pub struct ExecutionStep {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RevertDecodePlan {
     ErrorResult {
+        #[schemars(schema_with = "crate::abi_decoder::any_json_array_schema")]
         abi: Vec<Value>,
         #[serde(default)]
         required: bool,
@@ -187,8 +189,10 @@ pub struct ExecutionPlan {
     #[schemars(length(min = 1, max = 4096))]
     pub ordered_steps: Vec<ExecutionStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::abi_decoder::any_json_object_schema")]
     pub execution_policy: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::abi_decoder::any_json_object_schema")]
     pub adapters: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simulation_failure_policy: Option<SimulationFailurePolicy>,
