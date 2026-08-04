@@ -1,0 +1,67 @@
+# Temporary diagnostic for the Windows-only test-thread stack overflow.
+# Compiles the test binary once, then probes each hypothesis in cheap steps.
+# Remove once the overflow is understood and fixed.
+name: Windows stack diagnosis
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Probe test-thread stacks
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install latest stable Rust
+        run: rustup update stable --no-self-update
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
+      - name: Compile the library test binary once
+        run: cargo test --locked --lib --no-run
+
+      - name: Confirm the environment variable reaches the shell
+        shell: bash
+        env:
+          RUST_MIN_STACK: 67108864
+        run: |
+          set -euo pipefail
+          echo "RUST_MIN_STACK=$RUST_MIN_STACK"
+          rustc --version
+
+      - name: Probe whether the stack floor is honored by test threads
+        shell: bash
+        env:
+          RUST_MIN_STACK: 67108864
+          RUST_BACKTRACE: full
+        run: cargo test --locked --lib tests::raised_test_thread_stack_floor_is_in_effect -- --exact --nocapture
+
+      - name: Run one previously overflowing test in isolation
+        if: always()
+        shell: bash
+        env:
+          RUST_MIN_STACK: 67108864
+          RUST_BACKTRACE: full
+        run: cargo test --locked --lib mcp::tests::inventory_omits_rpc_urls_and_private_state -- --exact --nocapture
+
+      - name: Run every MCP test single-threaded
+        if: always()
+        shell: bash
+        env:
+          RUST_MIN_STACK: 67108864
+          RUST_BACKTRACE: full
+        run: 'cargo test --locked --lib mcp:: -- --test-threads=1'
+
+      - name: Run the full library suite with an extreme floor
+        if: always()
+        shell: bash
+        env:
+          RUST_MIN_STACK: 268435456
+          RUST_BACKTRACE: full
+        run: cargo test --locked --lib

@@ -28,6 +28,11 @@ jobs:
       - name: Install latest stable Rust
         run: rustup update stable --no-self-update
 
+      # The Windows job spends most of its time compiling vendored SQLCipher
+      # and OpenSSL; caching cuts that to minutes on unchanged dependencies.
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
       - name: Check all targets
         run: cargo check --locked --all-targets --all-features
 
