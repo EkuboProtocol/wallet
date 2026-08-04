@@ -24,8 +24,12 @@ nothing here should be read as a claim that it has.
 - Exact execution through a direct EIP-1559 transaction or one atomic Calibur
   batch, with EIP-7702 authorization when required.
 - Simulation through the configured RPC's typed `eth_simulateV1` method. There
-  is no local EVM fork, `eth_getProof` state reconstruction, or `eth_call`
+  is no local EVM, `eth_getProof` state reconstruction, or `eth_call`
   fallback for signing decisions.
+- Temporary simulation forks so an agent can simulate a chain of dependent
+  actions — and read the world between them — before the user is asked to
+  approve the first step. Forks are hypothetical throughout and never sign,
+  approve, or satisfy a policy rule.
 - SQLCipher-backed policy and pending-transaction storage.
 - Deterministic ABI return/error decoding, bounded batch reads, native/ERC-20
   transfer helpers, pending approval, receipt reconciliation, and exact-byte
@@ -368,14 +372,16 @@ An agent must never run the approval command for you.
 | `wallet_add_network` | The only MCP configuration mutation. Requires a complete profile and OS owner authentication, and never replaces an existing chain ID. |
 | `wallet_get_status` | Address, native balance, transaction count, and current EIP-7702 delegation. |
 | `wallet_get_policy` | The active policy and its revision. |
-| `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. |
+| `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. Accepts a `fork_id` to read simulated state. |
 | `wallet_list_tokens` | Page through the local token database, optionally per chain. |
 | `wallet_add_token` | Verify one token's symbol/name/decimals on-chain via Multicall3 and store it. Duplicate chain/address pairs fail. |
 | `wallet_import_token_list` | Bulk-import up to 1000 tokens; each new token is verified on-chain, existing pairs are skipped, never overwritten. |
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
-| `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. |
+| `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. With a `fork_id`, simulates on top of that fork and appends the plan on success. |
+| `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
+| `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
 | `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. |
 | `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; or submit an already-approved request ID. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
@@ -425,6 +431,54 @@ omitted unless requested; balances are raw smallest-unit decimal strings with
 the stored decimals/symbols attached.
 
 Inspect the database from the CLI with `ekubo-wallet token list [chain-id]`.
+
+### Simulation forks
+
+A one-shot simulation answers "does this plan work against the chain as it is
+now?". It cannot answer "does this whole sequence work?", because step N+1
+depends on state step N has not produced yet, and preparation tools reading
+chain state mid-sequence would build step N+1 from the wrong world.
+
+`wallet_create_fork(wallet_id, chain_id)` opens a temporary fork pinned to the
+current block. Pass its `fork_id` to `wallet_simulate_execution_plan` for each
+step in order: the plan runs on top of everything already applied to the fork
+and, if execution succeeds, is appended. Pass the same `fork_id` to
+`wallet_batch_eth_call`, `wallet_get_balances`, `wallet_get_portfolio`, and
+`wallet_get_status` to read the world as it would be after those steps.
+
+A fork is nothing but an ordered list of already-validated plans plus one
+pinned parent block. No simulated state is stored: each call replays the whole
+list as consecutive `eth_simulateV1` blocks, where every block inherits the
+previous block's state, so the configured RPC still executes everything and
+there is still no local EVM or `eth_getProof` path. Replay is quadratic in the
+calls a session sends, which is why a fork holds at most 8 plans, a wallet
+holds at most 4 forks, and forks expire after five minutes.
+
+Forks have no bearing on policy or signatures. A fork cannot create a pending
+request, produce signed bytes, mark anything approved, or satisfy a policy
+rule. Policy findings on a fork are reported exactly as on a real simulation
+but are advisory — an agent learning a sequence would be blocked before
+bothering the user is most of the value, and `wallet_get_policy` already
+returns the whole policy document anyway. Submission always re-simulates and
+re-policy-checks against real chain state, so "it passed on the fork" never
+substitutes for that. There is no CLI surface, and no fork state is shown at
+approval time.
+
+Every fork-backed result carries a `fork` block with the pinned parent block,
+the simulated block the result came from, how many plans are applied, the
+expiry, and `hypothetical: true`. Forks deliberately expose no block or time
+controls, but `eth_simulateV1` numbers each block it simulates, so applying a
+plan advances the simulated block by one and the `block.number` and
+`block.timestamp` a contract observes are ahead of the pinned parent. That
+artifact is reported rather than hidden. `wallet_get_status` on a fork also
+reports the transaction count from the pinned parent, flagged with
+`transaction_count_is_pinned_parent`, because simulation runs without
+transaction validation and never advances a nonce.
+
+An agent flow is: create fork → simulate the approval on it → read allowances
+through it → prepare the swap against those reads → simulate the swap on it →
+show the user the net effect of the whole sequence → then submit the real
+plans one at a time through the normal approval path, with no `fork_id`.
 
 ### Local read decoding
 
@@ -559,6 +613,16 @@ The ignored live tests require an RPC that supports `eth_simulateV1`:
 
 ```sh
 cargo test --locked --all-features live_ -- --ignored --nocapture
+```
+
+`tests/live_networks.rs` is a live matrix that exercises reads, simulation, and
+simulation forks against every default network's real RPC. It is skipped unless
+`EKUBO_WALLET_LIVE_RPC_TESTS=1` is set, and each chain's endpoint can be
+overridden with `EKUBO_WALLET_LIVE_RPC_<chain-id>`:
+
+```sh
+EKUBO_WALLET_LIVE_RPC_TESTS=1 cargo test --locked --all-features \
+  --test live_networks -- --nocapture
 ```
 
 To build and install your local checkout — same agent registration and shell

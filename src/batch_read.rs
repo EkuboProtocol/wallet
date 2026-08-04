@@ -3,6 +3,7 @@ use crate::{
         AbiDecodePlan, AbiDecodeResult, DecodeStatus, StructuredDecodeError, decode_abi_result,
     },
     config::NetworkConfig,
+    fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
 };
 use alloy::{
     consensus::BlockHeader,
@@ -62,6 +63,12 @@ pub struct BatchEthCallInput {
     #[serde(default)]
     pub from: Option<String>,
     pub calls: Vec<BatchReadCall>,
+    /// Read the hypothetical state of this temporary simulation fork instead
+    /// of real chain state. A fork pins its own parent block, so
+    /// `block_parameter` must be left at `latest`, and at most
+    /// 64 calls may be sent because they share the pinned block's gas limit.
+    #[serde(default)]
+    pub fork_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -125,6 +132,10 @@ pub struct BatchEthCallOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub multicall3_address: Option<String>,
     pub results: Vec<BatchCallResult>,
+    /// Present only when these reads ran on a temporary simulation fork. Its
+    /// presence means every value returned here is hypothetical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkContext>,
 }
 
 #[derive(Clone)]
@@ -144,6 +155,7 @@ struct ResolvedBlock {
 pub async fn batch_eth_call(
     network: &NetworkConfig,
     input: &BatchEthCallInput,
+    fork: Option<&ForkPreface>,
 ) -> Result<BatchEthCallOutput> {
     validate_input(input)?;
     ensure!(
@@ -161,6 +173,9 @@ pub async fn batch_eth_call(
         .map(Address::from_str)
         .transpose()
         .context("from must be a 20-byte EVM address")?;
+    if let Some(preface) = fork {
+        return fork_batch_eth_call(network, input, &calls, requested_caller, preface).await;
+    }
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let setup = tokio::time::timeout(RPC_TIMEOUT, async {
         let (chain_id, block) = tokio::try_join!(
@@ -192,6 +207,7 @@ pub async fn batch_eth_call(
             caller: MULTICALL3_ADDRESS.to_checksum(None),
             multicall3_address: Some(MULTICALL3_ADDRESS.to_checksum(None)),
             results,
+            fork: None,
         });
     }
 
@@ -226,6 +242,125 @@ pub async fn batch_eth_call(
         caller: caller.to_checksum(None),
         multicall3_address: None,
         results: join_all(futures).await,
+        fork: None,
+    })
+}
+
+/// Run the same batch on top of a temporary simulation fork.
+///
+/// Every call lands in one `SimBlock` layered after the fork's applied plans
+/// and is then discarded, so a read can never change what the fork holds. The
+/// Multicall3 wrapper is used for exactly the same reason as on real state —
+/// it isolates per-call reverts — and the aggregate is one simulated
+/// transaction, so it gets the whole block's gas rather than a share of it.
+async fn fork_batch_eth_call(
+    network: &NetworkConfig,
+    input: &BatchEthCallInput,
+    calls: &[NormalizedCall],
+    requested_caller: Option<Address>,
+    preface: &ForkPreface,
+) -> Result<BatchEthCallOutput> {
+    ensure!(
+        input.block_parameter == default_block_parameter(),
+        "a fork read is pinned to the fork's own parent block; leave block_parameter at latest"
+    );
+    ensure!(
+        calls.len() <= MAX_FORK_READ_CALLS,
+        "a fork read accepts at most {MAX_FORK_READ_CALLS} calls because they share the pinned block's gas limit"
+    );
+    let multicall = requested_caller.is_none();
+    let requests = if multicall {
+        vec![
+            TransactionRequest::default()
+                .with_to(MULTICALL3_ADDRESS)
+                .with_input(
+                    aggregate3Call {
+                        calls: calls
+                            .iter()
+                            .map(|call| Call3 {
+                                target: call.to,
+                                allowFailure: true,
+                                callData: call.data.clone(),
+                            })
+                            .collect(),
+                    }
+                    .abi_encode(),
+                ),
+        ]
+    } else {
+        let caller = requested_caller.expect("checked above");
+        calls
+            .iter()
+            .map(|call| {
+                TransactionRequest::default()
+                    .with_from(caller)
+                    .with_to(call.to)
+                    .with_input(call.data.clone())
+            })
+            .collect()
+    };
+    let outcome = execute_reads(network, preface, requests).await?;
+    let results = if multicall {
+        let result = outcome
+            .results
+            .first()
+            .context("fork Multicall3 read returned no result")?;
+        ensure!(
+            result.status,
+            "Multicall3 failed on this fork; the canonical Multicall3 may not be deployed on chain {}",
+            network.chain_id
+        );
+        let decoded = aggregate3Call::abi_decode_returns(&result.return_data)
+            .context("fork Multicall3 returned undecodable data")?;
+        ensure!(
+            decoded.len() == calls.len(),
+            "fork Multicall3 returned an unexpected result count"
+        );
+        decoded
+            .iter()
+            .zip(calls)
+            .enumerate()
+            .map(|(index, (result, call))| {
+                format_result(call, index, result.success, &result.returnData, None)
+            })
+            .collect()
+    } else {
+        ensure!(
+            outcome.results.len() == calls.len(),
+            "fork eth_simulateV1 returned an unexpected result count"
+        );
+        outcome
+            .results
+            .iter()
+            .zip(calls)
+            .enumerate()
+            .map(|(index, (result, call))| {
+                format_result(
+                    call,
+                    index,
+                    result.status,
+                    &result.return_data,
+                    (!result.status).then(|| "call failed or reverted on the fork".into()),
+                )
+            })
+            .collect()
+    };
+    Ok(BatchEthCallOutput {
+        network: network.name.clone(),
+        chain_id: network.chain_id.to_string(),
+        block_parameter: input.block_parameter.clone(),
+        block_number: outcome.simulated_block.to_string(),
+        strategy: if multicall {
+            BatchStrategy::Multicall3
+        } else {
+            BatchStrategy::Individual
+        },
+        caller: requested_caller
+            .unwrap_or(MULTICALL3_ADDRESS)
+            .to_checksum(None),
+        multicall3_address: multicall.then(|| MULTICALL3_ADDRESS.to_checksum(None)),
+        results,
+        fork: None,
     })
 }
 
@@ -573,6 +708,7 @@ mod tests {
             block_parameter: "latest".into(),
             from: None,
             calls: vec![call()],
+            fork_id: None,
         };
         assert!(validate_input(&input).is_ok());
         let mut empty = input;
@@ -591,6 +727,7 @@ mod tests {
             chain_id: "1".into(),
             block_parameter: "latest".into(),
             from: None,
+            fork_id: None,
             calls: vec![BatchReadCall {
                 id: Some("weth-total-supply".into()),
                 to: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".into(),
@@ -608,7 +745,7 @@ mod tests {
                 include_raw: false,
             }],
         };
-        let output = batch_eth_call(&network, &input).await.unwrap();
+        let output = batch_eth_call(&network, &input, None).await.unwrap();
         assert_eq!(output.strategy, BatchStrategy::Multicall3);
         assert!(output.block_number.parse::<u64>().unwrap() > 0);
         assert_eq!(output.results[0].decode_status, BatchDecodeStatus::Decoded);

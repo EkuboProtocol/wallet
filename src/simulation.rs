@@ -5,7 +5,15 @@
 //! will later sign. The RPC executes that call against a pinned parent block;
 //! this process validates the response linkage and locally derives policy
 //! findings from the returned call result, balance probes, and transfer logs.
-//! No local fork, `eth_getProof`, or RPC-side `eth_call` fallback is used.
+//! No local EVM, `eth_getProof`, or RPC-side `eth_call` fallback is used.
+//!
+//! A simulation may optionally run on top of a temporary fork
+//! ([`crate::fork`]): the plans that fork has already applied are replayed as
+//! earlier `SimBlock`s in the very same `eth_simulateV1` request, so the plan
+//! under simulation observes their state. That is the only difference; the
+//! RPC still executes everything, and a fork never affects signing, policy
+//! authorization, or submission, all of which re-simulate against real chain
+//! state.
 
 use crate::{
     abi_decoder::decode_abi_error,
@@ -14,6 +22,7 @@ use crate::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{FindingSeverity, PolicyFinding, TokenSpends, evaluate_policy, policy_allows},
     },
+    fork::{ForkContext, ForkParent, ForkPreface, validate_replay},
     policy_store::StoredPolicy,
 };
 use alloy::{
@@ -199,12 +208,19 @@ pub struct SimulationResult {
     pub token_spends: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance_changes: Option<BalanceChanges>,
-    /// Parent block number whose state was used by `eth_simulateV1`.
+    /// Parent block number whose state was used by `eth_simulateV1`. On a
+    /// fork this is still the fork's pinned parent; the block this plan
+    /// actually executed in is `fork.simulated_block_number`.
     pub block_number: String,
+    /// Present only when the plan was simulated on a temporary fork. Its
+    /// presence means every number above is hypothetical: nothing was signed,
+    /// approved, or authorized by simulating here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkContext>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PlannedCall {
+pub struct PlannedCall {
     pub(crate) mode: ExecutionMode,
     pub(crate) to: Address,
     pub(crate) data: Bytes,
@@ -218,11 +234,18 @@ struct TransferActivity {
 }
 
 /// Simulate the exact direct call or Calibur batch used by signing.
+///
+/// With `fork` set, the plans that fork has already applied are replayed as
+/// earlier blocks of the same `eth_simulateV1` request and this plan executes
+/// on top of them. The result is hypothetical: the caller is responsible for
+/// labelling it, and nothing about it may substitute for the real-state
+/// simulation performed at submission.
 pub async fn simulate_execution(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     plan: &ExecutionPlan,
     stored_policy: &StoredPolicy,
+    fork: Option<&ForkPreface>,
 ) -> Result<SimulationResult> {
     ensure!(
         plan.sender == wallet.address,
@@ -236,33 +259,61 @@ pub async fn simulate_execution(
         stored_policy.wallet_id == wallet.id,
         "policy does not belong to selected wallet"
     );
+    if let Some(preface) = fork {
+        ensure!(
+            preface.chain_id == network.chain_id,
+            "fork chain does not match selected network"
+        );
+        ensure!(
+            preface.wallet == wallet.address,
+            "fork belongs to a different wallet"
+        );
+    }
 
-    let _permit = Arc::clone(&SIMULATION_SLOTS)
-        .acquire_owned()
-        .await
-        .context("simulation limiter was closed")?;
+    let _permit = simulation_slot().await?;
     let planned = planned_call(plan, wallet.address);
+    let fork_calls: &[PlannedCall] = fork.map_or(&[], |preface| preface.calls.as_slice());
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let setup = tokio::time::timeout(RPC_SETUP_TIMEOUT, async {
-        let (chain_id, block) = tokio::try_join!(
-            provider.get_chain_id(),
-            provider.get_block_by_number(BlockNumberOrTag::Latest),
-        )?;
+        let chain_id = provider.get_chain_id().await?;
+        // A fork already pinned its parent when it was created, and that
+        // header can no longer change, so replay never re-reads it.
+        let block = match fork {
+            Some(_) => None,
+            None => {
+                provider
+                    .get_block_by_number(BlockNumberOrTag::Latest)
+                    .await?
+            }
+        };
         Ok::<_, alloy::transports::TransportError>((chain_id, block))
     })
     .await
     .context("simulation RPC setup timed out")
     .and_then(|result| result.map_err(anyhow::Error::from));
-    let (chain_id, block) = match setup {
-        Ok((chain_id, Some(block))) => (chain_id, block),
-        Ok((_, None)) => {
-            return Ok(setup_failure_result(
-                plan,
-                stored_policy,
-                planned.mode,
-                "RPC returned no latest block",
-                network,
-            ));
+    let (chain_id, parent) = match setup {
+        Ok((chain_id, block)) => {
+            let parent = match (fork, block) {
+                (Some(preface), _) => preface.parent,
+                (None, Some(block)) => {
+                    let header = block.header();
+                    ForkParent {
+                        number: header.number(),
+                        hash: header.hash,
+                        gas_limit: header.gas_limit(),
+                    }
+                }
+                (None, None) => {
+                    return Ok(setup_failure_result(
+                        plan,
+                        stored_policy,
+                        planned.mode,
+                        "RPC returned no latest block",
+                        network,
+                    ));
+                }
+            };
+            (chain_id, parent)
         }
         Err(error) => {
             return Ok(rpc_failure_result(
@@ -284,11 +335,8 @@ pub async fn simulate_execution(
         ));
     }
 
-    let parent_header = block.header();
-    let block_number = parent_header.number();
-    let parent_hash = parent_header.hash;
-    let parent_gas_limit = parent_header.gas_limit();
-    let gas_limit = match effective_gas_limit(network, parent_gas_limit) {
+    let block_number = parent.number;
+    let gas_limit = match effective_gas_limit(network, parent.gas_limit) {
         Ok(limit) => limit,
         Err(error) => {
             return Ok(setup_failure_result_at_block(
@@ -325,9 +373,16 @@ pub async fn simulate_execution(
         }
     };
 
-    let mut will_authorize = false;
+    // A fork replays earlier batch plans in the same request, so the
+    // delegation designator has to be in place for those too even when the
+    // plan under simulation is a single direct call.
+    let batch_present = planned.mode == ExecutionMode::CaliburBatch
+        || fork_calls
+            .iter()
+            .any(|call| call.mode == ExecutionMode::CaliburBatch);
+    let mut needs_override = false;
     let mut replaces = None;
-    if planned.mode == ExecutionMode::CaliburBatch {
+    if batch_present {
         let implementation_code = tokio::time::timeout(
             RPC_SETUP_TIMEOUT,
             provider.get_code_at(CANONICAL_CALIBUR).block_id(block_id),
@@ -374,10 +429,10 @@ pub async fn simulate_execution(
         match delegated_implementation(&wallet_code) {
             Some(address) if address == CANONICAL_CALIBUR => {}
             Some(address) => {
-                will_authorize = true;
+                needs_override = true;
                 replaces = Some(format!("{address:#x}"));
             }
-            None if wallet_code.is_empty() => will_authorize = true,
+            None if wallet_code.is_empty() => needs_override = true,
             None => {
                 return Ok(setup_failure_result_at_block(
                     plan,
@@ -390,6 +445,11 @@ pub async fn simulate_execution(
             }
         }
     }
+    // Only the plan under simulation can authorize a delegation when it is
+    // actually submitted; an override that exists purely so a fork's earlier
+    // batch replays is not something this plan would do on chain.
+    let will_authorize = needs_override && planned.mode == ExecutionMode::CaliburBatch;
+    let replaces = replaces.filter(|_| planned.mode == ExecutionMode::CaliburBatch);
 
     let tracked_tokens = tracked_tokens(&stored_policy.policy, plan.chain_id.as_str());
     if tracked_tokens.len() > MAX_TRACKED_TOKENS {
@@ -412,7 +472,8 @@ pub async fn simulate_execution(
         &planned,
         gas_limit,
         &tracked_tokens,
-        will_authorize,
+        needs_override,
+        fork_calls,
     );
     let response = tokio::time::timeout(SIMULATION_TIMEOUT, async {
         let pre_balance_blocks = match &pre_balance_payload {
@@ -428,7 +489,7 @@ pub async fn simulate_execution(
     .await
     .context("eth_simulateV1 request timed out")
     .and_then(|result| result.map_err(anyhow::Error::from));
-    let (pre_balance_blocks, mut blocks) = match response {
+    let (pre_balance_blocks, blocks) = match response {
         Ok(blocks) => blocks,
         Err(error) => {
             return Ok(rpc_failure_result_at_block(
@@ -441,41 +502,52 @@ pub async fn simulate_execution(
             ));
         }
     };
-    if blocks.len() != 1 {
-        return Ok(setup_failure_result_at_block(
-            plan,
-            stored_policy,
-            planned.mode,
-            &format!(
-                "eth_simulateV1 returned {} blocks for one requested block",
-                blocks.len()
-            ),
-            network,
-            block_number,
-        ));
+    // One block per already-applied fork plan, then the block this plan runs
+    // in. Without a fork that is exactly the single block simulated today.
+    let mut blocks = match validate_replay(
+        parent,
+        fork_calls.len(),
+        fork.map(|preface| preface.fork_id),
+        blocks,
+    ) {
+        Ok(blocks) => blocks,
+        Err(error) => {
+            return Ok(setup_failure_result_at_block(
+                plan,
+                stored_policy,
+                planned.mode,
+                &error.to_string(),
+                network,
+                block_number,
+            ));
+        }
+    };
+    // The replayed blocks are consumed first: their native transfers move the
+    // fork's balance from the pinned parent's to the one this plan starts at.
+    let replayed = blocks.drain(..fork_calls.len()).collect::<Vec<_>>();
+    let mut native_before = native_before;
+    for block in &replayed {
+        let mut activity = transfer_activity(wallet.address, &block.calls[0].logs);
+        let native = activity
+            .remove(&NATIVE_TRANSFER_EMITTER)
+            .unwrap_or_default();
+        let Some(updated) = native_before
+            .checked_add(native.incoming)
+            .and_then(|balance| balance.checked_sub(native.outgoing))
+        else {
+            return Ok(setup_failure_result_at_block(
+                plan,
+                stored_policy,
+                planned.mode,
+                "fork replay native transfer logs do not reconcile with the pinned balance",
+                network,
+                block_number,
+            ));
+        };
+        native_before = updated;
     }
-    let simulated = blocks.pop().expect("one simulated block");
+    let simulated = blocks.pop().expect("validated execution block");
     let simulated_header = simulated.inner.header();
-    if simulated_header.parent_hash() != parent_hash {
-        return Ok(setup_failure_result_at_block(
-            plan,
-            stored_policy,
-            planned.mode,
-            "eth_simulateV1 response is not linked to the pinned parent block",
-            network,
-            block_number,
-        ));
-    }
-    if simulated_header.number() != block_number.saturating_add(1) {
-        return Ok(setup_failure_result_at_block(
-            plan,
-            stored_policy,
-            planned.mode,
-            "eth_simulateV1 returned an unexpected simulated block number",
-            network,
-            block_number,
-        ));
-    }
     let expected_calls = tracked_tokens.len() + 1;
     if simulated.calls.len() != expected_calls {
         return Ok(setup_failure_result_at_block(
@@ -492,22 +564,24 @@ pub async fn simulate_execution(
     }
 
     let balances_before = match pre_balance_blocks {
-        Some(mut blocks) => {
-            if blocks.len() != 1 {
+        Some(blocks) => {
+            let Ok(mut blocks) = validate_replay(
+                parent,
+                fork_calls.len(),
+                fork.map(|preface| preface.fork_id),
+                blocks,
+            ) else {
                 return Ok(setup_failure_result_at_block(
                     plan,
                     stored_policy,
                     planned.mode,
-                    "pre-balance eth_simulateV1 returned an unexpected block count",
+                    "pre-balance eth_simulateV1 response did not match the pinned request",
                     network,
                     block_number,
                 ));
-            }
-            let block = blocks.pop().expect("one pre-balance block");
-            if block.inner.header().parent_hash() != parent_hash
-                || block.inner.header().number() != block_number.saturating_add(1)
-                || block.calls.len() != tracked_tokens.len()
-            {
+            };
+            let block = blocks.pop().expect("validated pre-balance block");
+            if block.calls.len() != tracked_tokens.len() {
                 return Ok(setup_failure_result_at_block(
                     plan,
                     stored_policy,
@@ -583,7 +657,20 @@ pub async fn simulate_execution(
         token_spends: token_spends_public,
         balance_changes: Some(balance_changes),
         block_number: block_number.to_string(),
+        // The caller owns fork labelling: it is the only layer that knows
+        // whether this plan was appended to the fork after simulating.
+        fork: None,
     })
+}
+
+/// Acquire one of the process-wide `eth_simulateV1` slots. Fork replay and
+/// one-shot simulation share the same limiter, because a fork request is
+/// simply a larger simulation.
+pub(crate) async fn simulation_slot() -> Result<tokio::sync::OwnedSemaphorePermit> {
+    Arc::clone(&SIMULATION_SLOTS)
+        .acquire_owned()
+        .await
+        .context("simulation limiter was closed")
 }
 
 pub(crate) fn planned_call(plan: &ExecutionPlan, wallet: Address) -> PlannedCall {
@@ -619,6 +706,12 @@ pub(crate) fn planned_call(plan: &ExecutionPlan, wallet: Address) -> PlannedCall
     }
 }
 
+/// Build the pinned `eth_simulateV1` payloads.
+///
+/// `fork_calls` are the plans a fork has already applied, replayed one per
+/// leading `SimBlock` so the plan under simulation observes their state.
+/// Without a fork the slice is empty and each payload is the single block the
+/// one-shot path has always sent.
 #[allow(clippy::too_many_arguments)]
 fn simulation_payloads(
     plan: &ExecutionPlan,
@@ -627,7 +720,8 @@ fn simulation_payloads(
     planned: &PlannedCall,
     gas_limit: u64,
     tracked_tokens: &[Address],
-    will_authorize: bool,
+    needs_override: bool,
+    fork_calls: &[PlannedCall],
 ) -> (Option<SimulatePayload>, SimulatePayload) {
     let probe = balance_probe_address(plan);
     let pre_balance_calls = tracked_tokens
@@ -636,14 +730,7 @@ fn simulation_payloads(
         .map(|token| balance_probe_request(token, wallet, probe, chain_id))
         .collect::<Vec<_>>();
     let mut execution_calls = Vec::with_capacity(tracked_tokens.len() + 1);
-    let mut main = TransactionRequest::default()
-        .from(wallet)
-        .to(planned.to)
-        .gas_limit(gas_limit)
-        .value(planned.value)
-        .input(TransactionInput::new(planned.data.clone()));
-    main.chain_id = Some(chain_id);
-    execution_calls.push(main);
+    execution_calls.push(planned_request(planned, wallet, gas_limit, chain_id));
     execution_calls.extend(
         tracked_tokens
             .iter()
@@ -651,25 +738,43 @@ fn simulation_payloads(
             .map(|token| balance_probe_request(token, wallet, probe, chain_id)),
     );
 
-    let mut execution_block = SimBlock::default().extend_calls(execution_calls);
-    if will_authorize {
-        let mut overrides = StateOverride::default();
-        overrides.insert(
-            wallet,
-            AccountOverride::default().with_7702_delegation_designator(CANONICAL_CALIBUR),
-        );
-        execution_block = execution_block.with_state_overrides(overrides);
+    let replay = || {
+        fork_calls
+            .iter()
+            .map(|call| {
+                SimBlock::default()
+                    .extend_calls([planned_request(call, wallet, gas_limit, chain_id)])
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut execution_blocks = replay();
+    execution_blocks.push(SimBlock::default().extend_calls(execution_calls));
+    if needs_override {
+        // State set by an override carries into every later block, so the
+        // designator only has to be installed once, at the front.
+        let first = std::mem::take(&mut execution_blocks[0]);
+        execution_blocks[0] = delegation_override(first, wallet);
     }
-    let pre_balance_payload = (!pre_balance_calls.is_empty()).then(|| SimulatePayload {
-        block_state_calls: vec![SimBlock::default().extend_calls(pre_balance_calls)],
-        trace_transfers: false,
-        validation: false,
-        return_full_transactions: false,
+    let pre_balance_payload = (!pre_balance_calls.is_empty()).then(|| {
+        let mut blocks = replay();
+        blocks.push(SimBlock::default().extend_calls(pre_balance_calls));
+        // Balance probes are static reads, so the designator matters only
+        // when there is fork history to replay ahead of them.
+        if needs_override && !fork_calls.is_empty() {
+            let first = std::mem::take(&mut blocks[0]);
+            blocks[0] = delegation_override(first, wallet);
+        }
+        SimulatePayload {
+            block_state_calls: blocks,
+            trace_transfers: false,
+            validation: false,
+            return_full_transactions: false,
+        }
     });
     (
         pre_balance_payload,
         SimulatePayload {
-            block_state_calls: vec![execution_block],
+            block_state_calls: execution_blocks,
             trace_transfers: true,
             // This mirrors eth_call semantics: nonce, signature, and fee
             // preparation happen later and cannot alter target/value/calldata.
@@ -677,6 +782,35 @@ fn simulation_payloads(
             return_full_transactions: false,
         },
     )
+}
+
+/// The exact transaction request for one planned direct call or Calibur
+/// batch. Fork replay and the plan under simulation build theirs identically.
+pub(crate) fn planned_request(
+    planned: &PlannedCall,
+    wallet: Address,
+    gas_limit: u64,
+    chain_id: u64,
+) -> TransactionRequest {
+    let mut request = TransactionRequest::default()
+        .from(wallet)
+        .to(planned.to)
+        .gas_limit(gas_limit)
+        .value(planned.value)
+        .input(TransactionInput::new(planned.data.clone()));
+    request.chain_id = Some(chain_id);
+    request
+}
+
+/// Install the canonical Calibur EIP-7702 delegation designator on the
+/// wallet for this block and every block after it.
+pub(crate) fn delegation_override(block: SimBlock, wallet: Address) -> SimBlock {
+    let mut overrides = StateOverride::default();
+    overrides.insert(
+        wallet,
+        AccountOverride::default().with_7702_delegation_designator(CANONICAL_CALIBUR),
+    );
+    block.with_state_overrides(overrides)
 }
 
 fn balance_probe_request(
@@ -721,7 +855,7 @@ fn token_balance_results(
         .collect()
 }
 
-fn effective_gas_limit(network: &NetworkConfig, block_limit: u64) -> Result<u64> {
+pub(crate) fn effective_gas_limit(network: &NetworkConfig, block_limit: u64) -> Result<u64> {
     let configured = network
         .max_gas_limit
         .as_deref()
@@ -1111,6 +1245,7 @@ fn base_failure_result(
         token_spends: BTreeMap::new(),
         balance_changes: None,
         block_number: block_number.to_string(),
+        fork: None,
     }
 }
 
@@ -1259,8 +1394,16 @@ mod tests {
         let plan = plan(2);
         let planned = planned_call(&plan, plan.sender);
         let token = Address::repeat_byte(0x55);
-        let (pre_balance, payload) =
-            simulation_payloads(&plan, 1, plan.sender, &planned, 1_000_000, &[token], true);
+        let (pre_balance, payload) = simulation_payloads(
+            &plan,
+            1,
+            plan.sender,
+            &planned,
+            1_000_000,
+            &[token],
+            true,
+            &[],
+        );
         assert_eq!(pre_balance.unwrap().block_state_calls[0].calls.len(), 1);
         assert!(payload.trace_transfers);
         assert!(!payload.validation);
@@ -1281,6 +1424,85 @@ mod tests {
             encoded["blockStateCalls"][0]["calls"][0]["to"],
             format!("{:#x}", plan.sender)
         );
+    }
+
+    #[test]
+    fn fork_replay_prepends_one_block_per_applied_plan() {
+        let plan = plan(1);
+        let planned = planned_call(&plan, plan.sender);
+        let applied = [
+            planned_call(&plan, plan.sender),
+            planned_call(&self::tests::plan(2), plan.sender),
+        ];
+        let token = Address::repeat_byte(0x55);
+        let (pre_balance, payload) = simulation_payloads(
+            &plan,
+            1,
+            plan.sender,
+            &planned,
+            1_000_000,
+            &[token],
+            true,
+            &applied,
+        );
+        // Two replayed plans, then the block this plan runs in. The balance
+        // probes ride along in the last block of each payload, so both
+        // payloads report balances at the same simulated height.
+        let payload_blocks = &payload.block_state_calls;
+        assert_eq!(payload_blocks.len(), 3);
+        assert_eq!(payload_blocks[0].calls.len(), 1);
+        assert_eq!(payload_blocks[1].calls.len(), 1);
+        assert_eq!(payload_blocks[2].calls.len(), 2);
+        let pre_balance = pre_balance.unwrap();
+        assert_eq!(pre_balance.block_state_calls.len(), 3);
+        assert_eq!(pre_balance.block_state_calls[2].calls.len(), 1);
+
+        // The designator is installed once, on the first block, because
+        // overridden state carries forward to every block after it.
+        for blocks in [payload_blocks, &pre_balance.block_state_calls] {
+            let code = blocks[0]
+                .state_overrides
+                .as_ref()
+                .unwrap()
+                .get(&plan.sender)
+                .unwrap()
+                .code
+                .as_ref()
+                .unwrap();
+            assert_eq!(delegated_implementation(code), Some(CANONICAL_CALIBUR));
+            assert!(blocks[1].state_overrides.is_none());
+            assert!(blocks[2].state_overrides.is_none());
+        }
+    }
+
+    #[test]
+    fn a_replayed_batch_does_not_become_this_plan_authorizing_a_delegation() {
+        // A one-call plan is always a direct call, so even when the fork it
+        // replays on needs the Calibur designator, submitting this plan for
+        // real would not create one.
+        let direct = planned_call(&plan(1), Address::repeat_byte(0x11));
+        assert_eq!(direct.mode, ExecutionMode::Direct);
+        let batch = planned_call(&plan(2), Address::repeat_byte(0x11));
+        assert_eq!(batch.mode, ExecutionMode::CaliburBatch);
+        let needs_override = true;
+        assert!(!(needs_override && direct.mode == ExecutionMode::CaliburBatch));
+        assert!(needs_override && batch.mode == ExecutionMode::CaliburBatch);
+    }
+
+    #[test]
+    fn replay_validation_requires_the_pinned_parent_and_consecutive_blocks() {
+        use crate::fork::ForkParent;
+
+        let parent = ForkParent {
+            number: 100,
+            hash: B256::repeat_byte(0xab),
+            gas_limit: 30_000_000,
+        };
+        // An empty response can never satisfy even the zero-replay case.
+        let empty: Vec<alloy::rpc::types::simulate::SimulatedBlock<alloy::rpc::types::Block>> =
+            Vec::new();
+        let error = validate_replay(parent, 0, None, empty).expect_err("one block is required");
+        assert!(error.to_string().contains("returned 0 blocks"));
     }
 
     #[test]
@@ -1355,7 +1577,7 @@ mod tests {
             revision: 1,
             updated_at: Utc::now(),
         };
-        let result = simulate_execution(&wallet, &default_networks()[0], &plan(1), &policy)
+        let result = simulate_execution(&wallet, &default_networks()[0], &plan(1), &policy, None)
             .await
             .unwrap();
         assert!(result.simulation.success, "{result:#?}");
@@ -1379,7 +1601,7 @@ mod tests {
             revision: 1,
             updated_at: Utc::now(),
         };
-        let result = simulate_execution(&wallet, &default_networks()[0], &plan(2), &policy)
+        let result = simulate_execution(&wallet, &default_networks()[0], &plan(2), &policy, None)
             .await
             .unwrap();
         assert!(result.simulation.success, "{result:#?}");
@@ -1424,9 +1646,15 @@ mod tests {
             revision: 1,
             updated_at: Utc::now(),
         };
-        let result = simulate_execution(&wallet, &default_networks()[0], &execution_plan, &policy)
-            .await
-            .unwrap();
+        let result = simulate_execution(
+            &wallet,
+            &default_networks()[0],
+            &execution_plan,
+            &policy,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(result.simulation.success, "{result:#?}");
         assert_eq!(
             result

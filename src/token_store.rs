@@ -9,7 +9,11 @@
 //! a list claims, and MCP tools may still write it — writes go through that
 //! verification, never around it.
 
-use crate::{config::NetworkConfig, policy_store::PolicyStore};
+use crate::{
+    config::NetworkConfig,
+    fork::{ForkContext, ForkPreface, execute_reads},
+    policy_store::PolicyStore,
+};
 use alloy::{
     network::TransactionBuilder,
     primitives::{Address, U256, address},
@@ -331,7 +335,9 @@ pub async fn fetch_onchain_metadata(
                 ]
             })
             .collect();
-        let results = aggregate(network, &provider, calls).await?;
+        // Token metadata is only ever verified against real chain state; a
+        // fork must never be able to influence what gets stored.
+        let results = aggregate(network, &provider, calls, None).await?;
         ensure!(
             results.len() == chunk.len() * 3,
             "Multicall3 returned an unexpected result count"
@@ -389,6 +395,10 @@ pub struct Portfolio {
     /// Set when the database held more tokens than one read may check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_skipped: Option<u64>,
+    /// Present only when this portfolio was read on a temporary simulation
+    /// fork. Its presence means every balance here is hypothetical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkContext>,
 }
 
 /// Read native and token balances for `address` through Multicall3. Only
@@ -397,6 +407,7 @@ pub async fn read_portfolio(
     network: &NetworkConfig,
     address: Address,
     known_tokens: &[StoredToken],
+    fork: Option<&ForkPreface>,
 ) -> Result<Portfolio> {
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let checked: Vec<&StoredToken> = known_tokens.iter().take(MAX_PORTFOLIO_TOKENS).collect();
@@ -437,7 +448,7 @@ pub async fn read_portfolio(
                 balanceOfCall { account: address }.abi_encode(),
             ));
         }
-        let results = aggregate(network, &provider, calls).await?;
+        let results = aggregate(network, &provider, calls, fork).await?;
         let mut results = results.into_iter();
         if start == 0 {
             let block = results.next().context("missing block number result")?;
@@ -479,6 +490,7 @@ pub async fn read_portfolio(
         tokens,
         tokens_checked: checked.len() as u64,
         tokens_skipped: (skipped > 0).then_some(skipped as u64),
+        fork: None,
     })
 }
 
@@ -506,6 +518,10 @@ pub struct TokenBalances {
     /// `token_data_fetcher` when the Ekubo lens answered, otherwise
     /// `multicall_balance_of`.
     pub source: String,
+    /// Present only when these balances were read on a temporary simulation
+    /// fork. Its presence means every balance here is hypothetical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkContext>,
 }
 
 /// Read balances for an explicit token list through the Ekubo
@@ -517,6 +533,7 @@ pub async fn read_token_balances(
     network: &NetworkConfig,
     owner: Address,
     tokens: &[Address],
+    fork: Option<&ForkPreface>,
 ) -> Result<TokenBalances> {
     ensure!(!tokens.is_empty(), "at least one token address is required");
     ensure!(
@@ -551,7 +568,7 @@ pub async fn read_token_balances(
             }
             .abi_encode(),
         ));
-        let results = aggregate(network, &provider, calls).await?;
+        let results = aggregate(network, &provider, calls, fork).await?;
         let mut results = results.into_iter();
         if index == 0 {
             let block = results.next().context("missing block number result")?;
@@ -594,7 +611,7 @@ pub async fn read_token_balances(
                     }
                 })
                 .collect();
-            let results = aggregate(network, &provider, calls).await?;
+            let results = aggregate(network, &provider, calls, fork).await?;
             ensure!(
                 results.len() == chunk.len(),
                 "Multicall3 returned an unexpected result count"
@@ -624,6 +641,7 @@ pub async fn read_token_balances(
         balances,
         tokens_checked: tokens.len() as u64,
         source: source.into(),
+        fork: None,
     })
 }
 
@@ -635,14 +653,32 @@ fn call(target: Address, data: Vec<u8>) -> TokenCall3 {
     }
 }
 
+/// Run one Multicall3 `aggregate3` batch, either against real chain state or
+/// inside a temporary simulation fork. Both paths send the identical encoded
+/// call, so results decode the same way and per-call failures stay isolated.
 async fn aggregate<P: Provider>(
     network: &NetworkConfig,
     provider: &P,
     calls: Vec<TokenCall3>,
+    fork: Option<&ForkPreface>,
 ) -> Result<Vec<TokenResult3>> {
     let request = TransactionRequest::default()
         .with_to(crate::batch_read::MULTICALL3_ADDRESS)
         .with_input(aggregate3Call { calls }.abi_encode());
+    if let Some(preface) = fork {
+        let outcome = execute_reads(network, preface, vec![request]).await?;
+        let result = outcome
+            .results
+            .first()
+            .context("fork Multicall3 read returned no result")?;
+        ensure!(
+            result.status,
+            "Multicall3 failed on this fork; the canonical Multicall3 may not be deployed on chain {}",
+            network.chain_id
+        );
+        return aggregate3Call::abi_decode_returns(&result.return_data)
+            .context("Multicall3 returned undecodable data");
+    }
     let bytes = tokio::time::timeout(RPC_TIMEOUT, provider.call(request))
         .await
         .context("Multicall3 request timed out")?
@@ -854,13 +890,13 @@ mod tests {
             .unwrap();
         assert!(
             runtime
-                .block_on(read_token_balances(&network, owner, &empty))
+                .block_on(read_token_balances(&network, owner, &empty, None))
                 .is_err()
         );
         let too_many = vec![Address::repeat_byte(0x22); MAX_BALANCE_TOKENS + 1];
         assert!(
             runtime
-                .block_on(read_token_balances(&network, owner, &too_many))
+                .block_on(read_token_balances(&network, owner, &too_many, None))
                 .is_err()
         );
     }
@@ -877,7 +913,7 @@ mod tests {
         let bogus = Address::repeat_byte(0x11);
         let usdc = Address::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
         let binance = Address::from_str("0xf977814e90da44bfa03b6295a0616a897441acec").unwrap();
-        let result = read_token_balances(&network, binance, &[usdc, bogus, Address::ZERO])
+        let result = read_token_balances(&network, binance, &[usdc, bogus, Address::ZERO], None)
             .await
             .unwrap();
         println!("source={} balances={:?}", result.source, result.balances);

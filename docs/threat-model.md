@@ -66,8 +66,19 @@ Signing simulation uses `eth_simulateV1` against a pinned parent block. The
 process checks returned block linkage and count, sends the exact target/value/
 calldata as the first execution call, applies the precise EIP-7702 delegation
 override when needed, and derives token/native observations from returned
-results and logs. It does not create a local fork, call `eth_getProof`, or fall
+results and logs. It does not run a local EVM, call `eth_getProof`, or fall
 back to `eth_call` for a signing decision.
+
+Temporary simulation forks extend the same request shape rather than the trust
+boundary: a fork is an ordered list of already-validated plans replayed as
+consecutive simulated blocks in one `eth_simulateV1` call, so the RPC remains
+the only executor. A fork cannot create a pending request, produce signed
+bytes, mark anything approved, or satisfy a policy rule, and its policy
+findings are advisory. Submission re-simulates and re-policy-checks against
+real chain state, which closes the obvious attack where an agent establishes a
+benign fork history and then submits something else. Fork state is never
+persisted and never shown at approval time, so a human is never asked to read
+agent-supplied hypotheticals while deciding whether to sign.
 
 The RPC still executes the EVM, supplies state, gas/fee estimates, receipts,
 and transaction visibility. It can lie, censor, or be stale. Pinning and local

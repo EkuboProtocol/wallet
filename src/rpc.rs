@@ -1,5 +1,10 @@
-use crate::config::{NetworkConfig, WalletMetadata};
+use crate::{
+    config::{NetworkConfig, WalletMetadata},
+    fork::{ForkContext, ForkPreface, native_balance},
+    simulation::CANONICAL_CALIBUR,
+};
 use alloy::{
+    eips::BlockId,
     primitives::{Address, B256, Bytes},
     providers::{Provider, ProviderBuilder},
 };
@@ -21,6 +26,15 @@ pub struct WalletStatus {
     pub transaction_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegated_implementation: Option<String>,
+    /// Present only when this status was read on a temporary simulation fork.
+    /// Its presence means the native balance is hypothetical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork: Option<ForkContext>,
+    /// Set on a fork: the nonce is read from the pinned parent block, because
+    /// `eth_simulateV1` runs without transaction validation and so never
+    /// advances it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_count_is_pinned_parent: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +62,11 @@ pub async fn verify_chain_id(network: &NetworkConfig) -> Result<()> {
 pub async fn wallet_status(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
+    fork: Option<&ForkPreface>,
 ) -> Result<WalletStatus> {
+    if let Some(preface) = fork {
+        return fork_wallet_status(wallet, network, preface).await;
+    }
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let (chain_id, balance, transaction_count, code) = tokio::try_join!(
         timeout_call(network, provider.get_chain_id()),
@@ -76,6 +94,63 @@ pub async fn wallet_status(
         transaction_count,
         delegated_implementation: delegated_implementation(&code)
             .map(|address| format!("{address:#x}")),
+        fork: None,
+        transaction_count_is_pinned_parent: None,
+    })
+}
+
+/// Wallet status as a fork sees it.
+///
+/// The native balance is read through the fork, so it reflects every applied
+/// plan. The nonce cannot be: `eth_simulateV1` runs with validation disabled
+/// and never advances it, so the pinned parent's count is reported and
+/// flagged as such. The delegation is decided by the fork itself — replaying
+/// any atomic batch installs the canonical Calibur designator, which is
+/// exactly what submitting that plan would do on chain.
+async fn fork_wallet_status(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    preface: &ForkPreface,
+) -> Result<WalletStatus> {
+    ensure!(
+        preface.wallet == wallet.address,
+        "fork belongs to a different wallet"
+    );
+    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let pinned = BlockId::number(preface.parent.number);
+    let (chain_id, transaction_count, code) = tokio::try_join!(
+        timeout_call(network, provider.get_chain_id()),
+        timeout_call(network, async {
+            provider
+                .get_transaction_count(wallet.address)
+                .block_id(pinned)
+                .await
+        }),
+        timeout_call(network, async {
+            provider.get_code_at(wallet.address).block_id(pinned).await
+        }),
+    )?;
+    ensure!(
+        chain_id == network.chain_id,
+        "RPC reports chain {chain_id}, not {}",
+        network.chain_id
+    );
+    let (balance, _) = native_balance(network, preface, wallet.address).await?;
+    let delegated = if preface.requires_calibur() {
+        Some(format!("{CANONICAL_CALIBUR:#x}"))
+    } else {
+        delegated_implementation(&code).map(|address| format!("{address:#x}"))
+    };
+    Ok(WalletStatus {
+        wallet_id: wallet.id.clone(),
+        address: format!("{:#x}", wallet.address),
+        network: network.name.clone(),
+        chain_id: chain_id.to_string(),
+        native_balance: balance.to_string(),
+        transaction_count,
+        delegated_implementation: delegated,
+        fork: None,
+        transaction_count_is_pinned_parent: Some(true),
     })
 }
 

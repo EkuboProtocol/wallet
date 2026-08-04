@@ -1,0 +1,47 @@
+name: Live network matrix
+
+# The wallet's chain-facing behaviour is supposed to be identical on every
+# default network, and only a real RPC can prove that. These tests are kept out
+# of the pull-request workflow because they depend on shared public endpoints;
+# they run on a schedule and on demand instead, so a chain that starts behaving
+# differently is caught without making every PR depend on third-party uptime.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-networks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    name: Live RPC conformance
+    runs-on: ubuntu-24.04
+    env:
+      EKUBO_WALLET_LIVE_RPC_TESTS: "1"
+      # Base's default profile endpoint throttles eth_simulateV1 hard enough
+      # that a fork replay cannot complete. Base's own public endpoint is used
+      # here instead; it needs no credential.
+      EKUBO_WALLET_LIVE_RPC_8453: https://mainnet.base.org
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install latest stable Rust
+        run: rustup update stable --no-self-update
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
+      - name: Run the live network matrix
+        # One chain at a time: the shared endpoints throttle a parallel run,
+        # and a throttled retry loop is slower than running serially.
+        run: cargo test --locked --all-features --test live_networks -- --nocapture --test-threads=1
+
+      - name: Run the ignored live unit tests
+        run: cargo test --locked --all-features live_ -- --ignored --nocapture

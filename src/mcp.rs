@@ -16,6 +16,7 @@ use crate::{
         ReceiptStatus, SignedExecution, SigningOverrides, broadcast_signed_execution,
         sign_execution,
     },
+    fork::{ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceAction, PresenceRequest},
     legal::{self, LegalDocument, LegalStatus, LegalStore},
     pending::{PendingStatus, PendingStore, PendingTransaction},
@@ -61,6 +62,10 @@ struct WalletMcpServer {
     tokens: Arc<Mutex<TokenStore>>,
     address_book: Arc<Mutex<AddressBookStore>>,
     human_presence: Arc<dyn HumanPresence>,
+    /// Temporary simulation forks. Deliberately in-process only: fork state
+    /// is never persisted, never shown at approval time, and never survives a
+    /// restart.
+    forks: Arc<Mutex<ForkStore>>,
 }
 
 impl WalletMcpServer {
@@ -139,6 +144,7 @@ impl WalletMcpServer {
             tokens: Arc::new(Mutex::new(tokens)),
             address_book: Arc::new(Mutex::new(address_book)),
             human_presence,
+            forks: Arc::new(Mutex::new(ForkStore::new())),
         })
     }
 }
@@ -179,9 +185,14 @@ struct PolicyOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_field_names)] // Public MCP field names intentionally match the protocol.
 struct WalletNetworkInput {
     wallet_id: String,
     chain_id: String,
+    /// Report this temporary simulation fork's hypothetical state instead of
+    /// real chain state.
+    #[serde(default)]
+    fork_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -190,6 +201,11 @@ struct SimulateInput {
     wallet_id: String,
     chain_id: String,
     execution_plan: ExecutionPlan,
+    /// Simulate on top of everything already applied to this temporary fork
+    /// and, if execution succeeds, append this plan to it. Omit to simulate
+    /// against real chain state.
+    #[serde(default)]
+    fork_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -353,6 +369,10 @@ struct PortfolioInput {
     /// Any EVM address. Provide exactly one of `wallet_id` or `address`.
     #[serde(default)]
     address: Option<String>,
+    /// Read this temporary simulation fork's hypothetical balances instead of
+    /// real chain state.
+    #[serde(default)]
+    fork_id: Option<uuid::Uuid>,
 }
 
 const fn default_token_limit() -> usize {
@@ -372,6 +392,10 @@ struct GetBalancesInput {
     /// 1-1000 token contract addresses. Include
     /// 0x0000000000000000000000000000000000000000 to read the native balance.
     tokens: Vec<String>,
+    /// Read this temporary simulation fork's hypothetical balances instead of
+    /// real chain state.
+    #[serde(default)]
+    fork_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -496,6 +520,41 @@ struct TypedDataOutput {
     instruction: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CreateForkInput {
+    wallet_id: String,
+    chain_id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ForkOutput {
+    fork_id: uuid::Uuid,
+    wallet_id: String,
+    chain_id: String,
+    /// The real block this fork's state is pinned to.
+    parent_block_number: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    applied_plans: u32,
+    max_plans: u32,
+    instruction: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DiscardForkInput {
+    fork_id: uuid::Uuid,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct DiscardForkOutput {
+    fork_id: uuid::Uuid,
+    /// False when the fork had already expired or been discarded.
+    discarded: bool,
+    instruction: String,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ExecutionStatus {
@@ -611,6 +670,7 @@ impl WalletMcpServer {
         Parameters(WalletNetworkInput {
             wallet_id,
             chain_id,
+            fork_id,
         }): Parameters<WalletNetworkInput>,
     ) -> Result<Json<WalletStatus>, ErrorData> {
         let wallet = self
@@ -621,11 +681,13 @@ impl WalletMcpServer {
             .config
             .network_by_chain_id(&chain_id)
             .map_err(|error| tool_error(&error))?;
-        Ok(Json(
-            wallet_status(&wallet, &network)
-                .await
-                .map_err(|error| tool_error(&error))?,
-        ))
+        let session = self.fork_session(fork_id, &chain_id, Some(&wallet_id))?;
+        let preface = session.as_ref().map(ForkSession::preface);
+        let mut status = wallet_status(&wallet, &network, preface.as_ref())
+            .await
+            .map_err(|error| tool_error(&error))?;
+        status.fork = session.map(|session| session.read_context());
+        Ok(Json(status))
     }
 
     #[tool(
@@ -661,11 +723,138 @@ impl WalletMcpServer {
                     None,
                 )
             })?;
-        Ok(Json(
-            simulate_execution(&wallet, &network, &input.execution_plan, &stored_policy)
-                .await
-                .map_err(|error| tool_error(&error))?,
-        ))
+        let session = self.fork_session(input.fork_id, &input.chain_id, Some(&input.wallet_id))?;
+        // Refuse before spending a simulation rather than after.
+        if let Some(session) = &session {
+            ensure_tool(
+                session.has_capacity(),
+                &format!(
+                    "fork {} already holds the maximum of {MAX_PLANS_PER_FORK} plans; open a new fork",
+                    session.fork_id
+                ),
+            )?;
+        }
+        let preface = session.as_ref().map(ForkSession::preface);
+        let mut result = simulate_execution(
+            &wallet,
+            &network,
+            &input.execution_plan,
+            &stored_policy,
+            preface.as_ref(),
+        )
+        .await
+        .map_err(|error| tool_error(&error))?;
+        if let Some(session) = session {
+            // Only a plan that actually executed becomes part of the fork's
+            // history. Policy findings never gate the append: on a fork they
+            // are advisory, so an agent can learn a sequence would be blocked
+            // and still see the rest of it.
+            result.fork = Some(if result.simulation.success {
+                self.forks
+                    .lock()
+                    .map_err(|_| {
+                        ErrorData::internal_error("fork registry lock was poisoned", None)
+                    })?
+                    .append(
+                        session.fork_id,
+                        input.execution_plan,
+                        session.plans.len(),
+                        Utc::now(),
+                    )
+                    .map_err(|error| tool_error(&error))?
+                    .applied_context()
+            } else {
+                session.read_context()
+            });
+        }
+        Ok(Json(result))
+    }
+
+    #[tool(
+        name = "wallet_create_fork",
+        description = "Open a temporary simulation fork so a chain of dependent actions can be simulated end to end before the user is asked to approve the first step. The fork pins the current block and starts empty. Pass its fork_id to wallet_simulate_execution_plan to run a plan on top of everything already applied to that fork and, on success, append it; pass it to wallet_batch_eth_call, wallet_get_balances, wallet_get_portfolio, and wallet_get_status to read the world as it would be after those plans, so preparation tools can build step N+1 against step N's state. Everything a fork produces is hypothetical: it never creates a pending request, never signs, never approves, never satisfies a policy rule, and never appears at approval time. Submission always re-simulates and re-policy-checks against real chain state, so passing on a fork is not a substitute. Forks cannot advance blocks or time, though eth_simulateV1 advances the block number by one per applied plan. They expire, are capped per wallet, hold a small number of plans, and are lost when this server restarts.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_create_fork(
+        &self,
+        Parameters(CreateForkInput {
+            wallet_id,
+            chain_id,
+        }): Parameters<CreateForkInput>,
+    ) -> Result<Json<ForkOutput>, ErrorData> {
+        let wallet = self
+            .config
+            .wallet(&wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let network = self
+            .config
+            .network_by_chain_id(&chain_id)
+            .map_err(|error| tool_error(&error))?;
+        let parent = pin_parent_block(&network)
+            .await
+            .map_err(|error| tool_error(&error))?;
+        let session = self
+            .forks
+            .lock()
+            .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
+            .create(
+                &wallet_id,
+                wallet.address,
+                network.chain_id,
+                parent,
+                Utc::now(),
+            )
+            .map_err(|error| tool_error(&error))?;
+        Ok(Json(ForkOutput {
+            fork_id: session.fork_id,
+            wallet_id: session.wallet_id.clone(),
+            chain_id: session.chain_id.to_string(),
+            parent_block_number: session.parent.number.to_string(),
+            created_at: session.created_at,
+            expires_at: session.expires_at,
+            applied_plans: 0,
+            max_plans: u32::try_from(MAX_PLANS_PER_FORK).unwrap_or(u32::MAX),
+            instruction: format!(
+                "Simulate each step of the sequence with wallet_simulate_execution_plan and this fork_id, in order; a step that executes successfully is appended and the next one sees its state. Read through the fork with the same fork_id so preparation tools build later steps against the right world. Show the user the net effect of the whole sequence, then submit the real plans one at a time through the normal approval path without any fork_id. This fork expires at {} and is discarded with wallet_discard_fork.",
+                session.expires_at.to_rfc3339()
+            ),
+        }))
+    }
+
+    #[tool(
+        name = "wallet_discard_fork",
+        description = "Discard a temporary simulation fork and every plan applied to it. Forks also expire on their own; discarding early frees one of the wallet's fork slots. Nothing on chain is affected, because a fork never held anything real.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_discard_fork(
+        &self,
+        Parameters(DiscardForkInput { fork_id }): Parameters<DiscardForkInput>,
+    ) -> Result<Json<DiscardForkOutput>, ErrorData> {
+        let discarded = self
+            .forks
+            .lock()
+            .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
+            .discard(fork_id);
+        Ok(Json(DiscardForkOutput {
+            fork_id,
+            discarded,
+            instruction: if discarded {
+                "The fork and everything applied to it are gone. Nothing on chain changed."
+            } else {
+                "No such live fork; it had already expired or been discarded. Nothing on chain changed."
+            }
+            .into(),
+        }))
     }
 
     #[tool(
@@ -698,11 +887,13 @@ impl WalletMcpServer {
             .config
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
-        Ok(Json(
-            batch_eth_call(&network, &input)
-                .await
-                .map_err(|error| tool_error(&error))?,
-        ))
+        let session = self.fork_session(input.fork_id, &input.chain_id, None)?;
+        let preface = session.as_ref().map(ForkSession::preface);
+        let mut output = batch_eth_call(&network, &input, preface.as_ref())
+            .await
+            .map_err(|error| tool_error(&error))?;
+        output.fork = session.map(|session| session.read_context());
+        Ok(Json(output))
     }
 
     #[tool(
@@ -907,11 +1098,14 @@ impl WalletMcpServer {
                 )
                 .map_err(|error| tool_error(&error))?
         };
-        Ok(Json(
-            crate::token_store::read_portfolio(&network, address, &known)
+        let session = self.fork_session(input.fork_id, &input.chain_id, None)?;
+        let preface = session.as_ref().map(ForkSession::preface);
+        let mut portfolio =
+            crate::token_store::read_portfolio(&network, address, &known, preface.as_ref())
                 .await
-                .map_err(|error| tool_error(&error))?,
-        ))
+                .map_err(|error| tool_error(&error))?;
+        portfolio.fork = session.map(|session| session.read_context());
+        Ok(Json(portfolio))
     }
 
     #[tool(
@@ -949,11 +1143,14 @@ impl WalletMcpServer {
                 })
             })
             .collect::<Result<Vec<_>, ErrorData>>()?;
-        Ok(Json(
-            crate::token_store::read_token_balances(&network, owner, &tokens)
+        let session = self.fork_session(input.fork_id, &input.chain_id, None)?;
+        let preface = session.as_ref().map(ForkSession::preface);
+        let mut balances =
+            crate::token_store::read_token_balances(&network, owner, &tokens, preface.as_ref())
                 .await
-                .map_err(|error| tool_error(&error))?,
-        ))
+                .map_err(|error| tool_error(&error))?;
+        balances.fork = session.map(|session| session.read_context());
+        Ok(Json(balances))
     }
 
     #[tool(
@@ -1490,6 +1687,39 @@ impl WalletMcpServer {
 }
 
 impl WalletMcpServer {
+    /// Resolve a live fork for a read or a simulation.
+    ///
+    /// A fork is bound to the wallet and chain it was opened for, so it can
+    /// never be used to answer a question about a different one. Expiry is
+    /// enforced by the store, so an expired fork reads as unknown.
+    fn fork_session(
+        &self,
+        fork_id: Option<uuid::Uuid>,
+        chain_id: &str,
+        wallet_id: Option<&str>,
+    ) -> Result<Option<ForkSession>, ErrorData> {
+        let Some(fork_id) = fork_id else {
+            return Ok(None);
+        };
+        let session = self
+            .forks
+            .lock()
+            .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
+            .session(fork_id, Utc::now())
+            .map_err(|error| tool_error(&error))?;
+        ensure_tool(
+            session.chain_id.to_string() == chain_id,
+            "fork was opened for a different chain",
+        )?;
+        if let Some(wallet_id) = wallet_id {
+            ensure_tool(
+                session.wallet_id == wallet_id,
+                "fork was opened for a different wallet",
+            )?;
+        }
+        Ok(Some(session))
+    }
+
     /// Resolve the exactly-one-of `wallet_id`/`address` pair used by read tools.
     fn resolve_read_address(
         &self,
@@ -1618,7 +1848,7 @@ impl WalletMcpServer {
             .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
             .get(&wallet.id)?
             .with_context(|| format!("wallet {} has no local policy", wallet.id))?;
-        let simulation = simulate_execution(&wallet, &network, &plan, &stored_policy).await?;
+        let simulation = simulate_execution(&wallet, &network, &plan, &stored_policy, None).await?;
 
         if !simulation.allowed || !simulation.simulation.success {
             let expiry = stored_policy
@@ -1888,8 +2118,8 @@ const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
 // validation, simulation, and policy rules to all of them. Naming a specific
 // counterpart here would both mislead an agent about the wallet's scope and
 // imply that plans from that source are more trusted, which they are not.
-const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. When the active policy blocks something the user genuinely wants done repeatedly, propose a minimal policy change with wallet_propose_policy (read wallet://docs/policy-authoring and wallet://schemas/policy first, base it on the exact wallet_get_policy revision, and include a clear rationale); the user reviews a permission diff and applies it with `ekubo-wallet policy review <wallet-id>` in their own terminal. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local fork or eth_getProof path. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is display-only data kept inside the encrypted database: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, tell the user the exact `ekubo-wallet approve <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes. Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf. Third-party license attributions are available through wallet_get_legal and the wallet://legal resources. EIP-712 typed-data signing always queues for explicit human CLI approval via wallet_sign_typed_data, then wallet_wait_for_typed_data returns the signature once the user approves; policies cannot evaluate typed data, so there is no automatic typed-data path. The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI with OS owner authentication.";
-const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local fork, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database is display data used for listings and portfolio reads, stored inside the authenticated encrypted database so it cannot be edited outside this process to misrepresent balances. MCP tools may add to it only through on-chain Multicall3 verification, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n- The address book maps per-chain aliases to addresses inside the encrypted database, so an alias cannot be retargeted by editing a file. Only the human CLI can mutate it, after OS owner authentication. Nothing in the signing or policy path reads it, and an alias never substitutes for reviewing the actual address.\n- Agents may propose a replacement policy with wallet_propose_policy. A proposal is inert data in the encrypted database: one per wallet, bound to the exact policy revision it was written against, replaced by any newer proposal, and applied only by the human CLI after presenting a minimized permission diff plus the agent's rationale, terminal approval, and OS owner authentication.\n- EIP-712 typed-data requests always queue in the encrypted database for separate human CLI review, which displays the complete payload, requires terminal approval plus OS owner authentication, and only then signs. The MCP server can create and observe typed-data requests but cannot approve or sign them.\n- No MCP tool other than wallet_get_legal is reachable until the user has accepted the current Terms of Service and Privacy Policy through the interactive CLI; the signing paths repeat the check as defense in depth. Acceptance binds the exact document digests; changed documents fail closed until re-accepted.\n";
+const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. When the active policy blocks something the user genuinely wants done repeatedly, propose a minimal policy change with wallet_propose_policy (read wallet://docs/policy-authoring and wallet://schemas/policy first, base it on the exact wallet_get_policy revision, and include a clear rationale); the user reviews a permission diff and applies it with `ekubo-wallet policy review <wallet-id>` in their own terminal. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local EVM or eth_getProof path. When a sequence's later steps depend on state produced by earlier ones, open a temporary simulation fork with wallet_create_fork and pass its fork_id to wallet_simulate_execution_plan for each step in order, and to wallet_batch_eth_call, wallet_get_balances, wallet_get_portfolio, and wallet_get_status, so preparation tools build step N+1 against step N's state; then show the user the net effect of the whole sequence and submit the real plans one at a time through the normal approval path with no fork_id. Everything a fork returns is hypothetical and carries a fork block saying so: policy findings on a fork are advisory, and a fork never creates a pending request, signs, approves, satisfies a policy rule, or appears at approval time. Forks cannot advance blocks or time, expire quickly, and are lost on restart; discard one early with wallet_discard_fork. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is display-only data kept inside the encrypted database: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, tell the user the exact `ekubo-wallet approve <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes. Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf. Third-party license attributions are available through wallet_get_legal and the wallet://legal resources. EIP-712 typed-data signing always queues for explicit human CLI approval via wallet_sign_typed_data, then wallet_wait_for_typed_data returns the signature once the user approves; policies cannot evaluate typed data, so there is no automatic typed-data path. The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI with OS owner authentication.";
+const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local EVM, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Temporary simulation forks are an agent workflow tool held only in this process's memory. A fork is an ordered list of already-validated plans plus one pinned parent block; every call replays that list as consecutive eth_simulateV1 blocks, so the RPC still executes everything and no simulated state is stored or reconstructed locally. A fork cannot create a pending request, produce signed bytes, mark anything approved, or satisfy a policy rule, and its policy findings are advisory; submission always re-simulates and re-policy-checks against real chain state, so 'it passed on the fork' never substitutes for that. Forks have no CLI surface and are never shown at approval time, so a human is never asked to read agent-supplied hypotheticals while deciding whether to sign. They expire, are capped per wallet and per plan, and do not survive a restart.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database is display data used for listings and portfolio reads, stored inside the authenticated encrypted database so it cannot be edited outside this process to misrepresent balances. MCP tools may add to it only through on-chain Multicall3 verification, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n- The address book maps per-chain aliases to addresses inside the encrypted database, so an alias cannot be retargeted by editing a file. Only the human CLI can mutate it, after OS owner authentication. Nothing in the signing or policy path reads it, and an alias never substitutes for reviewing the actual address.\n- Agents may propose a replacement policy with wallet_propose_policy. A proposal is inert data in the encrypted database: one per wallet, bound to the exact policy revision it was written against, replaced by any newer proposal, and applied only by the human CLI after presenting a minimized permission diff plus the agent's rationale, terminal approval, and OS owner authentication.\n- EIP-712 typed-data requests always queue in the encrypted database for separate human CLI review, which displays the complete payload, requires terminal approval plus OS owner authentication, and only then signs. The MCP server can create and observe typed-data requests but cannot approve or sign them.\n- No MCP tool other than wallet_get_legal is reachable until the user has accepted the current Terms of Service and Privacy Policy through the interactive CLI; the signing paths repeat the check as defense in depth. Acceptance binds the exact document digests; changed documents fail closed until re-accepted.\n";
 
 const POLICY_AUTHORING_GUIDE: &str = "\
 # Authoring wallet policies
@@ -2492,6 +2722,152 @@ mod tests {
         }
     }
 
+    /// Put a fork into the server's registry without touching an RPC.
+    fn insert_fork(server: &WalletMcpServer, wallet_id: &str, chain_id: u64) -> uuid::Uuid {
+        use crate::fork::ForkParent;
+
+        server
+            .forks
+            .lock()
+            .unwrap()
+            .create(
+                wallet_id,
+                Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+                chain_id,
+                ForkParent {
+                    number: 1_000,
+                    hash: alloy::primitives::B256::repeat_byte(0xcd),
+                    gas_limit: 30_000_000,
+                },
+                Utc::now(),
+            )
+            .unwrap()
+            .fork_id
+    }
+
+    #[test]
+    fn a_fork_only_answers_for_the_wallet_and_chain_it_was_opened_for() {
+        let (_directory, server) = server();
+        let fork_id = insert_fork(&server, "primary", 1);
+
+        assert!(
+            server
+                .fork_session(Some(fork_id), "1", Some("primary"))
+                .unwrap()
+                .is_some()
+        );
+        let wrong_chain = server
+            .fork_session(Some(fork_id), "8453", Some("primary"))
+            .expect_err("a fork must not answer for another chain");
+        assert!(format!("{wrong_chain:?}").contains("different chain"));
+        let wrong_wallet = server
+            .fork_session(Some(fork_id), "1", Some("other"))
+            .expect_err("a fork must not answer for another wallet");
+        assert!(format!("{wrong_wallet:?}").contains("different wallet"));
+    }
+
+    #[test]
+    fn an_unknown_or_discarded_fork_is_rejected_rather_than_ignored() {
+        let (_directory, server) = server();
+        let fork_id = insert_fork(&server, "primary", 1);
+
+        // Omitting fork_id keeps the real-state path; it never silently
+        // resolves to some other fork.
+        assert!(
+            server
+                .fork_session(None, "1", Some("primary"))
+                .unwrap()
+                .is_none()
+        );
+
+        let discarded = server
+            .wallet_discard_fork(Parameters(DiscardForkInput { fork_id }))
+            .unwrap();
+        assert!(discarded.0.discarded);
+        let again = server
+            .wallet_discard_fork(Parameters(DiscardForkInput { fork_id }))
+            .unwrap();
+        assert!(!again.0.discarded);
+
+        let error = server
+            .fork_session(Some(fork_id), "1", Some("primary"))
+            .expect_err("a discarded fork must not resolve");
+        assert!(format!("{error:?}").contains("unknown or expired"));
+    }
+
+    #[tokio::test]
+    async fn a_fork_cannot_be_opened_for_an_unknown_wallet_or_chain() {
+        let (_directory, server) = server();
+        let unknown_wallet = server
+            .wallet_create_fork(Parameters(CreateForkInput {
+                wallet_id: "missing".into(),
+                chain_id: "1".into(),
+            }))
+            .await
+            .err()
+            .expect("an unknown wallet must not open a fork");
+        assert!(format!("{unknown_wallet:?}").contains("unknown wallet"));
+
+        let unknown_chain = server
+            .wallet_create_fork(Parameters(CreateForkInput {
+                wallet_id: "primary".into(),
+                chain_id: "999999".into(),
+            }))
+            .await
+            .err()
+            .expect("an unconfigured chain must not open a fork");
+        assert!(format!("{unknown_chain:?}").contains("no configured network"));
+        assert!(server.forks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn forks_never_reach_the_signing_or_approval_surface() {
+        // Fork state lives only in this process, and only the read and
+        // simulate tools accept a fork_id. Everything that can sign,
+        // approve, or submit takes no fork input at all.
+        let schemas = WalletMcpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| {
+                (
+                    tool.name.clone().into_owned(),
+                    serde_json::to_string(tool.input_schema.as_ref()).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let accepts_fork = schemas
+            .iter()
+            .filter(|(_, schema)| schema.contains("fork_id"))
+            .map(|(name, _)| name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            accepts_fork,
+            [
+                "wallet_batch_eth_call",
+                "wallet_discard_fork",
+                "wallet_get_balances",
+                "wallet_get_portfolio",
+                "wallet_get_status",
+                "wallet_simulate_execution_plan",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        );
+        for signing_tool in [
+            "wallet_send_execution_plan",
+            "wallet_send_transfers",
+            "wallet_sign_typed_data",
+            "wallet_wait_for_approval",
+            "wallet_wait_for_execution",
+            "wallet_propose_policy",
+        ] {
+            assert!(
+                !schemas[signing_tool].contains("fork"),
+                "{signing_tool} must not accept fork input"
+            );
+        }
+    }
+
     #[test]
     fn tool_inventory_exposes_implemented_parity_surface() {
         let names = WalletMcpServer::tool_router()
@@ -2506,7 +2882,9 @@ mod tests {
                 "wallet_add_token",
                 "wallet_address_book",
                 "wallet_batch_eth_call",
+                "wallet_create_fork",
                 "wallet_decode_abi_result",
+                "wallet_discard_fork",
                 "wallet_get_balances",
                 "wallet_get_legal",
                 "wallet_get_policy",
@@ -2993,7 +3371,13 @@ mod tests {
         assert!(info.capabilities.resources.is_some());
         assert!(info.capabilities.tools.is_some());
         assert!(SECURITY_MODEL.contains("eth_simulateV1"));
-        assert!(SECURITY_MODEL.contains("no local fork"));
+        assert!(SECURITY_MODEL.contains("no local EVM"));
         assert!(SECURITY_MODEL.contains("eth_getProof"));
+        // A simulation fork is replay through the same RPC, not a local EVM,
+        // and it must be described as carrying no signing authority.
+        assert!(SECURITY_MODEL.contains("no simulated state is stored or reconstructed locally"));
+        assert!(SECURITY_MODEL.contains("cannot create a pending request"));
+        assert!(SERVER_INSTRUCTIONS.contains("wallet_create_fork"));
+        assert!(SERVER_INSTRUCTIONS.contains("hypothetical"));
     }
 }

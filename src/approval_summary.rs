@@ -644,6 +644,7 @@ mod tests {
                 tokens: BTreeMap::new(),
             }),
             block_number: "1".into(),
+            fork: None,
         }
     }
 

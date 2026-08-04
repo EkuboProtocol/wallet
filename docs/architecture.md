@@ -18,8 +18,13 @@ daemon. There is one signing implementation and no generic digest-signing API.
 - Alloy's typed `eth_simulateV1` client executes the exact direct call or
   Calibur batch against a pinned parent block. The process validates response
   parent linkage, simulated block number, call count, canonical Calibur runtime
-  hash, balance probes, and returned transfer logs. There is no local EVM fork,
+  hash, balance probes, and returned transfer logs. There is no local EVM,
   `eth_getProof` reconstruction, or `eth_call` fallback for signing decisions.
+- Temporary simulation forks (`src/fork.rs`) are held only in process memory as
+  an ordered list of already-validated plans plus one pinned parent block.
+  Every call replays that list as consecutive `eth_simulateV1` blocks, so the
+  RPC still executes everything and no simulated state is stored locally. They
+  are an agent workflow tool with no CLI surface and no signing authority.
 - `rusqlite` with vendored SQLCipher stores current policies and pending
   transaction lifecycle rows in one encrypted `policies.db` file.
 - `keyring` stores wallet keys and a distinct 256-bit SQLCipher key under

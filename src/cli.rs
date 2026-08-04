@@ -1488,8 +1488,14 @@ async fn run_approve(
         "active policy changed while approval was pending"
     );
 
-    let simulation =
-        simulate_execution(&wallet, &network, &request.execution_plan, &stored_policy).await?;
+    let simulation = simulate_execution(
+        &wallet,
+        &network,
+        &request.execution_plan,
+        &stored_policy,
+        None,
+    )
+    .await?;
     let overrides = SigningOverrides {
         allow_policy_override: true,
         allow_simulation_failure: true,
