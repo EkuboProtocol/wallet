@@ -238,19 +238,44 @@ RPC must support `eth_simulateV1` including sequential calls, logs,
 native-transfer tracing, and state overrides; it also observes the full
 simulation intent, so prefer a trusted dedicated provider.
 
-Add a dedicated RPC without putting a credential in shell history — omit
-`--rpc-url` and the CLI prompts for it:
+`network add` starts from whatever already describes the chain — the
+configured network with that name or alias, otherwise the built-in preset — so
+changing one field means naming only that field. Point a preset chain at a
+dedicated endpoint, keeping everything else:
 
 ```sh
-ekubo-wallet network add base 8453 \
-  --display-name "Base (dedicated RPC)" \
-  --alias base-dedicated \
+ekubo-wallet network add base --rpc-url https://your-provider.example/base
+```
+
+Omitting `--rpc-url` makes the CLI prompt for it, which keeps an endpoint key
+out of shell history. The prompt shows what you type: an RPC URL is
+configuration this machine's owner already owns, not a signing credential, and
+`network list` prints configured URLs in full. The complete URL is also shown
+in the authorization prompt, so a typo is caught before it is saved.
+
+A chain that is neither configured nor a preset needs its complete profile.
+Run it in a terminal and every missing value is prompted for in one pass, with
+defaults for the usual answers:
+
+```sh
+ekubo-wallet network add mychain 987654
+```
+
+Or pass them as flags for a scripted install. Any that are missing are
+reported together, with an explanation and an example each, rather than one per
+attempt:
+
+```sh
+ekubo-wallet network add mychain 987654 \
+  --display-name "My Chain" \
+  --alias mychain-mainnet \
   --native-currency-name Ether \
   --native-currency-symbol ETH \
   --native-currency-decimals 18 \
   --max-gas-limit 16777216 \
-  --block-explorer-url https://basescan.org \
-  --documentation-url https://docs.base.org/base-chain/quickstart/connecting-to-base
+  --block-explorer-url https://explorer.example.com \
+  --documentation-url https://docs.example.com \
+  --rpc-url https://rpc.example.com
 ```
 
 Transaction gas never comes from an agent or execution plan. The wallet doubles

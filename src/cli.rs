@@ -28,13 +28,14 @@ use alloy::{
     primitives::{Address, B256, U256, b256},
     signers::SignerSync,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use directories::BaseDirs;
 use num_bigint::BigUint;
 use sha3::{Digest, Keccak256};
 use std::{
+    collections::BTreeMap,
     fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -2053,10 +2054,14 @@ async fn run_network(
             )
         }
         NetworkCommand::Add(args) => {
-            let candidate = network_candidate(*args)?;
             let mut prospective = config.load()?.networks;
+            let candidate = network_candidate(*args, &prospective)?;
             replace_configured_network(&mut prospective, candidate.clone())?;
             let digest = configuration_digest(&candidate)?;
+            // The complete URL is shown, not just its origin. This is the
+            // one moment the user can catch a typo or the wrong endpoint, and
+            // `network list` already prints configured URLs in full; an RPC
+            // URL is configuration this human owns, not a signing credential.
             authorize_network_change(
                 "Add or update network",
                 "Trust this RPC to supply chain state and eth_simulateV1 execution for signing decisions.",
@@ -2064,7 +2069,7 @@ async fn run_network(
                 vec![
                     ("Network", candidate.name.clone()),
                     ("Chain ID", candidate.chain_id.to_string()),
-                    ("RPC origin", rpc_origin(&candidate.rpc_url)),
+                    ("RPC URL", candidate.rpc_url.to_string()),
                 ],
             )
             .await?;
@@ -2081,9 +2086,7 @@ async fn run_network(
                 || {
                     Ok(format!(
                         "Configured {} (chain {}) via {}; the RPC verified its chain ID.",
-                        candidate.name,
-                        candidate.chain_id,
-                        rpc_origin(&candidate.rpc_url),
+                        candidate.name, candidate.chain_id, candidate.rpc_url,
                     ))
                 },
             )
@@ -2186,109 +2189,354 @@ fn describe_network(network: &NetworkConfig) -> serde_json::Value {
     })
 }
 
-fn network_candidate(mut args: NetworkAddArgs) -> Result<NetworkConfig> {
-    let preset = args
-        .chain_id
-        .is_none()
-        .then(|| {
-            default_networks().into_iter().find(|network| {
-                network.name == args.name || network.aliases.iter().any(|alias| alias == &args.name)
-            })
-        })
-        .flatten();
+/// Resolve the network to write.
+///
+/// An already-configured network or a built-in preset with the same name or
+/// alias becomes the base, so editing one field never means restating the
+/// other eight. Only a genuinely new custom chain has to supply everything,
+/// and that path collects what it needs interactively rather than rejecting
+/// one missing flag per attempt.
+fn network_candidate(args: NetworkAddArgs, configured: &[NetworkConfig]) -> Result<NetworkConfig> {
+    if let Some(base) = network_base(&args, configured) {
+        return apply_network_overrides(base, args);
+    }
     ensure!(
-        args.chain_id.is_some() || preset.is_some(),
-        "unknown network preset {}; run `ekubo-wallet network presets` or provide a custom chain ID",
+        args.chain_id.is_some(),
+        "unknown network {}; run `ekubo-wallet network presets` to see the built-in ones, `ekubo-wallet network list` to see the configured ones, or pass a chain ID to define a custom network",
         args.name
     );
+    build_custom_network(args)
+}
 
-    if let Some(mut preset) = preset {
-        if let Some(rpc_url) = args.rpc_url {
-            preset.rpc_url = rpc_url;
-        }
-        if let Some(display_name) = args.display_name {
-            preset.display_name = Some(display_name);
-        }
-        if !args.aliases.is_empty() {
-            preset.aliases = normalize_aliases(args.aliases)?;
-        }
-        if let Some(maximum) = args.max_gas_limit {
-            preset.max_gas_limit = Some(maximum);
-        }
-        if let Some(url) = args.block_explorer_url {
-            preset.block_explorer_url = Some(url);
-        }
-        if let Some(url) = args.documentation_url {
-            preset.documentation_url = Some(url);
-        }
-        if args.native_currency_name.is_some()
-            || args.native_currency_symbol.is_some()
-            || args.native_currency_decimals.is_some()
-        {
-            let mut currency = preset
-                .native_currency
-                .take()
-                .context("preset has no native currency metadata")?;
-            if let Some(name) = args.native_currency_name {
-                currency.name = name;
-            }
-            if let Some(symbol) = args.native_currency_symbol {
-                currency.symbol = symbol;
-            }
-            if let Some(decimals) = args.native_currency_decimals {
-                currency.decimals = decimals;
-            }
-            preset.native_currency = Some(currency);
-        }
-        return Ok(preset);
+/// The configured network or built-in preset this add/update starts from.
+///
+/// A configured network wins over a preset with the same name, so editing a
+/// customized network never silently reverts the rest of it to the preset. A
+/// declared chain ID must match, because repointing a name at a different
+/// chain is a redefinition rather than an edit.
+fn network_base(args: &NetworkAddArgs, configured: &[NetworkConfig]) -> Option<NetworkConfig> {
+    let matches = |network: &NetworkConfig| {
+        (network.name == args.name || network.aliases.iter().any(|alias| alias == &args.name))
+            && args
+                .chain_id
+                .is_none_or(|chain_id| chain_id == network.chain_id)
+    };
+    configured
+        .iter()
+        .find(|network| matches(network))
+        .cloned()
+        .or_else(|| default_networks().into_iter().find(matches))
+}
+
+/// Apply only the fields this invocation actually supplied.
+fn apply_network_overrides(mut base: NetworkConfig, args: NetworkAddArgs) -> Result<NetworkConfig> {
+    if let Some(rpc_url) = args.rpc_url {
+        base.rpc_url = rpc_url;
     }
+    if let Some(display_name) = args.display_name {
+        base.display_name = Some(display_name);
+    }
+    if !args.aliases.is_empty() {
+        base.aliases = normalize_aliases(args.aliases)?;
+    }
+    if let Some(maximum) = args.max_gas_limit {
+        base.max_gas_limit = Some(maximum);
+    }
+    if let Some(url) = args.block_explorer_url {
+        base.block_explorer_url = Some(url);
+    }
+    if let Some(url) = args.documentation_url {
+        base.documentation_url = Some(url);
+    }
+    if args.native_currency_name.is_some()
+        || args.native_currency_symbol.is_some()
+        || args.native_currency_decimals.is_some()
+    {
+        let mut currency = base.native_currency.take().unwrap_or(NativeCurrency {
+            name: "Ether".into(),
+            symbol: "ETH".into(),
+            decimals: 18,
+        });
+        if let Some(name) = args.native_currency_name {
+            currency.name = name;
+        }
+        if let Some(symbol) = args.native_currency_symbol {
+            currency.symbol = symbol;
+        }
+        if let Some(decimals) = args.native_currency_decimals {
+            currency.decimals = decimals;
+        }
+        base.native_currency = Some(currency);
+    }
+    Ok(base)
+}
 
+/// One field a brand-new custom network needs, with everything required to
+/// either ask for it or explain how to pass it.
+struct RequiredField {
+    flag: &'static str,
+    prompt: &'static str,
+    help: &'static str,
+    example: &'static str,
+    /// Offered as the prompt default and accepted on an empty answer.
+    default: Option<&'static str>,
+}
+
+/// Asked in this order: the cheap descriptive metadata first, then the
+/// endpoint that is actually being trusted, so the last thing on screen
+/// before the authorization prompt is the RPC itself.
+const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
+    RequiredField {
+        flag: "--display-name",
+        prompt: "Display name",
+        help: "How this chain is named in human output",
+        example: "Base",
+        default: None,
+    },
+    RequiredField {
+        flag: "--alias",
+        prompt: "Aliases (comma-separated)",
+        help: "Short names this chain can also be selected by",
+        example: "base-mainnet, base8453",
+        default: None,
+    },
+    RequiredField {
+        flag: "--native-currency-name",
+        prompt: "Native currency name",
+        help: "The gas token's full name",
+        example: "Ether",
+        default: Some("Ether"),
+    },
+    RequiredField {
+        flag: "--native-currency-symbol",
+        prompt: "Native currency symbol",
+        help: "The gas token's ticker",
+        example: "ETH",
+        default: Some("ETH"),
+    },
+    RequiredField {
+        flag: "--native-currency-decimals",
+        prompt: "Native currency decimals",
+        help: "Smallest-unit exponent of the gas token",
+        example: "18",
+        default: Some("18"),
+    },
+    RequiredField {
+        flag: "--max-gas-limit",
+        prompt: "Maximum gas limit",
+        help: "Largest gas limit this wallet may ever sign on this chain",
+        example: "16777216",
+        default: Some("16777216"),
+    },
+    RequiredField {
+        flag: "--block-explorer-url",
+        prompt: "Block explorer URL",
+        help: "Where the CLI links transactions and addresses",
+        example: "https://basescan.org",
+        default: None,
+    },
+    RequiredField {
+        flag: "--documentation-url",
+        prompt: "Documentation URL",
+        help: "Where this chain's connection details are published",
+        example: "https://docs.base.org",
+        default: None,
+    },
+    RequiredField {
+        flag: "--rpc-url",
+        prompt: "RPC URL",
+        help: "JSON-RPC endpoint that supplies chain state and eth_simulateV1 execution",
+        example: "https://rpc.example.com/v1/<key>",
+        default: None,
+    },
+];
+
+/// Build a network that matches no preset and no configured network.
+///
+/// Everything missing is worked out up front. In a terminal each gap is
+/// prompted for in one session; otherwise a single error names every missing
+/// flag, so a scripted invocation is fixed in one edit rather than one per
+/// run.
+fn build_custom_network(args: NetworkAddArgs) -> Result<NetworkConfig> {
     let chain_id = args
         .chain_id
         .context("custom network requires a chain ID")?;
     ensure!(chain_id > 0, "network chain ID must be positive");
-    let rpc_url = match args.rpc_url.take() {
-        Some(url) => url,
-        None => prompt_rpc_url()?,
-    };
-    let aliases = normalize_aliases(args.aliases)?;
+
+    let supplied = BTreeMap::from([
+        ("--display-name", args.display_name.clone()),
+        (
+            "--alias",
+            (!args.aliases.is_empty()).then(|| args.aliases.join(",")),
+        ),
+        ("--native-currency-name", args.native_currency_name.clone()),
+        (
+            "--native-currency-symbol",
+            args.native_currency_symbol.clone(),
+        ),
+        (
+            "--native-currency-decimals",
+            args.native_currency_decimals.map(|value| value.to_string()),
+        ),
+        ("--max-gas-limit", args.max_gas_limit.clone()),
+        (
+            "--block-explorer-url",
+            args.block_explorer_url.as_ref().map(ToString::to_string),
+        ),
+        (
+            "--documentation-url",
+            args.documentation_url.as_ref().map(ToString::to_string),
+        ),
+        ("--rpc-url", args.rpc_url.as_ref().map(ToString::to_string)),
+    ]);
+    let answers = collect_custom_network_fields(&args.name, chain_id, &supplied)?;
+    let field = |flag: &str| answers[flag].clone();
+
+    let aliases = normalize_aliases(
+        field("--alias")
+            .split([',', ' '])
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+    )?;
     ensure!(
         !aliases.is_empty(),
-        "custom network requires at least one --alias"
+        "custom network requires at least one alias"
     );
     Ok(NetworkConfig {
         name: args.name,
-        display_name: Some(
-            args.display_name
-                .context("custom network requires --display-name")?,
-        ),
+        display_name: Some(field("--display-name")),
         aliases,
         chain_id,
-        rpc_url,
-        max_gas_limit: Some(
-            args.max_gas_limit
-                .context("custom network requires --max-gas-limit")?,
-        ),
+        rpc_url: field("--rpc-url").parse().context("RPC URL is invalid")?,
+        max_gas_limit: Some(field("--max-gas-limit")),
         native_currency: Some(NativeCurrency {
-            name: args
-                .native_currency_name
-                .context("custom network requires --native-currency-name")?,
-            symbol: args
-                .native_currency_symbol
-                .context("custom network requires --native-currency-symbol")?,
-            decimals: args
-                .native_currency_decimals
-                .context("custom network requires --native-currency-decimals")?,
+            name: field("--native-currency-name"),
+            symbol: field("--native-currency-symbol"),
+            decimals: field("--native-currency-decimals")
+                .parse()
+                .context("native currency decimals must be 0-255")?,
         }),
         block_explorer_url: Some(
-            args.block_explorer_url
-                .context("custom network requires --block-explorer-url")?,
+            field("--block-explorer-url")
+                .parse()
+                .context("block explorer URL is invalid")?,
         ),
         documentation_url: Some(
-            args.documentation_url
-                .context("custom network requires --documentation-url")?,
+            field("--documentation-url")
+                .parse()
+                .context("documentation URL is invalid")?,
         ),
     })
+}
+
+/// Fill every gap in `supplied`: by prompting when a terminal is attached,
+/// and by reporting all of them at once when one is not.
+fn collect_custom_network_fields(
+    name: &str,
+    chain_id: u64,
+    supplied: &BTreeMap<&'static str, Option<String>>,
+) -> Result<BTreeMap<&'static str, String>> {
+    let missing = CUSTOM_NETWORK_FIELDS
+        .iter()
+        .filter(|field| supplied.get(field.flag).is_none_or(Option::is_none))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(supplied
+            .iter()
+            .map(|(flag, value)| (*flag, value.clone().unwrap_or_default()))
+            .collect());
+    }
+    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+        let flags = missing
+            .iter()
+            .map(|field| format!("{} <value>", field.flag))
+            .collect::<Vec<_>>();
+        let width = flags.iter().map(String::len).max().unwrap_or_default();
+        let lines = flags
+            .iter()
+            .zip(&missing)
+            .map(|(flag, field)| {
+                format!("  {flag:width$}  {} (e.g. {})", field.help, field.example)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "{name} is neither a built-in preset nor an already-configured network, so defining \
+it as chain {chain_id} needs its complete profile.\n\nAll {} missing values:\n{lines}\n\n\
+Run the same command in a terminal to be prompted for them one at a time, or see \
+`ekubo-wallet network presets` for complete examples.",
+            missing.len(),
+        );
+    }
+
+    cliclack::intro(format!("Configure network {name} (chain {chain_id})"))?;
+    cliclack::log::info(format!(
+        "{} value(s) still needed: {}",
+        missing.len(),
+        missing
+            .iter()
+            .map(|field| field.flag)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))?;
+    let mut answers = BTreeMap::new();
+    for field in CUSTOM_NETWORK_FIELDS {
+        if let Some(Some(value)) = supplied.get(field.flag) {
+            cliclack::log::info(format!("{}: {value}", field.prompt))?;
+            answers.insert(field.flag, value.clone());
+            continue;
+        }
+        // The RPC URL is shown rather than masked. It is configuration, not a
+        // signing credential, and masking it made a typo impossible to spot
+        // and forced a full re-entry on the next attempt. Prompting for it at
+        // all still keeps any embedded key out of shell history.
+        let mut input = cliclack::input(field.prompt)
+            .placeholder(field.example)
+            .validate(validator(field));
+        if let Some(default) = field.default {
+            input = input.default_input(default);
+        }
+        let value: String = input
+            .interact()
+            .with_context(|| format!("failed to read {} ({})", field.prompt, field.flag))?;
+        answers.insert(field.flag, value);
+    }
+    cliclack::outro(format!(
+        "{name} is fully described. Authorize the change to start trusting this RPC."
+    ))?;
+    Ok(answers)
+}
+
+/// Reject a malformed answer while the prompt is still open, rather than
+/// after the whole profile has been typed out.
+fn validator(field: &RequiredField) -> impl Fn(&String) -> std::result::Result<(), String> {
+    let flag = field.flag;
+    move |input: &String| {
+        let value = input.trim();
+        match flag {
+            _ if value.is_empty() => Err("a value is required".into()),
+            "--rpc-url" | "--block-explorer-url" | "--documentation-url" => Url::parse(value)
+                .map_err(|error| format!("not a URL: {error}"))
+                .and_then(|url| {
+                    matches!(url.scheme(), "http" | "https")
+                        .then_some(())
+                        .ok_or_else(|| "must be an http or https URL".into())
+                }),
+            "--native-currency-decimals" => value
+                .parse::<u8>()
+                .map(|_| ())
+                .map_err(|_| "must be a whole number from 0 to 255".into()),
+            "--max-gas-limit" => value
+                .parse::<u64>()
+                .map_err(|_| "must be a whole number of gas".to_owned())
+                .and_then(|limit| {
+                    (limit >= 21_000)
+                        .then_some(())
+                        .ok_or_else(|| "must be at least the 21000 intrinsic gas".into())
+                }),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn normalize_aliases(aliases: Vec<String>) -> Result<Vec<String>> {
@@ -2304,25 +2552,6 @@ fn normalize_aliases(aliases: Vec<String>) -> Result<Vec<String>> {
         "network aliases must be at most 64 characters"
     );
     Ok(aliases)
-}
-
-fn prompt_rpc_url() -> Result<Url> {
-    require_interactive("hidden RPC URL input")?;
-    let mut input = cliclack::password("RPC URL")
-        .mask('•')
-        .interact()
-        .context("failed to read RPC URL")?;
-    let parsed = input.parse().context("RPC URL is invalid");
-    input.zeroize();
-    parsed
-}
-
-fn rpc_origin(url: &Url) -> String {
-    let host = url.host_str().unwrap_or("<invalid-host>");
-    url.port().map_or_else(
-        || format!("{}://{host}", url.scheme()),
-        |port| format!("{}://{host}:{port}", url.scheme()),
-    )
 }
 
 fn configuration_digest(value: &impl serde::Serialize) -> Result<String> {
@@ -2693,11 +2922,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn preset_network_add_uses_complete_catalog_metadata() {
-        let candidate = network_candidate(NetworkAddArgs {
-            name: "eth".into(),
-            chain_id: None,
+    fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
+        NetworkAddArgs {
+            name: name.into(),
+            chain_id,
             rpc_url: None,
             display_name: None,
             aliases: Vec::new(),
@@ -2707,12 +2935,131 @@ mod tests {
             max_gas_limit: None,
             block_explorer_url: None,
             documentation_url: None,
-        })
-        .unwrap();
+        }
+    }
+
+    #[test]
+    fn editing_a_configured_network_only_needs_the_field_that_changes() {
+        let mut configured = default_networks();
+        let base = configured
+            .iter_mut()
+            .find(|network| network.name == "base")
+            .unwrap();
+        base.display_name = Some("My Base".into());
+        base.max_gas_limit = Some("1234567".into());
+        let configured = configured;
+
+        let mut args = add_args("base", None);
+        args.rpc_url = Some("https://rpc.example.invalid/base".parse().unwrap());
+        let candidate = network_candidate(args, &configured).unwrap();
+
+        assert_eq!(
+            candidate.rpc_url.as_str(),
+            "https://rpc.example.invalid/base"
+        );
+        // Everything the user did not name survives, including their own
+        // earlier customizations rather than the preset's values.
+        assert_eq!(candidate.display_name.as_deref(), Some("My Base"));
+        assert_eq!(candidate.max_gas_limit.as_deref(), Some("1234567"));
+        assert_eq!(candidate.chain_id, 8453);
+        assert!(!candidate.aliases.is_empty());
+    }
+
+    #[test]
+    fn an_alias_and_a_matching_chain_id_both_resolve_the_same_base() {
+        let configured = default_networks();
+        for (name, chain_id) in [("base-mainnet", None), ("base", Some(8453))] {
+            let candidate = network_candidate(add_args(name, chain_id), &configured).unwrap();
+            assert_eq!(candidate.name, "base");
+            assert_eq!(candidate.chain_id, 8453);
+        }
+    }
+
+    #[test]
+    fn preset_network_add_uses_complete_catalog_metadata() {
+        let candidate = network_candidate(add_args("eth", None), &[]).unwrap();
         assert_eq!(candidate.name, "ethereum");
         assert_eq!(candidate.chain_id, 1);
         assert!(candidate.native_currency.is_some());
         assert!(candidate.max_gas_limit.is_some());
+    }
+
+    #[test]
+    fn an_unknown_network_without_a_chain_id_says_where_to_look() {
+        let error = network_candidate(add_args("nowhere", None), &default_networks())
+            .expect_err("an unknown name is not a network");
+        let message = error.to_string();
+        assert!(message.contains("network presets"), "{message}");
+        assert!(message.contains("network list"), "{message}");
+        assert!(message.contains("chain ID"), "{message}");
+    }
+
+    #[test]
+    fn a_new_custom_network_reports_every_missing_value_at_once() {
+        // Non-interactive, so this is the scripted path: one error has to
+        // name the complete set, or fixing it takes one run per flag.
+        let error = network_candidate(add_args("custom", Some(987_654)), &default_networks())
+            .expect_err("an incomplete custom network is rejected");
+        let message = error.to_string();
+        for flag in CUSTOM_NETWORK_FIELDS.iter().map(|field| field.flag) {
+            assert!(message.contains(flag), "{flag} missing from:\n{message}");
+        }
+        assert!(message.contains("987654"), "{message}");
+        // Every flag carries its own explanation and a usable example.
+        assert!(message.contains("eth_simulateV1"), "{message}");
+        assert!(message.contains("16777216"), "{message}");
+    }
+
+    #[test]
+    fn a_complete_custom_network_needs_no_terminal_at_all() {
+        let mut args = add_args("custom", Some(987_654));
+        args.rpc_url = Some("https://rpc.example.invalid".parse().unwrap());
+        args.display_name = Some("Custom Chain".into());
+        args.aliases = vec!["custom-chain".into()];
+        args.native_currency_name = Some("Ether".into());
+        args.native_currency_symbol = Some("ETH".into());
+        args.native_currency_decimals = Some(18);
+        args.max_gas_limit = Some("16777216".into());
+        args.block_explorer_url = Some("https://explorer.example.invalid".parse().unwrap());
+        args.documentation_url = Some("https://docs.example.invalid".parse().unwrap());
+        let candidate = network_candidate(args, &default_networks()).unwrap();
+        assert_eq!(candidate.chain_id, 987_654);
+        assert_eq!(candidate.aliases, vec!["custom-chain".to_owned()]);
+        assert_eq!(candidate.native_currency.unwrap().decimals, 18);
+    }
+
+    #[test]
+    fn prompt_validation_rejects_malformed_answers_before_the_next_question() {
+        let field = |flag: &str| {
+            CUSTOM_NETWORK_FIELDS
+                .iter()
+                .find(|field| field.flag == flag)
+                .expect("declared field")
+        };
+        let rpc = validator(field("--rpc-url"));
+        assert!(rpc(&"https://rpc.example.invalid".to_owned()).is_ok());
+        assert!(rpc(&"rpc.example.invalid".to_owned()).is_err());
+        assert!(rpc(&"ftp://rpc.example.invalid".to_owned()).is_err());
+        assert!(rpc(&String::new()).is_err());
+
+        let decimals = validator(field("--native-currency-decimals"));
+        assert!(decimals(&"18".to_owned()).is_ok());
+        assert!(decimals(&"18.5".to_owned()).is_err());
+
+        let gas = validator(field("--max-gas-limit"));
+        assert!(gas(&"16777216".to_owned()).is_ok());
+        assert!(gas(&"1000".to_owned()).is_err());
+
+        // Every declared default has to survive its own validator.
+        for entry in CUSTOM_NETWORK_FIELDS {
+            if let Some(default) = entry.default {
+                assert!(
+                    validator(entry)(&default.to_owned()).is_ok(),
+                    "{} offers a default its validator rejects",
+                    entry.flag
+                );
+            }
+        }
     }
 
     #[test]
