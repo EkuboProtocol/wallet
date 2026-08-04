@@ -352,7 +352,7 @@ An agent must never run the approval command for you.
 | `wallet_list_tokens` | Page through the local token database, optionally per chain. |
 | `wallet_add_token` | Verify one token's symbol/name/decimals on-chain via Multicall3 and store it. Duplicate chain/address pairs fail. |
 | `wallet_import_token_list` | Bulk-import up to 1000 tokens; each new token is verified on-chain, existing pairs are skipped, never overwritten. |
-| `wallet_get_portfolio` | Native balance plus every known token's balance for any address, via Multicall3, pinned to a reported block. |
+| `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
 | `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. |
 | `wallet_send_native_transfers` | Any non-empty list of `{to, amount_wei}` items. |

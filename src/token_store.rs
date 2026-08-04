@@ -325,7 +325,7 @@ pub struct Portfolio {
     pub native_balance: String,
     /// Block number of the first Multicall3 batch.
     pub block_number: String,
-    /// Tokens with a nonzero balance (unless zero balances were requested).
+    /// Tokens with a nonzero balance; zero balances are never included.
     pub tokens: Vec<PortfolioToken>,
     /// How many known tokens were checked.
     pub tokens_checked: u64,
@@ -334,12 +334,12 @@ pub struct Portfolio {
     pub tokens_skipped: Option<u64>,
 }
 
-/// Read native and token balances for `address` through Multicall3.
+/// Read native and token balances for `address` through Multicall3. Only
+/// tokens with a nonzero balance are returned.
 pub async fn read_portfolio(
     network: &NetworkConfig,
     address: Address,
     known_tokens: &[StoredToken],
-    include_zero_balances: bool,
 ) -> Result<Portfolio> {
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let checked: Vec<&StoredToken> = known_tokens.iter().take(MAX_PORTFOLIO_TOKENS).collect();
@@ -398,7 +398,7 @@ pub async fn read_portfolio(
                 .then(|| balanceOfCall::abi_decode_returns(&result.returnData).ok())
                 .flatten()
                 .unwrap_or(U256::ZERO);
-            if balance > U256::ZERO || include_zero_balances {
+            if balance > U256::ZERO {
                 tokens.push(PortfolioToken {
                     address: token.address.clone(),
                     symbol: token.symbol.clone(),

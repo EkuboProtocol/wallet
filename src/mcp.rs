@@ -308,8 +308,6 @@ struct PortfolioInput {
     /// Any EVM address. Provide exactly one of `wallet_id` or `address`.
     #[serde(default)]
     address: Option<String>,
-    #[serde(default)]
-    include_zero_balances: bool,
 }
 
 const fn default_token_limit() -> usize {
@@ -684,7 +682,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_get_portfolio",
-        description = "Read the native balance and every token-database balance for one address on one chain through Multicall3, pinned to a reported block. Accepts a wallet_id or any EVM address. Zero balances are omitted unless requested.",
+        description = "Read the native balance and every token-database balance for one address on one chain through Multicall3, pinned to a reported block. Accepts a wallet_id or any EVM address. Only nonzero token balances are returned.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_get_portfolio(
@@ -722,14 +720,9 @@ impl WalletMcpServer {
             )
             .map_err(|error| tool_error(&error))?;
         Ok(Json(
-            crate::token_store::read_portfolio(
-                &network,
-                address,
-                &known,
-                input.include_zero_balances,
-            )
-            .await
-            .map_err(|error| tool_error(&error))?,
+            crate::token_store::read_portfolio(&network, address, &known)
+                .await
+                .map_err(|error| tool_error(&error))?,
         ))
     }
 
