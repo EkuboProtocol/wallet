@@ -42,13 +42,13 @@ jobs:
           RUST_BACKTRACE: full
         run: cargo test --locked --lib tests::raised_test_thread_stack_floor_is_in_effect -- --exact --nocapture
 
-      - name: Run one previously overflowing test in isolation
+      - name: Bisect server construction step by step
         if: always()
         shell: bash
         env:
           RUST_MIN_STACK: 67108864
           RUST_BACKTRACE: full
-        run: cargo test --locked --lib mcp::tests::inventory_omits_rpc_urls_and_private_state -- --exact --nocapture
+        run: cargo test --locked --lib mcp::tests::diagnose_server_construction_steps -- --exact --nocapture
 
       - name: Run every MCP test single-threaded
         if: always()
