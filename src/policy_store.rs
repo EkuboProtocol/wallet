@@ -556,6 +556,119 @@ mod tests {
         eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
     }
 
+    /// The full prefix passed with a tiny statement and the big statements
+    /// passed under a minimal prefix, so this probes the combination, with
+    /// `cipher_memory_security` and a pre-grown Windows working set as the
+    /// variables. If the overflow is `VirtualLock` failure recursion inside
+    /// the locked-memory allocator, `grown_working_set` passes while
+    /// `memsec_on` overflows.
+    #[test]
+    fn diagnose_big_statements_under_full_prefix() {
+        #[cfg(windows)]
+        #[allow(unsafe_code)]
+        fn grow_working_set() {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetCurrentProcess() -> isize;
+                fn SetProcessWorkingSetSize(process: isize, minimum: usize, maximum: usize) -> i32;
+            }
+            let grown = unsafe {
+                SetProcessWorkingSetSize(GetCurrentProcess(), 64 * 1024 * 1024, 256 * 1024 * 1024)
+            };
+            eprintln!("bigstmt-diagnose: SetProcessWorkingSetSize returned {grown}");
+        }
+        #[cfg(not(windows))]
+        fn grow_working_set() {}
+
+        let big_statements: &[&str] = &[
+            "CREATE TABLE IF NOT EXISTS pending_transactions (
+                 request_id TEXT PRIMARY KEY NOT NULL,
+                 wallet_id TEXT NOT NULL,
+                 network_name TEXT NOT NULL,
+                 chain_id TEXT NOT NULL,
+                 plan_json TEXT NOT NULL,
+                 plan_digest TEXT NOT NULL,
+                 policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+                 status TEXT NOT NULL CHECK (status IN (
+                     'awaiting_approval', 'rejected', 'signed', 'submitting',
+                     'broadcast', 'confirmed', 'reverted', 'expired', 'cancelled'
+                 )),
+                 created_at TEXT NOT NULL,
+                 expires_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 approved_at TEXT,
+                 rejected_at TEXT,
+                 serialized_transaction TEXT,
+                 signed_transaction_hash TEXT,
+                 broadcast_transaction_hash TEXT,
+                 block_number TEXT,
+                 CHECK (
+                     (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
+                         AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                     OR status <> 'awaiting_approval'
+                 ),
+                 CHECK (
+                     (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                     OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
+                 )
+             ) STRICT",
+            "CREATE INDEX IF NOT EXISTS pending_transactions_wallet_created
+                 ON pending_transactions(wallet_id, created_at DESC)",
+        ];
+        for variant in ["memsec_off", "grown_working_set", "memsec_on"] {
+            if variant == "grown_working_set" {
+                grow_working_set();
+            }
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("probe.db");
+            let connection = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap();
+            connection
+                .pragma_update(None, "key", key(4).sqlcipher_literal())
+                .unwrap();
+            if variant != "memsec_off" {
+                connection
+                    .pragma_update(None, "cipher_memory_security", "ON")
+                    .unwrap();
+            }
+            let _: String = connection
+                .pragma_query_value(None, "cipher_version", |row| row.get(0))
+                .unwrap();
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .unwrap();
+            connection
+                .pragma_update(None, "trusted_schema", "OFF")
+                .unwrap();
+            connection
+                .pragma_update(None, "secure_delete", "ON")
+                .unwrap();
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+            connection
+                .pragma_update(None, "synchronous", "FULL")
+                .unwrap();
+            connection
+                .busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            eprintln!("bigstmt-diagnose ({variant}): begin");
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            for (index, statement) in big_statements.iter().enumerate() {
+                eprintln!("bigstmt-diagnose ({variant}): statement {index}");
+                connection.execute_batch(statement).unwrap();
+            }
+            eprintln!("bigstmt-diagnose ({variant}): commit");
+            connection.execute_batch("COMMIT").unwrap();
+            eprintln!("bigstmt-diagnose ({variant}): done");
+        }
+    }
+
     /// Final elimination round. The full real prefix minus one candidate per
     /// variant, then the real `open` as the failing control. `variant` names:
     /// `no_busy_timeout`, `no_cipher_version`, `everything`.

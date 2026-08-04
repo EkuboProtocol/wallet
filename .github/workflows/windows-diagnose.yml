@@ -46,6 +46,14 @@ jobs:
           RUST_BACKTRACE: full
         run: cargo test --locked --lib tests::raised_test_thread_stack_floor_is_in_effect -- --exact --nocapture
 
+      - name: Probe big statements under the full pragma prefix
+        if: always()
+        shell: bash
+        env:
+          RUST_MIN_STACK: 67108864
+          RUST_BACKTRACE: full
+        run: cargo test --locked --lib policy_store::tests::diagnose_big_statements_under_full_prefix -- --exact --nocapture
+
       - name: Eliminate the remaining open prefix candidates
         if: always()
         shell: bash
