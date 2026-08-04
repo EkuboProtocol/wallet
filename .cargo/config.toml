@@ -1,0 +1,8 @@
+# Debug builds do not collapse the deeply generic alloy, rmcp, and schemars
+# frames that release builds do, and Windows MSVC gives spawned threads a
+# noticeably smaller default stack than Linux or macOS. The test harness runs
+# each test on a spawned thread, so that combination overflows on Windows while
+# the same tests need well under 64 KiB elsewhere. Reserving address space is
+# free on 64-bit hosts; `force = false` lets an explicit RUST_MIN_STACK win.
+[env]
+RUST_MIN_STACK = { value = "16777216", force = false }

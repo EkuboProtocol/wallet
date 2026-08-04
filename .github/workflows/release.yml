@@ -420,10 +420,25 @@ jobs:
               "$artifact"
           done
 
+      # GitHub build-provenance attestation for a private repository requires
+      # GitHub Enterprise Cloud. On other plans this step fails, which must not
+      # discard an otherwise complete release: the Sigstore bundles verified in
+      # the previous step are the mandatory provenance control, and the release
+      # notes below state whether an attestation was also recorded.
       - name: Attest all published files
+        id: attest
+        continue-on-error: true
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: dist/*
+
+      - name: Report attestation outcome
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.attest.outcome }}" != "success" ]; then
+            echo "::warning::Build-provenance attestation was not recorded. Private-repository attestations require GitHub Enterprise Cloud; the verified Sigstore bundles still cover every published file."
+          fi
 
       - name: Create GitHub Release with attested assets
         shell: bash
@@ -431,11 +446,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MACOS_SIGNED: ${{ needs.package-macos.outputs.signed }}
           WINDOWS_SIGNED: ${{ needs.package-windows.outputs.signed }}
+          ATTESTED: ${{ steps.attest.outcome }}
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/release-notes.md"
           {
-            printf '%s\n\n' 'Prebuilt archives are attached below. Every archive and SHA256SUMS carries a keyless Sigstore bundle and a GitHub build-provenance attestation.'
+            if [ "$ATTESTED" = "success" ]; then
+              printf '%s\n\n' 'Prebuilt archives are attached below. Every archive and SHA256SUMS carries a keyless Sigstore bundle, verified before publishing, and a GitHub build-provenance attestation.'
+            else
+              printf '%s\n\n' 'Prebuilt archives are attached below. Every archive and SHA256SUMS carries a keyless Sigstore bundle, verified before publishing. No GitHub build-provenance attestation was recorded, because private-repository attestations require GitHub Enterprise Cloud; verify the Sigstore bundles instead.'
+            fi
             printf '%s\n' '## Platform code signing'
             if [ "$MACOS_SIGNED" = "true" ]; then
               printf '%s\n' '- macOS: Developer ID signed and notarized.'

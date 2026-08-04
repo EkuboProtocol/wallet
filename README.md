@@ -5,6 +5,11 @@ It enforces transaction policy in the same process that reads the signing key,
 and exposes no arbitrary-message, arbitrary-hash, or raw-transaction signing
 tool. `ew` is an equivalent short command.
 
+It is a general-purpose wallet, not a companion to any particular protocol,
+dapp, or other MCP server. Any tool can produce a signer-neutral execution plan;
+this wallet validates, simulates, and policy-checks every plan identically
+regardless of where it came from, and treats all of them as untrusted input.
+
 This is security-sensitive software. It has not been independently audited, and
 nothing here should be read as a claim that it has.
 
