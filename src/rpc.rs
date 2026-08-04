@@ -106,6 +106,79 @@ pub async fn transaction_receipt(
         .transpose()
 }
 
+/// One receipt log, reduced to the fields transfer decoding needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptLog {
+    pub address: Address,
+    pub topics: Vec<B256>,
+    pub data: Vec<u8>,
+}
+
+/// A mined receipt with the details the human transaction view renders.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceiptDetails {
+    pub succeeded: bool,
+    pub block_number: u64,
+    pub gas_used: u64,
+    pub effective_gas_price: u128,
+    pub logs: Vec<ReceiptLog>,
+}
+
+/// Fetch the complete receipt for display: status, fee fields, and logs.
+pub async fn transaction_receipt_details(
+    network: &NetworkConfig,
+    transaction_hash: &str,
+) -> Result<Option<ReceiptDetails>> {
+    let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
+    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let (chain_id, receipt) = tokio::try_join!(
+        timeout_call(network, provider.get_chain_id()),
+        timeout_call(network, provider.get_transaction_receipt(hash)),
+    )?;
+    ensure!(
+        chain_id == network.chain_id,
+        "RPC reports chain {chain_id}, not {}",
+        network.chain_id
+    );
+    receipt
+        .map(|receipt| {
+            Ok(ReceiptDetails {
+                succeeded: receipt.status(),
+                block_number: receipt
+                    .block_number
+                    .context("RPC returned a receipt without a block number")?,
+                gas_used: receipt.gas_used,
+                effective_gas_price: receipt.effective_gas_price,
+                logs: receipt
+                    .inner
+                    .logs()
+                    .iter()
+                    .map(|log| ReceiptLog {
+                        address: log.address(),
+                        topics: log.topics().to_vec(),
+                        data: log.data().data.to_vec(),
+                    })
+                    .collect(),
+            })
+        })
+        .transpose()
+}
+
+/// The chain head height, used to count confirmations for a mined receipt.
+pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
+    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let (chain_id, block_number) = tokio::try_join!(
+        timeout_call(network, provider.get_chain_id()),
+        timeout_call(network, provider.get_block_number()),
+    )?;
+    ensure!(
+        chain_id == network.chain_id,
+        "RPC reports chain {chain_id}, not {}",
+        network.chain_id
+    );
+    Ok(block_number)
+}
+
 /// Return whether the configured RPC already knows the exact transaction
 /// hash. This is used only to recover a persisted submission lease; callers
 /// must still rebroadcast the already-signed bytes rather than prepare a new

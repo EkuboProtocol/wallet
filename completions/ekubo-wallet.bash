@@ -13,7 +13,7 @@ _ekubo_wallet() {
 
   case "$COMP_CWORD" in
     1)
-      choices="server version wallet network policy transaction tx token address-book legal approve reject completion --data-dir --help --version"
+      choices="server version wallet network policy transaction tx token address-book legal approve reject completion --data-dir --json --help --version"
       ;;
     2)
       case "$first" in

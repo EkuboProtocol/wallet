@@ -251,6 +251,10 @@ struct WaitInput {
     request_id: uuid::Uuid,
     #[serde(default = "default_wait_seconds")]
     timeout_seconds: u8,
+    /// How many confirmations the mined receipt must have before the wait
+    /// resolves: 1 means included in any block. Default 1, maximum 1000.
+    #[serde(default = "default_confirmations")]
+    confirmations: u16,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -457,6 +461,9 @@ struct ExecutionStatusOutput {
     transaction_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     block_number: Option<String>,
+    /// How many blocks deep the mined receipt is (1 = head), when measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confirmations: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     receipt_status: Option<ReceiptStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1073,7 +1080,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_wait_for_execution",
-        description = "Poll a previously broadcast transaction for up to 55 seconds and reconcile its receipt. This tool never approves, signs, or submits.",
+        description = "Wait for an execution plan to be executed: poll a previously broadcast transaction for up to 55 seconds, reconcile its receipt, and optionally keep waiting until the receipt has a requested number of confirmations. Repeat the call after each timeout to continue waiting. This tool never approves, signs, or submits.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1086,6 +1093,14 @@ impl WalletMcpServer {
         Parameters(input): Parameters<WaitInput>,
     ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
         validate_wait_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        ensure_tool(
+            (1..=1_000).contains(&input.confirmations),
+            "confirmations must be between 1 and 1000",
+        )?;
+        let network = self
+            .config
+            .network_by_chain_id(&input.chain_id)
+            .map_err(|error| tool_error(&error))?;
         let request = RequestInput {
             wallet_id: input.wallet_id,
             chain_id: input.chain_id,
@@ -1094,11 +1109,40 @@ impl WalletMcpServer {
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
         loop {
-            let status = self
+            let mut status = self
                 .reconcile_pending(&request)
                 .await
                 .map_err(|error| tool_error(&error))?;
-            if status.status != ExecutionStatus::SubmissionPending
+            let mined = matches!(
+                status.status,
+                ExecutionStatus::Submitted | ExecutionStatus::Reverted
+            );
+            if mined {
+                let receipt_block = status
+                    .block_number
+                    .as_deref()
+                    .and_then(|block| block.parse::<u64>().ok());
+                let Some(receipt_block) = receipt_block else {
+                    return Ok(Json(status));
+                };
+                let latest = crate::rpc::latest_block_number(&network)
+                    .await
+                    .map_err(|error| tool_error(&error))?;
+                // A lagging RPC can briefly report a head below the receipt
+                // block; the mined receipt still counts as one confirmation.
+                let observed = latest.saturating_sub(receipt_block).saturating_add(1);
+                status.confirmations = Some(observed);
+                if observed >= u64::from(input.confirmations) {
+                    return Ok(Json(status));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    status.instruction = Some(format!(
+                        "The transaction is mined with {observed} of {} requested confirmations. Call wallet_wait_for_execution again with the same request_id and confirmations to continue waiting.",
+                        input.confirmations
+                    ));
+                    return Ok(Json(status));
+                }
+            } else if status.status != ExecutionStatus::SubmissionPending
                 || tokio::time::Instant::now() >= deadline
             {
                 return Ok(Json(status));
@@ -1807,6 +1851,10 @@ const fn default_wait_seconds() -> u8 {
     55
 }
 
+const fn default_confirmations() -> u16 {
+    1
+}
+
 fn validate_wait_seconds(seconds: u8) -> Result<()> {
     ensure!(
         (1..=55).contains(&seconds),
@@ -1919,6 +1967,7 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
             .broadcast_transaction_hash
             .or(record.signed_transaction_hash),
         block_number: record.block_number,
+        confirmations: None,
         receipt_status,
         broadcast_error: None,
         simulation: None,

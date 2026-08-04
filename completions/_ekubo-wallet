@@ -5,7 +5,7 @@ _ekubo-wallet() {
 
   if (( CURRENT == 2 )); then
     _values "command" server version wallet network policy transaction tx token address-book legal approve reject completion \
-      --data-dir --help --version
+      --data-dir --json --help --version
     return
   fi
 

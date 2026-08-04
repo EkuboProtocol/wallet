@@ -16,14 +16,18 @@ use crate::{
     legal::{self, LegalDocument, LegalStore},
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
-    rpc::verify_chain_id,
+    render::{OutputMode, described_time, emit, explorer_transaction_url, relative_time},
+    rpc::{ReceiptDetails, transaction_receipt_details, verify_chain_id},
     simulation::{SimulationResult, simulate_execution},
     typed_data::{
         PendingTypedData, TypedDataStatus, TypedDataStore, interpret_permit_approvals,
         parse_typed_data,
     },
 };
-use alloy::{primitives::Address, signers::SignerSync};
+use alloy::{
+    primitives::{Address, B256, U256, b256},
+    signers::SignerSync,
+};
 use anyhow::{Context, Result, ensure};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -52,6 +56,11 @@ pub struct Cli {
     /// Override the platform data directory.
     #[arg(long, global = true, env = "EKUBO_WALLET_HOME")]
     data_dir: Option<PathBuf>,
+
+    /// Print machine-readable JSON instead of the human-readable view.
+    /// JSON is also the default whenever stdout is not a terminal.
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -317,24 +326,25 @@ impl Cli {
             Some(path) => ConfigStore::new(path),
             None => ConfigStore::production()?,
         };
+        let mode = OutputMode::resolve(self.json);
         match self.command {
             Command::Server => crate::mcp::serve(config).await,
             Command::Version => {
                 println!("ekubo-wallet {VERSION}");
                 Ok(())
             }
-            Command::Wallet(args) => run_wallet(config, args.command).await,
-            Command::Network(args) => run_network(&config, args.command).await,
-            Command::Policy(args) => run_policy(config, args.command).await,
-            Command::Transaction(args) => run_transaction(&config, args.command),
-            Command::Token(args) => run_token(&config, &args.command),
-            Command::AddressBook(args) => run_address_book(&config, args.command).await,
-            Command::Legal(args) => run_legal(&config, &args.command),
+            Command::Wallet(args) => run_wallet(config, args.command, mode).await,
+            Command::Network(args) => run_network(&config, args.command, mode).await,
+            Command::Policy(args) => run_policy(config, args.command, mode).await,
+            Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
+            Command::Token(args) => run_token(&config, &args.command, mode),
+            Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
+            Command::Legal(args) => run_legal(&config, &args.command, mode),
             Command::Approve {
                 request_id,
                 no_confirm,
-            } => run_approve(&config, request_id, no_confirm).await,
-            Command::Reject { request_id } => run_reject(&config, request_id),
+            } => run_approve(&config, request_id, no_confirm, mode).await,
+            Command::Reject { request_id } => run_reject(&config, request_id, mode),
             Command::Completion { shell } => print_completion_script(shell),
             Command::Complete { value_kind } => print_completion_values(&config, &value_kind),
             Command::ConfigureAgent(args) => run_configure_agent(args.command),
@@ -342,14 +352,37 @@ impl Cli {
     }
 }
 
-async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
+async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMode) -> Result<()> {
     let custody = CustodyService::new(
         config.clone(),
         Arc::new(OsKeyStore),
         Arc::new(PlatformHumanPresence),
     );
     match command {
-        WalletCommand::List => print_json(&config.load()?.wallets),
+        WalletCommand::List => {
+            let wallets = config.load()?.wallets;
+            emit(mode, &wallets, || {
+                if wallets.is_empty() {
+                    return Ok(
+                        "No wallets. Create one with `ekubo-wallet wallet create <id>`.".into(),
+                    );
+                }
+                Ok(wallets
+                    .iter()
+                    .map(|wallet| {
+                        format!(
+                            "{}\n  address: {:#x}\n  source: {:?}, custody: {:?}\n  created: {}",
+                            wallet.id,
+                            wallet.address,
+                            wallet.source,
+                            wallet.custody,
+                            described_time(wallet.created_at),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            })
+        }
         WalletCommand::Create { wallet_id } => {
             // A freshly generated key holds nothing until the user funds it,
             // so the automatic profile is a safe starting point; the README
@@ -362,7 +395,12 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
                         wallet.id
                     )
                 })?;
-            print_json(&wallet)
+            emit(mode, &wallet, || {
+                Ok(format!(
+                    "Created wallet {} at {:#x} with the allow-all policy.\nReplace the policy before funding the address: `ekubo-wallet policy require-approval {}`.",
+                    wallet.id, wallet.address, wallet.id
+                ))
+            })
         }
         WalletCommand::Import { wallet_id } => {
             require_interactive("wallet import")?;
@@ -398,7 +436,12 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
                         "Imported wallets start with the require-approval policy: nothing signs \
                          automatically until you install a more permissive policy.",
                     )?;
-                    print_json(&wallet)
+                    emit(mode, &wallet, || {
+                        Ok(format!(
+                            "Imported wallet {} at {:#x}.",
+                            wallet.id, wallet.address
+                        ))
+                    })
                 }
                 Err(error) => {
                     progress.error("Wallet import failed");
@@ -465,7 +508,12 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
                         policies.delete(&wallet.id, policy.revision)?;
                     }
                     progress.stop("Wallet removed");
-                    print_json(&wallet)
+                    emit(mode, &wallet, || {
+                        Ok(format!(
+                            "Removed wallet {} ({:#x}) and its stored key.",
+                            wallet.id, wallet.address
+                        ))
+                    })
                 }
                 Err(error) => {
                     progress.error("Wallet removal failed");
@@ -490,7 +538,7 @@ fn initialize_wallet_policy(
     Ok(())
 }
 
-fn run_token(config: &ConfigStore, command: &TokenCommand) -> Result<()> {
+fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMode) -> Result<()> {
     match command {
         TokenCommand::List {
             chain_id,
@@ -499,10 +547,34 @@ fn run_token(config: &ConfigStore, command: &TokenCommand) -> Result<()> {
         } => {
             let (chain_id, limit, offset) = (*chain_id, *limit, *offset);
             let store = crate::token_store::TokenStore::production(config.data_dir())?;
-            print_json(&serde_json::json!({
-                "total": store.count(chain_id)?,
-                "tokens": store.list(chain_id, limit, offset)?,
-            }))
+            let total = store.count(chain_id)?;
+            let tokens = store.list(chain_id, limit, offset)?;
+            emit(
+                mode,
+                &serde_json::json!({ "total": total, "tokens": tokens }),
+                || {
+                    if tokens.is_empty() {
+                        return Ok("The token database is empty.".into());
+                    }
+                    let mut lines = vec![format!(
+                        "{total} token(s) stored, showing {}:",
+                        tokens.len()
+                    )];
+                    for token in &tokens {
+                        lines.push(format!(
+                            "  chain {} · {} · {}{} · via {}",
+                            token.chain_id,
+                            token.address,
+                            token.symbol.as_deref().unwrap_or("<no symbol>"),
+                            token.decimals.map_or_else(String::new, |decimals| format!(
+                                " ({decimals} decimals)"
+                            )),
+                            token.source,
+                        ));
+                    }
+                    Ok(lines.join("\n"))
+                },
+            )
         }
     }
 }
@@ -516,7 +588,11 @@ fn resolve_network(config: &ConfigStore, requested: &str) -> Result<NetworkConfi
     }
 }
 
-async fn run_address_book(config: &ConfigStore, command: AddressBookCommand) -> Result<()> {
+async fn run_address_book(
+    config: &ConfigStore,
+    command: AddressBookCommand,
+    mode: OutputMode,
+) -> Result<()> {
     match command {
         AddressBookCommand::List {
             network,
@@ -529,10 +605,33 @@ async fn run_address_book(config: &ConfigStore, command: AddressBookCommand) -> 
                 .transpose()?
                 .map(|network| network.chain_id);
             let store = AddressBookStore::production(config.data_dir())?;
-            print_json(&serde_json::json!({
-                "total": store.count(chain_id)?,
-                "entries": store.list(chain_id, limit, offset)?,
-            }))
+            let total = store.count(chain_id)?;
+            let entries = store.list(chain_id, limit, offset)?;
+            emit(
+                mode,
+                &serde_json::json!({ "total": total, "entries": entries }),
+                || {
+                    if entries.is_empty() {
+                        return Ok(
+                            "The address book is empty. Add an alias with `ekubo-wallet address-book add <network> <alias> <address>`.".into(),
+                        );
+                    }
+                    let mut lines = vec![format!("{total} entrie(s), showing {}:", entries.len())];
+                    for entry in &entries {
+                        lines.push(format!(
+                            "  {} → {} (chain {}){}",
+                            entry.alias,
+                            entry.address,
+                            entry.chain_id,
+                            entry
+                                .note
+                                .as_deref()
+                                .map_or_else(String::new, |note| format!(" — {note}")),
+                        ));
+                    }
+                    Ok(lines.join("\n"))
+                },
+            )
         }
         AddressBookCommand::Add {
             network,
@@ -588,7 +687,12 @@ async fn run_address_book(config: &ConfigStore, command: AddressBookCommand) -> 
                 address,
                 note.as_deref(),
             )?;
-            print_json(&entry)
+            emit(mode, &entry, || {
+                Ok(format!(
+                    "Stored {} → {} on chain {}.",
+                    entry.alias, entry.address, entry.chain_id
+                ))
+            })
         }
         AddressBookCommand::Remove { network, alias } => {
             require_interactive("address book changes")?;
@@ -629,17 +733,49 @@ async fn run_address_book(config: &ConfigStore, command: AddressBookCommand) -> 
                 .await?;
             let removed = AddressBookStore::production(config.data_dir())?
                 .remove(network.chain_id, &alias)?;
-            print_json(&serde_json::json!({
-                "removed": removed,
-            }))
+            emit(mode, &serde_json::json!({ "removed": removed }), || {
+                Ok(format!(
+                    "Removed {} → {} from chain {}.",
+                    removed.alias, removed.address, removed.chain_id
+                ))
+            })
         }
     }
 }
 
-fn run_legal(config: &ConfigStore, command: &LegalCommand) -> Result<()> {
+fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> Result<()> {
     let store = LegalStore::new(config.data_dir());
+    let render_status = |status: &crate::legal::LegalStatus| {
+        let describe = |name: &str, document: &crate::legal::DocumentStatus| {
+            if document.accepted {
+                format!(
+                    "{name}: accepted{}",
+                    document
+                        .accepted_at
+                        .map_or_else(String::new, |when| format!(" {}", relative_time(when)))
+                )
+            } else if document.superseded_digest.is_some() {
+                format!("{name}: a previous revision was accepted; re-acceptance required")
+            } else {
+                format!("{name}: not accepted")
+            }
+        };
+        format!(
+            "{}\n{}\n{}",
+            describe("Terms of Service", &status.terms_of_service),
+            describe("Privacy Policy", &status.privacy_policy),
+            if status.signing_allowed {
+                "The wallet is fully enabled."
+            } else {
+                "The wallet is disabled until both documents are accepted: run `ekubo-wallet legal accept`."
+            }
+        )
+    };
     match command {
-        LegalCommand::Status => print_json(&store.status()?),
+        LegalCommand::Status => {
+            let status = store.status()?;
+            emit(mode, &status, || Ok(render_status(&status)))
+        }
         LegalCommand::Show { document } => {
             let mut stdout = io::stdout().lock();
             stdout.write_all(document.document().text().as_bytes())?;
@@ -675,7 +811,8 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand) -> Result<()> {
                 "the Privacy Policy was not acknowledged; signing stays disabled"
             );
             cliclack::outro("Recorded. Signing is now enabled for this installation.")?;
-            print_json(&store.status()?)
+            let status = store.status()?;
+            emit(mode, &status, || Ok(render_status(&status)))
         }
     }
 }
@@ -694,19 +831,33 @@ fn terminal_note_safe(text: &str) -> String {
         .collect()
 }
 
-async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {
+async fn run_policy(config: ConfigStore, command: PolicyCommand, mode: OutputMode) -> Result<()> {
     match command {
         PolicyCommand::Show { wallet_id } => {
             config.wallet(&wallet_id)?;
             let stored = PolicyStore::production(config.data_dir())?
                 .get(&wallet_id)?
                 .with_context(|| format!("wallet {wallet_id} has no local policy"))?;
-            print_json(&serde_json::json!({
-                "wallet_id": stored.wallet_id,
-                "revision": stored.revision,
-                "updated_at": stored.updated_at,
-                "policy": stored.policy,
-            }))
+            emit(
+                mode,
+                &serde_json::json!({
+                    "wallet_id": stored.wallet_id,
+                    "revision": stored.revision,
+                    "updated_at": stored.updated_at,
+                    "policy": stored.policy,
+                }),
+                || {
+                    // The policy body stays pretty-printed JSON: it is the
+                    // exact configuration document an operator would edit.
+                    Ok(format!(
+                        "Policy for {} — revision {}, updated {}:\n{}",
+                        stored.wallet_id,
+                        stored.revision,
+                        described_time(stored.updated_at),
+                        serde_json::to_string_pretty(&stored.policy)?,
+                    ))
+                },
+            )
         }
         PolicyCommand::Set {
             wallet_id,
@@ -717,7 +868,7 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {
             let value = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", policy_file.display()))?;
             let policy = WalletPolicy::parse(value)?;
-            replace_policy(&config, &wallet_id, policy, Some(&policy_file)).await
+            replace_policy(&config, &wallet_id, policy, Some(&policy_file), mode).await
         }
         PolicyCommand::AllowAll { wallet_id } => {
             replace_policy(
@@ -725,6 +876,7 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {
                 &wallet_id,
                 WalletPolicy::allow_all_with_approval(),
                 None,
+                mode,
             )
             .await
         }
@@ -734,6 +886,7 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {
                 &wallet_id,
                 WalletPolicy::require_approval_for_everything(),
                 None,
+                mode,
             )
             .await
         }
@@ -746,17 +899,31 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {
                 .with_context(|| format!("failed to parse {}", policy_file.display()))?;
             let policy = WalletPolicy::parse(value)?;
             let canonical = serde_json::to_vec(&policy)?;
-            print_json(&serde_json::json!({
-                "valid": true,
-                "policy_file": policy_file.display().to_string(),
-                "digest": format!("0x{}", hex::encode(Keccak256::digest(&canonical))),
-                "version": policy.version,
-                "require_simulation": policy.require_simulation,
-                "approval_expiry_seconds": policy.approval_expiry_seconds,
-                "chains": policy.chains.keys().collect::<Vec<_>>(),
-                "policy": policy,
-            }))
+            let digest = format!("0x{}", hex::encode(Keccak256::digest(&canonical)));
+            emit(
+                mode,
+                &serde_json::json!({
+                    "valid": true,
+                    "policy_file": policy_file.display().to_string(),
+                    "digest": digest,
+                    "version": policy.version,
+                    "require_simulation": policy.require_simulation,
+                    "approval_expiry_seconds": policy.approval_expiry_seconds,
+                    "chains": policy.chains.keys().collect::<Vec<_>>(),
+                    "policy": policy,
+                }),
+                || {
+                    Ok(format!(
+                        "{} is a valid policy.\n  digest: {digest}\n  chains: {}\n  require_simulation: {}\n  approval_expiry_seconds: {}",
+                        policy_file.display(),
+                        policy.chains.keys().cloned().collect::<Vec<_>>().join(", "),
+                        policy.require_simulation,
+                        policy.approval_expiry_seconds,
+                    ))
+                },
+            )
         }
+        // The schema is itself a JSON document; there is no human form.
         PolicyCommand::Schema => print_json(&policy_json_schema()),
     }
 }
@@ -784,24 +951,286 @@ fn policy_json_schema() -> serde_json::Value {
     schema
 }
 
-fn run_transaction(config: &ConfigStore, command: TransactionCommand) -> Result<()> {
+async fn run_transaction(
+    config: &ConfigStore,
+    command: TransactionCommand,
+    mode: OutputMode,
+) -> Result<()> {
     let pending = PendingStore::production(config.data_dir())?;
     match command {
         TransactionCommand::List { wallet_id, limit } => {
             if let Some(wallet_id) = wallet_id.as_deref() {
                 config.wallet(wallet_id)?;
             }
-            print_json(&serde_json::json!({
-                "transactions": pending.list(wallet_id.as_deref(), limit)?,
-            }))
+            let transactions = pending.list(wallet_id.as_deref(), limit)?;
+            if mode == OutputMode::Json {
+                return print_json(&serde_json::json!({ "transactions": transactions }));
+            }
+            if transactions.is_empty() {
+                println!("No recorded transactions.");
+                return Ok(());
+            }
+            // The full interactive browser needs stdin; without it, print the
+            // one-line summaries instead.
+            if io::stdin().is_terminal() {
+                browse_transactions(config, &transactions).await
+            } else {
+                for record in &transactions {
+                    println!("{}", transaction_line(record));
+                }
+                Ok(())
+            }
         }
         TransactionCommand::Show { identifier } => {
-            print_json(&pending.get_by_identifier(&identifier)?)
+            let record = pending.get_by_identifier(&identifier)?;
+            if mode == OutputMode::Json {
+                return print_json(&record);
+            }
+            let detail = transaction_detail(config, &record).await;
+            println!("{}", crate::render::terminal_safe_multiline(&detail));
+            Ok(())
         }
     }
 }
 
-fn list_pending_approvals(config: &ConfigStore) -> Result<()> {
+/// keccak256("Transfer(address,address,uint256)"), for receipt log decoding.
+const TRANSFER_EVENT: B256 =
+    b256!("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
+
+fn status_label(status: PendingStatus) -> &'static str {
+    match status {
+        PendingStatus::AwaitingApproval => "awaiting approval",
+        PendingStatus::Rejected => "rejected",
+        PendingStatus::Signed => "approved, not submitted",
+        PendingStatus::Submitting => "submitting",
+        PendingStatus::Broadcast => "broadcast, awaiting receipt",
+        PendingStatus::Confirmed => "confirmed",
+        PendingStatus::Reverted => "reverted",
+        PendingStatus::Expired => "expired",
+        PendingStatus::Cancelled => "cancelled",
+    }
+}
+
+fn transaction_line(record: &PendingTransaction) -> String {
+    let native_total = record
+        .execution_plan
+        .ordered_steps
+        .iter()
+        .filter_map(|step| BigUint::from_str(step.transaction.value.as_str()).ok())
+        .sum::<BigUint>();
+    format!(
+        "{} · {} · {} on chain {} · {} call(s), {} wei native · {}",
+        relative_time(record.created_at),
+        status_label(record.status),
+        record.wallet_id,
+        record.chain_id,
+        record.execution_plan.ordered_steps.len(),
+        native_total,
+        record.request_id,
+    )
+}
+
+/// Interactive loop: pick a transaction, see its expanded details (including
+/// live receipt lookups), return to the list.
+async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction]) -> Result<()> {
+    const DONE: usize = usize::MAX;
+    loop {
+        let mut select = cliclack::select(format!("{} recorded transaction(s)", records.len()));
+        for (index, record) in records.iter().enumerate() {
+            select = select.item(
+                index,
+                crate::render::terminal_safe_multiline(&transaction_line(record))
+                    .replace('\n', " "),
+                "",
+            );
+        }
+        select = select.item(DONE, "Done", "quit");
+        let choice = select.interact()?;
+        if choice == DONE {
+            return Ok(());
+        }
+        let detail = transaction_detail(config, &records[choice]).await;
+        cliclack::note(
+            format!("Request {}", records[choice].request_id),
+            crate::render::terminal_safe_multiline(&detail),
+        )?;
+    }
+}
+
+/// The expanded human view of one lifecycle record. Chain lookups are
+/// best-effort display work: an unreachable RPC degrades to the stored data.
+async fn transaction_detail(config: &ConfigStore, record: &PendingTransaction) -> String {
+    let network = config.network_by_chain_id(&record.chain_id).ok();
+    let mut lines = Vec::new();
+    lines.push(format!("Status: {}", status_label(record.status)));
+    lines.push(format!("Wallet: {}", record.wallet_id));
+    lines.push(format!(
+        "Network: {} (chain {})",
+        network
+            .as_ref()
+            .map_or(record.network_name.as_str(), |network| network
+                .name
+                .as_str()),
+        record.chain_id,
+    ));
+    lines.push(format!("Created: {}", described_time(record.created_at)));
+    if record.updated_at != record.created_at {
+        lines.push(format!("Updated: {}", described_time(record.updated_at)));
+    }
+    if record.status == PendingStatus::AwaitingApproval {
+        lines.push(format!("Expires: {}", described_time(record.expires_at)));
+    }
+    if let Some(approved_at) = record.approved_at {
+        lines.push(format!("Approved: {}", described_time(approved_at)));
+    }
+    if let Some(rejected_at) = record.rejected_at {
+        lines.push(format!("Rejected: {}", described_time(rejected_at)));
+    }
+    lines.push(format!("Plan digest: {}", record.digest));
+    lines.push(format!(
+        "Policy revision: {}; approval {}",
+        record.policy_revision,
+        if record.approval_required {
+            "required"
+        } else {
+            "automatic"
+        }
+    ));
+
+    for step in &record.execution_plan.ordered_steps {
+        let calldata = step.transaction.data.as_ref();
+        let selector = if calldata.is_empty() {
+            "no calldata".into()
+        } else {
+            format!(
+                "selector 0x{}, {} bytes",
+                hex::encode(&calldata[..calldata.len().min(4)]),
+                calldata.len()
+            )
+        };
+        lines.push(format!(
+            "Call {}: to {:#x}; value {} wei; {selector}",
+            step.step, step.transaction.to, step.transaction.value,
+        ));
+    }
+
+    let transaction_hash = record
+        .broadcast_transaction_hash
+        .as_deref()
+        .or(record.signed_transaction_hash.as_deref());
+    if let Some(hash) = transaction_hash {
+        lines.push(format!("Transaction hash: {hash}"));
+        if let Some(url) = network
+            .as_ref()
+            .and_then(|network| explorer_transaction_url(network, hash))
+        {
+            lines.push(format!("Explorer: {url}"));
+        }
+    }
+    if let Some(block) = &record.block_number {
+        lines.push(format!("Block: {block}"));
+    }
+
+    // Live receipt enrichment for anything that reached the chain.
+    if let (Some(network), Some(hash)) = (network.as_ref(), transaction_hash)
+        && matches!(
+            record.status,
+            PendingStatus::Broadcast | PendingStatus::Confirmed | PendingStatus::Reverted
+        )
+    {
+        match transaction_receipt_details(network, hash).await {
+            Ok(Some(receipt)) => {
+                lines.extend(receipt_lines(network, record, &receipt).await);
+            }
+            Ok(None) => lines.push("Receipt: not yet available from the RPC".into()),
+            Err(error) => lines.push(format!("Receipt: lookup failed ({error:#})")),
+        }
+    }
+    lines.join("\n")
+}
+
+/// Receipt facts plus the wallet's decoded ERC-20 transfer balance changes.
+async fn receipt_lines(
+    network: &NetworkConfig,
+    record: &PendingTransaction,
+    receipt: &ReceiptDetails,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Receipt: {} in block {}",
+        if receipt.succeeded {
+            "succeeded"
+        } else {
+            "reverted"
+        },
+        receipt.block_number,
+    ));
+    let fee_wei = u128::from(receipt.gas_used).saturating_mul(receipt.effective_gas_price);
+    let currency_symbol = network
+        .native_currency
+        .as_ref()
+        .map_or("native units", |currency| currency.symbol.as_str());
+    let currency_decimals = network
+        .native_currency
+        .as_ref()
+        .map_or(18, |currency| currency.decimals);
+    lines.push(format!(
+        "Fee paid: {} {currency_symbol} ({fee_wei} wei; {} gas)",
+        crate::approval_summary::format_fixed_point(&fee_wei.to_string(), currency_decimals),
+        receipt.gas_used,
+    ));
+
+    // Net standard Transfer activity for the sender, from the receipt logs.
+    let wallet = record.execution_plan.sender;
+    let mut activity: std::collections::BTreeMap<Address, (U256, U256)> =
+        std::collections::BTreeMap::new();
+    for log in &receipt.logs {
+        if log.topics.len() != 3 || log.topics[0] != TRANSFER_EVENT || log.data.len() != 32 {
+            continue;
+        }
+        let from = Address::from_slice(&log.topics[1].as_slice()[12..]);
+        let to = Address::from_slice(&log.topics[2].as_slice()[12..]);
+        let amount = U256::from_be_slice(&log.data);
+        let entry = activity.entry(log.address).or_default();
+        if to == wallet {
+            entry.0 = entry.0.saturating_add(amount);
+        }
+        if from == wallet {
+            entry.1 = entry.1.saturating_add(amount);
+        }
+    }
+    let activity: Vec<(Address, (U256, U256))> = activity
+        .into_iter()
+        .filter(|(_, (incoming, outgoing))| !incoming.is_zero() || !outgoing.is_zero())
+        .collect();
+    if activity.is_empty() {
+        lines.push("Token balance changes: none for this wallet in the receipt logs".into());
+        return lines;
+    }
+    let tokens: Vec<Address> = activity.iter().map(|(token, _)| *token).collect();
+    let metadata = crate::approval_summary::load_token_metadata(network, &tokens).await;
+    lines.push("Token balance changes (from receipt Transfer logs):".into());
+    for (token, (incoming, outgoing)) in activity {
+        let display = metadata.get(&token).cloned().unwrap_or_default();
+        let mut parts = Vec::new();
+        if !incoming.is_zero() {
+            parts.push(format!(
+                "+{}",
+                crate::approval_summary::format_token_amount(incoming, token, &display)
+            ));
+        }
+        if !outgoing.is_zero() {
+            parts.push(format!(
+                "-{}",
+                crate::approval_summary::format_token_amount(outgoing, token, &display)
+            ));
+        }
+        lines.push(format!("  {}", parts.join(", ")));
+    }
+    lines
+}
+
+fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> {
     let pending = PendingStore::production(config.data_dir())?;
     let awaiting = pending.awaiting_approval(None)?;
     let awaiting_typed_data =
@@ -815,15 +1244,42 @@ fn list_pending_approvals(config: &ConfigStore) -> Result<()> {
             awaiting.len() + awaiting_typed_data.len()
         );
     }
-    print_json(&serde_json::json!({
-        "pending_approvals": awaiting,
-        "pending_typed_data": awaiting_typed_data,
-    }))
+    emit(
+        mode,
+        &serde_json::json!({
+            "pending_approvals": awaiting,
+            "pending_typed_data": awaiting_typed_data,
+        }),
+        || {
+            let mut lines = Vec::new();
+            for record in &awaiting {
+                lines.push(format!(
+                    "{}\n    expires {}",
+                    transaction_line(record),
+                    relative_time(record.expires_at),
+                ));
+            }
+            for record in &awaiting_typed_data {
+                lines.push(format!(
+                    "{} · typed data for {} on chain {} · {}\n    expires {}",
+                    relative_time(record.created_at),
+                    record.wallet_id,
+                    record.chain_id,
+                    record.request_id,
+                    relative_time(record.expires_at),
+                ));
+            }
+            if lines.is_empty() {
+                lines.push("Nothing is awaiting approval.".into());
+            }
+            Ok(lines.join("\n"))
+        },
+    )
 }
 
-fn run_reject(config: &ConfigStore, request_id: Option<Uuid>) -> Result<()> {
+fn run_reject(config: &ConfigStore, request_id: Option<Uuid>, mode: OutputMode) -> Result<()> {
     let Some(request_id) = request_id else {
-        return list_pending_approvals(config);
+        return list_pending_approvals(config, mode);
     };
     let request = match PendingStore::production(config.data_dir())?.reject(request_id) {
         Ok(request) => request,
@@ -836,28 +1292,42 @@ fn run_reject(config: &ConfigStore, request_id: Option<Uuid>) -> Result<()> {
                 "Rejected. An MCP agent waiting on this typed-data request sees the rejection \
                  automatically."
             );
-            return print_json(&serde_json::json!({
-                "rejected": request.request_id,
-                "digest": request.digest,
-                "rejected_at": request.rejected_at,
-            }));
+            return emit(
+                mode,
+                &serde_json::json!({
+                    "rejected": request.request_id,
+                    "digest": request.digest,
+                    "rejected_at": request.rejected_at,
+                }),
+                || {
+                    Ok(format!(
+                        "Rejected typed-data request {}.",
+                        request.request_id
+                    ))
+                },
+            );
         }
     };
     eprintln!("Rejected. An MCP agent waiting on this request sees the rejection automatically.");
-    print_json(&serde_json::json!({
-        "rejected": request.request_id,
-        "digest": request.digest,
-        "rejected_at": request.rejected_at,
-    }))
+    emit(
+        mode,
+        &serde_json::json!({
+            "rejected": request.request_id,
+            "digest": request.digest,
+            "rejected_at": request.rejected_at,
+        }),
+        || Ok(format!("Rejected request {}.", request.request_id)),
+    )
 }
 
 async fn run_approve(
     config: &ConfigStore,
     request_id: Option<Uuid>,
     no_confirm: bool,
+    mode: OutputMode,
 ) -> Result<()> {
     let Some(request_id) = request_id else {
-        return list_pending_approvals(config);
+        return list_pending_approvals(config, mode);
     };
     require_interactive("transaction approval")?;
     legal::require_current_acceptance(config.data_dir())?;
@@ -870,7 +1340,7 @@ async fn run_approve(
             let Ok(request) = typed_data.get(request_id) else {
                 return Err(transaction_error);
             };
-            return approve_typed_data(config, typed_data, request, no_confirm).await;
+            return approve_typed_data(config, typed_data, request, no_confirm, mode).await;
         }
     };
     ensure!(
@@ -985,12 +1455,25 @@ async fn run_approve(
         "Approved and signed. An MCP agent waiting on this request detects the approval and \
          submits automatically; nothing further is needed here."
     );
-    print_json(&serde_json::json!({
-        "approved": approved.request_id,
-        "digest": approved.digest,
-        "transaction_hash": approved.signed_transaction_hash,
-        "approved_at": approved.approved_at,
-    }))
+    emit(
+        mode,
+        &serde_json::json!({
+            "approved": approved.request_id,
+            "digest": approved.digest,
+            "transaction_hash": approved.signed_transaction_hash,
+            "approved_at": approved.approved_at,
+        }),
+        || {
+            Ok(format!(
+                "Approved request {} — signed transaction {}.",
+                approved.request_id,
+                approved
+                    .signed_transaction_hash
+                    .as_deref()
+                    .unwrap_or("<missing>"),
+            ))
+        },
+    )
 }
 
 async fn approve_typed_data(
@@ -998,6 +1481,7 @@ async fn approve_typed_data(
     mut store: TypedDataStore,
     request: PendingTypedData,
     no_confirm: bool,
+    mode: OutputMode,
 ) -> Result<()> {
     ensure!(
         request.status == TypedDataStatus::AwaitingApproval,
@@ -1134,12 +1618,22 @@ async fn approve_typed_data(
         "Approved and signed. An MCP agent waiting on this request reads the signature \
          automatically; nothing further is needed here."
     );
-    print_json(&serde_json::json!({
-        "approved": stored.request_id,
-        "digest": stored.digest,
-        "signature": stored.signature,
-        "approved_at": stored.approved_at,
-    }))
+    emit(
+        mode,
+        &serde_json::json!({
+            "approved": stored.request_id,
+            "digest": stored.digest,
+            "signature": stored.signature,
+            "approved_at": stored.approved_at,
+        }),
+        || {
+            Ok(format!(
+                "Approved typed-data request {}.\nSignature: {}",
+                stored.request_id,
+                stored.signature.as_deref().unwrap_or("<missing>"),
+            ))
+        },
+    )
 }
 
 fn transaction_approval_request(
@@ -1309,6 +1803,7 @@ async fn replace_policy(
     wallet_id: &str,
     policy: WalletPolicy,
     source: Option<&std::path::Path>,
+    mode: OutputMode,
 ) -> Result<()> {
     let wallet = config.wallet(wallet_id)?;
     require_interactive("policy changes")?;
@@ -1356,12 +1851,21 @@ async fn replace_policy(
         &policy,
         current.as_ref().map(|value| value.revision),
     )?;
-    print_json(&serde_json::json!({
-        "wallet_id": wallet_id,
-        "policy_version": stored.policy.version,
-        "revision": stored.revision,
-        "digest": digest,
-    }))
+    emit(
+        mode,
+        &serde_json::json!({
+            "wallet_id": wallet_id,
+            "policy_version": stored.policy.version,
+            "revision": stored.revision,
+            "digest": digest,
+        }),
+        || {
+            Ok(format!(
+                "Installed policy revision {} for {wallet_id} (digest {digest}).",
+                stored.revision
+            ))
+        },
+    )
 }
 
 async fn require_approval(request: ApprovalRequest) -> Result<()> {
@@ -1372,14 +1876,28 @@ async fn require_approval(request: ApprovalRequest) -> Result<()> {
     Ok(())
 }
 
-async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()> {
+async fn run_network(
+    config: &ConfigStore,
+    command: NetworkCommand,
+    mode: OutputMode,
+) -> Result<()> {
     match command {
         // The human CLI prints complete RPC URLs so the configuration can
         // actually be read back and edited. No MCP tool returns them.
-        NetworkCommand::List => print_json(&describe_networks(&config.load()?.networks)),
-        NetworkCommand::Presets => print_json(&serde_json::json!({
-            "networks": describe_networks(&default_networks()),
-        })),
+        NetworkCommand::List => {
+            let networks = config.load()?.networks;
+            emit(mode, &describe_networks(&networks), || {
+                Ok(networks_human(&networks))
+            })
+        }
+        NetworkCommand::Presets => {
+            let networks = default_networks();
+            emit(
+                mode,
+                &serde_json::json!({ "networks": describe_networks(&networks) }),
+                || Ok(networks_human(&networks)),
+            )
+        }
         NetworkCommand::Reset => {
             let networks = default_networks();
             let digest = configuration_digest(&networks)?;
@@ -1394,10 +1912,20 @@ async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()
                 state.networks.clone_from(&networks);
                 Ok(())
             })?;
-            print_json(&serde_json::json!({
-                "reset": true,
-                "networks": describe_networks(&networks),
-            }))
+            emit(
+                mode,
+                &serde_json::json!({
+                    "reset": true,
+                    "networks": describe_networks(&networks),
+                }),
+                || {
+                    Ok(format!(
+                        "Reset to the {} built-in network presets.\n{}",
+                        networks.len(),
+                        networks_human(&networks)
+                    ))
+                },
+            )
         }
         NetworkCommand::Add(args) => {
             let candidate = network_candidate(*args)?;
@@ -1419,10 +1947,21 @@ async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()
             config.update(|state| {
                 replace_configured_network(&mut state.networks, candidate.clone())
             })?;
-            print_json(&serde_json::json!({
-                "network": describe_network(&candidate),
-                "rpc_verified": true,
-            }))
+            emit(
+                mode,
+                &serde_json::json!({
+                    "network": describe_network(&candidate),
+                    "rpc_verified": true,
+                }),
+                || {
+                    Ok(format!(
+                        "Configured {} (chain {}) via {}; the RPC verified its chain ID.",
+                        candidate.name,
+                        candidate.chain_id,
+                        rpc_origin(&candidate.rpc_url),
+                    ))
+                },
+            )
         }
         NetworkCommand::Remove { name } => {
             let mut prospective = config.load()?.networks;
@@ -1443,16 +1982,51 @@ async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()
             .await?;
             let removed =
                 config.update(|state| remove_configured_network(&mut state.networks, &name))?;
-            print_json(&serde_json::json!({
-                "removed": removed.name,
-                "chain_id": removed.chain_id.to_string(),
-            }))
+            emit(
+                mode,
+                &serde_json::json!({
+                    "removed": removed.name,
+                    "chain_id": removed.chain_id.to_string(),
+                }),
+                || {
+                    Ok(format!(
+                        "Removed network {} (chain {}).",
+                        removed.name, removed.chain_id
+                    ))
+                },
+            )
         }
     }
 }
 
 fn describe_networks(networks: &[NetworkConfig]) -> Vec<serde_json::Value> {
     networks.iter().map(describe_network).collect()
+}
+
+/// Full RPC URLs are intentionally included: the CLI listing is how an
+/// operator reads back the configuration.
+fn networks_human(networks: &[NetworkConfig]) -> String {
+    networks
+        .iter()
+        .map(|network| {
+            format!(
+                "{} (chain {}){}\n  rpc: {}{}",
+                network.name,
+                network.chain_id,
+                if network.aliases.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — aliases: {}", network.aliases.join(", "))
+                },
+                network.rpc_url,
+                network
+                    .block_explorer_url
+                    .as_ref()
+                    .map_or_else(String::new, |url| format!("\n  explorer: {url}")),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -1891,6 +2465,76 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transaction_line_and_detail_render_offline() {
+        let plan = crate::core::execution_plan::ExecutionPlan::parse(serde_json::json!({
+            "schema_version": "1",
+            "chain_id": "1",
+            "caip2_chain_id": "eip155:1",
+            "sender": "0x1111111111111111111111111111111111111111",
+            "ordered_steps": [{
+                "step": 1,
+                "kind": "execution",
+                "submit_condition": "always",
+                "transaction": {
+                    "chain_id": "1",
+                    "from": "0x1111111111111111111111111111111111111111",
+                    "to": "0x2222222222222222222222222222222222222222",
+                    "data": "0xa9059cbb",
+                    "value": "5"
+                }
+            }]
+        }))
+        .unwrap();
+        let now = chrono::Utc::now();
+        let record = PendingTransaction {
+            request_id: Uuid::nil(),
+            wallet_id: "primary".into(),
+            network_name: "ethereum".into(),
+            chain_id: "1".into(),
+            digest: format!("{:#x}", plan.digest()),
+            execution_plan: plan,
+            review_digest: None,
+            policy_revision: 3,
+            approval_required: true,
+            status: PendingStatus::AwaitingApproval,
+            created_at: now - chrono::TimeDelta::minutes(7),
+            expires_at: now + chrono::TimeDelta::minutes(3),
+            updated_at: now - chrono::TimeDelta::minutes(7),
+            approved_at: None,
+            rejected_at: None,
+            serialized_transaction: None,
+            signed_transaction_hash: None,
+            broadcast_transaction_hash: None,
+            block_number: None,
+        };
+
+        let line = transaction_line(&record);
+        assert!(line.contains("7 minutes ago"));
+        assert!(line.contains("awaiting approval"));
+        assert!(line.contains("primary"));
+        assert!(line.contains("1 call(s), 5 wei native"));
+
+        // An awaiting record renders entirely from stored data: no RPC.
+        let directory = tempfile::tempdir().unwrap();
+        let config = ConfigStore::new(directory.path());
+        let detail = transaction_detail(&config, &record).await;
+        assert!(detail.contains("Status: awaiting approval"));
+        assert!(detail.contains("Network: ethereum (chain 1)"));
+        assert!(detail.contains("Expires: in 3 minutes"));
+        assert!(detail.contains("Call 1: to 0x2222222222222222222222222222222222222222"));
+        assert!(detail.contains("selector 0xa9059cbb"));
+        assert!(detail.contains("Policy revision: 3; approval required"));
+
+        // A broadcast hash yields an explorer link from the configured network.
+        let mut broadcast = record;
+        broadcast.status = PendingStatus::Signed;
+        broadcast.serialized_transaction = Some("0x0102".into());
+        broadcast.signed_transaction_hash = Some(format!("0x{}", "aa".repeat(32)));
+        let detail = transaction_detail(&config, &broadcast).await;
+        assert!(detail.contains(&format!("https://etherscan.io/tx/0x{}", "aa".repeat(32))));
+    }
 
     #[test]
     fn parses_transaction_network_and_completion_parity_commands() {

@@ -371,7 +371,7 @@ An agent must never run the approval command for you.
 | `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; or submit an already-approved request ID. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
-| `wallet_wait_for_execution` | Bounded polling for a receipt. |
+| `wallet_wait_for_execution` | Wait for the plan to be executed: bounded polling for the receipt, plus an optional number of confirmations before resolving. |
 | `wallet_sign_typed_data` | Sign an exact EIP-712 payload. Recognized permits (ERC-2612, canonical Permit2) are policy-checked like `approve()` calls and sign automatically when allowed; everything else queues for CLI approval. |
 | `wallet_wait_for_typed_data` | Poll a pending typed-data request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
 | `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only with owner authentication. |
@@ -492,7 +492,12 @@ also stores the exact serialized transaction and hash before the first RPC
 submission. An exceptional approval additionally records the digest of its
 reviewed nonce, gas, fees, call, and delegation fields. Retries only rebroadcast
 those persisted bytes. Inspect the ledger with `ekubo-wallet transaction list`
-and `ekubo-wallet transaction show <request-id-or-hash>`.
+and `ekubo-wallet transaction show <request-id-or-hash>`: on a terminal these
+open a human-readable view — `list` is an interactive browser with relative
+ages, expandable details, block-explorer links, and receipt-decoded token
+balance changes. Every reporting command prints exact JSON instead when
+`--json` is passed or when stdout is not a terminal, so scripts and agents
+always receive machine-readable output.
 
 The random 256-bit database key is stored separately under credential-service
 name `org.ekubo.secure-wallet-mcp.policy-database-key.v1`. Wallet private keys use

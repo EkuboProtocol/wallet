@@ -14,6 +14,7 @@ pub mod legal;
 pub mod mcp;
 pub mod pending;
 pub mod policy_store;
+pub mod render;
 pub mod rpc;
 pub mod simulation;
 pub mod token_store;

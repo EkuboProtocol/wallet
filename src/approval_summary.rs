@@ -424,7 +424,7 @@ pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenM
     )
 }
 
-fn token_label(token: Address, display: &TokenMetadata) -> String {
+pub(crate) fn token_label(token: Address, display: &TokenMetadata) -> String {
     display.symbol.as_ref().map_or_else(
         || format!("{token:#x}"),
         |symbol| format!("{symbol} ({token:#x})"),
@@ -433,7 +433,7 @@ fn token_label(token: Address, display: &TokenMetadata) -> String {
 
 /// Render a decimal base-unit string as a fixed-point quantity without any
 /// rounding: every significant digit of the exact value is preserved.
-fn format_fixed_point(base_units: &str, decimals: u8) -> String {
+pub(crate) fn format_fixed_point(base_units: &str, decimals: u8) -> String {
     let decimals = usize::from(decimals);
     if decimals == 0 {
         return base_units.to_string();

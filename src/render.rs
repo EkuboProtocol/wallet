@@ -1,0 +1,236 @@
+//! Human-readable CLI output.
+//!
+//! Every CLI command that reports structured data resolves an [`OutputMode`]:
+//! `--json` always prints exact JSON, a non-terminal stdout (pipes, command
+//! substitution, agents shelling out) prints JSON so scripts never break, and
+//! an interactive terminal gets a human rendering by default. JSON output is
+//! the compatibility surface; human output is free to improve.
+
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use std::io::{self, IsTerminal, Write};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputMode {
+    Json,
+    Human,
+}
+
+impl OutputMode {
+    /// `--json` forces JSON; otherwise a terminal stdout gets the human view
+    /// and anything else (pipe, file, agent) keeps machine-readable JSON.
+    #[must_use]
+    pub fn resolve(json_flag: bool) -> Self {
+        if json_flag || !io::stdout().is_terminal() {
+            Self::Json
+        } else {
+            Self::Human
+        }
+    }
+}
+
+/// Print `value` as JSON, or the provided human rendering, per mode. The
+/// human text passes through control-character stripping so stored data can
+/// never inject terminal escapes.
+pub fn emit<T: Serialize>(
+    mode: OutputMode,
+    value: &T,
+    human: impl FnOnce() -> Result<String>,
+) -> Result<()> {
+    match mode {
+        OutputMode::Json => print_json(value),
+        OutputMode::Human => {
+            let text = human()?;
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "{}", terminal_safe_multiline(text.trim_end()))?;
+            Ok(())
+        }
+    }
+}
+
+pub fn print_json(value: &impl Serialize) -> Result<()> {
+    serde_json::to_writer_pretty(io::stdout().lock(), value)?;
+    println!();
+    Ok(())
+}
+
+/// Newlines survive; every other control character becomes a space.
+#[must_use]
+pub fn terminal_safe_multiline(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() && character != '\n' {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// "3 minutes ago", "in 2 hours", "just now".
+#[must_use]
+pub fn relative_time(when: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let (delta, template) = if when <= now {
+        (now - when, "{} ago")
+    } else {
+        (when - now, "in {}")
+    };
+    let seconds = delta.num_seconds();
+    // Rounded rather than truncated units, so "9 minutes from now" does not
+    // read as 8 the instant it is computed.
+    let text = if seconds < 5 {
+        return "just now".into();
+    } else if seconds < 90 {
+        format!("{seconds} seconds")
+    } else if seconds < 90 * 60 {
+        plural((seconds + 30) / 60, "minute")
+    } else if seconds < 36 * 3600 {
+        plural((seconds + 1800) / 3600, "hour")
+    } else {
+        plural((seconds + 43_200) / 86_400, "day")
+    };
+    template.replacen("{}", &text, 1)
+}
+
+fn plural(amount: i64, unit: &str) -> String {
+    if amount == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{amount} {unit}s")
+    }
+}
+
+/// A timestamp with both the relative and exact form.
+#[must_use]
+pub fn described_time(when: DateTime<Utc>) -> String {
+    format!(
+        "{} ({})",
+        relative_time(when),
+        when.format("%Y-%m-%d %H:%M:%S UTC")
+    )
+}
+
+/// The block-explorer transaction page for a hash, when the network has one.
+#[must_use]
+pub fn explorer_transaction_url(
+    network: &crate::config::NetworkConfig,
+    transaction_hash: &str,
+) -> Option<String> {
+    let base = network.block_explorer_url.as_ref()?;
+    Some(format!(
+        "{}/tx/{transaction_hash}",
+        base.as_str().trim_end_matches('/')
+    ))
+}
+
+/// Generic human rendering for JSON values: indented `key: value` lines with
+/// numbered entries for arrays of objects. A fallback for future commands
+/// without a bespoke view, so `--json` stays the only way to get raw JSON.
+#[must_use]
+pub fn generic_human(value: &serde_json::Value) -> String {
+    let mut out = String::new();
+    render_value(&mut out, value, 0);
+    out
+}
+
+fn render_value(out: &mut String, value: &serde_json::Value, indent: usize) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                render_entry(out, key, child, indent);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                render_entry(out, &format!("{}.", index + 1), item, indent);
+            }
+        }
+        scalar => {
+            out.push_str(&" ".repeat(indent));
+            out.push_str(&scalar_text(scalar));
+            out.push('\n');
+        }
+    }
+}
+
+fn render_entry(out: &mut String, key: &str, value: &serde_json::Value, indent: usize) {
+    use std::fmt::Write as _;
+    let pad = " ".repeat(indent);
+    match value {
+        serde_json::Value::Object(map) if map.is_empty() => {
+            let _ = writeln!(out, "{pad}{key}: {{}}");
+        }
+        serde_json::Value::Array(items) if items.is_empty() => {
+            let _ = writeln!(out, "{pad}{key}: (none)");
+        }
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            let _ = writeln!(out, "{pad}{key}:");
+            render_value(out, value, indent + 2);
+        }
+        scalar => {
+            let _ = writeln!(out, "{pad}{key}: {}", scalar_text(scalar));
+        }
+    }
+}
+
+fn scalar_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => "null".into(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeDelta;
+
+    #[test]
+    fn relative_times_read_naturally_in_both_directions() {
+        let now = Utc::now();
+        assert_eq!(relative_time(now), "just now");
+        assert_eq!(
+            relative_time(now - TimeDelta::seconds(30)),
+            "30 seconds ago"
+        );
+        assert_eq!(relative_time(now - TimeDelta::minutes(5)), "5 minutes ago");
+        assert_eq!(relative_time(now - TimeDelta::hours(3)), "3 hours ago");
+        assert_eq!(relative_time(now - TimeDelta::days(2)), "2 days ago");
+        assert_eq!(relative_time(now + TimeDelta::minutes(9)), "in 9 minutes");
+    }
+
+    #[test]
+    fn explorer_links_join_cleanly() {
+        let network = crate::config::default_networks().remove(0);
+        assert_eq!(
+            explorer_transaction_url(&network, "0xabc").as_deref(),
+            Some("https://etherscan.io/tx/0xabc")
+        );
+        let mut bare = network;
+        bare.block_explorer_url = None;
+        assert_eq!(explorer_transaction_url(&bare, "0xabc"), None);
+    }
+
+    #[test]
+    fn generic_rendering_flattens_objects_and_numbers_arrays() {
+        let rendered = generic_human(&serde_json::json!({
+            "wallet": "primary",
+            "networks": [{"name": "ethereum"}],
+            "empty": [],
+        }));
+        assert!(rendered.contains("wallet: primary"));
+        assert!(rendered.contains("1.:\n") || rendered.contains("1.:"));
+        assert!(rendered.contains("  name: ethereum"));
+        assert!(rendered.contains("empty: (none)"));
+    }
+
+    #[test]
+    fn human_output_strips_control_sequences_but_keeps_lines() {
+        assert_eq!(terminal_safe_multiline("a\u{1b}[31mb\nc"), "a [31mb\nc");
+    }
+}

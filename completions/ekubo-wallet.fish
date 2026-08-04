@@ -23,6 +23,7 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a approve -d 'Approve 
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a reject -d 'Reject a pending request locally'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a completion -d 'Print shell completions'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l data-dir -r -d 'Override the wallet data directory'
+complete -c ekubo-wallet -l json -d 'Print machine-readable JSON instead of the human view'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l help -d 'Show command help'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print version information'
 
