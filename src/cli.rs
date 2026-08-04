@@ -378,12 +378,18 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                     .iter()
                     .map(|wallet| {
                         format!(
-                            "{}\n  address: {:#x}\n  source: {:?}, custody: {:?}\n  created: {}",
+                            "{}\n  address: {:#x}\n  source: {:?}\n  created: {}\n  key exported: {}",
                             wallet.id,
                             wallet.address,
                             wallet.source,
-                            wallet.custody,
                             described_time(wallet.created_at),
+                            // Say what this line actually knows. "Never" would
+                            // read as a custody guarantee the OS credential
+                            // store does not give.
+                            wallet.exported_at.map_or_else(
+                                || "not by this CLI".to_string(),
+                                described_time
+                            ),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -467,7 +473,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                 .fact("Wallet", &wallet.id)
                 .fact("Address", format!("{:#x}", wallet.address))
                 .warning(
-                    "Export permanently ends the wallet's exclusive-policy guarantee. Anyone with the key can bypass this service.",
+                    "Export reveals the raw key and cannot be undone. Anyone holding it signs directly, with no policy, simulation, or approval in the way.",
                 ),
             )
             .await?;
@@ -477,7 +483,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
             let result = custody.export(&wallet_id).await;
             let key = match result {
                 Ok(key) => {
-                    progress.stop("Owner authenticated; custody state updated");
+                    progress.stop("Owner authenticated; export recorded");
                     key
                 }
                 Err(error) => {

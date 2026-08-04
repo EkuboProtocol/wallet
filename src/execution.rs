@@ -714,10 +714,7 @@ fn sanitize_message(network: &NetworkConfig, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::{CustodyStatus, WalletSource},
-        core::execution_plan::ExecutionPlan,
-    };
+    use crate::{config::WalletSource, core::execution_plan::ExecutionPlan};
     use alloy::{primitives::Address, signers::local::PrivateKeySigner};
     use chrono::Utc;
     use serde_json::json;
@@ -799,7 +796,6 @@ mod tests {
             address: signer.address(),
             created_at: Utc::now(),
             source: WalletSource::Created,
-            custody: CustodyStatus::Sealed,
             exported_at: None,
         }
     }

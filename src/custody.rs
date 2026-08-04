@@ -1,5 +1,5 @@
 use crate::{
-    config::{ConfigStore, CustodyStatus, WalletMetadata, WalletSource, validate_wallet_id},
+    config::{ConfigStore, WalletMetadata, WalletSource, validate_wallet_id},
     human_presence::{HumanPresence, PresenceAction, PresenceRequest},
 };
 use alloy::signers::local::PrivateKeySigner;
@@ -128,21 +128,11 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     pub fn create(&self, wallet_id: &str) -> Result<WalletMetadata> {
         let signer = PrivateKeySigner::random();
         let key = PrivateKeyMaterial::from_bytes(signer.to_bytes().as_slice())?;
-        self.add(
-            wallet_id,
-            &key,
-            WalletSource::Created,
-            CustodyStatus::Sealed,
-        )
+        self.add(wallet_id, &key, WalletSource::Created)
     }
 
     pub fn import(&self, wallet_id: &str, key: PrivateKeyMaterial) -> Result<WalletMetadata> {
-        let result = self.add(
-            wallet_id,
-            &key,
-            WalletSource::Imported,
-            CustodyStatus::ExternallyKnown,
-        );
+        let result = self.add(wallet_id, &key, WalletSource::Imported);
         drop(key);
         result
     }
@@ -152,7 +142,6 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         wallet_id: &str,
         key: &PrivateKeyMaterial,
         source: WalletSource,
-        custody: CustodyStatus,
     ) -> Result<WalletMetadata> {
         validate_wallet_id(wallet_id)?;
         let address = key.signer().address();
@@ -161,7 +150,6 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             address,
             created_at: Utc::now(),
             source,
-            custody,
             exported_at: None,
         };
 
@@ -207,15 +195,17 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             "credential address does not match wallet metadata"
         );
 
-        // Record the irreversible loss of exclusive custody before returning
-        // key material. A failed metadata write therefore never leaks a key.
+        // Record that a copy left through this tool before returning key
+        // material, so a failed metadata write never leaks a key unrecorded.
+        // The first timestamp stands: a second export reveals nothing the
+        // first did not, and moving the mark forward would misdate the moment
+        // the key stopped being held only here.
         self.config.update(|config| {
             let wallet = config
                 .wallets
                 .iter_mut()
                 .find(|wallet| wallet.id == wallet_id)
                 .with_context(|| format!("unknown wallet {wallet_id}"))?;
-            wallet.custody = CustodyStatus::Exported;
             wallet.exported_at.get_or_insert_with(Utc::now);
             Ok(())
         })?;
@@ -303,36 +293,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn created_wallet_transitions_to_exported() {
+    async fn export_records_a_timestamp() {
         let (_directory, service) = service(true);
         let wallet = service.create("primary").unwrap();
-        assert_eq!(wallet.custody, CustodyStatus::Sealed);
+        assert!(wallet.exported_at.is_none());
         let exported = service.export("primary").await.unwrap();
         assert_eq!(exported.len(), 66);
-        let wallet = service.config.wallet("primary").unwrap();
-        assert_eq!(wallet.custody, CustodyStatus::Exported);
-        assert!(wallet.exported_at.is_some());
+        assert!(
+            service
+                .config
+                .wallet("primary")
+                .unwrap()
+                .exported_at
+                .is_some()
+        );
     }
 
     #[tokio::test]
-    async fn denial_does_not_reclassify_key() {
+    async fn re_export_keeps_the_first_timestamp() {
+        let (_directory, service) = service(true);
+        service.create("primary").unwrap();
+        service.export("primary").await.unwrap();
+        let first = service.config.wallet("primary").unwrap().exported_at;
+        service.export("primary").await.unwrap();
+        assert_eq!(service.config.wallet("primary").unwrap().exported_at, first);
+    }
+
+    #[tokio::test]
+    async fn denial_does_not_record_an_export() {
         let (_directory, service) = service(false);
         service.create("primary").unwrap();
         assert!(service.export("primary").await.is_err());
-        assert_eq!(
-            service.config.wallet("primary").unwrap().custody,
-            CustodyStatus::Sealed
+        assert!(
+            service
+                .config
+                .wallet("primary")
+                .unwrap()
+                .exported_at
+                .is_none()
         );
     }
 
     #[test]
-    fn imports_are_never_marked_sealed() {
+    fn imports_record_their_external_origin() {
         let (_directory, service) = service(true);
         let key = PrivateKeyMaterial::from_hex(
             "0x0000000000000000000000000000000000000000000000000000000000000001",
         )
         .unwrap();
         let wallet = service.import("imported", key).unwrap();
-        assert_eq!(wallet.custody, CustodyStatus::ExternallyKnown);
+        assert_eq!(wallet.source, WalletSource::Imported);
+        // An import is externally known from the start, but that is `source`'s
+        // job to say. `exported_at` records only this tool's own disclosures.
+        assert!(wallet.exported_at.is_none());
     }
 }

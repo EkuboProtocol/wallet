@@ -22,14 +22,6 @@ pub enum WalletSource {
     Imported,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CustodyStatus {
-    Sealed,
-    ExternallyKnown,
-    Exported,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WalletMetadata {
@@ -38,8 +30,15 @@ pub struct WalletMetadata {
     pub address: Address,
     pub created_at: DateTime<Utc>,
     pub source: WalletSource,
-    #[serde(default = "legacy_custody_status")]
-    pub custody: CustodyStatus,
+    /// When this tool first handed out a copy of the private key.
+    ///
+    /// A timestamp is a sound positive: `wallet export` definitely revealed
+    /// the key. Its absence is not the corresponding negative. The key sits in
+    /// the OS credential store, which the owner can read with their login
+    /// credential and anything running as them can reach, so a copy can leave
+    /// without this process ever observing it. Nothing in the policy, signing,
+    /// or approval path reads this field; it is provenance a human can consult,
+    /// never a control.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exported_at: Option<DateTime<Utc>>,
 }
@@ -83,6 +82,94 @@ pub struct WalletConfig {
     pub networks: Vec<NetworkConfig>,
 }
 
+/// The on-disk shape, which still accepts the `custody` enum that 0.1.0
+/// through 0.3.0-rc.0 wrote.
+///
+/// That enum held no information `source` and `exported_at` do not already
+/// carry, and held it less precisely: an imported key that was later exported
+/// collapsed to `exported` and lost the fact that it arrived externally known.
+/// It is therefore folded into those two fields on load and never written
+/// again. Reading the file through a dedicated type keeps `WalletMetadata`
+/// free of a field that exists only for compatibility.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredConfig {
+    version: u8,
+    wallets: Vec<StoredWallet>,
+    networks: Vec<NetworkConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredWallet {
+    id: String,
+    address: Address,
+    created_at: DateTime<Utc>,
+    source: WalletSource,
+    #[serde(default)]
+    custody: Option<LegacyCustodyStatus>,
+    #[serde(default)]
+    exported_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LegacyCustodyStatus {
+    Sealed,
+    ExternallyKnown,
+    Exported,
+}
+
+impl TryFrom<StoredWallet> for WalletMetadata {
+    type Error = anyhow::Error;
+
+    fn try_from(stored: StoredWallet) -> Result<Self> {
+        // Every released build set `custody` and `exported_at` inside one
+        // atomic configuration update, so the two can only disagree in a file
+        // edited by hand. Refuse that file rather than resolve it: silently
+        // trusting `exported_at` would downgrade a wallet whose key is
+        // recorded as copied into one that reads as never exported, which is
+        // the one direction this record must never fail in.
+        if let Some(custody) = stored.custody {
+            ensure!(
+                (custody == LegacyCustodyStatus::Exported) == stored.exported_at.is_some(),
+                "wallet {} records custody {:?} but {}; the two disagree, \
+                 so correct the configuration by hand before continuing",
+                stored.id,
+                custody,
+                if stored.exported_at.is_some() {
+                    "carries an export timestamp"
+                } else {
+                    "carries no export timestamp"
+                },
+            );
+        }
+        Ok(Self {
+            id: stored.id,
+            address: stored.address,
+            created_at: stored.created_at,
+            source: stored.source,
+            exported_at: stored.exported_at,
+        })
+    }
+}
+
+impl TryFrom<StoredConfig> for WalletConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(stored: StoredConfig) -> Result<Self> {
+        Ok(Self {
+            version: stored.version,
+            wallets: stored
+                .wallets
+                .into_iter()
+                .map(WalletMetadata::try_from)
+                .collect::<Result<Vec<_>>>()?,
+            networks: stored.networks,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConfigStore {
     data_dir: PathBuf,
@@ -122,8 +209,10 @@ impl ConfigStore {
             File::open(&self.file)
                 .with_context(|| format!("failed to open {}", self.file.display()))?,
         );
-        let config: WalletConfig = serde_json::from_reader(reader)
+        let stored: StoredConfig = serde_json::from_reader(reader)
             .with_context(|| format!("failed to parse {}", self.file.display()))?;
+        let config = WalletConfig::try_from(stored)
+            .with_context(|| format!("failed to load {}", self.file.display()))?;
         validate_config(&config)?;
         Ok(config)
     }
@@ -394,11 +483,6 @@ pub fn validate_config(config: &WalletConfig) -> Result<()> {
             "duplicate wallet {}",
             wallet.id
         );
-        ensure!(
-            wallet.exported_at.is_none() || wallet.custody == CustodyStatus::Exported,
-            "wallet {} has an export timestamp without exported custody status",
-            wallet.id
-        );
     }
     let mut chain_ids = BTreeSet::new();
     let mut identifiers = BTreeSet::new();
@@ -590,10 +674,6 @@ pub fn remove_configured_network(
     Ok(networks.remove(index))
 }
 
-fn legacy_custody_status() -> CustodyStatus {
-    CustodyStatus::ExternallyKnown
-}
-
 fn create_private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]
@@ -650,6 +730,73 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// A configuration as 0.1.0 through 0.3.0-rc.0 wrote it: one wallet
+    /// carrying the retired `custody` enum.
+    fn legacy_store(custody: &str, exported_at: Option<&str>) -> (tempfile::TempDir, ConfigStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let mut config = store.load().unwrap();
+        config.wallets.push(WalletMetadata {
+            id: "primary".into(),
+            address: Address::ZERO,
+            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            source: WalletSource::Created,
+            exported_at: None,
+        });
+        store.save(&config).unwrap();
+
+        let mut document: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(store.file()).unwrap()).unwrap();
+        let wallet = &mut document["wallets"][0];
+        wallet["custody"] = custody.into();
+        if let Some(exported_at) = exported_at {
+            wallet["exported_at"] = exported_at.into();
+        }
+        fs::write(store.file(), serde_json::to_string(&document).unwrap()).unwrap();
+        (directory, store)
+    }
+
+    #[test]
+    fn legacy_sealed_custody_loads_as_no_recorded_export() {
+        let (_directory, store) = legacy_store("sealed", None);
+        let wallet = store.load().unwrap().wallets.remove(0);
+        assert_eq!(wallet.source, WalletSource::Created);
+        assert!(wallet.exported_at.is_none());
+    }
+
+    #[test]
+    fn legacy_externally_known_custody_survives_as_its_import_source() {
+        let (_directory, store) = legacy_store("externally_known", None);
+        assert!(store.load().unwrap().wallets[0].exported_at.is_none());
+    }
+
+    #[test]
+    fn legacy_export_keeps_its_timestamp_and_is_rewritten_without_the_enum() {
+        let (_directory, store) = legacy_store("exported", Some("2026-02-02T03:04:05Z"));
+        let config = store.load().unwrap();
+        assert_eq!(
+            config.wallets[0].exported_at,
+            Some("2026-02-02T03:04:05Z".parse().unwrap())
+        );
+
+        store.save(&config).unwrap();
+        let document = fs::read_to_string(store.file()).unwrap();
+        assert!(!document.contains("custody"));
+        assert!(document.contains("exported_at"));
+        assert_eq!(store.load().unwrap(), config);
+    }
+
+    /// Only a hand-edited file can disagree with itself, and resolving it in
+    /// favour of either field would either invent or forget an export.
+    #[test]
+    fn contradictory_legacy_custody_fails_closed() {
+        let (_exported_without_timestamp, store) = legacy_store("exported", None);
+        assert!(store.load().is_err());
+
+        let (_sealed_with_timestamp, store) = legacy_store("sealed", Some("2026-02-02T03:04:05Z"));
+        assert!(store.load().is_err());
     }
 
     #[test]

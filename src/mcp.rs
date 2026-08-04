@@ -2755,7 +2755,7 @@ pub async fn serve(config: ConfigStore) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        config::{CustodyStatus, WalletMetadata, WalletSource},
+        config::{WalletMetadata, WalletSource},
         human_presence::TestHumanPresence,
         policy_store::DatabaseKey,
     };
@@ -2771,7 +2771,6 @@ mod tests {
             address: Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
             created_at: Utc::now(),
             source: WalletSource::Created,
-            custody: CustodyStatus::Sealed,
             exported_at: None,
         });
         config.save(&state).unwrap();
@@ -3203,7 +3202,6 @@ mod tests {
             address: Address::repeat_byte(0x22),
             created_at: Utc::now(),
             source: WalletSource::Created,
-            custody: CustodyStatus::Sealed,
             exported_at: None,
         });
         config.save(&state).unwrap();
