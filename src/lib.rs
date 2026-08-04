@@ -13,6 +13,7 @@ pub mod fork;
 pub mod human_presence;
 pub mod legal;
 pub mod mcp;
+pub mod message;
 pub mod pending;
 pub mod policy_store;
 pub mod render;

@@ -16,6 +16,7 @@ pub enum ApprovalKind {
     ExportPrivateKey,
     RemoveWallet,
     TypedDataSignature,
+    MessageSignature,
     AddressBookChange,
 }
 

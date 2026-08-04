@@ -14,6 +14,10 @@ use crate::{
     execution::{PreparedExecution, SigningOverrides, prepare_execution, sign_prepared_execution},
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceAction, PresenceRequest},
     legal::{self, LegalDocument, LegalStore},
+    message::{
+        MessageStatus, MessageStore, PendingMessage, describe_message, message_digest, parse_siwe,
+        siwe_warnings,
+    },
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     render::{OutputMode, described_time, emit, explorer_transaction_url, relative_time},
@@ -1325,14 +1329,19 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
     let awaiting = pending.awaiting_approval(None)?;
     let awaiting_typed_data =
         TypedDataStore::production(config.data_dir())?.awaiting_approval(None)?;
+    let awaiting_messages = MessageStore::production(config.data_dir())?.awaiting_approval(None)?;
     let proposals = PolicyStore::production(config.data_dir())?.list_proposals()?;
-    if awaiting.is_empty() && awaiting_typed_data.is_empty() && proposals.is_empty() {
+    if awaiting.is_empty()
+        && awaiting_typed_data.is_empty()
+        && awaiting_messages.is_empty()
+        && proposals.is_empty()
+    {
         eprintln!("No requests are awaiting approval.");
     } else {
         eprintln!(
             "{} request(s) awaiting approval. Review one with `ekubo-wallet approve <request-id>`; \
              unapproved requests expire at their listed expires_at.{}",
-            awaiting.len() + awaiting_typed_data.len(),
+            awaiting.len() + awaiting_typed_data.len() + awaiting_messages.len(),
             if proposals.is_empty() {
                 String::new()
             } else {
@@ -1359,6 +1368,7 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
         &serde_json::json!({
             "pending_approvals": awaiting,
             "pending_typed_data": awaiting_typed_data,
+            "pending_messages": awaiting_messages,
             "pending_policy_proposals": proposal_summaries,
         }),
         || {
@@ -1376,6 +1386,19 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
                     relative_time(record.created_at),
                     record.wallet_id,
                     record.chain_id,
+                    record.request_id,
+                    relative_time(record.expires_at),
+                ));
+            }
+            for record in &awaiting_messages {
+                lines.push(format!(
+                    "{} · message for {}{} · {}\n    expires {}",
+                    relative_time(record.created_at),
+                    record.wallet_id,
+                    record
+                        .chain_id
+                        .as_deref()
+                        .map_or_else(String::new, |chain| format!(" (chain {chain} claimed)")),
                     record.request_id,
                     relative_time(record.expires_at),
                 ));
@@ -1406,7 +1429,23 @@ fn run_reject(config: &ConfigStore, request_id: Option<Uuid>, mode: OutputMode) 
         Err(transaction_error) => {
             let mut typed_data = TypedDataStore::production(config.data_dir())?;
             let Ok(request) = typed_data.reject(request_id) else {
-                return Err(transaction_error);
+                let mut messages = MessageStore::production(config.data_dir())?;
+                let Ok(request) = messages.reject(request_id) else {
+                    return Err(transaction_error);
+                };
+                eprintln!(
+                    "Rejected. An MCP agent waiting on this message request sees the rejection \
+                     automatically."
+                );
+                return emit(
+                    mode,
+                    &serde_json::json!({
+                        "rejected": request.request_id,
+                        "digest": request.digest,
+                        "rejected_at": request.rejected_at,
+                    }),
+                    || Ok(format!("Rejected message request {}.", request.request_id)),
+                );
             };
             eprintln!(
                 "Rejected. An MCP agent waiting on this typed-data request sees the rejection \
@@ -1458,7 +1497,11 @@ async fn run_approve(
             drop(pending);
             let typed_data = TypedDataStore::production(config.data_dir())?;
             let Ok(request) = typed_data.get(request_id) else {
-                return Err(transaction_error);
+                let messages = MessageStore::production(config.data_dir())?;
+                let Ok(request) = messages.get(request_id) else {
+                    return Err(transaction_error);
+                };
+                return approve_message(config, messages, request, no_confirm, mode).await;
             };
             return approve_typed_data(config, typed_data, request, no_confirm, mode).await;
         }
@@ -1760,6 +1803,218 @@ async fn approve_typed_data(
             ))
         },
     )
+}
+
+async fn approve_message(
+    config: &ConfigStore,
+    mut store: MessageStore,
+    request: PendingMessage,
+    no_confirm: bool,
+    mode: OutputMode,
+) -> Result<()> {
+    ensure!(
+        request.status == MessageStatus::AwaitingApproval,
+        "message request is not awaiting approval"
+    );
+    let wallet = config.wallet(&request.wallet_id)?;
+    if let Some(chain_id) = &request.chain_id {
+        config.network_by_chain_id(chain_id)?;
+    }
+    let message = request.message_bytes()?;
+    let digest = message_digest(&message);
+    ensure!(
+        format!("{digest:#x}") == request.digest,
+        "message request no longer matches its stored bytes"
+    );
+    let display = describe_message(&message);
+    let siwe = display.text.as_deref().and_then(parse_siwe);
+    // Re-check the account the login names here too: the request was refused
+    // at creation, and nothing may have changed the wallet under it since.
+    if let Some(siwe) = &siwe {
+        ensure!(
+            siwe.address == wallet.address.to_checksum(None),
+            "this sign-in message names account {}, but wallet {} is {}",
+            siwe.address,
+            wallet.id,
+            wallet.address.to_checksum(None)
+        );
+    }
+
+    let mut approval = ApprovalRequest::new(
+        ApprovalKind::MessageSignature,
+        "Approve message signature",
+        "Sign these exact bytes with the wallet key, prefixed as an EIP-191 personal message. \
+         The complete message is printed above this summary.",
+    )
+    .fact("Wallet", &request.wallet_id)
+    .fact("Signer", wallet.address.to_checksum(None))
+    .fact(
+        "Chain",
+        request.chain_id.as_ref().map_or_else(
+            || "not stated; a message signature binds no chain".to_owned(),
+            |chain_id| format!("{chain_id}, claimed by the requester"),
+        ),
+    )
+    .fact(
+        "Size",
+        format!(
+            "{} bytes, {} line(s), sent as {}",
+            display.byte_length,
+            display.line_count,
+            match request.encoding {
+                crate::message::MessageEncoding::Text => "text",
+                crate::message::MessageEncoding::Hex => "raw bytes",
+            }
+        ),
+    );
+
+    if let Some(siwe) = &siwe {
+        approval = approval
+            .fact("Sign in to", &siwe.domain)
+            .fact("Account", &siwe.address)
+            .fact("URI", &siwe.uri)
+            .fact("Chain ID in message", &siwe.chain_id)
+            .fact("Nonce", &siwe.nonce)
+            .fact("Issued at", &siwe.issued_at);
+        if let Some(statement) = &siwe.statement {
+            approval = approval.fact("Statement", terminal_safe_excerpt(statement));
+        }
+        for (label, value) in [
+            ("Expires at", siwe.expiration_time.as_deref()),
+            ("Not before", siwe.not_before.as_deref()),
+            ("Request ID", siwe.request_id.as_deref()),
+        ] {
+            if let Some(value) = value {
+                approval = approval.fact(label, value);
+            }
+        }
+        for (index, resource) in siwe.resources.iter().enumerate() {
+            approval = approval.fact(
+                format!("Resource {}", index + 1),
+                terminal_safe_excerpt(resource),
+            );
+        }
+        for warning in siwe_warnings(
+            siwe,
+            request.chain_id.as_deref(),
+            siwe.chain_id
+                .parse::<u64>()
+                .is_ok_and(|_| config.network_by_chain_id(&siwe.chain_id).is_ok()),
+            chrono::Utc::now(),
+        ) {
+            approval = approval.warning(warning);
+        }
+    } else {
+        approval = approval
+            .fact(
+                "Message",
+                display
+                    .escaped_text
+                    .as_deref()
+                    .map_or_else(|| request.message_hex.clone(), terminal_safe_excerpt),
+            )
+            .warning(
+                "This is not a recognized sign-in message. A message signature can authorize an \
+                 off-chain order, a delegation, or an account link; verify every byte printed \
+                 above against whatever asked for it.",
+            );
+    }
+    for warning in &display.warnings {
+        approval = approval.warning(warning.clone());
+    }
+    approval = approval.fact("Signing hash", &request.digest);
+    approval.digest = Some(request.digest.clone());
+    approval.id = request.request_id;
+    approval.expires_at = request.expires_at;
+
+    let mut stderr = io::stderr().lock();
+    serde_json::to_writer_pretty(
+        &mut stderr,
+        &serde_json::json!({
+            "approval": approval,
+            "message": {
+                "hex": request.message_hex,
+                "text": display.text,
+                "escaped_text": display.escaped_text,
+                "byte_length": display.byte_length,
+                "encoding": request.encoding,
+                "siwe": siwe,
+            },
+        }),
+    )?;
+    stderr.write_all(b"\n")?;
+    stderr.flush()?;
+    drop(stderr);
+    if !no_confirm {
+        require_approval(approval).await?;
+    }
+
+    PlatformHumanPresence
+        .confirm(&PresenceRequest {
+            action: PresenceAction::SignMessage,
+            wallet_id: wallet.id.clone(),
+            operation_digest: Some(request.digest.clone()),
+        })
+        .await?;
+
+    // Re-read mutable local authority after the potentially long human
+    // review; the final SQL write repeats the pending checks atomically.
+    let current = store.get(request.request_id)?;
+    ensure!(
+        current.status == MessageStatus::AwaitingApproval
+            && current.digest == request.digest
+            && current.message_hex == request.message_hex,
+        "message request changed during approval"
+    );
+    ensure!(
+        config.wallet(&request.wallet_id)? == wallet,
+        "wallet configuration changed during approval"
+    );
+    let material = OsKeyStore.load(&wallet.id)?;
+    let signer = material.signer();
+    ensure!(
+        signer.address() == wallet.address,
+        "credential-store private key does not match wallet metadata"
+    );
+    let signature = signer
+        .sign_hash_sync(&digest)
+        .context("failed to sign the message")?;
+    let stored = store.store_signature(
+        request.request_id,
+        &request.digest,
+        &format!("0x{}", hex::encode(signature.as_bytes())),
+    )?;
+    eprintln!(
+        "Approved and signed. An MCP agent waiting on this request reads the signature \
+         automatically; nothing further is needed here."
+    );
+    emit(
+        mode,
+        &serde_json::json!({
+            "approved": stored.request_id,
+            "digest": stored.digest,
+            "signature": stored.signature,
+            "approved_at": stored.approved_at,
+        }),
+        || {
+            Ok(format!(
+                "Approved message request {}.\nSignature: {}",
+                stored.request_id,
+                stored.signature.as_deref().unwrap_or("<missing>"),
+            ))
+        },
+    )
+}
+
+/// Keep one approval fact to a readable length; the exact bytes are always
+/// printed in full above the summary.
+fn terminal_safe_excerpt(value: &str) -> String {
+    const MAX_FACT_CHARACTERS: usize = 200;
+    if value.chars().count() <= MAX_FACT_CHARACTERS {
+        return value.to_owned();
+    }
+    let head: String = value.chars().take(MAX_FACT_CHARACTERS).collect();
+    format!("{head}… (full message printed above)")
 }
 
 fn transaction_approval_request(
@@ -2624,6 +2879,17 @@ fn print_completion_values(config: &ConfigStore, requested: &str) -> Result<()> 
                                     "typed data for {} on chain {}",
                                     request.wallet_id, request.chain_id
                                 ),
+                            )
+                        }),
+                );
+                candidates.extend(
+                    MessageStore::production(config.data_dir())?
+                        .awaiting_approval(None)?
+                        .into_iter()
+                        .map(|request| {
+                            (
+                                request.request_id.to_string(),
+                                format!("message for {}", request.wallet_id),
                             )
                         }),
                 );

@@ -19,6 +19,10 @@ use crate::{
     fork::{ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceAction, PresenceRequest},
     legal::{self, LegalDocument, LegalStatus, LegalStore},
+    message::{
+        MessageDisplay, MessageStatus, MessageStore, PendingMessage, SiweMessage, describe_message,
+        parse_message_input, parse_siwe, siwe_warnings,
+    },
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     rpc::{WalletStatus, transaction_known, transaction_receipt, verify_chain_id, wallet_status},
@@ -58,6 +62,7 @@ struct WalletMcpServer {
     policies: Arc<Mutex<PolicyStore>>,
     pending: Arc<Mutex<PendingStore>>,
     typed_data: Arc<Mutex<TypedDataStore>>,
+    messages: Arc<Mutex<MessageStore>>,
     legal: Arc<Mutex<LegalStore>>,
     tokens: Arc<Mutex<TokenStore>>,
     address_book: Arc<Mutex<AddressBookStore>>,
@@ -83,6 +88,7 @@ impl WalletMcpServer {
         let policies = PolicyStore::production(config.data_dir())?;
         let pending = PendingStore::production(config.data_dir())?;
         let typed_data = TypedDataStore::production(config.data_dir())?;
+        let messages = MessageStore::production(config.data_dir())?;
         let legal = LegalStore::production(config.data_dir())?;
         let tokens = TokenStore::production(config.data_dir())?;
         let address_book = AddressBookStore::production(config.data_dir())?;
@@ -91,6 +97,7 @@ impl WalletMcpServer {
             policies,
             pending,
             typed_data,
+            messages,
             legal,
             tokens,
             address_book,
@@ -102,6 +109,7 @@ impl WalletMcpServer {
         policies: PolicyStore,
         pending: PendingStore,
         typed_data: TypedDataStore,
+        messages: MessageStore,
         legal: LegalStore,
         tokens: TokenStore,
         address_book: AddressBookStore,
@@ -111,6 +119,7 @@ impl WalletMcpServer {
             policies,
             pending,
             typed_data,
+            messages,
             legal,
             tokens,
             address_book,
@@ -123,6 +132,7 @@ impl WalletMcpServer {
         policies: PolicyStore,
         pending: PendingStore,
         typed_data: TypedDataStore,
+        messages: MessageStore,
         legal: LegalStore,
         tokens: TokenStore,
         address_book: AddressBookStore,
@@ -140,6 +150,7 @@ impl WalletMcpServer {
             policies: Arc::new(Mutex::new(policies)),
             pending: Arc::new(Mutex::new(pending)),
             typed_data: Arc::new(Mutex::new(typed_data)),
+            messages: Arc::new(Mutex::new(messages)),
             legal: Arc::new(Mutex::new(legal)),
             tokens: Arc::new(Mutex::new(tokens)),
             address_book: Arc::new(Mutex::new(address_book)),
@@ -516,6 +527,64 @@ struct TypedDataOutput {
     /// Policy findings for recognized permits, evaluated like `approve()` calls.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     policy_findings: Vec<crate::core::policy::PolicyFinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SignMessageInput {
+    wallet_id: String,
+    /// The exact message to sign, as text. Pass exactly one of `message_text`
+    /// and `message_hex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_text: Option<String>,
+    /// The exact message to sign, as `0x`-prefixed bytes, for messages that
+    /// are not valid UTF-8. A bare 32-byte value is refused: that is the
+    /// legacy `eth_sign` shape and no approval screen can describe it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_hex: Option<String>,
+    /// Optional context the requester is declaring. EIP-191 signatures bind no
+    /// chain, so this is shown to the user as a claim, never as a guarantee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chain_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MessageWaitInput {
+    request_id: uuid::Uuid,
+    #[serde(default = "default_wait_seconds")]
+    timeout_seconds: u8,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct MessageOutput {
+    request_id: uuid::Uuid,
+    wallet_id: String,
+    /// Context the requester declared, if any. Never a property of the
+    /// signature itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chain_id: Option<String>,
+    /// The exact bytes that are hashed.
+    message_hex: String,
+    /// The EIP-191 version `0x45` signing hash of those bytes.
+    digest: String,
+    status: MessageStatus,
+    /// How the message reads, and everything about it that can mislead a
+    /// human reading it in a terminal.
+    display: MessageDisplay,
+    /// The parsed login, when the message is a recognized ERC-4361 payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    siwe: Option<SiweMessage>,
+    expires_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approved_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rejected_at: Option<DateTime<Utc>>,
+    /// The 65-byte r||s||v signature, present only once signed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     instruction: Option<String>,
 }
@@ -1684,6 +1753,99 @@ impl WalletMcpServer {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
+
+    #[tool(
+        name = "wallet_sign_message",
+        description = "Sign an exact EIP-191 `personal_sign` message — dapp logins (ERC-4361 Sign-In with Ethereum), address-ownership proofs, and off-chain attestations. Every message queues for explicit human approval through the separate CLI: no policy can evaluate what a message signature authorizes, so there is no automatic path. Pass exactly one of message_text and message_hex. Legacy raw eth_sign over a bare 32-byte digest is refused; use wallet_sign_typed_data for EIP-712. Wait on the queued request with wallet_wait_for_message.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_sign_message(
+        &self,
+        Parameters(input): Parameters<SignMessageInput>,
+    ) -> Result<Json<MessageOutput>, ErrorData> {
+        self.require_legal_acceptance()
+            .map_err(|error| tool_error(&error))?;
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let (message, encoding) =
+            parse_message_input(input.message_text.as_deref(), input.message_hex.as_deref())
+                .map_err(|error| tool_error(&error))?;
+        if let Some(chain_id) = &input.chain_id {
+            self.config
+                .network_by_chain_id(chain_id)
+                .map_err(|error| tool_error(&error))?;
+        }
+
+        // A login naming a different account is refused before a request ever
+        // exists, exactly as a permit whose owner is not the signing wallet
+        // is: that signature is useless to the address it names and can only
+        // be a mistake or a trick.
+        if let Some(siwe) = std::str::from_utf8(&message).ok().and_then(parse_siwe)
+            && siwe.address != wallet.address.to_checksum(None)
+        {
+            return Err(tool_error(&anyhow::anyhow!(
+                "this sign-in message names account {}, but wallet {} is {}",
+                siwe.address,
+                wallet.id,
+                wallet.address.to_checksum(None)
+            )));
+        }
+
+        let record = self
+            .messages
+            .lock()
+            .map_err(|_| ErrorData::internal_error("message database lock was poisoned", None))?
+            .create(&wallet.id, input.chain_id.as_deref(), &message, encoding)
+            .map_err(|error| tool_error(&error))?;
+        Ok(Json(
+            message_output(record, &self.config).map_err(|error| tool_error(&error))?,
+        ))
+    }
+
+    #[tool(
+        name = "wallet_wait_for_message",
+        description = "Wait for a pending EIP-191 message request to be approved and signed or rejected through the separate human CLI, and read the signature once signed. This tool cannot approve, reject, or sign.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn wallet_wait_for_message(
+        &self,
+        Parameters(input): Parameters<MessageWaitInput>,
+    ) -> Result<Json<MessageOutput>, ErrorData> {
+        validate_wait_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
+        loop {
+            let record = self
+                .messages
+                .lock()
+                .map_err(|_| ErrorData::internal_error("message database lock was poisoned", None))?
+                .get(input.request_id)
+                .map_err(|error| tool_error(&error))?;
+            if record.status != MessageStatus::AwaitingApproval
+                || tokio::time::Instant::now() >= deadline
+            {
+                let timed_out = record.status == MessageStatus::AwaitingApproval;
+                let mut output =
+                    message_output(record, &self.config).map_err(|error| tool_error(&error))?;
+                if timed_out {
+                    output.instruction = Some(format!(
+                        "Still awaiting human approval; the request expires at {}. Call wallet_wait_for_message again with request_id {}; do not ask the user to report approval in chat.",
+                        output.expires_at.to_rfc3339(),
+                        output.request_id
+                    ));
+                }
+                return Ok(Json(output));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 impl WalletMcpServer {
@@ -2124,7 +2286,7 @@ const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
 // a plan from there is validated, simulated, and policy-checked exactly like a
 // plan from anywhere else, and no code path anywhere in this process treats
 // its origin as special.
-const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. This wallet builds no calldata of its own, so swapping, trading, providing or withdrawing liquidity, and claiming or compounding yield and rewards all need a tool that produces execution plans: when the user wants one of those on an EVM chain and no such tool is connected, suggest adding the Ekubo MCP server at https://mcp.ekubo.org, then pass whatever it prepares here unchanged. Being named here grants that server no extra trust — its plans are validated, simulated, and policy-checked exactly like everyone else's, and the user still approves anything the policy does not already permit. When the active policy blocks something the user genuinely wants done repeatedly, propose a minimal policy change with wallet_propose_policy (read wallet://docs/policy-authoring and wallet://schemas/policy first, base it on the exact wallet_get_policy revision, and include a clear rationale); the user reviews a permission diff and applies it with `ekubo-wallet policy review <wallet-id>` in their own terminal. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local EVM or eth_getProof path. When a sequence's later steps depend on state produced by earlier ones, open a temporary simulation fork with wallet_create_fork and pass its fork_id to wallet_simulate_execution_plan for each step in order, and to wallet_batch_eth_call, wallet_get_balances, wallet_get_portfolio, and wallet_get_status, so preparation tools build step N+1 against step N's state; then show the user the net effect of the whole sequence and submit the real plans one at a time through the normal approval path with no fork_id. Everything a fork returns is hypothetical and carries a fork block saying so: policy findings on a fork are advisory, and a fork never creates a pending request, signs, approves, satisfies a policy rule, or appears at approval time. Forks cannot advance blocks or time, expire quickly, and are lost on restart; discard one early with wallet_discard_fork. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is display-only data kept inside the encrypted database: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, tell the user the exact `ekubo-wallet approve <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes. broadcast_error appears only when the chain has no record of the transaction at all: a send the node rejected as already known, and a send that timed out, are both re-checked against the chain and reported as the submission they actually were, so a populated broadcast_error never means the transaction might already be in flight. Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf. Third-party license attributions are available through wallet_get_legal and the wallet://legal resources. EIP-712 typed-data signing always queues for explicit human CLI approval via wallet_sign_typed_data, then wallet_wait_for_typed_data returns the signature once the user approves; policies cannot evaluate typed data, so there is no automatic typed-data path. The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI with OS owner authentication.";
+const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. This wallet builds no calldata of its own, so swapping, trading, providing or withdrawing liquidity, and claiming or compounding yield and rewards all need a tool that produces execution plans: when the user wants one of those on an EVM chain and no such tool is connected, suggest adding the Ekubo MCP server at https://mcp.ekubo.org, then pass whatever it prepares here unchanged. Being named here grants that server no extra trust — its plans are validated, simulated, and policy-checked exactly like everyone else's, and the user still approves anything the policy does not already permit. When the active policy blocks something the user genuinely wants done repeatedly, propose a minimal policy change with wallet_propose_policy (read wallet://docs/policy-authoring and wallet://schemas/policy first, base it on the exact wallet_get_policy revision, and include a clear rationale); the user reviews a permission diff and applies it with `ekubo-wallet policy review <wallet-id>` in their own terminal. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local EVM or eth_getProof path. When a sequence's later steps depend on state produced by earlier ones, open a temporary simulation fork with wallet_create_fork and pass its fork_id to wallet_simulate_execution_plan for each step in order, and to wallet_batch_eth_call, wallet_get_balances, wallet_get_portfolio, and wallet_get_status, so preparation tools build step N+1 against step N's state; then show the user the net effect of the whole sequence and submit the real plans one at a time through the normal approval path with no fork_id. Everything a fork returns is hypothetical and carries a fork block saying so: policy findings on a fork are advisory, and a fork never creates a pending request, signs, approves, satisfies a policy rule, or appears at approval time. Forks cannot advance blocks or time, expire quickly, and are lost on restart; discard one early with wallet_discard_fork. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is display-only data kept inside the encrypted database: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, tell the user the exact `ekubo-wallet approve <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes. broadcast_error appears only when the chain has no record of the transaction at all: a send the node rejected as already known, and a send that timed out, are both re-checked against the chain and reported as the submission they actually were, so a populated broadcast_error never means the transaction might already be in flight. Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf. Third-party license attributions are available through wallet_get_legal and the wallet://legal resources. EIP-712 typed-data signing queues for explicit human CLI approval via wallet_sign_typed_data, then wallet_wait_for_typed_data returns the signature once the user approves; only recognized permits the active policy already authorizes sign automatically, because nothing else about typed data is policy-evaluable. EIP-191 message signing works the same way through wallet_sign_message and wallet_wait_for_message, with no automatic path at all: no policy can score what a message signature authorizes. Pass exactly one of message_text and message_hex; a bare 32-byte value is refused because legacy raw eth_sign cannot be shown to a human honestly. A message signature binds no chain, so any chain_id passed with one is context the requester declared and is presented to the user as a claim. The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI with OS owner authentication.";
 const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local EVM, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Temporary simulation forks are an agent workflow tool held only in this process's memory. A fork is an ordered list of already-validated plans plus one pinned parent block; every call replays that list as consecutive eth_simulateV1 blocks, so the RPC still executes everything and no simulated state is stored or reconstructed locally. A fork cannot create a pending request, produce signed bytes, mark anything approved, or satisfy a policy rule, and its policy findings are advisory; submission always re-simulates and re-policy-checks against real chain state, so 'it passed on the fork' never substitutes for that. Forks have no CLI surface and are never shown at approval time, so a human is never asked to read agent-supplied hypotheticals while deciding whether to sign. They expire, are capped per wallet and per plan, and do not survive a restart.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database is display data used for listings and portfolio reads, stored inside the authenticated encrypted database so it cannot be edited outside this process to misrepresent balances. MCP tools may add to it only through on-chain Multicall3 verification, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n- The address book maps per-chain aliases to addresses inside the encrypted database, so an alias cannot be retargeted by editing a file. Only the human CLI can mutate it, after OS owner authentication. Nothing in the signing or policy path reads it, and an alias never substitutes for reviewing the actual address.\n- Agents may propose a replacement policy with wallet_propose_policy. A proposal is inert data in the encrypted database: one per wallet, bound to the exact policy revision it was written against, replaced by any newer proposal, and applied only by the human CLI after presenting a minimized permission diff plus the agent's rationale, terminal approval, and OS owner authentication.\n- EIP-712 typed-data requests always queue in the encrypted database for separate human CLI review, which displays the complete payload, requires terminal approval plus OS owner authentication, and only then signs. The MCP server can create and observe typed-data requests but cannot approve or sign them.\n- No MCP tool other than wallet_get_legal is reachable until the user has accepted the current Terms of Service and Privacy Policy through the interactive CLI; the signing paths repeat the check as defense in depth. Acceptance binds the exact document digests; changed documents fail closed until re-accepted.\n";
 
 const POLICY_AUTHORING_GUIDE: &str = "\
@@ -2386,6 +2548,56 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
     }
 }
 
+fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<MessageOutput> {
+    let instruction = match record.status {
+        MessageStatus::AwaitingApproval => Some(format!(
+            "Message signing requires explicit human approval. Tell the user to run `ekubo-wallet approve {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_message with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
+            record.request_id
+        )),
+        MessageStatus::Signed => Some(
+            "The message is signed; signature holds the exact 65-byte r||s||v signature over the EIP-191 digest. Deliver it to whatever requested the signature.".into(),
+        ),
+        MessageStatus::Rejected => Some(
+            "The user rejected this message request. Do not recreate it unless they explicitly ask to sign again.".into(),
+        ),
+        MessageStatus::Expired => Some(
+            "The message approval request expired. Create a new request only if the user still wants to sign.".into(),
+        ),
+    };
+    let message = record.message_bytes()?;
+    let mut display = describe_message(&message);
+    let siwe = display.text.as_deref().and_then(parse_siwe);
+    if let Some(siwe) = &siwe {
+        display.warnings.extend(siwe_warnings(
+            siwe,
+            record.chain_id.as_deref(),
+            config.network_by_chain_id(&siwe.chain_id).is_ok(),
+            Utc::now(),
+        ));
+    } else {
+        display.warnings.push(
+            "This is not a recognized sign-in message. A message signature can authorize an \
+             off-chain order, a delegation, or an account link; the user must read every byte."
+                .into(),
+        );
+    }
+    Ok(MessageOutput {
+        request_id: record.request_id,
+        wallet_id: record.wallet_id,
+        chain_id: record.chain_id,
+        message_hex: record.message_hex,
+        digest: record.digest,
+        status: record.status,
+        display,
+        siwe,
+        expires_at: record.expires_at,
+        approved_at: record.approved_at,
+        rejected_at: record.rejected_at,
+        signature: record.signature,
+        instruction,
+    })
+}
+
 fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput {
     let status = match record.status {
         PendingStatus::AwaitingApproval => ExecutionStatus::ApprovalRequired,
@@ -2581,6 +2793,11 @@ mod tests {
             &DatabaseKey::new([4; 32]),
         )
         .unwrap();
+        let message_database = PolicyStore::open(
+            &directory.path().join("policies.db"),
+            &DatabaseKey::new([4; 32]),
+        )
+        .unwrap();
         let legal_database = PolicyStore::open(
             &directory.path().join("policies.db"),
             &DatabaseKey::new([4; 32]),
@@ -2601,6 +2818,7 @@ mod tests {
             policies,
             PendingStore::new(pending_database),
             TypedDataStore::new(typed_data_database),
+            MessageStore::new(message_database),
             LegalStore::new(legal_database),
             TokenStore::new(token_database),
             AddressBookStore::new(address_book_database),
@@ -2862,6 +3080,7 @@ mod tests {
         for signing_tool in [
             "wallet_send_execution_plan",
             "wallet_send_transfers",
+            "wallet_sign_message",
             "wallet_sign_typed_data",
             "wallet_wait_for_approval",
             "wallet_wait_for_execution",
@@ -2903,10 +3122,12 @@ mod tests {
                 "wallet_propose_policy",
                 "wallet_send_execution_plan",
                 "wallet_send_transfers",
+                "wallet_sign_message",
                 "wallet_sign_typed_data",
                 "wallet_simulate_execution_plan",
                 "wallet_wait_for_approval",
                 "wallet_wait_for_execution",
+                "wallet_wait_for_message",
                 "wallet_wait_for_typed_data",
             ]
             .into_iter()
@@ -3001,6 +3222,11 @@ mod tests {
             &DatabaseKey::new([5; 32]),
         )
         .unwrap();
+        let message_database = PolicyStore::open(
+            &directory.path().join("policies.db"),
+            &DatabaseKey::new([5; 32]),
+        )
+        .unwrap();
         let legal_database = PolicyStore::open(
             &directory.path().join("policies.db"),
             &DatabaseKey::new([5; 32]),
@@ -3021,6 +3247,7 @@ mod tests {
             policies,
             PendingStore::new(pending_database),
             TypedDataStore::new(typed_data_database),
+            MessageStore::new(message_database),
             LegalStore::new(legal_database),
             TokenStore::new(token_database),
             AddressBookStore::new(address_book_database),
@@ -3106,6 +3333,173 @@ mod tests {
             panic!("typed-data signing unexpectedly bypassed the legal acceptance gate");
         };
         assert!(error.message.contains("legal accept"));
+
+        let result = server.wallet_sign_message(Parameters(SignMessageInput {
+            wallet_id: "primary".into(),
+            message_text: Some("gm".into()),
+            message_hex: None,
+            chain_id: None,
+        }));
+        let Err(error) = result else {
+            panic!("message signing unexpectedly bypassed the legal acceptance gate");
+        };
+        assert!(error.message.contains("legal accept"));
+    }
+
+    fn sign_message(
+        server: &WalletMcpServer,
+        text: &str,
+    ) -> Result<Json<MessageOutput>, ErrorData> {
+        server.wallet_sign_message(Parameters(SignMessageInput {
+            wallet_id: "primary".into(),
+            message_text: Some(text.into()),
+            message_hex: None,
+            chain_id: None,
+        }))
+    }
+
+    fn siwe_payload(address: &str) -> String {
+        [
+            "example.com wants you to sign in with your Ethereum account:",
+            address,
+            "",
+            "Sign in to Example.",
+            "",
+            "URI: https://example.com/login",
+            "Version: 1",
+            "Chain ID: 1",
+            "Nonce: 32891756",
+            "Issued At: 2026-08-04T16:25:24Z",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn message_signing_always_queues_and_never_signs_inline() {
+        let (_directory, server) = server();
+        accept_legal(&server);
+        // The wallet policy is allow-all: a message still queues, because no
+        // policy can score what a message signature authorizes.
+        let Json(output) = sign_message(&server, "gm").unwrap();
+        assert_eq!(output.status, MessageStatus::AwaitingApproval);
+        assert!(output.signature.is_none());
+        assert!(output.chain_id.is_none());
+        assert_eq!(output.message_hex, "0x676d");
+        assert_eq!(output.display.text.as_deref(), Some("gm"));
+        assert_eq!(
+            output.digest,
+            format!("{:#x}", crate::message::message_digest(b"gm"))
+        );
+        assert!(output.siwe.is_none());
+        assert!(
+            output
+                .display
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("not a recognized sign-in message"))
+        );
+        assert!(
+            output
+                .instruction
+                .as_deref()
+                .unwrap()
+                .contains("ekubo-wallet approve")
+        );
+
+        // A duplicate message reuses the pending request.
+        let Json(duplicate) = sign_message(&server, "gm").unwrap();
+        assert_eq!(duplicate.request_id, output.request_id);
+
+        // Waiting on it returns the same pending state with a re-poll nudge.
+        let Json(waited) = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(server.wallet_wait_for_message(Parameters(MessageWaitInput {
+                request_id: output.request_id,
+                timeout_seconds: 1,
+            })))
+            .unwrap();
+        assert_eq!(waited.status, MessageStatus::AwaitingApproval);
+        assert!(waited.signature.is_none());
+        assert!(
+            waited
+                .instruction
+                .as_deref()
+                .unwrap()
+                .contains("wallet_wait_for_message")
+        );
+    }
+
+    #[test]
+    fn sign_in_messages_are_parsed_and_bound_to_the_signing_wallet() {
+        let (_directory, server) = server();
+        accept_legal(&server);
+        let Json(output) = sign_message(
+            &server,
+            &siwe_payload("0x1111111111111111111111111111111111111111"),
+        )
+        .unwrap();
+        let siwe = output.siwe.unwrap();
+        assert_eq!(siwe.domain, "example.com");
+        assert_eq!(siwe.nonce, "32891756");
+        assert!(
+            !output
+                .display
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("not a recognized sign-in message"))
+        );
+
+        // A login naming another account is refused before a request exists.
+        let Err(error) = sign_message(
+            &server,
+            &siwe_payload("0x2222222222222222222222222222222222222222"),
+        ) else {
+            panic!("a sign-in for another account was queued");
+        };
+        assert!(error.message.contains("names account"));
+    }
+
+    #[test]
+    fn message_input_is_validated_before_anything_queues() {
+        let (_directory, server) = server();
+        accept_legal(&server);
+        let Err(error) = server.wallet_sign_message(Parameters(SignMessageInput {
+            wallet_id: "primary".into(),
+            message_text: None,
+            message_hex: Some(format!("0x{}", "ab".repeat(32))),
+            chain_id: None,
+        })) else {
+            panic!("a bare 32-byte digest was queued for signing");
+        };
+        assert!(error.message.contains("eth_sign is not supported"));
+
+        let both = server.wallet_sign_message(Parameters(SignMessageInput {
+            wallet_id: "primary".into(),
+            message_text: Some("gm".into()),
+            message_hex: Some("0x676d".into()),
+            chain_id: None,
+        }));
+        assert!(both.is_err());
+
+        let neither = server.wallet_sign_message(Parameters(SignMessageInput {
+            wallet_id: "primary".into(),
+            message_text: None,
+            message_hex: None,
+            chain_id: None,
+        }));
+        assert!(neither.is_err());
+
+        // A chain the server does not know is rejected outright, even though
+        // the signature would not be bound to it.
+        let foreign = server.wallet_sign_message(Parameters(SignMessageInput {
+            wallet_id: "primary".into(),
+            message_text: Some("gm".into()),
+            message_hex: None,
+            chain_id: Some("999999".into()),
+        }));
+        assert!(foreign.is_err());
     }
 
     fn order_payload() -> serde_json::Value {

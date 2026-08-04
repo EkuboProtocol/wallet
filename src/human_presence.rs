@@ -10,6 +10,7 @@ pub enum PresenceAction {
     ApprovePolicyException,
     RemoveWallet,
     SignTypedData,
+    SignMessage,
     ModifyAddressBook,
 }
 
@@ -22,6 +23,7 @@ impl fmt::Display for PresenceAction {
             Self::ApprovePolicyException => "approve a policy exception",
             Self::RemoveWallet => "remove the wallet and its private key",
             Self::SignTypedData => "sign EIP-712 typed data",
+            Self::SignMessage => "sign an EIP-191 message",
             Self::ModifyAddressBook => "modify the address book",
         })
     }

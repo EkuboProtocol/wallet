@@ -420,6 +420,8 @@ An agent must never run the approval command for you.
 | `wallet_wait_for_execution` | Wait for the plan to be executed: bounded polling for the receipt, plus an optional number of confirmations before resolving. |
 | `wallet_sign_typed_data` | Sign an exact EIP-712 payload. Recognized permits (ERC-2612, canonical Permit2) are policy-checked like `approve()` calls and sign automatically when allowed; everything else queues for CLI approval. |
 | `wallet_wait_for_typed_data` | Poll a pending typed-data request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
+| `wallet_sign_message` | Sign an exact EIP-191 `personal_sign` message — dapp logins (ERC-4361), ownership proofs, off-chain attestations. Always queues for CLI approval; no policy path. Raw `eth_sign` over a bare 32-byte digest is refused. |
+| `wallet_wait_for_message` | Poll a pending message request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
 | `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only with owner authentication. |
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. The only tool available before acceptance. |
 | `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
@@ -582,8 +584,8 @@ state.
 | Windows | `%LOCALAPPDATA%\Ekubo\secure-wallet-mcp` | `policies.db` |
 
 The one SQLCipher file contains separate `wallet_policies`,
-`pending_transactions`, `pending_typed_data`, `tokens`, `address_book`,
-`legal_acceptance`, and `policy_proposals` tables. Token metadata, address
+`pending_transactions`, `pending_typed_data`, `pending_messages`, `tokens`,
+`address_book`, `legal_acceptance`, and `policy_proposals` tables. Token metadata, address
 aliases, and legal acceptance deliberately live inside the authenticated
 encrypted database rather than in plain files: they carry no signing
 authority, but a file edit outside this process must not be able to forge
@@ -629,6 +631,19 @@ and sign automatically only when allowed. Every other payload — and every
 policy-denied permit — queues in the encrypted database for CLI review, which
 displays the complete payload, requires terminal approval plus OS owner
 authentication bound to the signing hash, and only then signs.
+
+EIP-191 `personal_sign` messages queue the same way, with no automatic path at
+all: no policy can score what a message signature authorizes. The CLI prints the
+exact bytes as hex beside their text, escapes control characters, terminal
+escape sequences, and Unicode bidirectional overrides so the message cannot
+repaint or reorder the screen reviewing it, and parses recognized ERC-4361
+sign-in messages into labeled fields with warnings for an unconfigured or
+disagreeing chain, an expired or post-dated login, a domain that disagrees with
+its own URI, and any listed resources. A sign-in message naming an account other
+than the signing wallet is refused outright, and legacy raw `eth_sign` over a
+bare 32-byte digest is refused because no approval screen can describe it
+honestly. A message signature binds no chain, so a `chain_id` sent with one is
+displayed as the requester's claim.
 
 SQLCipher protects confidentiality and page integrity, but there is no external
 anti-rollback anchor. Restoring an older valid encrypted database can restore

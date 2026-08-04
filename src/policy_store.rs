@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.secure-wallet-mcp.policy-database-key.v1";
@@ -325,6 +325,48 @@ impl PolicyStore {
                 ],
             )?;
             version = 7;
+        }
+        if version == 7 {
+            // EIP-191 message signatures queue exactly like typed data, minus
+            // every automatic path: no policy can score a message, so there is
+            // no approval_required or policy_revision column to carry.
+            //
+            // chain_id is the empty string when the requester declared none —
+            // `personal_sign` binds no chain — because SQLite treats NULLs as
+            // distinct in a unique index, which would silently disable the
+            // awaiting-request deduplication below.
+            run_transaction(
+                &connection,
+                &[
+                    "CREATE TABLE IF NOT EXISTS pending_messages (
+                         request_id TEXT PRIMARY KEY NOT NULL,
+                         wallet_id TEXT NOT NULL,
+                         chain_id TEXT NOT NULL,
+                         message_hex TEXT NOT NULL
+                             CHECK (message_hex LIKE '0x%' AND length(message_hex) % 2 = 0),
+                         message_encoding TEXT NOT NULL
+                             CHECK (message_encoding IN ('text', 'hex')),
+                         digest TEXT NOT NULL,
+                         status TEXT NOT NULL CHECK (status IN (
+                             'awaiting_approval', 'rejected', 'signed', 'expired'
+                         )),
+                         created_at TEXT NOT NULL,
+                         expires_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         approved_at TEXT,
+                         rejected_at TEXT,
+                         signature TEXT,
+                         CHECK ((status = 'signed') = (signature IS NOT NULL))
+                     ) STRICT",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS pending_messages_unique_awaiting
+                         ON pending_messages(wallet_id, chain_id, digest)
+                         WHERE status = 'awaiting_approval'",
+                    "CREATE INDEX IF NOT EXISTS pending_messages_wallet_created
+                         ON pending_messages(wallet_id, created_at DESC)",
+                    "UPDATE schema_metadata SET version = 8 WHERE singleton = 1",
+                ],
+            )?;
+            version = 8;
         }
         ensure!(
             version == SCHEMA_VERSION,

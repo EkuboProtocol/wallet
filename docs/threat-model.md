@@ -24,7 +24,18 @@ processes and expose no generic signing primitive.
 1. Private keys never appear in MCP inputs/results, policies, logs, config, or
    SQLCipher rows.
 2. Signing accepts a validated structured plan, never an arbitrary digest or
-   caller-supplied serialized transaction.
+   caller-supplied serialized transaction. Off-chain signatures are equally
+   structured: EIP-712 typed data is parsed and re-hashed locally, and EIP-191
+   messages are hashed from their exact stored bytes under the `0x19` prefix.
+   Legacy raw `eth_sign` over a bare unprefixed 32-byte digest is refused,
+   because that digest is indistinguishable from a transaction, permit, or
+   EIP-7702 authorization hash and no approval screen can describe it
+   truthfully.
+   A message signature has no readable on-chain effect for the policy language
+   to score, so every message queues for human review with no automatic path;
+   its review escapes control characters, terminal escape sequences, and
+   Unicode bidirectional overrides, because the message body is attacker-
+   controlled text rendered into the approver's terminal.
 3. The signed sender, chain, target, value, calldata, transaction type, nonce,
    gas, fees, and EIP-7702 authorization are constructed locally and validated
    after signing.

@@ -69,6 +69,53 @@ and performs no further RPC request, so the signed fields are exactly those
 reviewed. The process validates the resulting envelope and atomically stores
 the review digest, exact bytes, and transaction hash.
 
+## Signature requests
+
+`ekubo-wallet approve <request-id>` also resolves queued signature requests,
+which carry no transaction and are therefore never simulated. Both kinds are
+stored in the same encrypted database, expire after 15 minutes, deduplicate an
+identical repeated request, and re-derive their signing hash from the stored
+payload on every read, so an edited row can never present one payload while
+binding a signature to another.
+
+EIP-712 typed data prints the complete payload above the summary, with the
+primary type, domain, and signing hash as facts. A recognized permit (ERC-2612,
+DAI, or canonical Permit2, matched by its complete type encoding) lists the
+token approvals signing would grant along with any policy findings; anything
+unrecognized carries a blanket warning that a typed-data signature can
+authorize transfers, orders, or delegations.
+
+EIP-191 `personal_sign` messages print their exact bytes as hex beside the
+decoded text. Nothing about a message is policy-evaluable, so every message
+queues — there is no automatic path, not even for logins. The review:
+
+- escapes control characters, terminal escape sequences, and Unicode
+  bidirectional overrides, and warns when any are present, so a message cannot
+  repaint or reorder the screen used to review it;
+- shows byte length, line count, and whether the requester sent text or raw
+  bytes, and refuses an oversized message rather than truncating one;
+- warns when the bytes are not valid UTF-8, or are a bare hexadecimal string
+  that tells a human nothing;
+- states that any `chain_id` is a requester claim, because an EIP-191
+  signature binds no chain; and
+- parses a recognized ERC-4361 sign-in message into labeled fields — domain,
+  account, statement, URI, chain, nonce, timestamps, request ID, and every
+  listed resource — warning when the chain is unconfigured or disagrees with
+  the requester's claim, when the login is expired or post-dated, when a
+  timestamp is malformed, when the domain disagrees with its own URI, and
+  whenever resources are attached.
+
+A sign-in message naming an account other than the signing wallet is refused
+when it is requested and again at approval time. Legacy raw `eth_sign` over a
+bare unprefixed 32-byte digest is refused outright: such a digest is
+indistinguishable from a transaction, permit, or EIP-7702 authorization hash,
+so no honest review can be drawn for it.
+
+Both flows require terminal confirmation plus OS owner authentication bound to
+the signing hash, re-check the stored request and wallet configuration after
+the human pause, and store the signature atomically. The waiting agent reads it
+through `wallet_wait_for_typed_data` or `wallet_wait_for_message`.
+
 ## Lifecycle
 
 ```text
