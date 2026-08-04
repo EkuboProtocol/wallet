@@ -1243,51 +1243,6 @@ mod tests {
     use alloy::primitives::Address;
     use std::str::FromStr;
 
-    /// Temporary Windows-overflow bisection: executes exactly what [`server`]
-    /// does, announcing each step, so the diagnose workflow's `--nocapture`
-    /// output shows the last step reached before the stack overflow.
-    #[test]
-    fn diagnose_server_construction_steps() {
-        eprintln!("diagnose: 1 tempdir");
-        let directory = tempfile::tempdir().unwrap();
-        eprintln!("diagnose: 2 ConfigStore::new");
-        let config = ConfigStore::new(directory.path());
-        eprintln!("diagnose: 3 config.load");
-        let mut state = config.load().unwrap();
-        eprintln!("diagnose: 4 push wallet + config.save");
-        state.wallets.push(WalletMetadata {
-            id: "primary".into(),
-            address: Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
-            created_at: Utc::now(),
-            source: WalletSource::Created,
-            custody: CustodyStatus::Sealed,
-            exported_at: None,
-        });
-        config.save(&state).unwrap();
-        eprintln!("diagnose: 5 PolicyStore::open");
-        let mut policies = PolicyStore::open(
-            &directory.path().join("policies.db"),
-            &DatabaseKey::new([4; 32]),
-        )
-        .unwrap();
-        eprintln!("diagnose: 6 policies.put");
-        policies
-            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
-            .unwrap();
-        eprintln!("diagnose: 7 second PolicyStore::open");
-        let pending_database = PolicyStore::open(
-            &directory.path().join("policies.db"),
-            &DatabaseKey::new([4; 32]),
-        )
-        .unwrap();
-        eprintln!("diagnose: 8 WalletMcpServer::new");
-        let server =
-            WalletMcpServer::new(config, policies, PendingStore::new(pending_database)).unwrap();
-        eprintln!("diagnose: 9 wallet_list");
-        let Json(inventory) = server.wallet_list().unwrap();
-        eprintln!("diagnose: done ({} wallets)", inventory.wallets.len());
-    }
-
     fn server() -> (tempfile::TempDir, WalletMcpServer) {
         let directory = tempfile::tempdir().unwrap();
         let config = ConfigStore::new(directory.path());

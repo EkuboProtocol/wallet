@@ -72,10 +72,10 @@ Every step ran in CI on `windows-2025` through a temporary
 
 ## Upstream status
 
-The defect is upstream SQLCipher's: a reentrant logging path on Windows.
-The minimal upstream fix is a reentrancy guard in `sqlcipher_log` (or a
-non-allocating Windows log sink). Reported with an accompanying patch; see
-the pull request referenced from the repository issue tracker. When a
+The defect is upstream SQLCipher's: a reentrant logging path on Windows,
+present unchanged at 4.17.0. Reported with a patch adding a thread-local
+reentrancy guard to `sqlcipher_log`:
+<https://github.com/sqlcipher/sqlcipher/pull/602>. When a
 bundled SQLCipher release containing a fix is picked up through
 libsqlite3-sys, the `cipher_log_level` pragma can be relaxed if SQLCipher
 diagnostics become desirable.

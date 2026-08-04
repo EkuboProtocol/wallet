@@ -15,16 +15,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Temporary Windows-overflow bisection: announces each statement of
-/// [`PolicyStore::open`] in test builds only, so the diagnose workflow's
-/// `--nocapture` output names the exact statement that recurses.
-macro_rules! open_diag {
-    ($($arg:tt)*) => {
-        #[cfg(test)]
-        eprintln!($($arg)*);
-    };
-}
-
 const SCHEMA_VERSION: i64 = 5;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
@@ -133,7 +123,6 @@ impl PolicyStore {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
 
         if path.metadata().is_ok_and(|metadata| metadata.len() > 0) {
-            open_diag!("psopen: pre-schema verify_integrity");
             verify_integrity(&connection)?;
         }
 
@@ -141,7 +130,6 @@ impl PolicyStore {
         // string to execute_batch overflows the stack on Windows against the
         // bundled SQLCipher, while the identical statements executed one at a
         // time succeed; see docs/windows-sqlcipher-overflow.md.
-        open_diag!("psopen: schema batch");
         run_transaction(
             &connection,
             &[
@@ -242,11 +230,8 @@ impl PolicyStore {
             version == SCHEMA_VERSION,
             "unsupported policy database schema {version}"
         );
-        open_diag!("psopen: final verify_integrity");
         verify_integrity(&connection)?;
-        open_diag!("psopen: permissions");
         set_private_file_permissions(path)?;
-        open_diag!("psopen: done");
         Ok(Self { connection })
     }
 
@@ -390,29 +375,24 @@ fn run_transaction(connection: &Connection, statements: &[&str]) -> Result<()> {
 }
 
 fn verify_integrity(connection: &Connection) -> Result<()> {
-    open_diag!("verify: prepare cipher_integrity_check");
     let mut cipher_statement = connection
         .prepare("PRAGMA cipher_integrity_check")
         .context("failed to start SQLCipher integrity check")?;
-    open_diag!("verify: run cipher_integrity_check");
     let cipher_issues = cipher_statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    open_diag!("verify: cipher_integrity_check returned");
     ensure!(
         cipher_issues.is_empty(),
         "SQLCipher page authentication failed: {}",
         cipher_issues.join("; ")
     );
 
-    open_diag!("verify: run integrity_check");
     let mut logical_statement = connection
         .prepare("PRAGMA integrity_check")
         .context("failed to start SQLite integrity check")?;
     let logical = logical_statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    open_diag!("verify: integrity_check returned");
     ensure!(
         logical.as_slice() == ["ok"],
         "policy database integrity check failed: {}",
@@ -473,497 +453,6 @@ mod tests {
 
     fn key(byte: u8) -> DatabaseKey {
         DatabaseKey::new([byte; 32])
-    }
-
-    /// Temporary Windows-overflow bisection: replays [`PolicyStore::open`] one
-    /// statement at a time so the diagnose workflow's `--nocapture` output
-    /// names the exact `SQLCipher` call that recurses. An in-memory pass runs
-    /// first to separate the crypto path from the filesystem path.
-    #[test]
-    fn diagnose_sqlcipher_open_steps() {
-        eprintln!("sql-diagnose: A1 in-memory open");
-        let memory = Connection::open_in_memory().unwrap();
-        eprintln!("sql-diagnose: A2 in-memory pragma key");
-        memory
-            .pragma_update(None, "key", key(4).sqlcipher_literal())
-            .unwrap();
-        eprintln!("sql-diagnose: A3 in-memory cipher_version");
-        let version: String = memory
-            .pragma_query_value(None, "cipher_version", |row| row.get(0))
-            .unwrap();
-        eprintln!("sql-diagnose: A4 in-memory create table (version {version})");
-        memory.execute_batch("CREATE TABLE probe(x)").unwrap();
-        eprintln!("sql-diagnose: A5 in-memory insert");
-        memory.execute("INSERT INTO probe VALUES (1)", []).unwrap();
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("probe.db");
-        eprintln!("sql-diagnose: B1 file open_with_flags");
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .unwrap();
-        eprintln!("sql-diagnose: B2 pragma key");
-        connection
-            .pragma_update(None, "key", key(4).sqlcipher_literal())
-            .unwrap();
-        eprintln!("sql-diagnose: B3 cipher_memory_security ON");
-        connection
-            .pragma_update(None, "cipher_memory_security", "ON")
-            .unwrap();
-        eprintln!("sql-diagnose: B4 cipher_version");
-        let _: String = connection
-            .pragma_query_value(None, "cipher_version", |row| row.get(0))
-            .unwrap();
-        eprintln!("sql-diagnose: B5 misc pragmas");
-        connection
-            .pragma_update(None, "foreign_keys", "ON")
-            .unwrap();
-        connection
-            .pragma_update(None, "trusted_schema", "OFF")
-            .unwrap();
-        connection
-            .pragma_update(None, "secure_delete", "ON")
-            .unwrap();
-        connection
-            .pragma_update(None, "journal_mode", "DELETE")
-            .unwrap();
-        connection
-            .pragma_update(None, "synchronous", "FULL")
-            .unwrap();
-        eprintln!("sql-diagnose: B6 create table (first real page write)");
-        connection.execute_batch("CREATE TABLE probe(x)").unwrap();
-        eprintln!("sql-diagnose: B7 insert");
-        connection
-            .execute("INSERT INTO probe VALUES (1)", [])
-            .unwrap();
-        eprintln!("sql-diagnose: C1 direct integrity_check on live connection");
-        let logical: Vec<String> = connection
-            .prepare("PRAGMA integrity_check")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        eprintln!("sql-diagnose: C2 integrity_check said {logical:?}");
-        eprintln!("sql-diagnose: C3 direct cipher_integrity_check on live connection");
-        let cipher: Vec<String> = connection
-            .prepare("PRAGMA cipher_integrity_check")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        eprintln!("sql-diagnose: C4 cipher_integrity_check said {cipher:?}");
-        eprintln!("sql-diagnose: B8 reopen existing database");
-        drop(connection);
-        let reopened = PolicyStore::open(&path, &key(4));
-        eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
-    }
-
-    /// The full prefix passed with a tiny statement and the big statements
-    /// passed under a minimal prefix, so this probes the combination, with
-    /// `cipher_memory_security` and a pre-grown Windows working set as the
-    /// variables. If the overflow is `VirtualLock` failure recursion inside
-    /// the locked-memory allocator, `grown_working_set` passes while
-    /// `memsec_on` overflows.
-    #[test]
-    fn diagnose_big_statements_under_full_prefix() {
-        #[cfg(windows)]
-        #[allow(unsafe_code)]
-        fn grow_working_set() {
-            #[link(name = "kernel32")]
-            unsafe extern "system" {
-                fn GetCurrentProcess() -> isize;
-                fn SetProcessWorkingSetSize(process: isize, minimum: usize, maximum: usize) -> i32;
-            }
-            let grown = unsafe {
-                SetProcessWorkingSetSize(GetCurrentProcess(), 64 * 1024 * 1024, 256 * 1024 * 1024)
-            };
-            eprintln!("bigstmt-diagnose: SetProcessWorkingSetSize returned {grown}");
-        }
-        #[cfg(not(windows))]
-        fn grow_working_set() {}
-
-        let big_statements: &[&str] = &[
-            "CREATE TABLE IF NOT EXISTS pending_transactions (
-                 request_id TEXT PRIMARY KEY NOT NULL,
-                 wallet_id TEXT NOT NULL,
-                 network_name TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
-                 plan_json TEXT NOT NULL,
-                 plan_digest TEXT NOT NULL,
-                 policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
-                 status TEXT NOT NULL CHECK (status IN (
-                     'awaiting_approval', 'rejected', 'signed', 'submitting',
-                     'broadcast', 'confirmed', 'reverted', 'expired', 'cancelled'
-                 )),
-                 created_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 serialized_transaction TEXT,
-                 signed_transaction_hash TEXT,
-                 broadcast_transaction_hash TEXT,
-                 block_number TEXT,
-                 CHECK (
-                     (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
-                         AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
-                     OR status <> 'awaiting_approval'
-                 ),
-                 CHECK (
-                     (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
-                     OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
-                 )
-             ) STRICT",
-            "CREATE INDEX IF NOT EXISTS pending_transactions_wallet_created
-                 ON pending_transactions(wallet_id, created_at DESC)",
-        ];
-        for variant in ["memsec_off", "grown_working_set", "memsec_on"] {
-            if variant == "grown_working_set" {
-                grow_working_set();
-            }
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("probe.db");
-            let connection = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_CREATE
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap();
-            connection
-                .pragma_update(None, "key", key(4).sqlcipher_literal())
-                .unwrap();
-            if variant != "memsec_off" {
-                connection
-                    .pragma_update(None, "cipher_memory_security", "ON")
-                    .unwrap();
-            }
-            let _: String = connection
-                .pragma_query_value(None, "cipher_version", |row| row.get(0))
-                .unwrap();
-            connection
-                .pragma_update(None, "foreign_keys", "ON")
-                .unwrap();
-            connection
-                .pragma_update(None, "trusted_schema", "OFF")
-                .unwrap();
-            connection
-                .pragma_update(None, "secure_delete", "ON")
-                .unwrap();
-            connection
-                .pragma_update(None, "journal_mode", "DELETE")
-                .unwrap();
-            connection
-                .pragma_update(None, "synchronous", "FULL")
-                .unwrap();
-            connection
-                .busy_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-            eprintln!("bigstmt-diagnose ({variant}): begin");
-            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-            for (index, statement) in big_statements.iter().enumerate() {
-                eprintln!("bigstmt-diagnose ({variant}): statement {index}");
-                connection.execute_batch(statement).unwrap();
-            }
-            eprintln!("bigstmt-diagnose ({variant}): commit");
-            connection.execute_batch("COMMIT").unwrap();
-            eprintln!("bigstmt-diagnose ({variant}): done");
-        }
-    }
-
-    /// Final elimination round. The full real prefix minus one candidate per
-    /// variant, then the real `open` as the failing control. `variant` names:
-    /// `no_busy_timeout`, `no_cipher_version`, `everything`.
-    #[test]
-    fn diagnose_open_prefix_variants() {
-        for variant in ["no_busy_timeout", "no_cipher_version", "everything"] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("probe.db");
-            create_private_dir(directory.path()).unwrap();
-            let connection = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_CREATE
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap();
-            connection
-                .pragma_update(None, "key", key(4).sqlcipher_literal())
-                .unwrap();
-            connection
-                .pragma_update(None, "cipher_memory_security", "ON")
-                .unwrap();
-            if variant != "no_cipher_version" {
-                let _: String = connection
-                    .pragma_query_value(None, "cipher_version", |row| row.get(0))
-                    .unwrap();
-            }
-            connection
-                .pragma_update(None, "foreign_keys", "ON")
-                .unwrap();
-            connection
-                .pragma_update(None, "trusted_schema", "OFF")
-                .unwrap();
-            connection
-                .pragma_update(None, "secure_delete", "ON")
-                .unwrap();
-            connection
-                .pragma_update(None, "journal_mode", "DELETE")
-                .unwrap();
-            connection
-                .pragma_update(None, "synchronous", "FULL")
-                .unwrap();
-            if variant != "no_busy_timeout" {
-                connection
-                    .busy_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
-            }
-            eprintln!("prefix-diagnose ({variant}): begin");
-            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-            eprintln!("prefix-diagnose ({variant}): create");
-            connection
-                .execute_batch("CREATE TABLE probe(x INTEGER) STRICT")
-                .unwrap();
-            eprintln!("prefix-diagnose ({variant}): commit");
-            connection.execute_batch("COMMIT").unwrap();
-            eprintln!("prefix-diagnose ({variant}): done");
-        }
-        eprintln!("prefix-diagnose: control PolicyStore::open on a fresh path");
-        let control = tempfile::tempdir().unwrap();
-        let opened = PolicyStore::open(&control.path().join("policies.db"), &key(4));
-        eprintln!("prefix-diagnose: control done (ok = {})", opened.is_ok());
-    }
-
-    /// Isolates `cipher_memory_security` as the suspected overflow trigger:
-    /// the passing probes all omitted it, and the failing real `open` sets it
-    /// before its first explicit transaction.
-    #[test]
-    fn diagnose_memory_security_transactions() {
-        for memory_security in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("probe.db");
-            let connection = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_CREATE
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap();
-            connection
-                .pragma_update(None, "key", key(4).sqlcipher_literal())
-                .unwrap();
-            if memory_security {
-                connection
-                    .pragma_update(None, "cipher_memory_security", "ON")
-                    .unwrap();
-            }
-            connection
-                .pragma_update(None, "foreign_keys", "ON")
-                .unwrap();
-            connection
-                .pragma_update(None, "trusted_schema", "OFF")
-                .unwrap();
-            connection
-                .pragma_update(None, "secure_delete", "ON")
-                .unwrap();
-            connection
-                .pragma_update(None, "journal_mode", "DELETE")
-                .unwrap();
-            connection
-                .pragma_update(None, "synchronous", "FULL")
-                .unwrap();
-            eprintln!("memsec-diagnose (memory_security={memory_security}): begin");
-            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-            eprintln!("memsec-diagnose (memory_security={memory_security}): create");
-            connection
-                .execute_batch("CREATE TABLE probe(x INTEGER) STRICT")
-                .unwrap();
-            eprintln!("memsec-diagnose (memory_security={memory_security}): commit");
-            connection.execute_batch("COMMIT").unwrap();
-            eprintln!("memsec-diagnose (memory_security={memory_security}): done");
-        }
-    }
-
-    /// Pins the trigger shape: the same statements pass individually but the
-    /// combined multi-statement string overflows on Windows, so this probes
-    /// progressively simpler multi-statement strings.
-    #[test]
-    fn diagnose_multi_statement_shapes() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("probe.db");
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .unwrap();
-        connection
-            .pragma_update(None, "key", key(4).sqlcipher_literal())
-            .unwrap();
-        eprintln!("shape-diagnose: T1 two selects in one string");
-        connection.execute_batch("SELECT 1; SELECT 2;").unwrap();
-        eprintln!("shape-diagnose: T2 begin/commit in one string");
-        connection
-            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
-            .unwrap();
-        eprintln!("shape-diagnose: T3 two creates in one string");
-        connection
-            .execute_batch("CREATE TABLE shape_a(x); CREATE TABLE shape_b(y);")
-            .unwrap();
-        eprintln!("shape-diagnose: T4 transactional create pair in one string");
-        connection
-            .execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE TABLE shape_c(x);
-                 CREATE TABLE shape_d(y);
-                 COMMIT;",
-            )
-            .unwrap();
-        eprintln!("shape-diagnose: done");
-    }
-
-    /// Statement-level split of the schema batch that overflows on Windows.
-    /// One variant keys the database and one does not, separating the
-    /// `SQLCipher` codec from the SQL engine.
-    #[test]
-    fn diagnose_schema_batch_statements() {
-        for keyed in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("probe.db");
-            let connection = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_CREATE
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap();
-            if keyed {
-                connection
-                    .pragma_update(None, "key", key(4).sqlcipher_literal())
-                    .unwrap();
-            }
-            connection
-                .pragma_update(None, "journal_mode", "DELETE")
-                .unwrap();
-            connection
-                .pragma_update(None, "synchronous", "FULL")
-                .unwrap();
-            let statements: &[(&str, &str)] = &[
-                ("begin", "BEGIN IMMEDIATE"),
-                (
-                    "schema_metadata",
-                    "CREATE TABLE IF NOT EXISTS schema_metadata (
-                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                         version INTEGER NOT NULL
-                     ) STRICT",
-                ),
-                (
-                    "seed version",
-                    "INSERT OR IGNORE INTO schema_metadata(singleton, version) VALUES (1, 0)",
-                ),
-                (
-                    "wallet_policies",
-                    "CREATE TABLE IF NOT EXISTS wallet_policies (
-                         wallet_id TEXT PRIMARY KEY NOT NULL,
-                         policy_json TEXT NOT NULL,
-                         revision INTEGER NOT NULL CHECK (revision > 0),
-                         updated_at TEXT NOT NULL
-                     ) STRICT",
-                ),
-                (
-                    "pending_transactions",
-                    "CREATE TABLE IF NOT EXISTS pending_transactions (
-                         request_id TEXT PRIMARY KEY NOT NULL,
-                         wallet_id TEXT NOT NULL,
-                         network_name TEXT NOT NULL,
-                         chain_id TEXT NOT NULL,
-                         plan_json TEXT NOT NULL,
-                         plan_digest TEXT NOT NULL,
-                         policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
-                         status TEXT NOT NULL CHECK (status IN (
-                             'awaiting_approval', 'rejected', 'signed', 'submitting',
-                             'broadcast', 'confirmed', 'reverted', 'expired', 'cancelled'
-                         )),
-                         created_at TEXT NOT NULL,
-                         expires_at TEXT NOT NULL,
-                         updated_at TEXT NOT NULL,
-                         approved_at TEXT,
-                         rejected_at TEXT,
-                         serialized_transaction TEXT,
-                         signed_transaction_hash TEXT,
-                         broadcast_transaction_hash TEXT,
-                         block_number TEXT,
-                         CHECK (
-                             (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
-                                 AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
-                             OR status <> 'awaiting_approval'
-                         ),
-                         CHECK (
-                             (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
-                             OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
-                         )
-                     ) STRICT",
-                ),
-                (
-                    "wallet index",
-                    "CREATE INDEX IF NOT EXISTS pending_transactions_wallet_created
-                         ON pending_transactions(wallet_id, created_at DESC)",
-                ),
-                (
-                    "bump version",
-                    "UPDATE schema_metadata SET version = 2 WHERE singleton = 1 AND version < 2",
-                ),
-                ("commit", "COMMIT"),
-            ];
-            for (label, sql) in statements {
-                eprintln!("schema-diagnose (keyed={keyed}): {label}");
-                connection.execute_batch(sql).unwrap();
-            }
-            eprintln!("schema-diagnose (keyed={keyed}): done");
-        }
-    }
-
-    /// Companion probe: the same integrity check with `SQLCipher` logging
-    /// disabled first. `SQLCipher` 4.11 converted its Windows log output to
-    /// UTF-16; if the overflow lives in that logging path, this variant passes
-    /// where [`diagnose_sqlcipher_open_steps`] overflows.
-    #[test]
-    fn diagnose_sqlcipher_integrity_without_logging() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("probe.db");
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .unwrap();
-        eprintln!("nolog-diagnose: 1 cipher_log_level NONE");
-        connection
-            .pragma_update(None, "cipher_log_level", "NONE")
-            .unwrap();
-        eprintln!("nolog-diagnose: 2 pragma key");
-        connection
-            .pragma_update(None, "key", key(4).sqlcipher_literal())
-            .unwrap();
-        eprintln!("nolog-diagnose: 3 create table");
-        connection.execute_batch("CREATE TABLE probe(x)").unwrap();
-        eprintln!("nolog-diagnose: 4 cipher_integrity_check");
-        let cipher: Vec<String> = connection
-            .prepare("PRAGMA cipher_integrity_check")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        eprintln!("nolog-diagnose: done ({cipher:?})");
     }
 
     #[test]
