@@ -107,6 +107,14 @@ impl PolicyStore {
         )
         .with_context(|| format!("failed to open policy database {}", path.display()))?;
 
+        // Must precede any allocation-heavy work. SQLCipher's Windows log sink
+        // allocates through sqlite3_malloc, which cipher_memory_security wraps
+        // with VirtualLock; when VirtualLock fails under the working-set quota
+        // it logs the failure, and that log allocates again, recursing until
+        // the stack is exhausted. Level NONE makes the logger return before it
+        // allocates, breaking the cycle while memory locking stays enabled;
+        // see docs/windows-sqlcipher-overflow.md.
+        connection.pragma_update(None, "cipher_log_level", "NONE")?;
         connection.pragma_update(None, "key", key.sqlcipher_literal())?;
         connection.pragma_update(None, "cipher_memory_security", "ON")?;
         let cipher_version: String = connection
