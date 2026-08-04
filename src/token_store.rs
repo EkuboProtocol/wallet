@@ -1,14 +1,15 @@
-//! Plain-SQLite token database and Multicall3-backed portfolio reads.
+//! Token display database and Multicall3-backed portfolio reads.
 //!
-//! Token metadata is public display data, so it deliberately lives outside
-//! the encrypted security database: MCP tools may write it without touching
-//! signing state, and reading it needs no credential-store access. Nothing in
-//! the signing path consults this database. Metadata is verified against the
-//! token contracts themselves through Multicall3 at insert time, so the
-//! database stores what the configured chain reports rather than what a list
-//! claims.
+//! Token metadata is display data: nothing in the signing or policy path
+//! consults it. It nevertheless lives inside the authenticated encrypted
+//! database, because a symbol, name, or decimals edited outside this process
+//! could misrepresent balances and amounts to the user. Metadata is verified
+//! against the token contracts themselves through Multicall3 at insert time,
+//! so the database stores what the configured chain reports rather than what
+//! a list claims, and MCP tools may still write it — writes go through that
+//! verification, never around it.
 
-use crate::config::NetworkConfig;
+use crate::{config::NetworkConfig, policy_store::PolicyStore};
 use alloy::{
     network::TransactionBuilder,
     primitives::{Address, U256},
@@ -24,7 +25,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
 
-const DATABASE_FILE: &str = "tokens.db";
+/// Plain-SQLite file used before the table moved into the encrypted
+/// database. Rows are imported once (constraint-checked, never overwriting)
+/// and the file is then removed.
+const LEGACY_DATABASE_FILE: &str = "tokens.db";
 /// Tokens verified per Multicall3 request; three calls each.
 const METADATA_CHUNK: usize = 100;
 /// Balance reads per Multicall3 request.
@@ -82,43 +86,68 @@ pub struct OnchainTokenMetadata {
 }
 
 pub struct TokenStore {
-    connection: Connection,
+    database: PolicyStore,
 }
 
 impl TokenStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
-        Self::open(&data_dir.join(DATABASE_FILE))
+        let store = Self {
+            database: PolicyStore::production(data_dir)?,
+        };
+        store.import_legacy_database(data_dir);
+        Ok(store)
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+    #[must_use]
+    pub const fn new(database: PolicyStore) -> Self {
+        Self { database }
+    }
+
+    /// One-time import of the pre-encryption plain-SQLite token file. Rows
+    /// pass through the encrypted table's CHECK constraints (`INSERT OR
+    /// IGNORE`, so malformed or duplicate rows are dropped rather than
+    /// trusted), and the legacy file is removed only after a full pass.
+    /// A failed import leaves the file for a later retry and never blocks
+    /// opening the store.
+    fn import_legacy_database(&self, data_dir: &Path) {
+        let legacy_path = data_dir.join(LEGACY_DATABASE_FILE);
+        if !legacy_path.exists() {
+            return;
         }
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("failed to open token database {}", path.display()))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        // The chain_id/address pair is the primary key, so a conflicting
-        // entry is structurally impossible rather than policy-enforced.
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS tokens (
-                 chain_id INTEGER NOT NULL CHECK (chain_id > 0),
-                 address TEXT NOT NULL CHECK (address = lower(address) AND length(address) = 42),
-                 symbol TEXT,
-                 name TEXT,
-                 decimals INTEGER CHECK (decimals IS NULL OR (decimals >= 0 AND decimals <= 255)),
-                 source TEXT NOT NULL,
-                 added_at TEXT NOT NULL,
-                 PRIMARY KEY (chain_id, address)
-             ) STRICT",
-        )?;
-        Ok(Self { connection })
+        let import = (|| -> Result<()> {
+            let legacy =
+                Connection::open_with_flags(&legacy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let mut statement = legacy.prepare(
+                "SELECT chain_id, address, symbol, name, decimals, source, added_at FROM tokens",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?;
+            for row in rows {
+                let (chain_id, address, symbol, name, decimals, source, added_at) = row?;
+                self.database.connection.execute(
+                    "INSERT OR IGNORE INTO tokens(
+                        chain_id, address, symbol, name, decimals, source, added_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![chain_id, address, symbol, name, decimals, source, added_at],
+                )?;
+            }
+            Ok(())
+        })();
+        if import.is_ok() {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ =
+                    std::fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
+            }
+        }
     }
 
     /// Insert one token. Fails if the (chain, address) pair already exists.
@@ -149,7 +178,7 @@ impl TokenStore {
         source: &str,
     ) -> Result<bool> {
         ensure!(chain_id > 0, "chain ID must be positive");
-        let changed = self.connection.execute(
+        let changed = self.database.connection.execute(
             "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(chain_id, address) DO NOTHING",
@@ -167,7 +196,8 @@ impl TokenStore {
     }
 
     pub fn get(&self, chain_id: u64, address: Address) -> Result<Option<StoredToken>> {
-        self.connection
+        self.database
+            .connection
             .query_row(
                 "SELECT chain_id, address, symbol, name, decimals, source, added_at
                  FROM tokens WHERE chain_id = ?1 AND address = ?2",
@@ -192,7 +222,7 @@ impl TokenStore {
         let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         let mut rows = Vec::new();
         if let Some(chain) = chain_id {
-            let mut statement = self.connection.prepare(
+            let mut statement = self.database.connection.prepare(
                 "SELECT chain_id, address, symbol, name, decimals, source, added_at
                  FROM tokens WHERE chain_id = ?1
                  ORDER BY chain_id, address LIMIT ?2 OFFSET ?3",
@@ -209,7 +239,7 @@ impl TokenStore {
                 rows.push(row?);
             }
         } else {
-            let mut statement = self.connection.prepare(
+            let mut statement = self.database.connection.prepare(
                 "SELECT chain_id, address, symbol, name, decimals, source, added_at
                  FROM tokens ORDER BY chain_id, address LIMIT ?1 OFFSET ?2",
             )?;
@@ -223,14 +253,16 @@ impl TokenStore {
 
     pub fn count(&self, chain_id: Option<u64>) -> Result<u64> {
         let count: i64 = match chain_id {
-            Some(chain) => self.connection.query_row(
+            Some(chain) => self.database.connection.query_row(
                 "SELECT COUNT(*) FROM tokens WHERE chain_id = ?1",
                 params![i64::try_from(chain).context("chain ID out of range")?],
                 |row| row.get(0),
             )?,
-            None => self
-                .connection
-                .query_row("SELECT COUNT(*) FROM tokens", [], |row| row.get(0))?,
+            None => {
+                self.database
+                    .connection
+                    .query_row("SELECT COUNT(*) FROM tokens", [], |row| row.get(0))?
+            }
         };
         Ok(u64::try_from(count).unwrap_or(0))
     }
@@ -514,10 +546,17 @@ impl ChainIdInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy_store::DatabaseKey;
+
+    fn open(directory: &Path) -> TokenStore {
+        TokenStore::new(
+            PolicyStore::open(&directory.join("policies.db"), &DatabaseKey::new([8; 32])).unwrap(),
+        )
+    }
 
     fn store() -> (tempfile::TempDir, TokenStore) {
         let directory = tempfile::tempdir().unwrap();
-        let store = TokenStore::production(directory.path()).unwrap();
+        let store = open(directory.path());
         (directory, store)
     }
 
@@ -611,14 +650,54 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let token = Address::repeat_byte(0x44);
         {
-            let mut store = TokenStore::production(directory.path()).unwrap();
+            let mut store = open(directory.path());
             store.add(10, token, &usdc(), "manual").unwrap();
         }
-        let store = TokenStore::production(directory.path()).unwrap();
+        let store = open(directory.path());
         assert_eq!(store.count(None).unwrap(), 1);
         assert_eq!(
             store.get(10, token).unwrap().unwrap().symbol.as_deref(),
             Some("USDC")
         );
+    }
+
+    #[test]
+    fn legacy_plain_database_is_imported_once_and_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy_path = directory.path().join(LEGACY_DATABASE_FILE);
+        let legacy = Connection::open(&legacy_path).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE tokens (
+                     chain_id INTEGER NOT NULL,
+                     address TEXT NOT NULL,
+                     symbol TEXT, name TEXT, decimals INTEGER,
+                     source TEXT NOT NULL, added_at TEXT NOT NULL,
+                     PRIMARY KEY (chain_id, address)
+                 );
+                 INSERT INTO tokens VALUES
+                     (1, '0x1111111111111111111111111111111111111111',
+                      'USDC', 'USD Coin', 6, 'manual', '2026-01-01T00:00:00Z'),
+                     (0, '0xbad', 'EVIL', 'Constraint Violator', 6,
+                      'manual', '2026-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let store = open(directory.path());
+        store.import_legacy_database(directory.path());
+        // The valid row imports; the row violating the encrypted table's
+        // constraints is dropped rather than trusted; the file is removed.
+        assert_eq!(store.count(None).unwrap(), 1);
+        assert_eq!(
+            store
+                .get(1, Address::repeat_byte(0x11))
+                .unwrap()
+                .unwrap()
+                .symbol
+                .as_deref(),
+            Some("USDC")
+        );
+        assert!(!legacy_path.exists());
     }
 }

@@ -1,21 +1,26 @@
-//! Plain-SQLite address book: per-chain aliases for addresses.
+//! Per-chain address aliases, stored in the authenticated encrypted database.
 //!
 //! Entries are lookup convenience data with no signing authority: nothing in
-//! the signing or policy path reads this database, and an alias never
+//! the signing or policy path reads this store, and an alias never
 //! substitutes for reviewing the actual address in an approval. Entries are
 //! added, updated, and removed only by the interactive CLI after OS owner
 //! authentication; MCP exposes read-only lookups so an agent can resolve
-//! "pay alice" to the address the user configured.
+//! "pay alice" to the address the user configured. The rows live inside the
+//! `SQLCipher` database precisely because an agent must not be able to retarget
+//! an alias by editing a plain file outside this process.
 
+use crate::policy_store::PolicyStore;
 use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{fs, path::Path, str::FromStr};
 
-const DATABASE_FILE: &str = "address_book.db";
+/// Plain-SQLite file used before the table moved into the encrypted
+/// database. Never trusted or imported: deleted on sight.
+const LEGACY_DATABASE_FILE: &str = "address_book.db";
 const MAX_NOTE_LEN: usize = 256;
 
 /// One stored alias, the address rendered checksummed.
@@ -31,40 +36,22 @@ pub struct AddressBookEntry {
 }
 
 pub struct AddressBookStore {
-    connection: Connection,
+    database: PolicyStore,
 }
 
 impl AddressBookStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
-        Self::open(&data_dir.join(DATABASE_FILE))
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
+        }
+        Ok(Self {
+            database: PolicyStore::production(data_dir)?,
+        })
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("failed to open address book {}", path.display()))?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS address_book (
-                 chain_id INTEGER NOT NULL CHECK (chain_id > 0),
-                 alias TEXT NOT NULL,
-                 address TEXT NOT NULL CHECK (address = lower(address) AND length(address) = 42),
-                 note TEXT,
-                 added_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 PRIMARY KEY (chain_id, alias)
-             ) STRICT",
-        )?;
-        Ok(Self { connection })
+    #[must_use]
+    pub const fn new(database: PolicyStore) -> Self {
+        Self { database }
     }
 
     /// Insert or replace one alias. The CLI authenticates the owner before
@@ -83,7 +70,7 @@ impl AddressBookStore {
             .transpose()?
             .filter(|note| !note.is_empty());
         let now = Utc::now().to_rfc3339();
-        self.connection.execute(
+        self.database.connection.execute(
             "INSERT INTO address_book(chain_id, alias, address, note, added_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)
              ON CONFLICT(chain_id, alias) DO UPDATE SET
@@ -107,7 +94,7 @@ impl AddressBookStore {
         let existing = self
             .get(chain_id, alias)?
             .with_context(|| format!("no address book entry {alias} on chain {chain_id}"))?;
-        self.connection.execute(
+        self.database.connection.execute(
             "DELETE FROM address_book WHERE chain_id = ?1 AND alias = ?2",
             params![
                 i64::try_from(chain_id).context("chain ID out of range")?,
@@ -119,7 +106,8 @@ impl AddressBookStore {
 
     pub fn get(&self, chain_id: u64, alias: &str) -> Result<Option<AddressBookEntry>> {
         validate_alias(alias)?;
-        self.connection
+        self.database
+            .connection
             .query_row(
                 "SELECT chain_id, alias, address, note, added_at, updated_at
                  FROM address_book WHERE chain_id = ?1 AND alias = ?2",
@@ -144,7 +132,7 @@ impl AddressBookStore {
         let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         let mut rows = Vec::new();
         if let Some(chain) = chain_id {
-            let mut statement = self.connection.prepare(
+            let mut statement = self.database.connection.prepare(
                 "SELECT chain_id, alias, address, note, added_at, updated_at
                  FROM address_book WHERE chain_id = ?1
                  ORDER BY chain_id, alias LIMIT ?2 OFFSET ?3",
@@ -161,7 +149,7 @@ impl AddressBookStore {
                 rows.push(row?);
             }
         } else {
-            let mut statement = self.connection.prepare(
+            let mut statement = self.database.connection.prepare(
                 "SELECT chain_id, alias, address, note, added_at, updated_at
                  FROM address_book ORDER BY chain_id, alias LIMIT ?1 OFFSET ?2",
             )?;
@@ -175,14 +163,16 @@ impl AddressBookStore {
 
     pub fn count(&self, chain_id: Option<u64>) -> Result<u64> {
         let count: i64 = match chain_id {
-            Some(chain) => self.connection.query_row(
+            Some(chain) => self.database.connection.query_row(
                 "SELECT COUNT(*) FROM address_book WHERE chain_id = ?1",
                 params![i64::try_from(chain).context("chain ID out of range")?],
                 |row| row.get(0),
             )?,
-            None => self
-                .connection
-                .query_row("SELECT COUNT(*) FROM address_book", [], |row| row.get(0))?,
+            None => self.database.connection.query_row(
+                "SELECT COUNT(*) FROM address_book",
+                [],
+                |row| row.get(0),
+            )?,
         };
         Ok(u64::try_from(count).unwrap_or(0))
     }
@@ -231,10 +221,17 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AddressBookEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy_store::DatabaseKey;
+
+    fn open(directory: &Path) -> AddressBookStore {
+        AddressBookStore::new(
+            PolicyStore::open(&directory.join("policies.db"), &DatabaseKey::new([6; 32])).unwrap(),
+        )
+    }
 
     fn store() -> (tempfile::TempDir, AddressBookStore) {
         let directory = tempfile::tempdir().unwrap();
-        let store = AddressBookStore::production(directory.path()).unwrap();
+        let store = open(directory.path());
         (directory, store)
     }
 
@@ -303,12 +300,12 @@ mod tests {
     fn reopening_preserves_rows() {
         let directory = tempfile::tempdir().unwrap();
         {
-            let mut store = AddressBookStore::production(directory.path()).unwrap();
+            let mut store = open(directory.path());
             store
                 .upsert(10, "vault", Address::repeat_byte(0x44), None)
                 .unwrap();
         }
-        let store = AddressBookStore::production(directory.path()).unwrap();
+        let store = open(directory.path());
         assert_eq!(store.count(None).unwrap(), 1);
         assert_eq!(
             store.get(10, "vault").unwrap().unwrap().address,

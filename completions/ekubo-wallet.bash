@@ -19,7 +19,7 @@ _ekubo_wallet() {
       case "$first" in
         wallet) choices="list create import export remove" ;;
         network) choices="list presets reset add remove delete" ;;
-        policy) choices="show set allow-all require-approval validate schema" ;;
+        policy) choices="show set allow-all require-approval validate schema review" ;;
         transaction|tx) choices="list show" ;;
         token) choices="list" ;;
         address-book) choices="list add remove delete" ;;
@@ -34,7 +34,7 @@ _ekubo_wallet() {
           COMPREPLY=( $(compgen -f -- "$current") )
           return
           ;;
-        wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|transaction:list|tx:list)
+        wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:list|tx:list)
           choices="$(ekubo-wallet __complete wallets 2>/dev/null)"
           ;;
         network:add)

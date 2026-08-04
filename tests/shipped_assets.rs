@@ -195,6 +195,7 @@ fn packaged_completions_offer_every_subcommand() {
         "legal",
         "accept",
         "status",
+        "review",
     ];
     for shell in ["bash", "zsh", "fish"] {
         let output = cli().arg("completion").arg(shell).output().unwrap();

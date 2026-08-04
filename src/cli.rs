@@ -156,6 +156,8 @@ enum PolicyCommand {
     Validate { policy_file: PathBuf },
     /// Print the JSON Schema describing a policy document.
     Schema,
+    /// Review the agent-proposed policy change as a permission diff and apply it.
+    Review { wallet_id: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -744,7 +746,15 @@ async fn run_address_book(
 }
 
 fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> Result<()> {
-    let store = LegalStore::new(config.data_dir());
+    // `legal show` needs no store at all; keep it usable before any
+    // credential-store or database access is possible.
+    if let LegalCommand::Show { document } = command {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(document.document().text().as_bytes())?;
+        stdout.flush()?;
+        return Ok(());
+    }
+    let store = LegalStore::production(config.data_dir())?;
     let render_status = |status: &crate::legal::LegalStatus| {
         let describe = |name: &str, document: &crate::legal::DocumentStatus| {
             if document.accepted {
@@ -776,12 +786,7 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
             let status = store.status()?;
             emit(mode, &status, || Ok(render_status(&status)))
         }
-        LegalCommand::Show { document } => {
-            let mut stdout = io::stdout().lock();
-            stdout.write_all(document.document().text().as_bytes())?;
-            stdout.flush()?;
-            Ok(())
-        }
+        LegalCommand::Show { .. } => unreachable!("handled before opening the store"),
         LegalCommand::Accept => {
             require_interactive("legal acceptance")?;
             let accept = |document: LegalDocument, prompt: &str| -> Result<bool> {
@@ -925,30 +930,114 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand, mode: OutputMod
         }
         // The schema is itself a JSON document; there is no human form.
         PolicyCommand::Schema => print_json(&policy_json_schema()),
+        PolicyCommand::Review { wallet_id } => {
+            review_policy_proposal(&config, &wallet_id, mode).await
+        }
     }
+}
+
+/// Review and apply the single pending agent-proposed policy for a wallet.
+/// The reviewer sees a minimized permission diff and the agent's rationale,
+/// never a raw JSON comparison; application requires terminal approval plus
+/// OS owner authentication and is revision-guarded end to end.
+async fn review_policy_proposal(
+    config: &ConfigStore,
+    wallet_id: &str,
+    mode: OutputMode,
+) -> Result<()> {
+    let wallet = config.wallet(wallet_id)?;
+    require_interactive("policy changes")?;
+    let mut policies = PolicyStore::production(config.data_dir())?;
+    let Some(proposal) = policies.proposal(wallet_id)? else {
+        eprintln!(
+            "No policy proposal is pending for {wallet_id}. Agents create one with the \
+             wallet_propose_policy tool."
+        );
+        return Ok(());
+    };
+    let current = policies
+        .get(wallet_id)?
+        .with_context(|| format!("wallet {wallet_id} has no local policy"))?;
+    if current.revision != proposal.source_revision {
+        policies.delete_proposal(wallet_id)?;
+        anyhow::bail!(
+            "the pending proposal referenced policy revision {} but the active policy is now \
+             revision {}; the stale proposal was discarded. Ask the agent to read the current \
+             policy and propose again.",
+            proposal.source_revision,
+            current.revision
+        );
+    }
+
+    let diff = crate::core::policy::diff_policies(&current.policy, &proposal.policy);
+    let policy_bytes = serde_json::to_vec(&proposal.policy)?;
+    let digest = format!("0x{}", hex::encode(Keccak256::digest(&policy_bytes)));
+    let mut request = ApprovalRequest::new(
+        ApprovalKind::PolicyChange,
+        "Apply proposed wallet policy",
+        "An agent proposed this replacement policy. The permission diff below is authoritative; \
+         the rationale is the agent's own explanation.",
+    )
+    .fact("Wallet", &wallet.id)
+    .fact("Address", format!("{:#x}", wallet.address))
+    .fact("Current revision", current.revision.to_string())
+    .fact("Proposed", described_time(proposal.created_at))
+    .fact("Proposed policy digest", &digest)
+    .fact("Agent rationale (untrusted)", &proposal.rationale);
+    for (index, line) in diff.iter().enumerate() {
+        request = request.fact(format!("Change {}", index + 1), line);
+    }
+    request = request
+        .digest(&digest)
+        .warning(
+            "A more permissive policy can authorize transactions without an exceptional approval.",
+        )
+        .warning(
+            "The rationale is agent-authored text. Judge the change by the diff lines, not the \
+             story.",
+        );
+    require_approval(request).await?;
+    PlatformHumanPresence
+        .confirm(&PresenceRequest {
+            action: PresenceAction::ChangePolicy,
+            wallet_id: wallet_id.into(),
+            operation_digest: Some(digest.clone()),
+        })
+        .await?;
+
+    // put() enforces the expected revision atomically, so a policy change
+    // during the human review fails closed rather than applying stale rules.
+    let stored = policies.put(wallet_id, &proposal.policy, Some(proposal.source_revision))?;
+    policies.delete_proposal(wallet_id)?;
+    eprintln!(
+        "Applied. An agent can observe the new revision through wallet_get_policy; nothing \
+         further is needed here."
+    );
+    emit(
+        mode,
+        &serde_json::json!({
+            "wallet_id": wallet_id,
+            "revision": stored.revision,
+            "digest": digest,
+            "applied_changes": diff,
+        }),
+        || {
+            Ok(format!(
+                "Applied policy revision {} for {wallet_id}:\n{}",
+                stored.revision,
+                diff.iter()
+                    .map(|line| format!("  {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ))
+        },
+    )
 }
 
 /// The schema is derived from the same types the wallet enforces, so a document
 /// that validates here cannot drift from what `policy set` will accept.
 fn policy_json_schema() -> serde_json::Value {
-    let mut schema = serde_json::to_value(schemars::schema_for!(WalletPolicy))
-        .expect("policy schema serializes");
-    if let Some(object) = schema.as_object_mut() {
-        object.insert(
-            "title".into(),
-            serde_json::Value::String("Ekubo Wallet policy".into()),
-        );
-        object.insert(
-            "description".into(),
-            serde_json::Value::String(
-                "Stateless per-transaction signing policy. Amounts are decimal strings in the \
-                 asset's smallest unit. There are no daily limits, rolling windows, or spend \
-                 counters."
-                    .into(),
-            ),
-        );
-    }
-    schema
+    crate::core::policy::json_schema()
 }
 
 async fn run_transaction(
@@ -1235,20 +1324,41 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
     let awaiting = pending.awaiting_approval(None)?;
     let awaiting_typed_data =
         TypedDataStore::production(config.data_dir())?.awaiting_approval(None)?;
-    if awaiting.is_empty() && awaiting_typed_data.is_empty() {
+    let proposals = PolicyStore::production(config.data_dir())?.list_proposals()?;
+    if awaiting.is_empty() && awaiting_typed_data.is_empty() && proposals.is_empty() {
         eprintln!("No requests are awaiting approval.");
     } else {
         eprintln!(
             "{} request(s) awaiting approval. Review one with `ekubo-wallet approve <request-id>`; \
-             unapproved requests expire at their listed expires_at.",
-            awaiting.len() + awaiting_typed_data.len()
+             unapproved requests expire at their listed expires_at.{}",
+            awaiting.len() + awaiting_typed_data.len(),
+            if proposals.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {} policy proposal(s) await `ekubo-wallet policy review <wallet-id>`.",
+                    proposals.len()
+                )
+            },
         );
     }
+    let proposal_summaries: Vec<serde_json::Value> = proposals
+        .iter()
+        .map(|proposal| {
+            serde_json::json!({
+                "wallet_id": proposal.wallet_id,
+                "source_revision": proposal.source_revision,
+                "created_at": proposal.created_at,
+                "rationale": proposal.rationale,
+            })
+        })
+        .collect();
     emit(
         mode,
         &serde_json::json!({
             "pending_approvals": awaiting,
             "pending_typed_data": awaiting_typed_data,
+            "pending_policy_proposals": proposal_summaries,
         }),
         || {
             let mut lines = Vec::new();
@@ -1267,6 +1377,15 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
                     record.chain_id,
                     record.request_id,
                     relative_time(record.expires_at),
+                ));
+            }
+            for proposal in &proposals {
+                lines.push(format!(
+                    "{} · policy proposal for {} (from revision {}) · review with `ekubo-wallet policy review {}`",
+                    relative_time(proposal.created_at),
+                    proposal.wallet_id,
+                    proposal.source_revision,
+                    proposal.wallet_id,
                 ));
             }
             if lines.is_empty() {

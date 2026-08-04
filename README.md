@@ -170,7 +170,16 @@ ekubo-wallet policy require-approval primary   # every transaction needs explici
 ekubo-wallet policy allow-all primary          # simulated + policy-clean transactions sign automatically
 ekubo-wallet policy validate ./policy.json     # or draft something in between
 ekubo-wallet policy set primary ./policy.json
+ekubo-wallet policy review primary             # review an agent-proposed policy change
 ```
+
+Agents can propose policy changes with the `wallet_propose_policy` tool
+(guided by the `wallet://docs/policy-authoring` and `wallet://schemas/policy`
+resources), but only `policy review` applies one: it shows a minimized
+human-readable diff of the permissions against the current policy together
+with the agent's rationale, requires terminal approval plus OS owner
+authentication, and fails closed if the policy changed since the proposal was
+written.
 
 Policy changes, exceptional approvals, network changes, key export, and wallet
 removal require an interactive terminal and OS-backed owner authentication.
@@ -376,6 +385,7 @@ An agent must never run the approval command for you.
 | `wallet_wait_for_typed_data` | Poll a pending typed-data request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
 | `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only with owner authentication. |
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. The only tool available before acceptance. |
+| `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
 
 MCP operations select networks only with canonical decimal `chain_id` strings
 such as `"1"` or `"4663"`; profile names are CLI and display metadata. No tool
@@ -478,15 +488,16 @@ state.
 | Linux | `${XDG_STATE_HOME}/ekubo-secure-wallet-mcp`, or `~/.local/state/ekubo-secure-wallet-mcp` | `policies.db` |
 | Windows | `%LOCALAPPDATA%\Ekubo\secure-wallet-mcp` | `policies.db` |
 
-The unencrypted `tokens.db` in the same directory holds the public token
-database described above; it contains no security state. The unencrypted
-`address_book.db` holds per-chain address aliases: lookup convenience data
-that only the CLI can change (after owner authentication) and that nothing in
-the signing or policy path reads. The unencrypted `legal.json` records which
-Terms of Service and Privacy Policy digests were accepted and when.
-
 The one SQLCipher file contains separate `wallet_policies`,
-`pending_transactions`, and `pending_typed_data` tables. A pending row stores its normalized execution
+`pending_transactions`, `pending_typed_data`, `tokens`, `address_book`,
+`legal_acceptance`, and `policy_proposals` tables. Token metadata, address
+aliases, and legal acceptance deliberately live inside the authenticated
+encrypted database rather than in plain files: they carry no signing
+authority, but a file edit outside this process must not be able to forge
+acceptance, retarget an alias, or misrepresent a token. A pre-existing plain
+`tokens.db` is imported once (constraint-checked, never overwriting) and
+removed; leftover `address_book.db` or `legal.json` files from unreleased
+builds are deleted without being trusted. A pending row stores its normalized execution
 plan and digest, policy revision, expiry and lifecycle status; once signed it
 also stores the exact serialized transaction and hash before the first RPC
 submission. An exceptional approval additionally records the digest of its

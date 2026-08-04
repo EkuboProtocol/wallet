@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.secure-wallet-mcp.policy-database-key.v1";
@@ -55,6 +55,22 @@ pub struct StoredPolicy {
     pub revision: u64,
     pub updated_at: DateTime<Utc>,
 }
+
+/// An agent-proposed replacement policy awaiting human review. At most one
+/// proposal exists per wallet — a newer proposal replaces the previous one —
+/// and it binds the exact policy revision it was written against, so it can
+/// never apply over a policy the agent has not seen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyProposal {
+    pub wallet_id: String,
+    pub source_revision: u64,
+    pub policy: WalletPolicy,
+    /// Agent-authored free text shown to the reviewer; untrusted display data.
+    pub rationale: String,
+    pub created_at: DateTime<Utc>,
+}
+
+pub const MAX_PROPOSAL_RATIONALE_LEN: usize = 2_000;
 
 pub struct PolicyStore {
     pub(crate) connection: Connection,
@@ -262,6 +278,54 @@ impl PolicyStore {
             )?;
             version = 6;
         }
+        if version == 6 {
+            // Integrity-sensitive display and gating state moves inside the
+            // authenticated database: token metadata, address aliases, and
+            // legal acceptance must not be forgeable by editing a plain file
+            // outside this process.
+            run_transaction(
+                &connection,
+                &[
+                    "CREATE TABLE IF NOT EXISTS tokens (
+                         chain_id INTEGER NOT NULL CHECK (chain_id > 0),
+                         address TEXT NOT NULL
+                             CHECK (address = lower(address) AND length(address) = 42),
+                         symbol TEXT,
+                         name TEXT,
+                         decimals INTEGER
+                             CHECK (decimals IS NULL OR (decimals >= 0 AND decimals <= 255)),
+                         source TEXT NOT NULL,
+                         added_at TEXT NOT NULL,
+                         PRIMARY KEY (chain_id, address)
+                     ) STRICT",
+                    "CREATE TABLE IF NOT EXISTS address_book (
+                         chain_id INTEGER NOT NULL CHECK (chain_id > 0),
+                         alias TEXT NOT NULL,
+                         address TEXT NOT NULL
+                             CHECK (address = lower(address) AND length(address) = 42),
+                         note TEXT,
+                         added_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         PRIMARY KEY (chain_id, alias)
+                     ) STRICT",
+                    "CREATE TABLE IF NOT EXISTS legal_acceptance (
+                         document TEXT PRIMARY KEY NOT NULL
+                             CHECK (document IN ('terms_of_service', 'privacy_policy')),
+                         digest TEXT NOT NULL,
+                         accepted_at TEXT NOT NULL
+                     ) STRICT",
+                    "CREATE TABLE IF NOT EXISTS policy_proposals (
+                         wallet_id TEXT PRIMARY KEY NOT NULL,
+                         source_revision INTEGER NOT NULL CHECK (source_revision > 0),
+                         policy_json TEXT NOT NULL,
+                         rationale TEXT NOT NULL,
+                         created_at TEXT NOT NULL
+                     ) STRICT",
+                    "UPDATE schema_metadata SET version = 7 WHERE singleton = 1",
+                ],
+            )?;
+            version = 7;
+        }
         ensure!(
             version == SCHEMA_VERSION,
             "unsupported policy database schema {version}"
@@ -361,6 +425,141 @@ impl PolicyStore {
         })
     }
 
+    /// Store or replace the wallet's single pending policy proposal. The
+    /// insert re-checks that `source_revision` is the active revision inside
+    /// the transaction, so a proposal can never be recorded against a policy
+    /// the proposer did not read. The latest proposal always prevails.
+    pub fn put_proposal(
+        &mut self,
+        wallet_id: &str,
+        source_revision: u64,
+        policy: &WalletPolicy,
+        rationale: &str,
+    ) -> Result<PolicyProposal> {
+        validate_wallet_id(wallet_id)?;
+        let rationale = rationale.trim();
+        ensure!(
+            !rationale.is_empty() && rationale.len() <= MAX_PROPOSAL_RATIONALE_LEN,
+            "proposal rationale must contain 1-{MAX_PROPOSAL_RATIONALE_LEN} bytes"
+        );
+        // Round-trip through the strict parser, exactly like put().
+        let canonical = serde_json::to_value(policy)?;
+        let policy = WalletPolicy::parse(canonical)?;
+        let policy_json = serde_json::to_string(&policy)?;
+        let source = i64::try_from(source_revision).context("source revision is too large")?;
+        let transaction = self.connection.transaction()?;
+        let current: Option<i64> = transaction
+            .query_row(
+                "SELECT revision FROM wallet_policies WHERE wallet_id = ?1",
+                [wallet_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        ensure!(
+            current == Some(source),
+            "the proposal references policy revision {source_revision}, but the active revision \
+             is {current:?}; read the current policy with wallet_get_policy and propose again"
+        );
+        let created_at = Utc::now();
+        transaction.execute(
+            "INSERT INTO policy_proposals(
+                wallet_id, source_revision, policy_json, rationale, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(wallet_id) DO UPDATE SET
+                 source_revision = excluded.source_revision,
+                 policy_json = excluded.policy_json,
+                 rationale = excluded.rationale,
+                 created_at = excluded.created_at",
+            params![
+                wallet_id,
+                source,
+                policy_json,
+                rationale,
+                created_at.to_rfc3339()
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(PolicyProposal {
+            wallet_id: wallet_id.into(),
+            source_revision,
+            policy,
+            rationale: rationale.into(),
+            created_at,
+        })
+    }
+
+    pub fn proposal(&self, wallet_id: &str) -> Result<Option<PolicyProposal>> {
+        validate_wallet_id(wallet_id)?;
+        self.connection
+            .query_row(
+                "SELECT source_revision, policy_json, rationale, created_at
+                 FROM policy_proposals WHERE wallet_id = ?1",
+                [wallet_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(source_revision, policy_json, rationale, created_at)| {
+                parse_proposal(
+                    wallet_id,
+                    source_revision,
+                    &policy_json,
+                    rationale,
+                    &created_at,
+                )
+            })
+            .transpose()
+    }
+
+    pub fn list_proposals(&self) -> Result<Vec<PolicyProposal>> {
+        let mut statement = self.connection.prepare(
+            "SELECT wallet_id, source_revision, policy_json, rationale, created_at
+             FROM policy_proposals ORDER BY wallet_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        rows.into_iter()
+            .map(
+                |(wallet_id, source_revision, policy_json, rationale, created_at)| {
+                    parse_proposal(
+                        &wallet_id,
+                        source_revision,
+                        &policy_json,
+                        rationale,
+                        &created_at,
+                    )
+                },
+            )
+            .collect()
+    }
+
+    /// Remove the wallet's pending proposal, if any. Returns whether one
+    /// existed.
+    pub fn delete_proposal(&mut self, wallet_id: &str) -> Result<bool> {
+        validate_wallet_id(wallet_id)?;
+        let changed = self.connection.execute(
+            "DELETE FROM policy_proposals WHERE wallet_id = ?1",
+            [wallet_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Deletes a policy only if it still has the revision reviewed by the
     /// caller. This is used when removing the corresponding wallet.
     pub fn delete(&mut self, wallet_id: &str, expected_revision: u64) -> Result<()> {
@@ -385,6 +584,26 @@ impl PolicyStore {
         transaction.commit()?;
         Ok(())
     }
+}
+
+fn parse_proposal(
+    wallet_id: &str,
+    source_revision: i64,
+    policy_json: &str,
+    rationale: String,
+    created_at: &str,
+) -> Result<PolicyProposal> {
+    let value = serde_json::from_str(policy_json).context("stored proposal is invalid JSON")?;
+    Ok(PolicyProposal {
+        wallet_id: wallet_id.into(),
+        source_revision: u64::try_from(source_revision)
+            .context("stored proposal revision is invalid")?,
+        policy: WalletPolicy::parse(value).context("stored proposal policy is invalid")?,
+        rationale,
+        created_at: DateTime::parse_from_rfc3339(created_at)
+            .context("stored proposal timestamp is invalid")?
+            .with_timezone(&Utc),
+    })
 }
 
 /// Run `statements` inside one `BEGIN IMMEDIATE` transaction, one statement
@@ -506,6 +725,74 @@ mod tests {
             .unwrap();
         assert_eq!(second.revision, 2);
         assert_eq!(store.get("primary").unwrap().unwrap(), second);
+    }
+
+    #[test]
+    fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let mut store = PolicyStore::open(&path, &key(9)).unwrap();
+        let active = store
+            .put(
+                "primary",
+                &WalletPolicy::require_approval_for_everything(),
+                None,
+            )
+            .unwrap();
+
+        // A proposal against a revision the agent has not read fails.
+        assert!(
+            store
+                .put_proposal(
+                    "primary",
+                    active.revision + 1,
+                    &WalletPolicy::allow_all_with_approval(),
+                    "widen",
+                )
+                .is_err()
+        );
+        // Rationale is required.
+        assert!(
+            store
+                .put_proposal(
+                    "primary",
+                    active.revision,
+                    &WalletPolicy::allow_all_with_approval(),
+                    "   ",
+                )
+                .is_err()
+        );
+
+        let first = store
+            .put_proposal(
+                "primary",
+                active.revision,
+                &WalletPolicy::allow_all_with_approval(),
+                "enable automatic signing",
+            )
+            .unwrap();
+        assert_eq!(first.source_revision, active.revision);
+        let replacement = store
+            .put_proposal(
+                "primary",
+                active.revision,
+                &WalletPolicy::require_approval_for_everything(),
+                "narrower follow-up proposal",
+            )
+            .unwrap();
+        // The latest proposal prevails: one row per wallet.
+        let stored = store.proposal("primary").unwrap().unwrap();
+        assert_eq!(stored.rationale, replacement.rationale);
+        assert_eq!(store.list_proposals().unwrap().len(), 1);
+
+        // Applying with the bound revision succeeds exactly once.
+        let applied = store
+            .put("primary", &stored.policy, Some(stored.source_revision))
+            .unwrap();
+        assert_eq!(applied.revision, active.revision + 1);
+        assert!(store.delete_proposal("primary").unwrap());
+        assert!(!store.delete_proposal("primary").unwrap());
+        assert!(store.proposal("primary").unwrap().is_none());
     }
 
     #[test]

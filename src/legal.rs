@@ -12,21 +12,21 @@
 //! uses, so the disclosed endpoints cannot drift from a release's real
 //! defaults; changing a default RPC changes the document digest and forces
 //! re-acceptance.
+//!
+//! Acceptance records live in the authenticated encrypted database, not in a
+//! plain file, so an agent with filesystem access cannot forge acceptance.
 
+use crate::policy_store::PolicyStore;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
+use rusqlite::OptionalExtension;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
-use std::{
-    fmt::Write as _,
-    fs,
-    io::Write as _,
-    path::{Path, PathBuf},
-};
-use tempfile::NamedTempFile;
+use std::{fmt::Write as _, fs, path::Path};
 
-const ACCEPTANCE_FILE: &str = "legal.json";
+/// The pre-database acceptance file, deleted on sight.
+const LEGACY_ACCEPTANCE_FILE: &str = "legal.json";
 
 /// Shipped attribution document for third-party dependencies. Regenerate with
 /// `contrib/generate-third-party-licenses.py`; `tests/shipped_assets.rs`
@@ -134,11 +134,12 @@ TOOLING.
 
 ## 5. Local data
 
-Keys stay in the operating system credential store. Policies and transaction
-lifecycle records are stored in an encrypted local database. Token metadata,
-the address book, and legal acceptance records are stored unencrypted in the
-wallet data directory. Nothing in this section leaves your machine except as
-described in sections 2 and 4.
+Keys stay in the operating system credential store. Policies, transaction
+lifecycle records, token metadata, the address book, legal acceptance
+records, and pending policy proposals are stored in an encrypted local
+database. Wallet metadata and network configuration, including the RPC URLs
+you configure, are stored unencrypted in the wallet data directory. Nothing
+in this section leaves your machine except as described in sections 2 and 4.
 
 ## 6. Acknowledgment
 
@@ -206,15 +207,6 @@ pub struct AcceptanceRecord {
     pub accepted_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct AcceptanceFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    terms_of_service: Option<AcceptanceRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    privacy_policy: Option<AcceptanceRecord>,
-}
-
 /// Acceptance state of one document, as reported to the CLI and MCP.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DocumentStatus {
@@ -236,55 +228,52 @@ pub struct LegalStatus {
     pub privacy_policy: DocumentStatus,
 }
 
-#[derive(Clone, Debug)]
+/// Acceptance state, stored in the authenticated encrypted database so that
+/// nothing outside this process — in particular an agent with file access —
+/// can forge acceptance by writing a file.
 pub struct LegalStore {
-    file: PathBuf,
+    database: PolicyStore,
 }
 
 impl LegalStore {
+    pub fn production(data_dir: &Path) -> Result<Self> {
+        // Acceptance recorded by pre-database builds lived in a plain JSON
+        // file, which is exactly the forgeable state this store replaces.
+        // Remove it; those installations re-accept once.
+        let _ = fs::remove_file(data_dir.join(LEGACY_ACCEPTANCE_FILE));
+        Ok(Self {
+            database: PolicyStore::production(data_dir)?,
+        })
+    }
+
     #[must_use]
-    pub fn new(data_dir: &Path) -> Self {
-        Self {
-            file: data_dir.join(ACCEPTANCE_FILE),
-        }
+    pub const fn new(database: PolicyStore) -> Self {
+        Self { database }
     }
 
-    fn load(&self) -> Result<AcceptanceFile> {
-        if !self.file.exists() {
-            return Ok(AcceptanceFile::default());
-        }
-        let bytes = fs::read(&self.file)
-            .with_context(|| format!("failed to read {}", self.file.display()))?;
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("failed to parse {}", self.file.display()))
-    }
-
-    fn save(&self, state: &AcceptanceFile) -> Result<()> {
-        let directory = self
-            .file
-            .parent()
-            .context("legal acceptance file has no parent directory")?;
-        fs::create_dir_all(directory)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-        }
-        let mut temporary = NamedTempFile::new_in(directory)
-            .context("failed to create temporary acceptance file")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o600))?;
-        }
-        serde_json::to_writer_pretty(&mut temporary, state)?;
-        temporary.write_all(b"\n")?;
-        temporary.as_file().sync_all()?;
-        temporary
-            .persist(&self.file)
-            .map_err(|error| error.error)
-            .with_context(|| format!("failed to replace {}", self.file.display()))?;
-        Ok(())
+    fn record(&self, document: LegalDocument) -> Result<Option<AcceptanceRecord>> {
+        let key = match document {
+            LegalDocument::TermsOfService => "terms_of_service",
+            LegalDocument::PrivacyPolicy => "privacy_policy",
+            LegalDocument::ThirdPartyLicenses => return Ok(None),
+        };
+        self.database
+            .connection
+            .query_row(
+                "SELECT digest, accepted_at FROM legal_acceptance WHERE document = ?1",
+                [key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .map(|(digest, accepted_at)| {
+                Ok(AcceptanceRecord {
+                    digest,
+                    accepted_at: DateTime::parse_from_rfc3339(&accepted_at)
+                        .context("stored acceptance timestamp is invalid")?
+                        .with_timezone(&Utc),
+                })
+            })
+            .transpose()
     }
 
     /// Record acceptance of the current revision of one document. The digest
@@ -300,27 +289,31 @@ impl LegalStore {
             "the reviewed {} text is not the current revision; read it again before accepting",
             document.title()
         );
-        let record = AcceptanceRecord {
-            digest: document.digest(),
-            accepted_at: Utc::now(),
-        };
-        let mut state = self.load()?;
-        match document {
-            LegalDocument::TermsOfService => state.terms_of_service = Some(record),
-            LegalDocument::PrivacyPolicy => state.privacy_policy = Some(record),
+        let key = match document {
+            LegalDocument::TermsOfService => "terms_of_service",
+            LegalDocument::PrivacyPolicy => "privacy_policy",
             LegalDocument::ThirdPartyLicenses => unreachable!("rejected above"),
-        }
-        self.save(&state)
+        };
+        self.database.connection.execute(
+            "INSERT INTO legal_acceptance(document, digest, accepted_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(document) DO UPDATE SET
+                 digest = excluded.digest,
+                 accepted_at = excluded.accepted_at",
+            rusqlite::params![key, document.digest(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
     }
 
     pub fn status(&self) -> Result<LegalStatus> {
-        let state = self.load()?;
         let terms_of_service = document_status(
             LegalDocument::TermsOfService,
-            state.terms_of_service.as_ref(),
+            self.record(LegalDocument::TermsOfService)?.as_ref(),
         );
-        let privacy_policy =
-            document_status(LegalDocument::PrivacyPolicy, state.privacy_policy.as_ref());
+        let privacy_policy = document_status(
+            LegalDocument::PrivacyPolicy,
+            self.record(LegalDocument::PrivacyPolicy)?.as_ref(),
+        );
         Ok(LegalStatus {
             signing_allowed: terms_of_service.accepted && privacy_policy.accepted,
             terms_of_service,
@@ -347,7 +340,12 @@ fn document_status(document: LegalDocument, record: Option<&AcceptanceRecord>) -
 /// `wallet_get_legal` (the privacy policy governs even read-only RPC and
 /// agent data exposure), and the signing paths repeat it as defense in depth.
 pub fn require_current_acceptance(data_dir: &Path) -> Result<()> {
-    let status = LegalStore::new(data_dir).status()?;
+    require_status_allows_use(&LegalStore::production(data_dir)?.status()?)
+}
+
+/// The shared refusal for unaccepted documents, usable with an already-open
+/// store (the MCP server holds one rather than reopening per tool call).
+pub fn require_status_allows_use(status: &LegalStatus) -> Result<()> {
     ensure!(
         status.signing_allowed,
         "this wallet is disabled until the user accepts the current Terms of Service and Privacy \
@@ -394,12 +392,21 @@ mod tests {
         assert!(TERMS_OF_SERVICE.contains("USING AN AGENT"));
     }
 
+    fn store() -> (tempfile::TempDir, LegalStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let database = PolicyStore::open(
+            &directory.path().join("policies.db"),
+            &crate::policy_store::DatabaseKey::new([7; 32]),
+        )
+        .unwrap();
+        (directory, LegalStore::new(database))
+    }
+
     #[test]
     fn signing_requires_both_current_documents() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = LegalStore::new(directory.path());
+        let (_directory, store) = store();
         assert!(!store.status().unwrap().signing_allowed);
-        assert!(require_current_acceptance(directory.path()).is_err());
+        assert!(require_status_allows_use(&store.status().unwrap()).is_err());
 
         store
             .record_acceptance(
@@ -408,7 +415,7 @@ mod tests {
             )
             .unwrap();
         assert!(!store.status().unwrap().signing_allowed);
-        assert!(require_current_acceptance(directory.path()).is_err());
+        assert!(require_status_allows_use(&store.status().unwrap()).is_err());
 
         store
             .record_acceptance(
@@ -419,13 +426,12 @@ mod tests {
         let status = store.status().unwrap();
         assert!(status.signing_allowed);
         assert!(status.terms_of_service.accepted_at.is_some());
-        require_current_acceptance(directory.path()).unwrap();
+        require_status_allows_use(&status).unwrap();
     }
 
     #[test]
     fn stale_digests_cannot_be_recorded_and_stale_acceptance_is_superseded() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = LegalStore::new(directory.path());
+        let (_directory, store) = store();
         assert!(
             store
                 .record_acceptance(LegalDocument::TermsOfService, "0xdeadbeef")
@@ -440,15 +446,16 @@ mod tests {
                 .is_err()
         );
 
-        // Simulate acceptance of a previous revision by writing it directly.
+        // Simulate acceptance of a previous revision by writing the row
+        // directly, as a build shipping older document text would have.
         store
-            .save(&AcceptanceFile {
-                terms_of_service: Some(AcceptanceRecord {
-                    digest: "0xoutdated".into(),
-                    accepted_at: Utc::now(),
-                }),
-                privacy_policy: None,
-            })
+            .database
+            .connection
+            .execute(
+                "INSERT INTO legal_acceptance(document, digest, accepted_at)
+                 VALUES ('terms_of_service', '0xoutdated', ?1)",
+                [Utc::now().to_rfc3339()],
+            )
             .unwrap();
         let status = store.status().unwrap();
         assert!(!status.terms_of_service.accepted);

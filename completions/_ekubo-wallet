@@ -13,7 +13,7 @@ _ekubo-wallet() {
     case "$words[2]" in
       wallet) _values "wallet command" list create import export remove ;;
       network) _values "network command" list presets reset add remove delete ;;
-      policy) _values "policy command" show set allow-all require-approval validate schema ;;
+      policy) _values "policy command" show set allow-all require-approval validate schema review ;;
       transaction|tx) _values "transaction command" list show ;;
       token) _values "token command" list ;;
       address-book) _values "address book command" list add remove delete ;;
@@ -30,7 +30,7 @@ _ekubo-wallet() {
   if (( CURRENT == 4 )); then
     case "$words[2]:$words[3]" in
       policy:validate) _files -g '*.json' ;;
-      wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|transaction:list|tx:list)
+      wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:list|tx:list)
         choices=("${(@f)$(ekubo-wallet __complete wallets-described 2>/dev/null)}")
         _describe "wallet" choices
         ;;

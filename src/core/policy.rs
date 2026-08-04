@@ -585,6 +585,286 @@ fn evaluate_target_calldata(
     }
 }
 
+/// The JSON Schema for policy documents, derived from the enforced types so
+/// it cannot drift from what the wallet actually accepts.
+#[must_use]
+pub fn json_schema() -> Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(WalletPolicy))
+        .expect("policy schema serializes");
+    if let Some(object) = schema.as_object_mut() {
+        object.insert("title".into(), Value::String("Ekubo Wallet policy".into()));
+        object.insert(
+            "description".into(),
+            Value::String(
+                "Stateless per-transaction signing policy. Amounts are decimal strings in the \
+                 asset's smallest unit. There are no daily limits, rolling windows, or spend \
+                 counters."
+                    .into(),
+            ),
+        );
+    }
+    schema
+}
+
+/// A minimized, human-readable diff of what the proposed policy permits
+/// relative to the current one. Each line is one permission-level change,
+/// prefixed `+` (granted), `-` (removed), or `~` (changed), so a reviewer
+/// reads exactly what signing authority they are about to add or take away
+/// without comparing JSON documents.
+#[must_use]
+pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<String> {
+    let mut lines = Vec::new();
+    if current.require_simulation != proposed.require_simulation {
+        lines.push(format!(
+            "~ require_simulation: {} → {}",
+            current.require_simulation, proposed.require_simulation
+        ));
+    }
+    if current.approval_expiry_seconds != proposed.approval_expiry_seconds {
+        lines.push(format!(
+            "~ approval expiry: {}s → {}s",
+            current.approval_expiry_seconds, proposed.approval_expiry_seconds
+        ));
+    }
+    let chain_keys: BTreeSet<&String> = current
+        .chains
+        .keys()
+        .chain(proposed.chains.keys())
+        .collect();
+    for key in chain_keys {
+        let label = if key == "*" { "every chain (*)" } else { key };
+        match (current.chains.get(key), proposed.chains.get(key)) {
+            (None, Some(next)) => {
+                for grant in chain_grants(next) {
+                    lines.push(format!("+ chain {label}: {grant}"));
+                }
+            }
+            (Some(previous), None) => {
+                for grant in chain_grants(previous) {
+                    lines.push(format!("- chain {label}: {grant}"));
+                }
+            }
+            (Some(previous), Some(next)) if previous != next => {
+                diff_chain(&mut lines, label, previous, next);
+            }
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        lines.push("No permission changes: the proposed policy is identical.".into());
+    }
+    lines
+}
+
+fn amount_text(value: &str) -> String {
+    if value == MAX_UINT256 {
+        "unlimited".into()
+    } else {
+        value.into()
+    }
+}
+
+fn target_grant(target: &str, rule: &TargetPolicy) -> String {
+    let mut parts = Vec::new();
+    if rule.allow_any_calldata {
+        parts.push("any calldata".to_string());
+    } else if !rule.allowed_selectors.is_empty() {
+        parts.push(format!(
+            "selectors {}",
+            rule.allowed_selectors
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if rule.allow_empty_calldata {
+        parts.push("empty calldata (plain native sends)".to_string());
+    }
+    if parts.is_empty() {
+        parts.push("no calldata".to_string());
+    }
+    format!("call target {target}: {}", parts.join("; "))
+}
+
+fn spender_grant(spender: &str, token: &str, rule: &ApprovalTokenPolicy) -> String {
+    format!(
+        "approvals to spender {spender} for token {token}: up to {}",
+        amount_text(&rule.max_amount)
+    )
+}
+
+fn token_grant(token: &str, rule: &TokenPolicy) -> String {
+    let recipients = if rule.transfer_recipients.is_empty() {
+        "no transfer recipients".to_string()
+    } else {
+        format!(
+            "transfer recipients {}",
+            rule.transfer_recipients
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "token {token}: spend up to {} per transaction; {recipients}",
+        amount_text(&rule.max_spend_per_transaction)
+    )
+}
+
+/// Every permission one chain policy grants, as standalone lines.
+fn chain_grants(chain: &ChainPolicy) -> Vec<String> {
+    let mut grants = Vec::new();
+    if chain.native.max_value_per_transaction != "0" {
+        grants.push(format!(
+            "native value up to {} wei per transaction",
+            amount_text(&chain.native.max_value_per_transaction)
+        ));
+    }
+    grants.push(format!(
+        "up to {} call(s) per batch",
+        chain.max_calls_per_batch
+    ));
+    for (target, rule) in &chain.targets {
+        grants.push(target_grant(target, rule));
+    }
+    for (spender, rule) in &chain.approval_spenders {
+        for (token, token_rule) in &rule.tokens {
+            grants.push(spender_grant(spender, token, token_rule));
+        }
+    }
+    for (token, rule) in &chain.tokens {
+        grants.push(token_grant(token, rule));
+    }
+    grants
+}
+
+fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next: &ChainPolicy) {
+    if previous.native.max_value_per_transaction != next.native.max_value_per_transaction {
+        lines.push(format!(
+            "~ chain {label}: native value per transaction {} → {}",
+            amount_text(&previous.native.max_value_per_transaction),
+            amount_text(&next.native.max_value_per_transaction),
+        ));
+    }
+    if previous.max_calls_per_batch != next.max_calls_per_batch {
+        lines.push(format!(
+            "~ chain {label}: calls per batch {} → {}",
+            previous.max_calls_per_batch, next.max_calls_per_batch
+        ));
+    }
+    if previous.approval_expiry_seconds != next.approval_expiry_seconds {
+        lines.push(format!(
+            "~ chain {label}: approval expiry {:?} → {:?}",
+            previous.approval_expiry_seconds, next.approval_expiry_seconds
+        ));
+    }
+
+    let targets: BTreeSet<&String> = previous.targets.keys().chain(next.targets.keys()).collect();
+    for target in targets {
+        match (previous.targets.get(target), next.targets.get(target)) {
+            (None, Some(rule)) => {
+                lines.push(format!("+ chain {label}: {}", target_grant(target, rule)));
+            }
+            (Some(rule), None) => {
+                lines.push(format!("- chain {label}: {}", target_grant(target, rule)));
+            }
+            (Some(old), Some(new)) if old != new => lines.push(format!(
+                "~ chain {label}: {} (was: {})",
+                target_grant(target, new),
+                target_grant(target, old),
+            )),
+            _ => {}
+        }
+    }
+
+    let spenders: BTreeSet<&String> = previous
+        .approval_spenders
+        .keys()
+        .chain(next.approval_spenders.keys())
+        .collect();
+    for spender in spenders {
+        let old_tokens = previous
+            .approval_spenders
+            .get(spender)
+            .map(|rule| &rule.tokens);
+        let new_tokens = next.approval_spenders.get(spender).map(|rule| &rule.tokens);
+        let tokens: BTreeSet<&String> = old_tokens
+            .into_iter()
+            .flat_map(BTreeMap::keys)
+            .chain(new_tokens.into_iter().flat_map(BTreeMap::keys))
+            .collect();
+        for token in tokens {
+            let old = old_tokens.and_then(|tokens| tokens.get(token));
+            let new = new_tokens.and_then(|tokens| tokens.get(token));
+            match (old, new) {
+                (None, Some(rule)) => {
+                    lines.push(format!(
+                        "+ chain {label}: {}",
+                        spender_grant(spender, token, rule)
+                    ));
+                }
+                (Some(rule), None) => {
+                    lines.push(format!(
+                        "- chain {label}: {}",
+                        spender_grant(spender, token, rule)
+                    ));
+                }
+                (Some(old), Some(new)) if old.max_amount != new.max_amount => {
+                    lines.push(format!(
+                        "~ chain {label}: approvals to spender {spender} for token {token}: up to {} (was {})",
+                        amount_text(&new.max_amount),
+                        amount_text(&old.max_amount),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let tokens: BTreeSet<&String> = previous.tokens.keys().chain(next.tokens.keys()).collect();
+    for token in tokens {
+        match (previous.tokens.get(token), next.tokens.get(token)) {
+            (None, Some(rule)) => {
+                lines.push(format!("+ chain {label}: {}", token_grant(token, rule)));
+            }
+            (Some(rule), None) => {
+                lines.push(format!("- chain {label}: {}", token_grant(token, rule)));
+            }
+            (Some(old), Some(new)) if old != new => {
+                if old.max_spend_per_transaction != new.max_spend_per_transaction {
+                    lines.push(format!(
+                        "~ chain {label}: token {token} spend per transaction {} → {}",
+                        amount_text(&old.max_spend_per_transaction),
+                        amount_text(&new.max_spend_per_transaction),
+                    ));
+                }
+                let recipients: BTreeSet<&String> = old
+                    .transfer_recipients
+                    .keys()
+                    .chain(new.transfer_recipients.keys())
+                    .collect();
+                for recipient in recipients {
+                    match (
+                        old.transfer_recipients.contains_key(recipient),
+                        new.transfer_recipients.contains_key(recipient),
+                    ) {
+                        (false, true) => lines.push(format!(
+                            "+ chain {label}: token {token} may transfer to {recipient}"
+                        )),
+                        (true, false) => lines.push(format!(
+                            "- chain {label}: token {token} may transfer to {recipient}"
+                        )),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn error(code: &str, message: String, step: Option<u32>) -> PolicyFinding {
     PolicyFinding {
         severity: FindingSeverity::Error,
@@ -843,6 +1123,71 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn policy_diff_is_minimized_and_permission_level() {
+        let current = WalletPolicy::require_approval_for_everything();
+        let proposed = WalletPolicy::parse(json!({
+            "chains": {
+                "*": {
+                    "max_calls_per_batch": 1,
+                    "native": { "max_value_per_transaction": "0" }
+                },
+                "1": {
+                    "max_calls_per_batch": 4,
+                    "native": { "max_value_per_transaction": "1000000000000000000" },
+                    "approval_spenders": {
+                        "0x000000000022d473030f116ddee9f6b43ac78ba3": {
+                            "tokens": {
+                                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+                                    "max_amount": "5000000"
+                                }
+                            }
+                        }
+                    },
+                    "tokens": {
+                        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+                            "max_spend_per_transaction": "5000000",
+                            "transfer_recipients": {
+                                "0x3333333333333333333333333333333333333333": {}
+                            }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let diff = diff_policies(&current, &proposed);
+        assert!(
+            diff.iter()
+                .any(|line| line.starts_with("+ chain 1:") && line.contains("native value up to"))
+        );
+        assert!(diff.iter().any(|line| {
+            line.contains("approvals to spender 0x000000000022d473030f116ddee9f6b43ac78ba3")
+                && line.contains("up to 5000000")
+        }));
+        assert!(diff.iter().any(|line| line.contains("transfer recipients")
+            && line.contains("0x3333333333333333333333333333333333333333")));
+        // The unchanged wildcard chain contributes nothing.
+        assert!(!diff.iter().any(|line| line.contains("every chain (*)")));
+
+        // Identical documents diff to an explicit no-change line.
+        let unchanged = diff_policies(&current, &current);
+        assert_eq!(unchanged.len(), 1);
+        assert!(unchanged[0].contains("identical"));
+
+        // Removing a grant shows as a removal, and unlimited reads as a word.
+        let allow_all = WalletPolicy::allow_all_with_approval();
+        let shrink = diff_policies(&allow_all, &current);
+        assert!(
+            shrink
+                .iter()
+                .any(|line| line.starts_with("- chain every chain (*)")
+                    || line.starts_with("- chain"))
+        );
+        assert!(shrink.iter().any(|line| line.contains("unlimited")));
     }
 
     #[test]
