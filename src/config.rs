@@ -224,13 +224,13 @@ pub fn default_data_dir() -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     return Ok(base
         .home_dir()
-        .join("Library/Application Support/org.ekubo.wallet-mcp"));
+        .join("Library/Application Support/org.ekubo.secure-wallet-mcp"));
     #[cfg(target_os = "windows")]
-    return Ok(base.data_local_dir().join("Ekubo/wallet-mcp"));
+    return Ok(base.data_local_dir().join("Ekubo/secure-wallet-mcp"));
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Ok(env::var_os("XDG_STATE_HOME")
         .map_or_else(|| base.home_dir().join(".local/state"), PathBuf::from)
-        .join("ekubo-wallet-mcp"))
+        .join("ekubo-secure-wallet-mcp"))
 }
 
 #[must_use]

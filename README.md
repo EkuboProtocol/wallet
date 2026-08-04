@@ -452,13 +452,16 @@ delegation designator are rejected.
 ## Local storage
 
 `EKUBO_WALLET_HOME`, when set, is the complete data directory. Otherwise the
-platform defaults are:
+platform defaults are below. They are deliberately distinct from the
+TypeScript `wallet-mcp-server` directories and keychain entries: the storage
+formats are incompatible, and the two servers must never read each other's
+state.
 
 | Platform | Data directory | Encrypted database |
 | --- | --- | --- |
-| macOS | `~/Library/Application Support/org.ekubo.wallet-mcp` | `policies.db` |
-| Linux | `${XDG_STATE_HOME}/ekubo-wallet-mcp`, or `~/.local/state/ekubo-wallet-mcp` | `policies.db` |
-| Windows | `%LOCALAPPDATA%\Ekubo\wallet-mcp` | `policies.db` |
+| macOS | `~/Library/Application Support/org.ekubo.secure-wallet-mcp` | `policies.db` |
+| Linux | `${XDG_STATE_HOME}/ekubo-secure-wallet-mcp`, or `~/.local/state/ekubo-secure-wallet-mcp` | `policies.db` |
+| Windows | `%LOCALAPPDATA%\Ekubo\secure-wallet-mcp` | `policies.db` |
 
 The unencrypted `tokens.db` in the same directory holds the public token
 database described above; it contains no security state.
@@ -473,8 +476,8 @@ those persisted bytes. Inspect the ledger with `ekubo-wallet transaction list`
 and `ekubo-wallet transaction show <request-id-or-hash>`.
 
 The random 256-bit database key is stored separately under credential-service
-name `org.ekubo.wallet-mcp.policy-database-key.v1`. Wallet private keys use
-`org.ekubo.wallet-mcp.private-key.v1` and the wallet ID as their account. The
+name `org.ekubo.secure-wallet-mcp.policy-database-key.v1`. Wallet private keys use
+`org.ekubo.secure-wallet-mcp.private-key.v1` and the wallet ID as their account. The
 unencrypted `config.json` in the same data directory contains wallet metadata
 and network configuration, including RPC URLs; it contains no private key.
 

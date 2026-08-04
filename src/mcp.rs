@@ -58,7 +58,12 @@ impl WalletMcpServer {
         let configured = config.load()?;
         ensure!(
             configured.wallets.is_empty() || config.data_dir().join("policies.db").is_file(),
-            "wallet metadata exists but the encrypted policy database is missing"
+            "{} lists wallets but {} does not exist. If a wallet was created or imported while \
+             policy initialization failed, repair it with `ekubo-wallet policy require-approval \
+             <wallet-id>` or remove it with `ekubo-wallet wallet remove <wallet-id>`. If this \
+             directory belongs to different wallet software, point EKUBO_WALLET_HOME elsewhere.",
+            config.data_dir().join("config.json").display(),
+            config.data_dir().join("policies.db").display(),
         );
         let policies = PolicyStore::production(config.data_dir())?;
         let pending = PendingStore::production(config.data_dir())?;

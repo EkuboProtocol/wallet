@@ -18,7 +18,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 const SCHEMA_VERSION: i64 = 5;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
-const KEYRING_SERVICE: &str = "org.ekubo.wallet-mcp.policy-database-key.v1";
+const KEYRING_SERVICE: &str = "org.ekubo.secure-wallet-mcp.policy-database-key.v1";
 const KEYRING_USER: &str = "default";
 
 /// A raw 256-bit `SQLCipher` key. Debug output never exposes its contents.
