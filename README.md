@@ -222,21 +222,27 @@ chain IDs without seeing provider credentials.
 | CLI name | Chain ID | Max transaction gas | Default public RPC |
 | --- | ---: | ---: | --- |
 | `ethereum` | 1 | 16,777,216 | `https://ethereum-rpc.publicnode.com` |
-| `base` | 8453 | 16,777,216 | `https://base.gateway.tenderly.co` |
+| `base` | 8453 | 16,777,216 | `https://mainnet.base.org` |
 | `arbitrum` | 42161 | 32,000,000 | `https://arb1.arbitrum.io/rpc` |
 | `robinhood` | 4663 | 32,000,000 | `https://rpc.mainnet.chain.robinhood.com` |
 | `monad` | 143 | 30,000,000 | `https://rpc.monad.xyz` |
 | `ink` | 57073 | 16,777,216 | `https://rpc-gel.inkonchain.com` |
-| `polygon` | 137 | 32,000,000 | `https://polygon.drpc.org` |
 | `optimism` | 10 | 16,777,216 | `https://mainnet.optimism.io` |
 | `gnosis` | 100 | 16,777,216 | `https://rpc.gnosischain.com` |
 | `berachain` | 80094 | 16,777,216 | `https://rpc.berachain.com` |
 
-These endpoints are public, shared, rate-limited, and carry no availability
-guarantee. They are not contacted merely by starting the server. The configured
-RPC must support `eth_simulateV1` including sequential calls, logs,
-native-transfer tracing, and state overrides; it also observes the full
-simulation intent, so prefer a trusted dedicated provider.
+Each is an endpoint its own chain or its operator publishes for wallet use, so
+what you are connecting to is documented somewhere you can read rather than
+aggregated from a directory. They are public, shared, rate-limited, and carry
+no availability guarantee. They are not contacted merely by starting the
+server. The configured RPC must support `eth_simulateV1` including sequential
+calls, logs, native-transfer tracing, and state overrides; it also observes the
+full simulation intent, so prefer a trusted dedicated provider.
+
+Monad's published endpoint does not implement `eth_simulateV1`, so nothing can
+be simulated there and nothing signs automatically: every plan fails simulation
+and queues for explicit approval. Point that chain at a provider that supports
+the method before using it.
 
 `network add` starts from whatever already describes the chain — the
 configured network with that name or alias, otherwise the built-in preset — so

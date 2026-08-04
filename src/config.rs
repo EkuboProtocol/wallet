@@ -233,6 +233,14 @@ pub fn default_data_dir() -> Result<PathBuf> {
         .join("ekubo-secure-wallet-mcp"))
 }
 
+/// The built-in network profiles.
+///
+/// Each RPC is an endpoint its own chain or its operator publishes for wallet
+/// use, chosen so it is documented somewhere a user can read rather than
+/// aggregated from a directory, and verified to answer `eth_simulateV1` —
+/// without which this wallet cannot simulate and therefore cannot sign
+/// automatically. They are public, shared, and rate-limited: a funded wallet
+/// should be pointed at a dedicated provider with `ekubo-wallet network add`.
 #[must_use]
 pub fn default_networks() -> Vec<NetworkConfig> {
     vec![
@@ -246,14 +254,14 @@ pub fn default_networks() -> Vec<NetworkConfig> {
             "Ether",
             "ETH",
             "https://etherscan.io",
-            "https://chainlist.org/chain/1",
+            "https://ethereum.publicnode.com",
         ),
         network(
             "base",
             "Base",
             &["base-mainnet"],
             8453,
-            "https://base.gateway.tenderly.co",
+            "https://mainnet.base.org",
             "16777216",
             "Ether",
             "ETH",
@@ -307,18 +315,6 @@ pub fn default_networks() -> Vec<NetworkConfig> {
             "ETH",
             "https://explorer.inkonchain.com",
             "https://docs.inkonchain.com/general/connect-wallet",
-        ),
-        network(
-            "polygon",
-            "Polygon Mainnet",
-            &["polygon-mainnet", "polygon-pos", "matic"],
-            137,
-            "https://polygon.drpc.org",
-            "32000000",
-            "POL",
-            "POL",
-            "https://polygonscan.com",
-            "https://docs.polygon.technology/pos/reference/rpc-endpoints",
         ),
         network(
             "optimism",

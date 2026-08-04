@@ -23,11 +23,9 @@ jobs:
     name: Live RPC conformance
     runs-on: ubuntu-24.04
     env:
+      # No per-chain overrides: this job exists to prove the endpoints that
+      # actually ship still work.
       EKUBO_WALLET_LIVE_RPC_TESTS: "1"
-      # Base's default profile endpoint throttles eth_simulateV1 hard enough
-      # that a fork replay cannot complete. Base's own public endpoint is used
-      # here instead; it needs no credential.
-      EKUBO_WALLET_LIVE_RPC_8453: https://mainnet.base.org
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

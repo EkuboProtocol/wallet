@@ -28,6 +28,8 @@
 
 use alloy::{
     primitives::{Address, U256, address},
+    providers::{Provider, ProviderBuilder},
+    rpc::types::simulate::{SimBlock, SimulatePayload},
     sol,
     sol_types::SolCall,
 };
@@ -52,6 +54,10 @@ use std::{future::Future, time::Duration};
 /// then read that state back.
 const PERMIT2: Address = address!("000000000022D473030F116dDEE9F6B43aC78BA3");
 const MULTICALL3: Address = address!("cA11bde05977b3631167028862bE2a173976CA11");
+/// The canonical Calibur implementation every atomic batch delegates to. It
+/// is not deployed on every default network, and where it is missing a
+/// multi-call plan must fail loudly rather than quietly become something else.
+const CANONICAL_CALIBUR: Address = address!("000000005c84F8Fd50b21CAC312528A64437030e");
 
 sol! {
     function approve(address token, address spender, uint160 amount, uint48 expiration) external;
@@ -395,9 +401,12 @@ async fn status_and_balances_read(network: &NetworkConfig) {
         read_token_balances(network, sender(), &tokens, None)
     })
     .await;
-    assert_eq!(
-        balances.source, "token_data_fetcher",
-        "the Ekubo lens is deployed on every default network"
+    // Either read path is correct; which one answers depends on whether the
+    // Ekubo lens is deployed on this chain, and both must work.
+    assert!(
+        ["token_data_fetcher", "multicall_balance_of"].contains(&balances.source.as_str()),
+        "unexpected balance source {}",
+        balances.source
     );
     assert!(balances.block_number.parse::<u64>().unwrap() > 0);
     assert!(
@@ -407,7 +416,83 @@ async fn status_and_balances_read(network: &NetworkConfig) {
     );
 }
 
-async fn one_shot_simulation_covers_direct_and_batch(network: &NetworkConfig) {
+/// What this chain's published endpoint can actually do.
+///
+/// Both of these are properties of the chain and its RPC, not of the wallet,
+/// and both change what correct behaviour looks like — so they are probed
+/// rather than baked into a table that would quietly rot.
+#[derive(Clone, Copy, Debug)]
+struct Capabilities {
+    simulate: bool,
+    calibur: bool,
+}
+
+async fn capabilities(network: &NetworkConfig) -> Capabilities {
+    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let calibur = retrying("calibur code", || async {
+        Ok(provider.get_code_at(CANONICAL_CALIBUR).await?)
+    })
+    .await;
+    let payload = SimulatePayload {
+        block_state_calls: vec![SimBlock::default()],
+        trace_transfers: false,
+        validation: false,
+        return_full_transactions: false,
+    };
+    let simulate = match provider.simulate(&payload).await {
+        Ok(_) => true,
+        Err(error) => {
+            let text = error.to_string().to_ascii_lowercase();
+            let unsupported = text.contains("not supported")
+                || text.contains("method not found")
+                || text.contains("unsupported")
+                || text.contains("does not exist");
+            assert!(
+                unsupported,
+                "eth_simulateV1 failed on chain {} for a reason other than being unimplemented: {error}",
+                network.chain_id
+            );
+            false
+        }
+    };
+    Capabilities {
+        simulate,
+        calibur: !calibur.is_empty(),
+    }
+}
+
+/// A chain whose RPC cannot simulate cannot be signed for automatically. The
+/// wallet must say so rather than let an unsimulated plan through.
+async fn simulation_failure_is_reported_and_blocks_signing(network: &NetworkConfig) {
+    let result = simulate_execution(
+        &wallet(),
+        network,
+        &approve_plan(network.chain_id, spender(), 1_000),
+        &policy(),
+        None,
+    )
+    .await
+    .expect("simulation returns a result even when the RPC cannot simulate");
+    assert!(!result.simulation.success);
+    assert!(
+        !result.allowed,
+        "an unsimulated plan must never be allowed on chain {}",
+        network.chain_id
+    );
+    assert!(
+        result
+            .policy_findings
+            .iter()
+            .any(|finding| finding.code == "simulation_failed"),
+        "chain {} must report why it could not simulate: {result:#?}",
+        network.chain_id
+    );
+}
+
+async fn one_shot_simulation_covers_direct_and_batch(
+    network: &NetworkConfig,
+    capabilities: Capabilities,
+) {
     let direct = simulate_retrying(
         network,
         &approve_plan(network.chain_id, spender(), 1_000),
@@ -428,19 +513,35 @@ async fn one_shot_simulation_covers_direct_and_batch(network: &NetworkConfig) {
         ],
     );
     let batch = simulate_retrying(network, &batch_plan, None).await;
-    assert!(
-        batch.simulation.success,
-        "canonical Calibur must execute this batch on chain {}: {batch:#?}",
-        network.chain_id
-    );
     assert_eq!(batch.execution_mode, ExecutionMode::CaliburBatch);
-    assert!(
-        batch.will_authorize_delegation,
-        "an undelegated wallet must authorize the canonical delegation"
-    );
+    if capabilities.calibur {
+        assert!(
+            batch.simulation.success,
+            "canonical Calibur must execute this batch on chain {}: {batch:#?}",
+            network.chain_id
+        );
+        assert!(
+            batch.will_authorize_delegation,
+            "an undelegated wallet must authorize the canonical delegation"
+        );
+    } else {
+        // Nothing on this chain can execute an atomic batch, so the wallet
+        // has to name that rather than degrade into unrelated calls.
+        assert!(!batch.simulation.success);
+        assert!(!batch.allowed);
+        let message = batch.simulation.failure.expect("a stated failure").message;
+        assert!(
+            message.contains("Calibur"),
+            "chain {} must say the implementation is missing: {message}",
+            network.chain_id
+        );
+    }
 }
 
-async fn a_fork_carries_state_between_dependent_plans(network: &NetworkConfig) {
+async fn a_fork_carries_state_between_dependent_plans(
+    network: &NetworkConfig,
+    capabilities: Capabilities,
+) {
     let chain_id = network.chain_id;
     let (mut store, session) = open_fork(network).await;
     let parent = session.parent.number;
@@ -492,28 +593,36 @@ async fn a_fork_carries_state_between_dependent_plans(network: &NetworkConfig) {
     );
 
     // A Calibur batch replays through the delegation designator override, so
-    // the state it writes has to survive replay like any other step.
-    let batch = plan(
-        chain_id,
-        vec![
-            approve_call(other_spender(), 333_000),
-            approve_call(spender(), 444_000),
-        ],
-    );
-    let (result, session) = simulate_on_fork(network, &mut store, &session, &batch).await;
-    assert_eq!(result.execution_mode, ExecutionMode::CaliburBatch);
-    assert_eq!(result.fork.expect("fork context").applied_plans, 3);
+    // the state it writes has to survive replay like any other step. Chains
+    // without the implementation deployed never get that far, and their batch
+    // behaviour is asserted by the one-shot battery instead.
+    let session = if capabilities.calibur {
+        let batch = plan(
+            chain_id,
+            vec![
+                approve_call(other_spender(), 333_000),
+                approve_call(spender(), 444_000),
+            ],
+        );
+        let (result, session) = simulate_on_fork(network, &mut store, &session, &batch).await;
+        assert_eq!(result.execution_mode, ExecutionMode::CaliburBatch);
+        assert_eq!(result.fork.expect("fork context").applied_plans, 3);
+        let preface = session.preface();
+        assert!(preface.requires_calibur());
+        assert_eq!(
+            permit2_allowance(network, Some(&preface), other_spender()).await,
+            U256::from(333_000)
+        );
+        assert_eq!(
+            permit2_allowance(network, Some(&preface), spender()).await,
+            U256::from(444_000),
+            "the batch must overwrite what the two earlier plans wrote"
+        );
+        session
+    } else {
+        session
+    };
     let preface = session.preface();
-    assert!(preface.requires_calibur());
-    assert_eq!(
-        permit2_allowance(network, Some(&preface), other_spender()).await,
-        U256::from(333_000)
-    );
-    assert_eq!(
-        permit2_allowance(network, Some(&preface), spender()).await,
-        U256::from(444_000),
-        "the batch must overwrite what the two earlier plans wrote"
-    );
 
     // Balance and status reads route through the same replay.
     let native_only = [Address::ZERO];
@@ -537,11 +646,16 @@ async fn a_fork_carries_state_between_dependent_plans(network: &NetworkConfig) {
         Some(true),
         "a fork never advances the nonce, and must say so"
     );
-    assert_eq!(
-        status.delegated_implementation.as_deref(),
-        Some("0x000000005c84f8fd50b21cac312528a64437030e"),
-        "replaying a batch installs the canonical Calibur designator"
-    );
+    if capabilities.calibur {
+        assert_eq!(
+            status.delegated_implementation.as_deref(),
+            Some("0x000000005c84f8fd50b21cac312528a64437030e"),
+            "replaying a batch installs the canonical Calibur designator"
+        );
+    } else {
+        // With no batch in the fork, the wallet's real code is reported.
+        assert!(status.delegated_implementation.is_none());
+    }
 
     assert!(session.has_capacity());
     assert!(session.plans.len() < MAX_PLANS_PER_FORK);
@@ -562,10 +676,18 @@ async fn run_matrix(chain_id: u64) {
         "chain {chain_id} via {}",
         network.rpc_url.host_str().unwrap()
     );
+    // Reads never depend on chain capabilities and must work everywhere.
     batch_reads_are_pinned_and_decoded(&network).await;
     status_and_balances_read(&network).await;
-    one_shot_simulation_covers_direct_and_batch(&network).await;
-    a_fork_carries_state_between_dependent_plans(&network).await;
+
+    let capabilities = capabilities(&network).await;
+    eprintln!("chain {chain_id} capabilities: {capabilities:?}");
+    if capabilities.simulate {
+        one_shot_simulation_covers_direct_and_batch(&network, capabilities).await;
+        a_fork_carries_state_between_dependent_plans(&network, capabilities).await;
+    } else {
+        simulation_failure_is_reported_and_blocks_signing(&network).await;
+    }
     eprintln!("chain {chain_id} passed");
 }
 
@@ -580,10 +702,17 @@ macro_rules! live_matrix {
     };
 }
 
+// Every default network. The wallet is supposed to behave identically on all
+// of them, and the differences that do exist belong to the chains rather than
+// to this code — so they are probed and asserted, never skipped.
 live_matrix! {
     ethereum => 1,
     optimism => 10,
     base => 8453,
     arbitrum => 42161,
     robinhood => 4663,
+    gnosis => 100,
+    ink => 57073,
+    berachain => 80094,
+    monad => 143,
 }
