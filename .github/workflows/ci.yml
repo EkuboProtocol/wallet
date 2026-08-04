@@ -32,6 +32,11 @@ jobs:
         run: cargo check --locked --all-targets --all-features
 
       - name: Run tests
+        # Also set in .cargo/config.toml for local runs. Repeated here because
+        # the harness runs each test on a spawned thread, and Windows MSVC debug
+        # frames overflow that thread's smaller default stack.
+        env:
+          RUST_MIN_STACK: 16777216
         run: cargo test --locked --all-features
 
   lint:
