@@ -129,55 +129,60 @@ impl PolicyStore {
             verify_integrity(&connection)?;
         }
 
+        // Every statement runs individually. Passing one multi-statement
+        // string to execute_batch overflows the stack on Windows against the
+        // bundled SQLCipher, while the identical statements executed one at a
+        // time succeed; see docs/windows-sqlcipher-overflow.md.
         open_diag!("psopen: schema batch");
-        connection.execute_batch(
-            "BEGIN IMMEDIATE;
-             CREATE TABLE IF NOT EXISTS schema_metadata (
-                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                 version INTEGER NOT NULL
-             ) STRICT;
-             INSERT OR IGNORE INTO schema_metadata(singleton, version) VALUES (1, 0);
-             CREATE TABLE IF NOT EXISTS wallet_policies (
-                 wallet_id TEXT PRIMARY KEY NOT NULL,
-                 policy_json TEXT NOT NULL,
-                 revision INTEGER NOT NULL CHECK (revision > 0),
-                 updated_at TEXT NOT NULL
-             ) STRICT;
-             CREATE TABLE IF NOT EXISTS pending_transactions (
-                 request_id TEXT PRIMARY KEY NOT NULL,
-                 wallet_id TEXT NOT NULL,
-                 network_name TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
-                 plan_json TEXT NOT NULL,
-                 plan_digest TEXT NOT NULL,
-                 policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
-                 status TEXT NOT NULL CHECK (status IN (
-                     'awaiting_approval', 'rejected', 'signed', 'submitting',
-                     'broadcast', 'confirmed', 'reverted', 'expired', 'cancelled'
-                 )),
-                 created_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 serialized_transaction TEXT,
-                 signed_transaction_hash TEXT,
-                 broadcast_transaction_hash TEXT,
-                 block_number TEXT,
-                 CHECK (
-                     (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
-                         AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
-                     OR status <> 'awaiting_approval'
-                 ),
-                 CHECK (
-                     (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
-                     OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
-                 )
-             ) STRICT;
-             CREATE INDEX IF NOT EXISTS pending_transactions_wallet_created
-                 ON pending_transactions(wallet_id, created_at DESC);
-             UPDATE schema_metadata SET version = 2 WHERE singleton = 1 AND version < 2;
-             COMMIT;",
+        run_transaction(
+            &connection,
+            &[
+                "CREATE TABLE IF NOT EXISTS schema_metadata (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     version INTEGER NOT NULL
+                 ) STRICT",
+                "INSERT OR IGNORE INTO schema_metadata(singleton, version) VALUES (1, 0)",
+                "CREATE TABLE IF NOT EXISTS wallet_policies (
+                     wallet_id TEXT PRIMARY KEY NOT NULL,
+                     policy_json TEXT NOT NULL,
+                     revision INTEGER NOT NULL CHECK (revision > 0),
+                     updated_at TEXT NOT NULL
+                 ) STRICT",
+                "CREATE TABLE IF NOT EXISTS pending_transactions (
+                     request_id TEXT PRIMARY KEY NOT NULL,
+                     wallet_id TEXT NOT NULL,
+                     network_name TEXT NOT NULL,
+                     chain_id TEXT NOT NULL,
+                     plan_json TEXT NOT NULL,
+                     plan_digest TEXT NOT NULL,
+                     policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+                     status TEXT NOT NULL CHECK (status IN (
+                         'awaiting_approval', 'rejected', 'signed', 'submitting',
+                         'broadcast', 'confirmed', 'reverted', 'expired', 'cancelled'
+                     )),
+                     created_at TEXT NOT NULL,
+                     expires_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL,
+                     approved_at TEXT,
+                     rejected_at TEXT,
+                     serialized_transaction TEXT,
+                     signed_transaction_hash TEXT,
+                     broadcast_transaction_hash TEXT,
+                     block_number TEXT,
+                     CHECK (
+                         (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
+                             AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                         OR status <> 'awaiting_approval'
+                     ),
+                     CHECK (
+                         (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                         OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
+                     )
+                 ) STRICT",
+                "CREATE INDEX IF NOT EXISTS pending_transactions_wallet_created
+                     ON pending_transactions(wallet_id, created_at DESC)",
+                "UPDATE schema_metadata SET version = 2 WHERE singleton = 1 AND version < 2",
+            ],
         )?;
         let mut version: i64 = connection.query_row(
             "SELECT version FROM schema_metadata WHERE singleton = 1",
@@ -185,40 +190,43 @@ impl PolicyStore {
             |row| row.get(0),
         )?;
         if version == 2 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE pending_transactions
-                     ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 1
-                     CHECK (approval_required IN (0, 1));
-                 CREATE INDEX IF NOT EXISTS pending_transactions_signed_hash
-                     ON pending_transactions(signed_transaction_hash)
-                     WHERE signed_transaction_hash IS NOT NULL;
-                 UPDATE schema_metadata SET version = 3 WHERE singleton = 1;
-                 COMMIT;",
+            run_transaction(
+                &connection,
+                &[
+                    "ALTER TABLE pending_transactions
+                         ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 1
+                         CHECK (approval_required IN (0, 1))",
+                    "CREATE INDEX IF NOT EXISTS pending_transactions_signed_hash
+                         ON pending_transactions(signed_transaction_hash)
+                         WHERE signed_transaction_hash IS NOT NULL",
+                    "UPDATE schema_metadata SET version = 3 WHERE singleton = 1",
+                ],
             )?;
             version = 3;
         }
         if version == 3 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
-                     ON pending_transactions(wallet_id, chain_id)
-                     WHERE status IN ('signed', 'submitting', 'broadcast');
-                 UPDATE schema_metadata SET version = 4 WHERE singleton = 1;
-                 COMMIT;",
+            run_transaction(
+                &connection,
+                &[
+                    "CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
+                         ON pending_transactions(wallet_id, chain_id)
+                         WHERE status IN ('signed', 'submitting', 'broadcast')",
+                    "UPDATE schema_metadata SET version = 4 WHERE singleton = 1",
+                ],
             )?;
             version = 4;
         }
         if version == 4 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                 ALTER TABLE pending_transactions
-                     ADD COLUMN review_digest TEXT;
-                 CREATE UNIQUE INDEX pending_transactions_unique_pending_plan
-                     ON pending_transactions(wallet_id, chain_id, plan_digest)
-                     WHERE status = 'awaiting_approval';
-                 UPDATE schema_metadata SET version = 5 WHERE singleton = 1;
-                 COMMIT;",
+            run_transaction(
+                &connection,
+                &[
+                    "ALTER TABLE pending_transactions
+                         ADD COLUMN review_digest TEXT",
+                    "CREATE UNIQUE INDEX pending_transactions_unique_pending_plan
+                         ON pending_transactions(wallet_id, chain_id, plan_digest)
+                         WHERE status = 'awaiting_approval'",
+                    "UPDATE schema_metadata SET version = 5 WHERE singleton = 1",
+                ],
             )?;
             version = 5;
         }
@@ -348,6 +356,29 @@ impl PolicyStore {
         transaction.commit()?;
         Ok(())
     }
+}
+
+/// Run `statements` inside one `BEGIN IMMEDIATE` transaction, one statement
+/// per `execute_batch` call.
+///
+/// Deliberately not one multi-statement string: preparing such a string
+/// against the bundled `SQLCipher` build overflows the stack on Windows MSVC,
+/// while the identical statements executed individually succeed. The failed
+/// transaction is rolled back so an error never leaves the connection inside
+/// an open transaction.
+fn run_transaction(connection: &Connection, statements: &[&str]) -> Result<()> {
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+    for statement in statements {
+        if let Err(error) = connection.execute_batch(statement) {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(error).context("schema statement failed");
+        }
+    }
+    if let Err(error) = connection.execute_batch("COMMIT") {
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(error).context("schema commit failed");
+    }
+    Ok(())
 }
 
 fn verify_integrity(connection: &Connection) -> Result<()> {
@@ -523,6 +554,45 @@ mod tests {
         drop(connection);
         let reopened = PolicyStore::open(&path, &key(4));
         eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
+    }
+
+    /// Pins the trigger shape: the same statements pass individually but the
+    /// combined multi-statement string overflows on Windows, so this probes
+    /// progressively simpler multi-statement strings.
+    #[test]
+    fn diagnose_multi_statement_shapes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("probe.db");
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        connection
+            .pragma_update(None, "key", key(4).sqlcipher_literal())
+            .unwrap();
+        eprintln!("shape-diagnose: T1 two selects in one string");
+        connection.execute_batch("SELECT 1; SELECT 2;").unwrap();
+        eprintln!("shape-diagnose: T2 begin/commit in one string");
+        connection
+            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
+            .unwrap();
+        eprintln!("shape-diagnose: T3 two creates in one string");
+        connection
+            .execute_batch("CREATE TABLE shape_a(x); CREATE TABLE shape_b(y);")
+            .unwrap();
+        eprintln!("shape-diagnose: T4 transactional create pair in one string");
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE shape_c(x);
+                 CREATE TABLE shape_d(y);
+                 COMMIT;",
+            )
+            .unwrap();
+        eprintln!("shape-diagnose: done");
     }
 
     /// Statement-level split of the schema batch that overflows on Windows.
