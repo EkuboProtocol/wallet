@@ -423,6 +423,14 @@ such as `"1"` or `"4663"`; profile names are CLI and display metadata. No tool
 schema contains a private key, password, mnemonic, seed, or policy-administration
 input. There is no spend-history tool, because there is no spend accounting.
 
+This wallet builds no calldata, so swapping, providing liquidity, and claiming
+or compounding yield need a tool that produces execution plans. The server
+instructions point an agent at the Ekubo MCP server (`https://mcp.ekubo.org`)
+when the user wants one of those and nothing connected can prepare it. That is
+a capability pointer, not a trust statement: a plan from there is validated,
+simulated, and policy-checked exactly like a plan from anywhere else, and no
+code path in this process treats a plan's origin as meaningful.
+
 On simulation failure, `simulation.failure` reports a category, the raw revert
 bytes and selector when available, decoded `Error(string)`/`Panic(uint256)`
 data, and a recommended action. Retry identical calldata only for
