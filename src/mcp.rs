@@ -926,7 +926,8 @@ impl WalletMcpServer {
                 if timed_out {
                     output.status = ExecutionStatus::TimedOut;
                     output.instruction = Some(format!(
-                        "Still awaiting separate human approval. Call wallet_wait_for_approval again with request_id {}; do not ask the user to report approval in chat.",
+                        "Still awaiting human approval; the request expires at {}. Call wallet_wait_for_approval again with request_id {}; do not ask the user to report approval in chat.",
+                        output.expires_at.to_rfc3339(),
                         output.request_id
                     ));
                 }

@@ -531,8 +531,18 @@ fn run_transaction(config: &ConfigStore, command: TransactionCommand) -> Result<
 
 fn list_pending_approvals(config: &ConfigStore) -> Result<()> {
     let pending = PendingStore::production(config.data_dir())?;
+    let awaiting = pending.awaiting_approval(None)?;
+    if awaiting.is_empty() {
+        eprintln!("No requests are awaiting approval.");
+    } else {
+        eprintln!(
+            "{} request(s) awaiting approval. Review one with `ekubo-wallet approve <request-id>`; \
+             unapproved requests expire at their listed expires_at.",
+            awaiting.len()
+        );
+    }
     print_json(&serde_json::json!({
-        "pending_approvals": pending.awaiting_approval(None)?,
+        "pending_approvals": awaiting,
     }))
 }
 
@@ -541,6 +551,7 @@ fn run_reject(config: &ConfigStore, request_id: Option<Uuid>) -> Result<()> {
         return list_pending_approvals(config);
     };
     let request = PendingStore::production(config.data_dir())?.reject(request_id)?;
+    eprintln!("Rejected. An MCP agent waiting on this request sees the rejection automatically.");
     print_json(&serde_json::json!({
         "rejected": request.request_id,
         "digest": request.digest,
@@ -667,6 +678,10 @@ async fn run_approve(
         &signed.serialized_transaction,
         &signed.transaction_hash,
     )?;
+    eprintln!(
+        "Approved and signed. An MCP agent waiting on this request detects the approval and \
+         submits automatically; nothing further is needed here."
+    );
     print_json(&serde_json::json!({
         "approved": approved.request_id,
         "digest": approved.digest,
