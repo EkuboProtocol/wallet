@@ -1137,13 +1137,13 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
     loop {
         // Only one page of records is drawn at a time, so a long history
         // cannot outgrow the screen and scroll it away on every keystroke.
-        let rows = interactive_list_rows();
-        let mut select = cliclack::select(list_prompt(
-            &format!("{} recorded transaction(s)", records.len()),
-            records.len(),
-            rows,
+        // The page height is re-read on every keystroke, so resizing the
+        // terminal mid-prompt repages the list immediately.
+        let mut select = crate::paged_list::PagedSelect::new(format!(
+            "{} recorded transaction(s)",
+            records.len()
         ))
-        .max_rows(rows)
+        .page_rows(interactive_list_rows)
         // Quitting is the first item, so it never requires scrolling to the
         // end of a long history, while the cursor still starts on the newest
         // record.
@@ -1181,18 +1181,11 @@ fn interactive_list_rows() -> usize {
     crate::render::interactive_list_rows(PROMPT_CHROME_ROWS)
 }
 
-/// Say how to move through a list that does not fit on one screen.
-fn list_prompt(title: &str, items: usize, rows: usize) -> String {
-    if items > rows {
-        format!("{title}; ↑/↓ to scroll, {rows} of {items} shown")
-    } else {
-        title.to_owned()
-    }
-}
-
 /// Run one selection prompt, treating Esc and Ctrl+C as "leave the list"
 /// rather than as an error.
-fn interact_or_quit<T: Clone + Eq>(select: &mut cliclack::Select<T>) -> Result<Option<T>> {
+fn interact_or_quit<T: Clone + Eq>(
+    select: &mut crate::paged_list::PagedSelect<T>,
+) -> Result<Option<T>> {
     match select.interact() {
         Ok(choice) => Ok(Some(choice)),
         Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
@@ -3133,17 +3126,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn long_lists_advertise_scrolling_and_short_ones_stay_quiet() {
-        assert_eq!(
-            list_prompt("40 record(s)", 40, 12),
-            "40 record(s); ↑/↓ to scroll, 12 of 40 shown"
-        );
-        assert_eq!(list_prompt("4 record(s)", 4, 12), "4 record(s)");
-        // A list exactly filling the page needs no scrolling hint either.
-        assert_eq!(list_prompt("12 record(s)", 12, 12), "12 record(s)");
-    }
 
     #[test]
     fn interactive_lists_are_sized_to_the_terminal() {

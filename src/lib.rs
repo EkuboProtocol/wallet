@@ -14,6 +14,7 @@ pub mod human_presence;
 pub mod legal;
 pub mod mcp;
 pub mod message;
+pub mod paged_list;
 pub mod pending;
 pub mod policy_store;
 pub mod render;
