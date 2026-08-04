@@ -416,6 +416,77 @@ mod tests {
         DatabaseKey::new([byte; 32])
     }
 
+    /// Temporary Windows-overflow bisection: replays [`PolicyStore::open`] one
+    /// statement at a time so the diagnose workflow's `--nocapture` output
+    /// names the exact `SQLCipher` call that recurses. An in-memory pass runs
+    /// first to separate the crypto path from the filesystem path.
+    #[test]
+    fn diagnose_sqlcipher_open_steps() {
+        eprintln!("sql-diagnose: A1 in-memory open");
+        let memory = Connection::open_in_memory().unwrap();
+        eprintln!("sql-diagnose: A2 in-memory pragma key");
+        memory
+            .pragma_update(None, "key", key(4).sqlcipher_literal())
+            .unwrap();
+        eprintln!("sql-diagnose: A3 in-memory cipher_version");
+        let version: String = memory
+            .pragma_query_value(None, "cipher_version", |row| row.get(0))
+            .unwrap();
+        eprintln!("sql-diagnose: A4 in-memory create table (version {version})");
+        memory.execute_batch("CREATE TABLE probe(x)").unwrap();
+        eprintln!("sql-diagnose: A5 in-memory insert");
+        memory.execute("INSERT INTO probe VALUES (1)", []).unwrap();
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("probe.db");
+        eprintln!("sql-diagnose: B1 file open_with_flags");
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        eprintln!("sql-diagnose: B2 pragma key");
+        connection
+            .pragma_update(None, "key", key(4).sqlcipher_literal())
+            .unwrap();
+        eprintln!("sql-diagnose: B3 cipher_memory_security ON");
+        connection
+            .pragma_update(None, "cipher_memory_security", "ON")
+            .unwrap();
+        eprintln!("sql-diagnose: B4 cipher_version");
+        let _: String = connection
+            .pragma_query_value(None, "cipher_version", |row| row.get(0))
+            .unwrap();
+        eprintln!("sql-diagnose: B5 misc pragmas");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .unwrap();
+        connection
+            .pragma_update(None, "trusted_schema", "OFF")
+            .unwrap();
+        connection
+            .pragma_update(None, "secure_delete", "ON")
+            .unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "DELETE")
+            .unwrap();
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .unwrap();
+        eprintln!("sql-diagnose: B6 create table (first real page write)");
+        connection.execute_batch("CREATE TABLE probe(x)").unwrap();
+        eprintln!("sql-diagnose: B7 insert");
+        connection
+            .execute("INSERT INTO probe VALUES (1)", [])
+            .unwrap();
+        eprintln!("sql-diagnose: B8 reopen existing database");
+        drop(connection);
+        let reopened = PolicyStore::open(&path, &key(4));
+        eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
+    }
+
     #[test]
     fn stores_only_current_policy_with_optimistic_revision() {
         let directory = tempfile::tempdir().unwrap();

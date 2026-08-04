@@ -46,6 +46,14 @@ jobs:
           RUST_BACKTRACE: full
         run: cargo test --locked --lib tests::raised_test_thread_stack_floor_is_in_effect -- --exact --nocapture
 
+      - name: Bisect SQLCipher open statement by statement
+        if: always()
+        shell: bash
+        env:
+          RUST_MIN_STACK: 67108864
+          RUST_BACKTRACE: full
+        run: cargo test --locked --lib policy_store::tests::diagnose_sqlcipher_open_steps -- --exact --nocapture
+
       - name: Bisect server construction step by step
         if: always()
         shell: bash
