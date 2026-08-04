@@ -179,6 +179,47 @@ The private signing key remains in Microsoft's service. GitHub exchanges its
 OIDC identity for a short-lived Azure credential, so there is no Azure password
 or certificate in GitHub.
 
+#### Provisioning state
+
+Steps 1–3 and 5 are done. The `Microsoft.CodeSigning` provider is registered on
+the Ekubo subscription; resource group `ekubo-signing` in `eastus` holds Basic
+Artifact Signing account `ekubo`, whose account URI is
+`https://eus.codesigning.azure.net/`. Entra application
+`ekubo-wallet-release-signing` exists with no client secret and one federated
+credential, `github-release-environment`, whose subject is
+`repo:EkuboProtocol/secure-wallet-mcp-server:environment:release`. The three
+`release` environment secrets are set.
+
+What remains, in order:
+
+1. **Organization identity validation for Ekubo, Inc.** This is the long pole
+   and cannot be scripted: Azure exposes no `identityValidations` ARM resource
+   type, so it exists only in the portal under the signing account's
+   **Identity validation** blade. Microsoft manually verifies the business
+   against public registries, which takes days and generally expects several
+   years of verifiable history. Submitting it needs the **Artifact Signing
+   Identity Verifier** role.
+2. Create the **Public Trust** certificate profile against the resulting
+   identity-validation ID:
+   `az trustedsigning certificate-profile create --account-name ekubo -g ekubo-signing -n <profile> --profile-type PublicTrust --identity-validation-id <id>`
+3. Assign **Artifact Signing Certificate Profile Signer** to the
+   `ekubo-wallet-release-signing` service principal, scoped to that one
+   certificate profile.
+4. Add all three `release` environment **variables** together
+   (`AZURE_ARTIFACT_SIGNING_ENDPOINT`, `AZURE_ARTIFACT_SIGNING_ACCOUNT`,
+   `AZURE_ARTIFACT_SIGNING_PROFILE`).
+
+Add the variables only once the profile exists and the role is assigned. The
+workflow's detection step treats the presence of the endpoint variable plus the
+three secrets as "signing is configured", so setting the endpoint early makes
+every release attempt to sign and fail. With the variables absent, releases
+publish an unsigned Windows binary and say so in their notes, which is the
+correct state while validation is pending.
+
+The `trustedsigning` CLI extension is preview-only; its
+`check-name-availability` subcommand sends a malformed request and always
+fails. Skip it and let `az trustedsigning create` report a name conflict.
+
 ## Release procedure
 
 1. Update `Cargo.toml`, commit through a reviewed pull request, and wait for CI.
