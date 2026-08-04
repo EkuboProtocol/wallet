@@ -3,7 +3,9 @@
 `ekubo-wallet` is a local EVM wallet, command-line tool, and stdio MCP server.
 It enforces transaction policy in the same process that reads the signing key,
 and exposes no arbitrary-message, arbitrary-hash, or raw-transaction signing
-tool. `ew` is an equivalent short command.
+tool. `ew` is an equivalent short name for the same executable — a symlink on
+macOS and Linux and a forwarding shim on Windows — so the OS credential store
+sees one client identity and a single keychain grant covers both names.
 
 It is a general-purpose wallet, not a companion to any particular protocol,
 dapp, or other MCP server. Any tool can produce a signer-neutral execution plan;
@@ -79,7 +81,7 @@ gh attestation verify ekubo-wallet-<version>-<target>.tar.gz \
   --repo EkuboProtocol/secure-wallet-mcp-server
 tar -xzf ekubo-wallet-<version>-<target>.tar.gz
 install -m 0755 ekubo-wallet-<version>-<target>/ekubo-wallet ~/.local/bin/
-install -m 0755 ekubo-wallet-<version>-<target>/ew ~/.local/bin/
+ln -sf ekubo-wallet ~/.local/bin/ew
 ```
 
 macOS archives are `.zip` rather than `.tar.gz`. If a release is published

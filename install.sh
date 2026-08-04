@@ -151,7 +151,6 @@ if [ -n "$LOCAL_SOURCE" ]; then
   SOURCE_DIRECTORY="$WORK_DIRECTORY/local"
   mkdir -p "$SOURCE_DIRECTORY/completions" "$SOURCE_DIRECTORY/contrib/polkit"
   install -m 0755 "$LOCAL_SOURCE/target/release/ekubo-wallet" "$SOURCE_DIRECTORY/ekubo-wallet"
-  install -m 0755 "$LOCAL_SOURCE/target/release/ew" "$SOURCE_DIRECTORY/ew"
   install -m 0644 "$LOCAL_SOURCE"/completions/* "$SOURCE_DIRECTORY/completions/"
   if [ -f "$LOCAL_SOURCE/contrib/polkit/com.ekubo.wallet.policy" ]; then
     install -m 0644 "$LOCAL_SOURCE/contrib/polkit/com.ekubo.wallet.policy" \
@@ -218,15 +217,15 @@ fi
 
 BIN_DIR=${EKUBO_WALLET_BIN_DIR:-$HOME/.local/bin}
 mkdir -p "$BIN_DIR"
-for name in ekubo-wallet ew; do
-  [ -f "$SOURCE_DIRECTORY/$name" ] || continue
-  install -m 0755 "$SOURCE_DIRECTORY/$name" "$BIN_DIR/$name"
-  # Gatekeeper marks anything downloaded as quarantined; the binary is signed
-  # and notarized, so clearing the attribute avoids a spurious first-run block.
-  if [ "$OS" = Darwin ] && command -v xattr >/dev/null 2>&1; then
-    xattr -d com.apple.quarantine "$BIN_DIR/$name" >/dev/null 2>&1 || :
-  fi
-done
+install -m 0755 "$SOURCE_DIRECTORY/ekubo-wallet" "$BIN_DIR/ekubo-wallet"
+# Gatekeeper marks anything downloaded as quarantined; clearing the attribute
+# after verification avoids a spurious first-run block.
+if [ "$OS" = Darwin ] && command -v xattr >/dev/null 2>&1; then
+  xattr -d com.apple.quarantine "$BIN_DIR/ekubo-wallet" >/dev/null 2>&1 || :
+fi
+# `ew` is a symlink, not a second binary: the OS keychain identifies clients
+# by the resolved executable, so one keychain grant covers both names.
+ln -sf ekubo-wallet "$BIN_DIR/ew"
 CLI_BIN="$BIN_DIR/ekubo-wallet"
 log "installed $("$CLI_BIN" version) to $BIN_DIR"
 

@@ -88,7 +88,8 @@ jobs:
           package="ekubo-wallet-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$package"
           install -m 0755 "target/${{ matrix.target }}/release/ekubo-wallet" "dist/$package/ekubo-wallet"
-          install -m 0755 "target/${{ matrix.target }}/release/ew" "dist/$package/ew"
+          # One binary, one keychain identity: ew is a symlink to it.
+          ln -s ekubo-wallet "dist/$package/ew"
           install -m 0644 LICENSE "dist/$package/LICENSE"
           install -m 0644 README.md "dist/$package/README.md"
           mkdir -p "dist/$package/completions" "dist/$package/contrib/polkit"
@@ -137,7 +138,6 @@ jobs:
           set -euo pipefail
           mkdir -p unsigned/completions
           cp "target/${{ matrix.target }}/release/ekubo-wallet${{ runner.os == 'Windows' && '.exe' || '' }}" unsigned/
-          cp "target/${{ matrix.target }}/release/ew${{ runner.os == 'Windows' && '.exe' || '' }}" unsigned/
           cp LICENSE unsigned/LICENSE
           cp README.md unsigned/README.md
           cp completions/* unsigned/completions/
@@ -234,11 +234,9 @@ jobs:
           security list-keychains -d user -s "$keychain_path"
 
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            for name in ekubo-wallet ew; do
-              binary="unsigned/$target/$name"
-              codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$binary"
-              codesign --verify --strict --verbose=2 "$binary"
-            done
+            binary="unsigned/$target/ekubo-wallet"
+            codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$binary"
+            codesign --verify --strict --verbose=2 "$binary"
           done
           printf '%s' "$api_key_path" > "$RUNNER_TEMP/notary-key-path"
 
@@ -254,7 +252,7 @@ jobs:
             package="ekubo-wallet-${{ needs.validate.outputs.version }}-$target"
             mkdir -p "dist/$package"
             install -m 0755 "unsigned/$target/ekubo-wallet" "dist/$package/ekubo-wallet"
-            install -m 0755 "unsigned/$target/ew" "dist/$package/ew"
+            ln -s ekubo-wallet "dist/$package/ew"
             install -m 0644 "unsigned/$target/LICENSE" "dist/$package/LICENSE"
             install -m 0644 "unsigned/$target/README.md" "dist/$package/README.md"
             cp -R "unsigned/$target/completions" "dist/$package/completions"
@@ -345,17 +343,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:EXPECT_SIGNED -eq "true") {
-            foreach ($name in @("ekubo-wallet", "ew")) {
-              $signature = Get-AuthenticodeSignature "unsigned\$name.exe"
-              if ($signature.Status -ne "Valid") {
-                throw "Authenticode verification failed for $name : $($signature.Status)"
-              }
+            $signature = Get-AuthenticodeSignature "unsigned\ekubo-wallet.exe"
+            if ($signature.Status -ne "Valid") {
+              throw "Authenticode verification failed: $($signature.Status)"
             }
           }
           $package = "ekubo-wallet-${{ needs.validate.outputs.version }}-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Force -Path "dist\$package" | Out-Null
           Copy-Item "unsigned\ekubo-wallet.exe" "dist\$package\ekubo-wallet.exe"
-          Copy-Item "unsigned\ew.exe" "dist\$package\ew.exe"
+          # Windows has no reliable archive symlinks; a cmd shim forwards to
+          # the one executable so both names share its signature.
+          Set-Content -Path "dist\$package\ew.cmd" -Value "@echo off`r`n`"%~dp0ekubo-wallet.exe`" %*"
           Copy-Item "unsigned\LICENSE" "dist\$package\LICENSE"
           Copy-Item "unsigned\README.md" "dist\$package\README.md"
           Copy-Item -Recurse "unsigned\completions" "dist\$package\completions"
