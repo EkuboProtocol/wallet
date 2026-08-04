@@ -556,6 +556,56 @@ mod tests {
         eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
     }
 
+    /// Isolates `cipher_memory_security` as the suspected overflow trigger:
+    /// the passing probes all omitted it, and the failing real `open` sets it
+    /// before its first explicit transaction.
+    #[test]
+    fn diagnose_memory_security_transactions() {
+        for memory_security in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("probe.db");
+            let connection = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap();
+            connection
+                .pragma_update(None, "key", key(4).sqlcipher_literal())
+                .unwrap();
+            if memory_security {
+                connection
+                    .pragma_update(None, "cipher_memory_security", "ON")
+                    .unwrap();
+            }
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .unwrap();
+            connection
+                .pragma_update(None, "trusted_schema", "OFF")
+                .unwrap();
+            connection
+                .pragma_update(None, "secure_delete", "ON")
+                .unwrap();
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+            connection
+                .pragma_update(None, "synchronous", "FULL")
+                .unwrap();
+            eprintln!("memsec-diagnose (memory_security={memory_security}): begin");
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            eprintln!("memsec-diagnose (memory_security={memory_security}): create");
+            connection
+                .execute_batch("CREATE TABLE probe(x INTEGER) STRICT")
+                .unwrap();
+            eprintln!("memsec-diagnose (memory_security={memory_security}): commit");
+            connection.execute_batch("COMMIT").unwrap();
+            eprintln!("memsec-diagnose (memory_security={memory_security}): done");
+        }
+    }
+
     /// Pins the trigger shape: the same statements pass individually but the
     /// combined multi-statement string overflows on Windows, so this probes
     /// progressively simpler multi-statement strings.
