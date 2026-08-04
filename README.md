@@ -298,12 +298,31 @@ Call 1 reads as: approve spender 0x1111…1111 for 1000 USDC (1000000000 base un
 Simulated net balance change (excludes live gas): USDC (0xa0b8…eb48): -1000 USDC (-1000000000 base units)
 ```
 
-Standard `approve`, `transfer`, `transferFrom`, `setApprovalForAll`, and
-`multicall(bytes[])` calldata is decoded locally. Token symbols and decimals come
-from bounded, best-effort reads of the configured RPC; when a lookup fails the
-line degrades to exact base units rather than to a guess, and token symbols are
-sanitized so they cannot forge additional review output. Effectively unlimited
-allowances and blanket `setApprovalForAll` grants raise explicit warnings.
+When a vendored [ERC-7730](https://eips.ethereum.org/EIPS/eip-7730)
+clear-signing descriptor matches the exact chain, contract, and function
+selector, the call renders as its declared intent plus labeled, formatted
+fields — token amounts with symbols and decimals, dates, durations, enums, and
+nested multicall actions:
+
+```text
+Call 1 reads as: Swap on Ekubo [Ekubo Protocol — Ekubo MEV-Capture Router]
+Call 1 ·: Pool token 0: 0x1111…
+Call 1 ·: Specified pool token: Token 1
+Call 1 ·: Specified amount: 1000000
+```
+
+Descriptors are vendored in [`clearsign/`](clearsign), embedded at compile
+time, and never fetched from the network; the test suite re-derives every
+selector and validates every display path, so updating the snapshot is a
+reviewed git commit that cannot silently drift.
+
+Otherwise, standard `approve`, `transfer`, `transferFrom`, `setApprovalForAll`,
+and `multicall(bytes[])` calldata is decoded locally. Token symbols and decimals
+come from bounded, best-effort reads of the configured RPC; when a lookup fails
+the line degrades to exact base units rather than to a guess, and all
+descriptor- and token-supplied text is sanitized so it cannot forge additional
+review output. Effectively unlimited allowances and blanket `setApprovalForAll`
+grants raise explicit warnings.
 
 These readings are supplemental. The review digest binds the exact ordered
 calldata, and the displayed target, selector, and value remain authoritative.

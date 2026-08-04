@@ -101,12 +101,16 @@ enum StandardCall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepInterpretation {
     pub step: u32,
-    /// Present only when the calldata matched a recognized standard call.
+    /// Present when the calldata matched a vendored ERC-7730 descriptor or a
+    /// recognized standard call.
     pub description: Option<String>,
+    /// Labeled field lines from a matching ERC-7730 descriptor.
+    pub details: Vec<String>,
     pub warnings: Vec<String>,
 }
 
-/// Collect the token contracts a plan names through standard token calldata.
+/// Collect the token contracts a plan names through standard token calldata
+/// or through the token references of a matching ERC-7730 descriptor.
 #[must_use]
 fn token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
     let mut targets = BTreeSet::new();
@@ -120,6 +124,16 @@ fn token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
             )
         ) {
             targets.insert(step.transaction.to);
+        }
+        if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>() {
+            targets.extend(crate::clear_signing::token_references(
+                chain_id,
+                crate::clear_signing::CallEnvelope {
+                    from: step.transaction.from,
+                    to: step.transaction.to,
+                },
+                &step.transaction.data,
+            ));
         }
     }
     targets.into_iter().collect()
@@ -210,6 +224,28 @@ pub async fn plan_token_metadata(
 }
 
 fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> StepInterpretation {
+    // A vendored ERC-7730 descriptor is the most specific reading available:
+    // it matches on exact chain, address, and selector, and was reviewed when
+    // the snapshot was committed. Standard token decoding remains the
+    // fallback for everything else.
+    if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>()
+        && let Some(reading) = crate::clear_signing::interpret(
+            chain_id,
+            crate::clear_signing::CallEnvelope {
+                from: step.transaction.from,
+                to: step.transaction.to,
+            },
+            &step.transaction.data,
+            metadata,
+        )
+    {
+        return StepInterpretation {
+            step: step.step,
+            description: Some(reading.intent),
+            details: reading.fields,
+            warnings: Vec::new(),
+        };
+    }
     let token = step.transaction.to;
     let display = metadata.get(&token).cloned().unwrap_or_default();
     let mut warnings = Vec::new();
@@ -282,6 +318,7 @@ fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> StepInte
     StepInterpretation {
         step: step.step,
         description,
+        details: Vec::new(),
         warnings,
     }
 }
@@ -373,7 +410,7 @@ fn format_signed_amount(delta: &BigInt, decimals: Option<u8>, symbol: Option<&st
     format!("{sign}{scaled}{unit} ({base_units} base units)")
 }
 
-fn format_token_amount(amount: U256, token: Address, display: &TokenMetadata) -> String {
+pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenMetadata) -> String {
     let base_units = amount.to_string();
     let label = token_label(token, display);
     display.decimals.map_or_else(
@@ -787,6 +824,31 @@ mod tests {
             step(2, other, vec![0xde, 0xad, 0xbe, 0xef]),
         ];
         assert_eq!(token_targets(&steps), vec![token]);
+    }
+
+    #[test]
+    fn clear_signed_steps_take_precedence_over_standard_decoding() {
+        // A VeToken stake call on its deployed chain and address must render
+        // through the vendored ERC-7730 descriptor: intent naming the
+        // protocol plus labeled fields, and no standard-decode fallback.
+        let (chain_id, target, calldata) = crate::clear_signing::stake_fixture();
+        let mut staked = step(1, target, calldata);
+        staked.transaction.chain_id = DecimalU256::new(chain_id.to_string()).unwrap();
+        let interpretations = interpret_steps(&[staked], &TokenMetadataMap::new());
+        let interpretation = &interpretations[0];
+        let description = interpretation.description.as_deref().unwrap();
+        assert!(description.contains("Ekubo"), "{description}");
+        let joined = interpretation.details.join("\n");
+        assert!(joined.contains("Amount"), "{joined}");
+        assert!(joined.contains("Stake end"), "{joined}");
+
+        // The same calldata on a chain without that deployment falls back to
+        // the unrecognized-selector path rather than borrowing the reading.
+        let (_, target, calldata) = crate::clear_signing::stake_fixture();
+        let elsewhere = step(1, target, calldata);
+        let fallback = interpret_steps(&[elsewhere], &TokenMetadataMap::new());
+        assert_eq!(fallback[0].description, None);
+        assert!(fallback[0].details.is_empty());
     }
 
     #[test]

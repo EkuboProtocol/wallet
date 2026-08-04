@@ -678,15 +678,19 @@ fn transaction_approval_request(
                 calldata.len(),
             ),
         );
-        // The exact fields above are authoritative; this line is a supplemental
-        // reading of recognized standard calldata.
+        // The exact fields above are authoritative; these lines are a
+        // supplemental reading from a vendored ERC-7730 descriptor or from
+        // recognized standard calldata.
         request = request.fact(
             format!("Call {} reads as", step.step),
             interpretation.description.clone().unwrap_or_else(|| {
-                "no recognized standard token operation; verify the target and selector directly"
+                "no matching descriptor or standard token operation; verify the target and selector directly"
                     .into()
             }),
         );
+        for detail in &interpretation.details {
+            request = request.fact(format!("Call {} ·", step.step), detail);
+        }
     }
     let balance_changes = render_balance_changes(simulation, network, token_metadata);
     if balance_changes.is_empty() {

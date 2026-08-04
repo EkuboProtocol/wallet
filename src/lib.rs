@@ -2,6 +2,7 @@ pub mod abi_decoder;
 pub mod approval;
 pub mod approval_summary;
 pub mod batch_read;
+pub mod clear_signing;
 pub mod cli;
 pub mod config;
 pub mod core;

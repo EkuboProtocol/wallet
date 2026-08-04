@@ -23,10 +23,13 @@ The review includes:
 - full wallet, network, chain, and sender identifiers;
 - every ordered call's kind, condition, full target, native value, selector,
   and calldata size;
-- a supplemental human reading of each call whose calldata matches a standard
-  `approve`, `transfer`, `transferFrom`, `setApprovalForAll`, or
-  `multicall(bytes[])` shape, with amounts rendered using token symbols and
-  decimals when they can be read;
+- a supplemental human reading of each call: an [ERC-7730](https://eips.ethereum.org/EIPS/eip-7730)
+  clear-signing rendering when a vendored descriptor matches the exact chain,
+  target, and selector — an intent line such as "Swap on Ekubo" plus labeled,
+  formatted fields, including nested multicall actions — otherwise a decoded
+  reading of standard `approve`, `transfer`, `transferFrom`,
+  `setApprovalForAll`, or `multicall(bytes[])` calldata, with amounts rendered
+  using token symbols and decimals when they can be read;
 - the portable execution-plan digest and simulation parent block;
 - transaction type, nonce, gas limit, fee fields, and worst-case fee;
 - the canonical Calibur implementation and authorization nonce, if applicable;
@@ -49,6 +52,15 @@ returned symbol is stripped of control and parenthesis characters so a hostile
 token cannot forge additional review fields. Effectively unlimited allowances and
 blanket `setApprovalForAll` grants are surfaced as explicit warnings. The review
 digest binds the exact calldata, not this rendering.
+
+ERC-7730 descriptors are vendored in the repository (`clearsign/`), embedded
+at compile time, and never fetched from the network; updating the snapshot is
+a reviewed git commit. The test suite parses every vendored descriptor,
+recomputes each function selector, and validates every display path and
+reference, so a malformed descriptor fails CI. Descriptor-supplied text is
+control-stripped and length-capped before display, nested calldata rendering
+is depth- and count-limited, and a descriptor can never change what is signed
+— only how it is described.
 
 After terminal confirmation, the CLI binds the native authentication prompt to
 the review digest. It then reloads the pending row, wallet/network
