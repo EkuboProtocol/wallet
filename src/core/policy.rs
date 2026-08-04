@@ -201,6 +201,38 @@ impl WalletPolicy {
         }
     }
 
+    /// The profile in which nothing signs automatically: no targets, tokens,
+    /// spenders, or native value are permitted on any chain, so every
+    /// transaction queues for explicit human approval in the CLI. Kept
+    /// byte-identical to `examples/policies/deny-all.json` by test.
+    #[must_use]
+    pub fn require_approval_for_everything() -> Self {
+        let chains = BTreeMap::from([(
+            "*".to_string(),
+            ChainPolicy {
+                label: Some(
+                    "Deny every automatic signature; each transaction needs an explicit CLI approval"
+                        .into(),
+                ),
+                approval_expiry_seconds: None,
+                max_calls_per_batch: 1,
+                native: NativePolicy {
+                    max_value_per_transaction: zero(),
+                },
+                targets: BTreeMap::new(),
+                approval_spenders: BTreeMap::new(),
+                tokens: BTreeMap::new(),
+            },
+        )]);
+        Self {
+            schema: None,
+            version: 2,
+            chains,
+            approval_expiry_seconds: 600,
+            require_simulation: true,
+        }
+    }
+
     #[must_use]
     pub fn chain(&self, chain_id: &str) -> Option<&ChainPolicy> {
         self.chains.get(chain_id).or_else(|| self.chains.get("*"))

@@ -127,6 +127,8 @@ enum PolicyCommand {
     },
     /// Install the wildcard automatic policy after owner authentication.
     AllowAll { wallet_id: String },
+    /// Install the policy that queues every transaction for explicit approval.
+    RequireApproval { wallet_id: String },
     /// Parse and summarize a policy file without changing any wallet.
     Validate { policy_file: PathBuf },
     /// Print the JSON Schema describing a policy document.
@@ -243,13 +245,17 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
     match command {
         WalletCommand::List => print_json(&config.load()?.wallets),
         WalletCommand::Create { wallet_id } => {
+            // A freshly generated key holds nothing until the user funds it,
+            // so the automatic profile is a safe starting point; the README
+            // still directs replacing it before funding.
             let wallet = custody.create(&wallet_id)?;
-            initialize_wallet_policy(&config, &wallet.id).with_context(|| {
-                format!(
-                    "wallet {} was created but policy initialization failed; signing will fail closed",
-                    wallet.id
-                )
-            })?;
+            initialize_wallet_policy(&config, &wallet.id, &WalletPolicy::allow_all_with_approval())
+                .with_context(|| {
+                    format!(
+                        "wallet {} was created but policy initialization failed; signing will fail closed",
+                        wallet.id
+                    )
+                })?;
             print_json(&wallet)
         }
         WalletCommand::Import { wallet_id } => {
@@ -267,14 +273,25 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
             let result = custody.import(&wallet_id, key);
             match result {
                 Ok(wallet) => {
-                    initialize_wallet_policy(&config, &wallet.id).with_context(|| {
+                    // An imported key usually already controls funds, so
+                    // nothing signs automatically until the user deliberately
+                    // installs a more permissive policy.
+                    initialize_wallet_policy(
+                        &config,
+                        &wallet.id,
+                        &WalletPolicy::require_approval_for_everything(),
+                    )
+                    .with_context(|| {
                         format!(
                             "wallet {} was imported but policy initialization failed; signing will fail closed",
                             wallet.id
                         )
                     })?;
                     progress.stop("Wallet imported");
-                    cliclack::outro("Imported wallets are marked as externally known.")?;
+                    cliclack::outro(
+                        "Imported wallets start with the require-approval policy: nothing signs \
+                         automatically until you install a more permissive policy.",
+                    )?;
                     print_json(&wallet)
                 }
                 Err(error) => {
@@ -353,13 +370,17 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand) -> Result<()> {
     }
 }
 
-fn initialize_wallet_policy(config: &ConfigStore, wallet_id: &str) -> Result<()> {
+fn initialize_wallet_policy(
+    config: &ConfigStore,
+    wallet_id: &str,
+    policy: &WalletPolicy,
+) -> Result<()> {
     let mut policies = PolicyStore::production(config.data_dir())?;
     ensure!(
         policies.get(wallet_id)?.is_none(),
         "policy state already exists for wallet {wallet_id}"
     );
-    policies.put(wallet_id, &WalletPolicy::allow_all_with_approval(), None)?;
+    policies.put(wallet_id, policy, None)?;
     Ok(())
 }
 
@@ -393,6 +414,15 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {
                 &config,
                 &wallet_id,
                 WalletPolicy::allow_all_with_approval(),
+                None,
+            )
+            .await
+        }
+        PolicyCommand::RequireApproval { wallet_id } => {
+            replace_policy(
+                &config,
+                &wallet_id,
+                WalletPolicy::require_approval_for_everything(),
                 None,
             )
             .await

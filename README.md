@@ -140,12 +140,24 @@ ekubo-wallet wallet list
 ekubo-wallet policy show primary
 ```
 
-A new wallet receives the reference-compatible wildcard allow-all policy, with
-simulation still required. Replace it with an appropriately restrictive policy
-before funding the address:
+Policy defaults differ by how the key arrived, because the risk differs:
+
+- `wallet create` generates a fresh, unfunded key and installs the wildcard
+  allow-all policy: successfully simulated actions sign automatically, and
+  policy or simulation failures queue for explicit approval. Replace it with
+  an appropriately restrictive policy before funding the address.
+- `wallet import` brings in a key that usually already controls funds, so it
+  installs the require-approval policy: nothing signs automatically until you
+  deliberately choose otherwise.
+
+Both profiles are one command to install at any time, and every transaction
+under the require-approval profile still runs the full simulation and decoded
+review before you approve it in the terminal:
 
 ```sh
-ekubo-wallet policy validate ./policy.json
+ekubo-wallet policy require-approval primary   # every transaction needs explicit CLI approval
+ekubo-wallet policy allow-all primary          # simulated + policy-clean transactions sign automatically
+ekubo-wallet policy validate ./policy.json     # or draft something in between
 ekubo-wallet policy set primary ./policy.json
 ```
 
@@ -255,8 +267,8 @@ for editor completion. Starting points live in [`examples/`](examples):
 
 | File | Purpose |
 | --- | --- |
-| [`policy.json`](examples/policy.json) | The default profile a new wallet receives. |
-| [`policies/deny-all.json`](examples/policies/deny-all.json) | Nothing signs automatically; every transaction needs an explicit CLI approval. |
+| [`policy.json`](examples/policy.json) | The default profile a created wallet receives. |
+| [`policies/deny-all.json`](examples/policies/deny-all.json) | Exactly what `policy require-approval` installs, and the default for imported wallets. |
 | [`policies/token-budget.template.json`](examples/policies/token-budget.template.json) | One chain, one router, one token, with capped allowance and per-transaction spend. |
 | [`policies/approval-wildcards.template.json`](examples/policies/approval-wildcards.template.json) | How exact entries override wildcards for spenders, tokens, and chains. |
 | [`policies/allow-all-with-approval.template.json`](examples/policies/allow-all-with-approval.template.json) | Exactly what `policy allow-all` installs. |

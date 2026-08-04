@@ -25,14 +25,14 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print ve
 
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from list presets reset add remove delete' -a 'list presets reset add remove delete'
-complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all validate schema' -a 'show set allow-all validate schema'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema' -a 'show set allow-all require-approval validate schema'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show' -a 'list show'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish elvish powershell' -a 'bash zsh fish elvish powershell'
 
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from export remove; and __fish_seen_subcommand_from wallet' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete defaults-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from remove delete; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
-complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show set allow-all; and __fish_seen_subcommand_from policy' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show set allow-all require-approval; and __fish_seen_subcommand_from policy' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from list; and __fish_seen_subcommand_from transaction tx' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from approve' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from reject' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'

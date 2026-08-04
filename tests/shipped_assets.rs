@@ -78,6 +78,22 @@ fn allow_all_template_matches_the_built_in_profile() {
 }
 
 #[test]
+fn require_approval_profile_matches_the_shipped_deny_all_example() {
+    // `policy require-approval` and the shipped example must install the same
+    // rules, so a reader can inspect the file to learn exactly what that
+    // command does.
+    let example =
+        WalletPolicy::parse(read_json("examples/policies/deny-all.json")).expect("example parses");
+    let built_in = WalletPolicy::require_approval_for_everything();
+    assert_eq!(example.chains, built_in.chains);
+    assert_eq!(
+        example.approval_expiry_seconds,
+        built_in.approval_expiry_seconds
+    );
+    assert_eq!(example.require_simulation, built_in.require_simulation);
+}
+
+#[test]
 fn deny_all_example_permits_nothing_automatically() {
     let policy =
         WalletPolicy::parse(read_json("examples/policies/deny-all.json")).expect("policy parses");
@@ -171,6 +187,7 @@ fn packaged_completions_offer_every_subcommand() {
         "show",
         "set",
         "allow-all",
+        "require-approval",
         "validate",
         "schema",
     ];
