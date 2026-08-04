@@ -15,6 +15,16 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Temporary Windows-overflow bisection: announces each statement of
+/// [`PolicyStore::open`] in test builds only, so the diagnose workflow's
+/// `--nocapture` output names the exact statement that recurses.
+macro_rules! open_diag {
+    ($($arg:tt)*) => {
+        #[cfg(test)]
+        eprintln!($($arg)*);
+    };
+}
+
 const SCHEMA_VERSION: i64 = 5;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
@@ -115,9 +125,11 @@ impl PolicyStore {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
 
         if path.metadata().is_ok_and(|metadata| metadata.len() > 0) {
+            open_diag!("psopen: pre-schema verify_integrity");
             verify_integrity(&connection)?;
         }
 
+        open_diag!("psopen: schema batch");
         connection.execute_batch(
             "BEGIN IMMEDIATE;
              CREATE TABLE IF NOT EXISTS schema_metadata (
@@ -214,8 +226,11 @@ impl PolicyStore {
             version == SCHEMA_VERSION,
             "unsupported policy database schema {version}"
         );
+        open_diag!("psopen: final verify_integrity");
         verify_integrity(&connection)?;
+        open_diag!("psopen: permissions");
         set_private_file_permissions(path)?;
+        open_diag!("psopen: done");
         Ok(Self { connection })
     }
 
@@ -336,24 +351,29 @@ impl PolicyStore {
 }
 
 fn verify_integrity(connection: &Connection) -> Result<()> {
+    open_diag!("verify: prepare cipher_integrity_check");
     let mut cipher_statement = connection
         .prepare("PRAGMA cipher_integrity_check")
         .context("failed to start SQLCipher integrity check")?;
+    open_diag!("verify: run cipher_integrity_check");
     let cipher_issues = cipher_statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    open_diag!("verify: cipher_integrity_check returned");
     ensure!(
         cipher_issues.is_empty(),
         "SQLCipher page authentication failed: {}",
         cipher_issues.join("; ")
     );
 
+    open_diag!("verify: run integrity_check");
     let mut logical_statement = connection
         .prepare("PRAGMA integrity_check")
         .context("failed to start SQLite integrity check")?;
     let logical = logical_statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    open_diag!("verify: integrity_check returned");
     ensure!(
         logical.as_slice() == ["ok"],
         "policy database integrity check failed: {}",
@@ -481,10 +501,64 @@ mod tests {
         connection
             .execute("INSERT INTO probe VALUES (1)", [])
             .unwrap();
+        eprintln!("sql-diagnose: C1 direct integrity_check on live connection");
+        let logical: Vec<String> = connection
+            .prepare("PRAGMA integrity_check")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        eprintln!("sql-diagnose: C2 integrity_check said {logical:?}");
+        eprintln!("sql-diagnose: C3 direct cipher_integrity_check on live connection");
+        let cipher: Vec<String> = connection
+            .prepare("PRAGMA cipher_integrity_check")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        eprintln!("sql-diagnose: C4 cipher_integrity_check said {cipher:?}");
         eprintln!("sql-diagnose: B8 reopen existing database");
         drop(connection);
         let reopened = PolicyStore::open(&path, &key(4));
         eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
+    }
+
+    /// Companion probe: the same integrity check with `SQLCipher` logging
+    /// disabled first. `SQLCipher` 4.11 converted its Windows log output to
+    /// UTF-16; if the overflow lives in that logging path, this variant passes
+    /// where [`diagnose_sqlcipher_open_steps`] overflows.
+    #[test]
+    fn diagnose_sqlcipher_integrity_without_logging() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("probe.db");
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap();
+        eprintln!("nolog-diagnose: 1 cipher_log_level NONE");
+        connection
+            .pragma_update(None, "cipher_log_level", "NONE")
+            .unwrap();
+        eprintln!("nolog-diagnose: 2 pragma key");
+        connection
+            .pragma_update(None, "key", key(4).sqlcipher_literal())
+            .unwrap();
+        eprintln!("nolog-diagnose: 3 create table");
+        connection.execute_batch("CREATE TABLE probe(x)").unwrap();
+        eprintln!("nolog-diagnose: 4 cipher_integrity_check");
+        let cipher: Vec<String> = connection
+            .prepare("PRAGMA cipher_integrity_check")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        eprintln!("nolog-diagnose: done ({cipher:?})");
     }
 
     #[test]
