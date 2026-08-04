@@ -525,6 +525,107 @@ mod tests {
         eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
     }
 
+    /// Statement-level split of the schema batch that overflows on Windows.
+    /// One variant keys the database and one does not, separating the
+    /// `SQLCipher` codec from the SQL engine.
+    #[test]
+    fn diagnose_schema_batch_statements() {
+        for keyed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("probe.db");
+            let connection = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap();
+            if keyed {
+                connection
+                    .pragma_update(None, "key", key(4).sqlcipher_literal())
+                    .unwrap();
+            }
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+            connection
+                .pragma_update(None, "synchronous", "FULL")
+                .unwrap();
+            let statements: &[(&str, &str)] = &[
+                ("begin", "BEGIN IMMEDIATE"),
+                (
+                    "schema_metadata",
+                    "CREATE TABLE IF NOT EXISTS schema_metadata (
+                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                         version INTEGER NOT NULL
+                     ) STRICT",
+                ),
+                (
+                    "seed version",
+                    "INSERT OR IGNORE INTO schema_metadata(singleton, version) VALUES (1, 0)",
+                ),
+                (
+                    "wallet_policies",
+                    "CREATE TABLE IF NOT EXISTS wallet_policies (
+                         wallet_id TEXT PRIMARY KEY NOT NULL,
+                         policy_json TEXT NOT NULL,
+                         revision INTEGER NOT NULL CHECK (revision > 0),
+                         updated_at TEXT NOT NULL
+                     ) STRICT",
+                ),
+                (
+                    "pending_transactions",
+                    "CREATE TABLE IF NOT EXISTS pending_transactions (
+                         request_id TEXT PRIMARY KEY NOT NULL,
+                         wallet_id TEXT NOT NULL,
+                         network_name TEXT NOT NULL,
+                         chain_id TEXT NOT NULL,
+                         plan_json TEXT NOT NULL,
+                         plan_digest TEXT NOT NULL,
+                         policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+                         status TEXT NOT NULL CHECK (status IN (
+                             'awaiting_approval', 'rejected', 'signed', 'submitting',
+                             'broadcast', 'confirmed', 'reverted', 'expired', 'cancelled'
+                         )),
+                         created_at TEXT NOT NULL,
+                         expires_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         approved_at TEXT,
+                         rejected_at TEXT,
+                         serialized_transaction TEXT,
+                         signed_transaction_hash TEXT,
+                         broadcast_transaction_hash TEXT,
+                         block_number TEXT,
+                         CHECK (
+                             (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
+                                 AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                             OR status <> 'awaiting_approval'
+                         ),
+                         CHECK (
+                             (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                             OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
+                         )
+                     ) STRICT",
+                ),
+                (
+                    "wallet index",
+                    "CREATE INDEX IF NOT EXISTS pending_transactions_wallet_created
+                         ON pending_transactions(wallet_id, created_at DESC)",
+                ),
+                (
+                    "bump version",
+                    "UPDATE schema_metadata SET version = 2 WHERE singleton = 1 AND version < 2",
+                ),
+                ("commit", "COMMIT"),
+            ];
+            for (label, sql) in statements {
+                eprintln!("schema-diagnose (keyed={keyed}): {label}");
+                connection.execute_batch(sql).unwrap();
+            }
+            eprintln!("schema-diagnose (keyed={keyed}): done");
+        }
+    }
+
     /// Companion probe: the same integrity check with `SQLCipher` logging
     /// disabled first. `SQLCipher` 4.11 converted its Windows log output to
     /// UTF-16; if the overflow lives in that logging path, this variant passes
