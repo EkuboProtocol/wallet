@@ -556,6 +556,69 @@ mod tests {
         eprintln!("sql-diagnose: done (reopen ok = {})", reopened.is_ok());
     }
 
+    /// Final elimination round. The full real prefix minus one candidate per
+    /// variant, then the real `open` as the failing control. `variant` names:
+    /// `no_busy_timeout`, `no_cipher_version`, `everything`.
+    #[test]
+    fn diagnose_open_prefix_variants() {
+        for variant in ["no_busy_timeout", "no_cipher_version", "everything"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("probe.db");
+            create_private_dir(directory.path()).unwrap();
+            let connection = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_CREATE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .unwrap();
+            connection
+                .pragma_update(None, "key", key(4).sqlcipher_literal())
+                .unwrap();
+            connection
+                .pragma_update(None, "cipher_memory_security", "ON")
+                .unwrap();
+            if variant != "no_cipher_version" {
+                let _: String = connection
+                    .pragma_query_value(None, "cipher_version", |row| row.get(0))
+                    .unwrap();
+            }
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .unwrap();
+            connection
+                .pragma_update(None, "trusted_schema", "OFF")
+                .unwrap();
+            connection
+                .pragma_update(None, "secure_delete", "ON")
+                .unwrap();
+            connection
+                .pragma_update(None, "journal_mode", "DELETE")
+                .unwrap();
+            connection
+                .pragma_update(None, "synchronous", "FULL")
+                .unwrap();
+            if variant != "no_busy_timeout" {
+                connection
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+            }
+            eprintln!("prefix-diagnose ({variant}): begin");
+            connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+            eprintln!("prefix-diagnose ({variant}): create");
+            connection
+                .execute_batch("CREATE TABLE probe(x INTEGER) STRICT")
+                .unwrap();
+            eprintln!("prefix-diagnose ({variant}): commit");
+            connection.execute_batch("COMMIT").unwrap();
+            eprintln!("prefix-diagnose ({variant}): done");
+        }
+        eprintln!("prefix-diagnose: control PolicyStore::open on a fresh path");
+        let control = tempfile::tempdir().unwrap();
+        let opened = PolicyStore::open(&control.path().join("policies.db"), &key(4));
+        eprintln!("prefix-diagnose: control done (ok = {})", opened.is_ok());
+    }
+
     /// Isolates `cipher_memory_security` as the suspected overflow trigger:
     /// the passing probes all omitted it, and the failing real `open` sets it
     /// before its first explicit transaction.
