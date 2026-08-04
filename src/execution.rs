@@ -585,32 +585,15 @@ pub async fn broadcast_signed_execution(
         .is_some();
     if !known {
         let bytes = decode_serialized(&signed.serialized_transaction)?;
-        match tokio::time::timeout(RPC_TIMEOUT, provider.send_raw_transaction(&bytes)).await {
-            Ok(Ok(pending)) if pending.tx_hash() == &hash => {}
-            Ok(Ok(_)) => {
-                return Ok(BroadcastResult {
-                    transaction_hash: signed.transaction_hash.clone(),
-                    receipt_status: ReceiptStatus::Pending,
-                    block_number: None,
-                    broadcast_error: Some("RPC returned an unexpected transaction hash".into()),
-                });
-            }
-            Ok(Err(error)) => {
-                return Ok(BroadcastResult {
-                    transaction_hash: signed.transaction_hash.clone(),
-                    receipt_status: ReceiptStatus::Pending,
-                    block_number: None,
-                    broadcast_error: Some(sanitize_message(network, &error.to_string())),
-                });
-            }
-            Err(_) => {
-                return Ok(BroadcastResult {
-                    transaction_hash: signed.transaction_hash.clone(),
-                    receipt_status: ReceiptStatus::Pending,
-                    block_number: None,
-                    broadcast_error: Some("transaction submission RPC timed out".into()),
-                });
-            }
+        let failure =
+            match tokio::time::timeout(RPC_TIMEOUT, provider.send_raw_transaction(&bytes)).await {
+                Ok(Ok(pending)) if pending.tx_hash() == &hash => None,
+                Ok(Ok(_)) => Some("RPC returned an unexpected transaction hash".to_owned()),
+                Ok(Err(error)) => Some(sanitize_message(network, &error.to_string())),
+                Err(_) => Some("transaction submission RPC timed out".to_owned()),
+            };
+        if let Some(failure) = failure {
+            return Ok(reconcile_failed_send(signed, network, &provider, hash, failure).await);
         }
     }
     if let Ok(Some(receipt)) = transaction_receipt(network, &signed.transaction_hash).await {
@@ -622,6 +605,64 @@ pub async fn broadcast_signed_execution(
         block_number: None,
         broadcast_error: None,
     })
+}
+
+/// Decide what a rejected or timed-out send actually means, by looking at the
+/// chain again rather than trusting the rejection.
+///
+/// The receipt and mempool checks above are not atomic with the send. This
+/// exact transaction can land in the window between them, and the node then
+/// answers the send with `nonce too low`, `already known`, or `replacement
+/// transaction underpriced` — all of which describe a submission that
+/// succeeded. A timeout hides the same thing.
+///
+/// Reporting that as a broadcast failure is worse than useless: the natural
+/// response to one is to prepare and submit a replacement, which risks
+/// executing twice something that already executed once.
+async fn reconcile_failed_send<P: Provider>(
+    signed: &SignedExecution,
+    network: &NetworkConfig,
+    provider: &P,
+    hash: B256,
+    failure: String,
+) -> BroadcastResult {
+    let receipt = transaction_receipt(network, &signed.transaction_hash)
+        .await
+        .ok()
+        .flatten();
+    let accepted = tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash))
+        .await
+        .ok()
+        .and_then(std::result::Result::ok)
+        .flatten()
+        .is_some();
+    send_failure_outcome(&signed.transaction_hash, receipt, accepted, failure)
+}
+
+/// What a send failure means, given what the chain says afterwards.
+///
+/// Split out from the RPC calls so the decision itself is testable: it is the
+/// part that has to be right.
+fn send_failure_outcome(
+    hash: &str,
+    receipt: Option<crate::rpc::ReceiptStatus>,
+    accepted: bool,
+    failure: String,
+) -> BroadcastResult {
+    // Mined already. The send was rejected because it had nothing left to do.
+    if let Some(receipt) = receipt {
+        return receipt_result(hash, receipt);
+    }
+    BroadcastResult {
+        transaction_hash: hash.into(),
+        receipt_status: ReceiptStatus::Pending,
+        block_number: None,
+        // The node holds this exact transaction, so submission succeeded and
+        // the rejection described an earlier attempt rather than a problem
+        // with this one. That is indistinguishable from an ordinary accepted
+        // send still waiting for a receipt, and is reported as one.
+        broadcast_error: (!accepted).then_some(failure),
+    }
 }
 
 fn receipt_result(hash: &str, receipt: crate::rpc::ReceiptStatus) -> BroadcastResult {
@@ -680,6 +721,77 @@ mod tests {
     use alloy::{primitives::Address, signers::local::PrivateKeySigner};
     use chrono::Utc;
     use serde_json::json;
+
+    /// The "already known" family a node answers with when the transaction it
+    /// is being asked to accept is already in its mempool or a block.
+    const ALREADY_KNOWN: &[&str] = &[
+        "nonce too low: address 0x0000, tx: 610 state: 611",
+        "already known",
+        "replacement transaction underpriced",
+    ];
+
+    #[test]
+    fn a_rejected_send_whose_transaction_landed_is_reported_as_mined() {
+        for rejection in ALREADY_KNOWN {
+            let result = send_failure_outcome(
+                "0xabc",
+                Some(crate::rpc::ReceiptStatus {
+                    succeeded: true,
+                    block_number: 27_923_617,
+                }),
+                false,
+                (*rejection).to_owned(),
+            );
+            assert_eq!(result.receipt_status, ReceiptStatus::Success);
+            assert_eq!(result.block_number.as_deref(), Some("27923617"));
+            assert!(
+                result.broadcast_error.is_none(),
+                "a mined transaction must never carry a broadcast error: {rejection}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_send_whose_transaction_reverted_reports_the_revert_not_the_rejection() {
+        let result = send_failure_outcome(
+            "0xabc",
+            Some(crate::rpc::ReceiptStatus {
+                succeeded: false,
+                block_number: 42,
+            }),
+            false,
+            "nonce too low".to_owned(),
+        );
+        assert_eq!(result.receipt_status, ReceiptStatus::Reverted);
+        assert_eq!(result.block_number.as_deref(), Some("42"));
+        assert!(result.broadcast_error.is_none());
+    }
+
+    #[test]
+    fn a_rejected_send_whose_transaction_is_in_the_mempool_is_an_ordinary_pending_send() {
+        // Submission succeeded; the rejection described an earlier attempt.
+        // An agent must not be able to tell this from a clean send, because
+        // there is nothing different for it to do.
+        let result = send_failure_outcome("0xabc", None, true, "already known".to_owned());
+        assert_eq!(result.receipt_status, ReceiptStatus::Pending);
+        assert_eq!(result.block_number, None);
+        assert!(result.broadcast_error.is_none());
+    }
+
+    #[test]
+    fn a_send_the_chain_never_heard_of_keeps_its_error() {
+        let result = send_failure_outcome(
+            "0xabc",
+            None,
+            false,
+            "insufficient funds for gas * price + value".to_owned(),
+        );
+        assert_eq!(result.receipt_status, ReceiptStatus::Pending);
+        assert_eq!(
+            result.broadcast_error.as_deref(),
+            Some("insufficient funds for gas * price + value")
+        );
+    }
 
     fn wallet(signer: &PrivateKeySigner) -> WalletMetadata {
         WalletMetadata {
