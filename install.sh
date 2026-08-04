@@ -6,10 +6,15 @@
 # verifies the archive digest against it, and — when Cosign is installed —
 # additionally verifies the keyless Sigstore bundle for SHA256SUMS against the
 # release workflow identity before any file is extracted or made executable.
+#
+# Set EKUBO_WALLET_LOCAL_SOURCE to a checkout of this repository to build with
+# `cargo build --locked --release` and install that build instead of a release
+# download; agent registration and completions work identically.
 set -eu
 
 REPOSITORY=${EKUBO_WALLET_REPOSITORY:-EkuboProtocol/secure-wallet-mcp-server}
 VERSION=${EKUBO_WALLET_VERSION:-latest}
+LOCAL_SOURCE=${EKUBO_WALLET_LOCAL_SOURCE:-}
 SERVER_NAME=ekubo-wallet
 : "${HOME:?HOME is required}"
 
@@ -44,9 +49,14 @@ case "$OS/$ARCH" in
   Linux/aarch64 | Linux/arm64) TARGET=aarch64-unknown-linux-gnu; ARCHIVE_EXTENSION=tar.gz ;;
   Darwin/x86_64) TARGET=x86_64-apple-darwin; ARCHIVE_EXTENSION=zip ;;
   Darwin/arm64) TARGET=aarch64-apple-darwin; ARCHIVE_EXTENSION=zip ;;
-  *) fail "no prebuilt binary for $OS/$ARCH; build from source with 'cargo build --release'" ;;
+  *)
+    [ -n "$LOCAL_SOURCE" ] \
+      || fail "no prebuilt binary for $OS/$ARCH; build from source with EKUBO_WALLET_LOCAL_SOURCE"
+    TARGET=unsupported
+    ARCHIVE_EXTENSION=none
+    ;;
 esac
-if [ "$ARCHIVE_EXTENSION" = zip ]; then
+if [ "$ARCHIVE_EXTENSION" = zip ] && [ -z "$LOCAL_SOURCE" ]; then
   need unzip
 fi
 
@@ -57,12 +67,15 @@ fi
 # a private or pre-release repository needs. curl is used otherwise.
 # ---------------------------------------------------------------------------
 
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-  DOWNLOADER=gh
-elif command -v curl >/dev/null 2>&1; then
-  DOWNLOADER=curl
-else
-  fail "an authenticated 'gh' or 'curl' is required to download the release"
+DOWNLOADER=none
+if [ -z "$LOCAL_SOURCE" ]; then
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    DOWNLOADER=gh
+  elif command -v curl >/dev/null 2>&1; then
+    DOWNLOADER=curl
+  else
+    fail "an authenticated 'gh' or 'curl' is required to download the release"
+  fi
 fi
 
 WORK_DIRECTORY=$(mktemp -d)
@@ -95,11 +108,16 @@ resolve_version() {
     | head -n 1
 }
 
-RESOLVED_VERSION=$(resolve_version)
-[ -n "$RESOLVED_VERSION" ] || fail "could not resolve a release version for $REPOSITORY"
-TAG="v$RESOLVED_VERSION"
-PACKAGE="ekubo-wallet-$RESOLVED_VERSION-$TARGET"
-ARCHIVE="$PACKAGE.$ARCHIVE_EXTENSION"
+TAG=""
+PACKAGE=""
+ARCHIVE=""
+if [ -z "$LOCAL_SOURCE" ]; then
+  RESOLVED_VERSION=$(resolve_version)
+  [ -n "$RESOLVED_VERSION" ] || fail "could not resolve a release version for $REPOSITORY"
+  TAG="v$RESOLVED_VERSION"
+  PACKAGE="ekubo-wallet-$RESOLVED_VERSION-$TARGET"
+  ARCHIVE="$PACKAGE.$ARCHIVE_EXTENSION"
+fi
 
 download_asset() {
   asset=$1
@@ -117,6 +135,29 @@ download_asset() {
     curl "$@" "https://github.com/$REPOSITORY/releases/download/$TAG/$asset" || return 1
   fi
 }
+
+if [ -n "$LOCAL_SOURCE" ]; then
+  # -------------------------------------------------------------------------
+  # Local build: compile the checkout and stage it like an extracted archive.
+  # No download or signature verification applies; you are trusting your own
+  # working tree and toolchain.
+  # -------------------------------------------------------------------------
+  need cargo
+  [ -f "$LOCAL_SOURCE/Cargo.toml" ] \
+    || fail "EKUBO_WALLET_LOCAL_SOURCE=$LOCAL_SOURCE is not a repository checkout"
+  log "building $LOCAL_SOURCE with cargo build --locked --release"
+  (cd "$LOCAL_SOURCE" && cargo build --locked --release) \
+    || fail "local build failed"
+  SOURCE_DIRECTORY="$WORK_DIRECTORY/local"
+  mkdir -p "$SOURCE_DIRECTORY/completions" "$SOURCE_DIRECTORY/contrib/polkit"
+  install -m 0755 "$LOCAL_SOURCE/target/release/ekubo-wallet" "$SOURCE_DIRECTORY/ekubo-wallet"
+  install -m 0755 "$LOCAL_SOURCE/target/release/ew" "$SOURCE_DIRECTORY/ew"
+  install -m 0644 "$LOCAL_SOURCE"/completions/* "$SOURCE_DIRECTORY/completions/"
+  if [ -f "$LOCAL_SOURCE/contrib/polkit/com.ekubo.wallet.policy" ]; then
+    install -m 0644 "$LOCAL_SOURCE/contrib/polkit/com.ekubo.wallet.policy" \
+      "$SOURCE_DIRECTORY/contrib/polkit/"
+  fi
+else
 
 log "downloading $ARCHIVE from $REPOSITORY $TAG"
 download_asset "$ARCHIVE" "$WORK_DIRECTORY/$ARCHIVE" \
@@ -171,7 +212,9 @@ else
 fi
 SOURCE_DIRECTORY="$WORK_DIRECTORY/extracted/$PACKAGE"
 [ -d "$SOURCE_DIRECTORY" ] || fail "archive did not contain $PACKAGE"
-[ -f "$SOURCE_DIRECTORY/ekubo-wallet" ] || fail "archive did not contain the ekubo-wallet executable"
+
+fi
+[ -f "$SOURCE_DIRECTORY/ekubo-wallet" ] || fail "staged files did not contain the ekubo-wallet executable"
 
 BIN_DIR=${EKUBO_WALLET_BIN_DIR:-$HOME/.local/bin}
 mkdir -p "$BIN_DIR"

@@ -515,8 +515,15 @@ The ignored live tests require an RPC that supports `eth_simulateV1`:
 cargo test --locked --all-features live_ -- --ignored --nocapture
 ```
 
-Point an MCP client at a local build with
-`target/release/ekubo-wallet server`. Regenerate the committed policy schema
+To build and install your local checkout — same agent registration and shell
+completions as a release install, no download or signature verification, since
+you are trusting your own working tree:
+
+```sh
+EKUBO_WALLET_LOCAL_SOURCE=. sh install.sh
+```
+
+Or point an MCP client directly at `target/release/ekubo-wallet server`. Regenerate the committed policy schema
 with `cargo run --bin ekubo-wallet -- policy schema > schemas/policy.schema.json`;
 a test fails if it is stale.
 
