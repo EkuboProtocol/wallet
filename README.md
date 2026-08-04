@@ -349,6 +349,10 @@ An agent must never run the approval command for you.
 | `wallet_get_status` | Address, native balance, transaction count, and current EIP-7702 delegation. |
 | `wallet_get_policy` | The active policy and its revision. |
 | `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. |
+| `wallet_list_tokens` | Page through the local token database, optionally per chain. |
+| `wallet_add_token` | Verify one token's symbol/name/decimals on-chain via Multicall3 and store it. Duplicate chain/address pairs fail. |
+| `wallet_import_token_list` | Bulk-import up to 1000 tokens; each new token is verified on-chain, existing pairs are skipped, never overwritten. |
+| `wallet_get_portfolio` | Native balance plus every known token's balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
 | `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. |
 | `wallet_send_native_transfers` | Any non-empty list of `{to, amount_wei}` items. |
@@ -369,6 +373,33 @@ data, and a recommended action. Retry identical calldata only for
 `retry_same_plan`, which normally means a transient RPC failure; for
 `reprepare_plan`, including any revert or slippage, return to the originating
 tool for freshly prepared calldata.
+
+### Token database and portfolio
+
+The wallet keeps a local token database in a **separate, unencrypted SQLite
+file** (`tokens.db`) beside the encrypted security database. Token metadata is
+public display data: MCP tools may write it without owner authentication, and
+nothing in the signing or policy path ever reads it.
+
+Its integrity rules are structural rather than procedural. The
+`(chain_id, address)` pair is the primary key, so a conflicting entry is
+impossible: `wallet_add_token` fails on a duplicate, and
+`wallet_import_token_list` skips existing pairs and reports counts — an entry
+is never overwritten. Every new token's `symbol`, `name`, and `decimals` are
+read from the token contract itself through Multicall3 on the configured
+chain's RPC, not trusted from the submitted list, and contracts that answer
+neither `symbol()` nor `decimals()` are rejected. Hostile metadata is
+control-stripped and length-capped before storage.
+
+`wallet_get_portfolio` turns the database into a portfolio reader for **any**
+address, not just configured wallets: one Multicall3 batch per 200 tokens
+reads `balanceOf` for every known token on the chain, alongside the native
+balance (`getEthBalance`) and a pinned block number, on any EVM chain where
+Multicall3 is deployed — which is effectively all of them. Zero balances are
+omitted unless requested; balances are raw smallest-unit decimal strings with
+the stored decimals/symbols attached.
+
+Inspect the database from the CLI with `ekubo-wallet token list [chain-id]`.
 
 ### Local read decoding
 
@@ -428,6 +459,9 @@ platform defaults are:
 | macOS | `~/Library/Application Support/org.ekubo.wallet-mcp` | `policies.db` |
 | Linux | `${XDG_STATE_HOME}/ekubo-wallet-mcp`, or `~/.local/state/ekubo-wallet-mcp` | `policies.db` |
 | Windows | `%LOCALAPPDATA%\Ekubo\wallet-mcp` | `policies.db` |
+
+The unencrypted `tokens.db` in the same directory holds the public token
+database described above; it contains no security state.
 
 The one SQLCipher file contains separate `wallet_policies` and
 `pending_transactions` tables. A pending row stores its normalized execution

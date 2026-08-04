@@ -188,6 +188,7 @@ fn packaged_completions_offer_every_subcommand() {
         "set",
         "allow-all",
         "require-approval",
+        "token",
         "validate",
         "schema",
     ];

@@ -14,6 +14,7 @@ pub mod pending;
 pub mod policy_store;
 pub mod rpc;
 pub mod simulation;
+pub mod token_store;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

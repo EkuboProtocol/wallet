@@ -13,7 +13,7 @@ _ekubo_wallet() {
 
   case "$COMP_CWORD" in
     1)
-      choices="server version wallet network policy transaction tx approve reject completion --data-dir --help --version"
+      choices="server version wallet network policy transaction tx token approve reject completion --data-dir --help --version"
       ;;
     2)
       case "$first" in
@@ -21,6 +21,7 @@ _ekubo_wallet() {
         network) choices="list presets reset add remove delete" ;;
         policy) choices="show set allow-all require-approval validate schema" ;;
         transaction|tx) choices="list show" ;;
+        token) choices="list" ;;
         approve|reject) choices="$(ekubo-wallet __complete approvals 2>/dev/null)" ;;
         completion) choices="bash zsh fish elvish powershell" ;;
       esac

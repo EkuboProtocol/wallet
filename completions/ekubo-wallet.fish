@@ -16,6 +16,7 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a network -d 'Inspect,
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a policy -d 'Set or inspect wallet policies'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a transaction -d 'Inspect signed and broadcast transactions'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a tx -d 'Inspect signed and broadcast transactions'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a token -d 'Inspect the local token database'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a approve -d 'Approve a pending request locally'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a reject -d 'Reject a pending request locally'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a completion -d 'Print shell completions'
@@ -27,6 +28,7 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from wallet; and not __fish_
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from list presets reset add remove delete' -a 'list presets reset add remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema' -a 'show set allow-all require-approval validate schema'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show' -a 'list show'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from token; and not __fish_seen_subcommand_from list' -a 'list'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish elvish powershell' -a 'bash zsh fish elvish powershell'
 
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from export remove; and __fish_seen_subcommand_from wallet' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'

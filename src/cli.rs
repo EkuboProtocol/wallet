@@ -65,6 +65,8 @@ enum Command {
     /// Inspect transactions signed or broadcast by this wallet server.
     #[command(alias = "tx")]
     Transaction(TransactionArgs),
+    /// Inspect the local token database.
+    Token(TokenArgs),
     /// List exceptional requests, or review and sign one locally.
     Approve {
         request_id: Option<Uuid>,
@@ -196,6 +198,24 @@ struct TransactionArgs {
     command: TransactionCommand,
 }
 
+#[derive(Debug, Args)]
+struct TokenArgs {
+    #[command(subcommand)]
+    command: TokenCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TokenCommand {
+    /// Print stored tokens as JSON, optionally filtered by decimal chain ID.
+    List {
+        chain_id: Option<u64>,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum TransactionCommand {
     /// Print recorded transaction lifecycle rows as JSON.
@@ -224,6 +244,7 @@ impl Cli {
             Command::Network(args) => run_network(&config, args.command).await,
             Command::Policy(args) => run_policy(config, args.command).await,
             Command::Transaction(args) => run_transaction(&config, args.command),
+            Command::Token(args) => run_token(&config, &args.command),
             Command::Approve {
                 request_id,
                 no_confirm,
@@ -382,6 +403,23 @@ fn initialize_wallet_policy(
     );
     policies.put(wallet_id, policy, None)?;
     Ok(())
+}
+
+fn run_token(config: &ConfigStore, command: &TokenCommand) -> Result<()> {
+    match command {
+        TokenCommand::List {
+            chain_id,
+            limit,
+            offset,
+        } => {
+            let (chain_id, limit, offset) = (*chain_id, *limit, *offset);
+            let store = crate::token_store::TokenStore::production(config.data_dir())?;
+            print_json(&serde_json::json!({
+                "total": store.count(chain_id)?,
+                "tokens": store.list(chain_id, limit, offset)?,
+            }))
+        }
+    }
 }
 
 async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {

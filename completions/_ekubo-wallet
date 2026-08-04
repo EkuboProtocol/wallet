@@ -4,7 +4,7 @@ _ekubo-wallet() {
   local -a choices
 
   if (( CURRENT == 2 )); then
-    _values "command" server version wallet network policy transaction tx approve reject completion \
+    _values "command" server version wallet network policy transaction tx token approve reject completion \
       --data-dir --help --version
     return
   fi
@@ -15,6 +15,7 @@ _ekubo-wallet() {
       network) _values "network command" list presets reset add remove delete ;;
       policy) _values "policy command" show set allow-all require-approval validate schema ;;
       transaction|tx) _values "transaction command" list show ;;
+      token) _values "token command" list ;;
       approve|reject)
         choices=("${(@f)$(ekubo-wallet __complete approvals-described 2>/dev/null)}")
         _describe "pending approval" choices

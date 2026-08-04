@@ -20,7 +20,9 @@ use crate::{
     policy_store::PolicyStore,
     rpc::{WalletStatus, transaction_known, transaction_receipt, verify_chain_id, wallet_status},
     simulation::{SimulationResult, simulate_execution},
+    token_store::{StoredToken, TokenStore},
 };
+use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, TimeDelta, Utc};
 use rmcp::{
@@ -38,6 +40,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use url::Url;
@@ -230,6 +233,82 @@ struct ApprovalWaitInput {
     request_id: uuid::Uuid,
     #[serde(default = "default_wait_seconds")]
     timeout_seconds: u8,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListTokensInput {
+    /// Decimal chain ID filter; omitted lists every chain.
+    #[serde(default)]
+    chain_id: Option<crate::token_store::ChainIdInput>,
+    #[serde(default = "default_token_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct TokenListOutput {
+    /// Total stored tokens matching the filter, ignoring paging.
+    total: u64,
+    tokens: Vec<StoredToken>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AddTokenInput {
+    chain_id: crate::token_store::ChainIdInput,
+    address: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ImportTokenItem {
+    /// Accepts a canonical decimal string or the bare number used by
+    /// standard token-list files.
+    #[serde(alias = "chainId")]
+    chain_id: crate::token_store::ChainIdInput,
+    address: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ImportTokenListInput {
+    #[serde(default)]
+    list_name: Option<String>,
+    tokens: Vec<ImportTokenItem>,
+}
+
+#[derive(Debug, Default, Serialize, JsonSchema)]
+struct ImportTokenListOutput {
+    added: u64,
+    /// Already present, in the database or repeated within the list.
+    skipped_existing: u64,
+    /// On chains this server has no configured network for.
+    skipped_unconfigured_chain: u64,
+    /// Contracts that answered neither `symbol()` nor `decimals()`.
+    skipped_unverifiable: u64,
+    /// Up to 32 chain:address identifiers of unverifiable entries.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unverifiable: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PortfolioInput {
+    chain_id: String,
+    /// A configured wallet. Provide exactly one of `wallet_id` or `address`.
+    #[serde(default)]
+    wallet_id: Option<String>,
+    /// Any EVM address. Provide exactly one of `wallet_id` or `address`.
+    #[serde(default)]
+    address: Option<String>,
+    #[serde(default)]
+    include_zero_balances: bool,
+}
+
+const fn default_token_limit() -> usize {
+    200
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -435,6 +514,217 @@ impl WalletMcpServer {
             batch_eth_call(&network, &input)
                 .await
                 .map_err(|error| tool_error(&error))?,
+        ))
+    }
+
+    #[tool(
+        name = "wallet_list_tokens",
+        description = "List tokens from the local token database, optionally filtered by decimal chain ID, with limit/offset paging. Token metadata is public display data verified on-chain at insert time; it never affects signing decisions.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn wallet_list_tokens(
+        &self,
+        Parameters(input): Parameters<ListTokensInput>,
+    ) -> Result<Json<TokenListOutput>, ErrorData> {
+        let chain_id = input
+            .chain_id
+            .as_ref()
+            .map(crate::token_store::ChainIdInput::value)
+            .transpose()
+            .map_err(|error| tool_error(&error))?;
+        let store =
+            TokenStore::production(self.config.data_dir()).map_err(|error| tool_error(&error))?;
+        let tokens = store
+            .list(chain_id, input.limit.min(1_000), input.offset)
+            .map_err(|error| tool_error(&error))?;
+        let total = store.count(chain_id).map_err(|error| tool_error(&error))?;
+        Ok(Json(TokenListOutput { total, tokens }))
+    }
+
+    #[tool(
+        name = "wallet_add_token",
+        description = "Verify one token on its configured chain through Multicall3 (symbol, name, decimals read from the contract itself) and add it to the local token database. Fails if the chain_id/address pair already exists; existing entries are never overwritten.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_add_token(
+        &self,
+        Parameters(input): Parameters<AddTokenInput>,
+    ) -> Result<Json<StoredToken>, ErrorData> {
+        let chain_id = input.chain_id.value().map_err(|error| tool_error(&error))?;
+        let network = self
+            .config
+            .network_by_chain_id(&chain_id.to_string())
+            .map_err(|error| tool_error(&error))?;
+        let address = Address::from_str(&input.address).map_err(|_| {
+            ErrorData::invalid_params("address must be a 20-byte EVM address", None)
+        })?;
+        let metadata = crate::token_store::fetch_onchain_metadata(&network, &[address])
+            .await
+            .map_err(|error| tool_error(&error))?;
+        let metadata = metadata.get(&address).cloned().unwrap_or_default();
+        if metadata.decimals.is_none() && metadata.symbol.is_none() {
+            return Err(tool_error(&anyhow::anyhow!(
+                "contract {} on chain {chain_id} answered neither symbol() nor decimals(); refusing to store it as a token",
+                address.to_checksum(None)
+            )));
+        }
+        let mut store =
+            TokenStore::production(self.config.data_dir()).map_err(|error| tool_error(&error))?;
+        Ok(Json(
+            store
+                .add(chain_id, address, &metadata, "mcp:add")
+                .map_err(|error| tool_error(&error))?,
+        ))
+    }
+
+    #[tool(
+        name = "wallet_import_token_list",
+        description = "Import up to 1000 tokens into the local token database. Each new token's symbol, name, and decimals are read from its contract through Multicall3 on its configured chain rather than trusted from the list. Existing chain_id/address pairs are skipped, never overwritten; tokens on unconfigured chains are reported and skipped.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_import_token_list(
+        &self,
+        Parameters(input): Parameters<ImportTokenListInput>,
+    ) -> Result<Json<ImportTokenListOutput>, ErrorData> {
+        ensure_tool(
+            !input.tokens.is_empty(),
+            "token list must contain at least one token",
+        )?;
+        ensure_tool(
+            input.tokens.len() <= crate::token_store::MAX_IMPORT_TOKENS,
+            "token list exceeds the per-import maximum",
+        )?;
+        let source = format!(
+            "mcp:import:{}",
+            input.list_name.as_deref().unwrap_or("unnamed")
+        );
+
+        // Group by chain so each configured chain gets one verification pass.
+        let mut by_chain: std::collections::BTreeMap<u64, Vec<Address>> =
+            std::collections::BTreeMap::new();
+        for item in &input.tokens {
+            let chain_id = item.chain_id.value().map_err(|error| tool_error(&error))?;
+            let address = Address::from_str(&item.address).map_err(|_| {
+                ErrorData::invalid_params(
+                    format!(
+                        "token address {} is not a 20-byte EVM address",
+                        item.address
+                    ),
+                    None,
+                )
+            })?;
+            by_chain.entry(chain_id).or_default().push(address);
+        }
+
+        let mut output = ImportTokenListOutput::default();
+        let mut store =
+            TokenStore::production(self.config.data_dir()).map_err(|error| tool_error(&error))?;
+        for (chain_id, addresses) in by_chain {
+            let Ok(network) = self.config.network_by_chain_id(&chain_id.to_string()) else {
+                output.skipped_unconfigured_chain += addresses.len() as u64;
+                continue;
+            };
+            // Deduplicate within the list and against the database before the
+            // RPC pass so only genuinely new tokens are verified on-chain.
+            let mut new_tokens = Vec::new();
+            for address in addresses {
+                if new_tokens.contains(&address) {
+                    output.skipped_existing += 1;
+                    continue;
+                }
+                match store.get(chain_id, address) {
+                    Ok(Some(_)) => output.skipped_existing += 1,
+                    Ok(None) => new_tokens.push(address),
+                    Err(error) => return Err(tool_error(&error)),
+                }
+            }
+            if new_tokens.is_empty() {
+                continue;
+            }
+            let metadata = crate::token_store::fetch_onchain_metadata(&network, &new_tokens)
+                .await
+                .map_err(|error| tool_error(&error))?;
+            for address in new_tokens {
+                let token_metadata = metadata.get(&address).cloned().unwrap_or_default();
+                if token_metadata.decimals.is_none() && token_metadata.symbol.is_none() {
+                    output.skipped_unverifiable += 1;
+                    if output.unverifiable.len() < 32 {
+                        output.unverifiable.push(format!(
+                            "{}:{}",
+                            chain_id,
+                            address.to_checksum(None)
+                        ));
+                    }
+                    continue;
+                }
+                match store.insert_if_absent(chain_id, address, &token_metadata, &source) {
+                    Ok(true) => output.added += 1,
+                    Ok(false) => output.skipped_existing += 1,
+                    Err(error) => return Err(tool_error(&error)),
+                }
+            }
+        }
+        Ok(Json(output))
+    }
+
+    #[tool(
+        name = "wallet_get_portfolio",
+        description = "Read the native balance and every token-database balance for one address on one chain through Multicall3, pinned to a reported block. Accepts a wallet_id or any EVM address. Zero balances are omitted unless requested.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn wallet_get_portfolio(
+        &self,
+        Parameters(input): Parameters<PortfolioInput>,
+    ) -> Result<Json<crate::token_store::Portfolio>, ErrorData> {
+        let network = self
+            .config
+            .network_by_chain_id(&input.chain_id)
+            .map_err(|error| tool_error(&error))?;
+        let address = match (&input.wallet_id, &input.address) {
+            (Some(wallet_id), None) => {
+                self.config
+                    .wallet(wallet_id)
+                    .map_err(|error| tool_error(&error))?
+                    .address
+            }
+            (None, Some(address)) => Address::from_str(address).map_err(|_| {
+                ErrorData::invalid_params("address must be a 20-byte EVM address", None)
+            })?,
+            _ => {
+                return Err(ErrorData::invalid_params(
+                    "provide exactly one of wallet_id or address",
+                    None,
+                ));
+            }
+        };
+        let store =
+            TokenStore::production(self.config.data_dir()).map_err(|error| tool_error(&error))?;
+        let known = store
+            .list(
+                Some(network.chain_id),
+                crate::token_store::MAX_PORTFOLIO_TOKENS + 1,
+                0,
+            )
+            .map_err(|error| tool_error(&error))?;
+        Ok(Json(
+            crate::token_store::read_portfolio(
+                &network,
+                address,
+                &known,
+                input.include_zero_balances,
+            )
+            .await
+            .map_err(|error| tool_error(&error))?,
         ))
     }
 
@@ -1044,8 +1334,8 @@ const SECURITY_RESOURCE_URI: &str = "wallet://docs/security-model";
 // validation, simulation, and policy rules to all of them. Naming a specific
 // counterpart here would both mislead an agent about the wallet's scope and
 // imply that plans from that source are more trusted, which they are not.
-const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local fork or eth_getProof path. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, wait only when the user independently chooses the CLI override path. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes.";
-const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local fork, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n";
+const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local fork or eth_getProof path. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is separate public display data: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, wait only when the user independently chooses the CLI override path. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes.";
+const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local fork, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database (tokens.db) is unencrypted public display data used for listings and portfolio reads. MCP tools may add to it, entries are verified against the token contracts through Multicall3 at insert, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n";
 
 #[tool_handler]
 impl ServerHandler for WalletMcpServer {
@@ -1092,6 +1382,14 @@ impl ServerHandler for WalletMcpServer {
                 .with_mime_type("text/markdown"),
         ])
         .into())
+    }
+}
+
+fn ensure_tool(condition: bool, message: &str) -> Result<(), ErrorData> {
+    if condition {
+        Ok(())
+    } else {
+        Err(ErrorData::invalid_params(message.to_string(), None))
     }
 }
 
@@ -1315,12 +1613,16 @@ mod tests {
             names,
             [
                 "wallet_add_network",
+                "wallet_add_token",
                 "wallet_batch_eth_call",
                 "wallet_decode_abi_result",
                 "wallet_get_policy",
+                "wallet_get_portfolio",
                 "wallet_get_status",
                 "wallet_get_execution_status",
+                "wallet_import_token_list",
                 "wallet_list",
+                "wallet_list_tokens",
                 "wallet_send_erc20_transfers",
                 "wallet_send_execution_plan",
                 "wallet_send_native_transfers",
