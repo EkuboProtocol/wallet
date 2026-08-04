@@ -577,15 +577,23 @@ pub async fn read_token_balances(
                 Some(getBlockNumberCall::abi_decode_returns(&block.returnData)?.to_string());
         }
         let result = results.next().context("missing TokenDataFetcher result")?;
-        if !result.success {
-            // Not deployed on this network; the Multicall3 wrapper isolated
-            // the failure. Fall back to individual reads.
+        // The lens is absent on some chains, and the EVM does not treat that
+        // as a failure: a call to an account with no code succeeds and
+        // returns nothing. Anything that is not a decodable lens answer —
+        // a reverted call, empty return data, or unexpected bytes — means
+        // this chain has no lens, so fall back to individual reads instead of
+        // failing the whole balance read.
+        let decoded = result
+            .success
+            .then(|| {
+                getNonzeroBalancesAndAllowancesCall::abi_decode_returns(&result.returnData).ok()
+            })
+            .flatten();
+        let Some(decoded) = decoded else {
             fetcher_available = false;
             balances.clear();
             break;
-        }
-        let decoded = getNonzeroBalancesAndAllowancesCall::abi_decode_returns(&result.returnData)
-            .context("TokenDataFetcher returned undecodable data")?;
+        };
         for entry in decoded.balances {
             balances.push(TokenBalance {
                 token: entry.token.to_checksum(None),
