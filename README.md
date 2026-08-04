@@ -520,8 +520,11 @@ completions as a release install, no download or signature verification, since
 you are trusting your own working tree:
 
 ```sh
-EKUBO_WALLET_LOCAL_SOURCE=. sh install.sh
+./install-local.sh
 ```
+
+(a shorthand for `EKUBO_WALLET_LOCAL_SOURCE=. sh install.sh`; every other
+installer environment variable still applies)
 
 Or point an MCP client directly at `target/release/ekubo-wallet server`. Regenerate the committed policy schema
 with `cargo run --bin ekubo-wallet -- policy schema > schemas/policy.schema.json`;
