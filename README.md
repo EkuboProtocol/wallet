@@ -360,7 +360,7 @@ An agent must never run the approval command for you.
 | `wallet_send_native_transfers` | Any non-empty list of `{to, amount_wei}` items. |
 | `wallet_send_erc20_transfers` | Any non-empty list of `{token, to, amount}` items, which may span token contracts. |
 | `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; or submit an already-approved request ID. |
-| `wallet_wait_for_approval` | Observe one pending request for up to 55 seconds. Cannot approve or submit it. |
+| `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_wait_for_execution` | Bounded polling for a receipt. |
 
