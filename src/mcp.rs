@@ -9,7 +9,7 @@ use crate::{
     core::{
         execution_plan::{DecimalU256, ExecutionPlan},
         policy::WalletPolicy,
-        transfers::{Erc20Transfer, NativeTransfer, erc20_transfer_plan, native_transfer_plan},
+        transfers::{Transfer, transfer_plan},
     },
     custody::{KeyStore, OsKeyStore},
     execution::{
@@ -194,18 +194,12 @@ struct SimulateInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct NativeTransfersInput {
+struct TransfersInput {
     wallet_id: String,
     chain_id: String,
-    transfers: Vec<NativeTransfer>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct Erc20TransfersInput {
-    wallet_id: String,
-    chain_id: String,
-    transfers: Vec<Erc20Transfer>,
+    /// Ordered transfers, which may mix the native token with any number of
+    /// ERC-20 contracts.
+    transfers: Vec<Transfer>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -363,6 +357,21 @@ struct PortfolioInput {
 
 const fn default_token_limit() -> usize {
     200
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GetBalancesInput {
+    chain_id: String,
+    /// A configured wallet. Provide exactly one of `wallet_id` or `address`.
+    #[serde(default)]
+    wallet_id: Option<String>,
+    /// Any EVM address. Provide exactly one of `wallet_id` or `address`.
+    #[serde(default)]
+    address: Option<String>,
+    /// 1-1000 token contract addresses. Include
+    /// 0x0000000000000000000000000000000000000000 to read the native balance.
+    tokens: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -883,23 +892,8 @@ impl WalletMcpServer {
             .config
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
-        let address = match (&input.wallet_id, &input.address) {
-            (Some(wallet_id), None) => {
-                self.config
-                    .wallet(wallet_id)
-                    .map_err(|error| tool_error(&error))?
-                    .address
-            }
-            (None, Some(address)) => Address::from_str(address).map_err(|_| {
-                ErrorData::invalid_params("address must be a 20-byte EVM address", None)
-            })?,
-            _ => {
-                return Err(ErrorData::invalid_params(
-                    "provide exactly one of wallet_id or address",
-                    None,
-                ));
-            }
-        };
+        let address =
+            self.resolve_read_address(input.wallet_id.as_deref(), input.address.as_deref())?;
         let known = {
             let store = self
                 .tokens
@@ -921,40 +915,50 @@ impl WalletMcpServer {
     }
 
     #[tool(
-        name = "wallet_send_native_transfers",
-        description = "Simulate, policy-check, locally sign, persist, and send a non-empty ordered list of native-token transfers. One transfer is direct; multiple transfers execute atomically through canonical Calibur.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = true
-        )
+        name = "wallet_get_balances",
+        description = "Read balances for an explicit list of up to 1000 token addresses for one address on one chain, pinned to a reported block. Uses the Ekubo TokenDataFetcher lens where deployed (all default networks) and falls back to individual Multicall3 balanceOf reads elsewhere; failed, nonexistent, or misbehaving tokens read as zero instead of aborting the batch, and only nonzero balances are returned with their token addresses. Address 0x0000000000000000000000000000000000000000 reads the native balance. Accepts a wallet_id or any EVM address.",
+        annotations(read_only_hint = true, open_world_hint = true)
     )]
-    async fn wallet_send_native_transfers(
+    async fn wallet_get_balances(
         &self,
-        Parameters(input): Parameters<NativeTransfersInput>,
-    ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
-        let wallet = self
-            .config
-            .wallet(&input.wallet_id)
-            .map_err(|error| tool_error(&error))?;
+        Parameters(input): Parameters<GetBalancesInput>,
+    ) -> Result<Json<crate::token_store::TokenBalances>, ErrorData> {
         let network = self
             .config
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
-        let chain_id = DecimalU256::new(input.chain_id).map_err(|error| tool_error(&error))?;
-        let plan = native_transfer_plan(&chain_id, wallet.address, input.transfers)
-            .map_err(|error| tool_error(&error))?;
+        let owner =
+            self.resolve_read_address(input.wallet_id.as_deref(), input.address.as_deref())?;
+        ensure_tool(
+            !input.tokens.is_empty(),
+            "tokens must contain at least one address",
+        )?;
+        ensure_tool(
+            input.tokens.len() <= crate::token_store::MAX_BALANCE_TOKENS,
+            "tokens exceeds the per-request maximum of 1000 addresses",
+        )?;
+        let tokens = input
+            .tokens
+            .iter()
+            .map(|token| {
+                Address::from_str(token).map_err(|_| {
+                    ErrorData::invalid_params(
+                        format!("token address {token} is not a 20-byte EVM address"),
+                        None,
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, ErrorData>>()?;
         Ok(Json(
-            self.send_new_plan(wallet, network, plan)
+            crate::token_store::read_token_balances(&network, owner, &tokens)
                 .await
                 .map_err(|error| tool_error(&error))?,
         ))
     }
 
     #[tool(
-        name = "wallet_send_erc20_transfers",
-        description = "Simulate, policy-check, locally sign, persist, and send a non-empty ordered list of ERC-20 transfer(address,uint256) calls. Amounts are raw smallest-unit quantities; multiple transfers execute atomically through canonical Calibur.",
+        name = "wallet_send_transfers",
+        description = "Simulate, policy-check, locally sign, persist, and send a non-empty ordered list of token transfers. Each item names the token contract to move, where address 0x0000000000000000000000000000000000000000 is the native token, and a raw smallest-unit amount; native and ERC-20 transfers may be mixed freely in one list. ERC-20 items become transfer(address,uint256) calls. The whole list is sent as a single transaction: one transfer is direct, and multiple transfers execute atomically through canonical Calibur.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -962,9 +966,9 @@ impl WalletMcpServer {
             open_world_hint = true
         )
     )]
-    async fn wallet_send_erc20_transfers(
+    async fn wallet_send_transfers(
         &self,
-        Parameters(input): Parameters<Erc20TransfersInput>,
+        Parameters(input): Parameters<TransfersInput>,
     ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
         let wallet = self
             .config
@@ -975,7 +979,7 @@ impl WalletMcpServer {
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
         let chain_id = DecimalU256::new(input.chain_id).map_err(|error| tool_error(&error))?;
-        let plan = erc20_transfer_plan(&chain_id, wallet.address, input.transfers)
+        let plan = transfer_plan(&chain_id, wallet.address, input.transfers)
             .map_err(|error| tool_error(&error))?;
         Ok(Json(
             self.send_new_plan(wallet, network, plan)
@@ -1486,6 +1490,28 @@ impl WalletMcpServer {
 }
 
 impl WalletMcpServer {
+    /// Resolve the exactly-one-of `wallet_id`/`address` pair used by read tools.
+    fn resolve_read_address(
+        &self,
+        wallet_id: Option<&str>,
+        address: Option<&str>,
+    ) -> Result<Address, ErrorData> {
+        match (wallet_id, address) {
+            (Some(wallet_id), None) => Ok(self
+                .config
+                .wallet(wallet_id)
+                .map_err(|error| tool_error(&error))?
+                .address),
+            (None, Some(address)) => Address::from_str(address).map_err(|_| {
+                ErrorData::invalid_params("address must be a 20-byte EVM address", None)
+            }),
+            _ => Err(ErrorData::invalid_params(
+                "provide exactly one of wallet_id or address",
+                None,
+            )),
+        }
+    }
+
     /// Sign a policy-authorized permit with the wallet key and persist the
     /// signature. The persistence step re-checks the policy revision, so a
     /// concurrent policy change discards the signature instead of storing it.
@@ -2481,6 +2507,7 @@ mod tests {
                 "wallet_address_book",
                 "wallet_batch_eth_call",
                 "wallet_decode_abi_result",
+                "wallet_get_balances",
                 "wallet_get_legal",
                 "wallet_get_policy",
                 "wallet_get_portfolio",
@@ -2490,9 +2517,8 @@ mod tests {
                 "wallet_list",
                 "wallet_list_tokens",
                 "wallet_propose_policy",
-                "wallet_send_erc20_transfers",
                 "wallet_send_execution_plan",
-                "wallet_send_native_transfers",
+                "wallet_send_transfers",
                 "wallet_sign_typed_data",
                 "wallet_simulate_execution_plan",
                 "wallet_wait_for_approval",
@@ -2673,12 +2699,13 @@ mod tests {
     async fn signing_tools_fail_closed_until_legal_acceptance() {
         let (_directory, server) = server();
         let result = server
-            .wallet_send_native_transfers(Parameters(NativeTransfersInput {
+            .wallet_send_transfers(Parameters(TransfersInput {
                 wallet_id: "primary".into(),
                 chain_id: "1".into(),
-                transfers: vec![NativeTransfer {
+                transfers: vec![Transfer {
+                    token: Address::ZERO,
                     to: Address::from_str("0x2222222222222222222222222222222222222222").unwrap(),
-                    amount_wei: DecimalU256::new("1").unwrap(),
+                    amount: DecimalU256::new("1").unwrap(),
                 }],
             }))
             .await;

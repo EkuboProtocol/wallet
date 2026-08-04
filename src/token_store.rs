@@ -12,7 +12,7 @@
 use crate::{config::NetworkConfig, policy_store::PolicyStore};
 use alloy::{
     network::TransactionBuilder,
-    primitives::{Address, U256},
+    primitives::{Address, U256, address},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     sol,
@@ -37,6 +37,17 @@ const BALANCE_CHUNK: usize = 200;
 pub const MAX_IMPORT_TOKENS: usize = 1_000;
 /// A portfolio read checks at most this many known tokens.
 pub const MAX_PORTFOLIO_TOKENS: usize = 2_000;
+/// One explicit balances read accepts at most this many token addresses.
+pub const MAX_BALANCE_TOKENS: usize = 1_000;
+/// The Ekubo `TokenDataFetcher` lens, deployed deterministically at the same
+/// address on every Ekubo-supported network. It reads balances for an
+/// explicit token list in one call, already returning only nonzero entries;
+/// nonexistent or misbehaving tokens read as zero via `SafeTransferLib`
+/// rather than reverting, and `address(0)` reads the owner's native balance.
+pub const TOKEN_DATA_FETCHER_ADDRESS: Address =
+    address!("0x305cf9a34dcb265522780d1d64544d3f7c450407");
+/// Tokens per `TokenDataFetcher` call.
+const FETCHER_CHUNK: usize = 500;
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_TEXT_LEN: usize = 64;
 
@@ -60,6 +71,20 @@ sol! {
     function balanceOf(address account) external view returns (uint256);
     function getEthBalance(address addr) external view returns (uint256);
     function getBlockNumber() external view returns (uint256);
+
+    struct FetcherBalance {
+        address token;
+        uint256 amount;
+    }
+
+    struct FetcherAllowance {
+        address token;
+        address spender;
+        uint256 amount;
+    }
+
+    function getNonzeroBalancesAndAllowances(address owner, address[] tokens, address[] spenders)
+        external view returns (FetcherBalance[] balances, FetcherAllowance[] allowances);
 }
 
 /// One stored token, addresses rendered checksummed.
@@ -457,6 +482,151 @@ pub async fn read_portfolio(
     })
 }
 
+/// One nonzero balance from an explicit balances read.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct TokenBalance {
+    pub token: String,
+    /// Raw balance in the token's smallest unit, as a decimal string.
+    pub balance: String,
+}
+
+/// Balances for one address across an explicit token list.
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct TokenBalances {
+    pub address: String,
+    pub chain_id: String,
+    pub network: String,
+    /// Block number reported in the same Multicall3 batch as the first read.
+    pub block_number: String,
+    /// Only nonzero balances. Zero, nonexistent, and misbehaving tokens are
+    /// omitted rather than aborting the batch.
+    pub balances: Vec<TokenBalance>,
+    /// Distinct token addresses checked after deduplication.
+    pub tokens_checked: u64,
+    /// `token_data_fetcher` when the Ekubo lens answered, otherwise
+    /// `multicall_balance_of`.
+    pub source: String,
+}
+
+/// Read balances for an explicit token list through the Ekubo
+/// `TokenDataFetcher` lens, falling back to individual Multicall3 `balanceOf`
+/// reads on networks where the lens is not deployed. Both paths isolate
+/// per-token failures — a bad address reads as zero — and `address(0)` reads
+/// the owner's native balance.
+pub async fn read_token_balances(
+    network: &NetworkConfig,
+    owner: Address,
+    tokens: &[Address],
+) -> Result<TokenBalances> {
+    ensure!(!tokens.is_empty(), "at least one token address is required");
+    ensure!(
+        tokens.len() <= MAX_BALANCE_TOKENS,
+        "at most {MAX_BALANCE_TOKENS} token addresses may be checked per request"
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    let tokens: Vec<Address> = tokens
+        .iter()
+        .copied()
+        .filter(|token| seen.insert(*token))
+        .collect();
+
+    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let mut block_number: Option<String> = None;
+    let mut balances = Vec::new();
+    let mut fetcher_available = true;
+    for (index, chunk) in tokens.chunks(FETCHER_CHUNK).enumerate() {
+        let mut calls = Vec::with_capacity(2);
+        if index == 0 {
+            calls.push(call(
+                crate::batch_read::MULTICALL3_ADDRESS,
+                getBlockNumberCall {}.abi_encode(),
+            ));
+        }
+        calls.push(call(
+            TOKEN_DATA_FETCHER_ADDRESS,
+            getNonzeroBalancesAndAllowancesCall {
+                owner,
+                tokens: chunk.to_vec(),
+                spenders: Vec::new(),
+            }
+            .abi_encode(),
+        ));
+        let results = aggregate(network, &provider, calls).await?;
+        let mut results = results.into_iter();
+        if index == 0 {
+            let block = results.next().context("missing block number result")?;
+            ensure!(block.success, "Multicall3 getBlockNumber failed");
+            block_number =
+                Some(getBlockNumberCall::abi_decode_returns(&block.returnData)?.to_string());
+        }
+        let result = results.next().context("missing TokenDataFetcher result")?;
+        if !result.success {
+            // Not deployed on this network; the Multicall3 wrapper isolated
+            // the failure. Fall back to individual reads.
+            fetcher_available = false;
+            balances.clear();
+            break;
+        }
+        let decoded = getNonzeroBalancesAndAllowancesCall::abi_decode_returns(&result.returnData)
+            .context("TokenDataFetcher returned undecodable data")?;
+        for entry in decoded.balances {
+            balances.push(TokenBalance {
+                token: entry.token.to_checksum(None),
+                balance: entry.amount.to_string(),
+            });
+        }
+    }
+
+    let source = if fetcher_available {
+        "token_data_fetcher"
+    } else {
+        for chunk in tokens.chunks(BALANCE_CHUNK) {
+            let calls = chunk
+                .iter()
+                .map(|token| {
+                    if *token == Address::ZERO {
+                        call(
+                            crate::batch_read::MULTICALL3_ADDRESS,
+                            getEthBalanceCall { addr: owner }.abi_encode(),
+                        )
+                    } else {
+                        call(*token, balanceOfCall { account: owner }.abi_encode())
+                    }
+                })
+                .collect();
+            let results = aggregate(network, &provider, calls).await?;
+            ensure!(
+                results.len() == chunk.len(),
+                "Multicall3 returned an unexpected result count"
+            );
+            for (token, result) in chunk.iter().zip(results) {
+                let balance = result
+                    .success
+                    .then(|| balanceOfCall::abi_decode_returns(&result.returnData).ok())
+                    .flatten()
+                    .unwrap_or(U256::ZERO);
+                if balance > U256::ZERO {
+                    balances.push(TokenBalance {
+                        token: token.to_checksum(None),
+                        balance: balance.to_string(),
+                    });
+                }
+            }
+        }
+        "multicall_balance_of"
+    };
+
+    Ok(TokenBalances {
+        address: owner.to_checksum(None),
+        chain_id: network.chain_id.to_string(),
+        network: network.name.clone(),
+        block_number: block_number.context("balances read produced no block number")?,
+        balances,
+        tokens_checked: tokens.len() as u64,
+        source: source.into(),
+    })
+}
+
 fn call(target: Address, data: Vec<u8>) -> TokenCall3 {
     TokenCall3 {
         target,
@@ -658,6 +828,79 @@ mod tests {
         assert_eq!(
             store.get(10, token).unwrap().unwrap().symbol.as_deref(),
             Some("USDC")
+        );
+    }
+
+    #[test]
+    fn fetcher_call_encodes_the_deployed_selector() {
+        use sha3::{Digest, Keccak256};
+        let expected = Keccak256::digest(
+            b"getNonzeroBalancesAndAllowances(address,address[],address[])".as_slice(),
+        );
+        assert_eq!(getNonzeroBalancesAndAllowancesCall::SELECTOR, expected[..4]);
+        assert_eq!(
+            format!("{TOKEN_DATA_FETCHER_ADDRESS:#x}"),
+            "0x305cf9a34dcb265522780d1d64544d3f7c450407"
+        );
+    }
+
+    #[test]
+    fn balances_read_bounds_its_input() {
+        let network = crate::config::default_networks().remove(0);
+        let owner = Address::repeat_byte(0x11);
+        let empty: Vec<Address> = Vec::new();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(read_token_balances(&network, owner, &empty))
+                .is_err()
+        );
+        let too_many = vec![Address::repeat_byte(0x22); MAX_BALANCE_TOKENS + 1];
+        assert!(
+            runtime
+                .block_on(read_token_balances(&network, owner, &too_many))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit live Ethereum RPC conformance check"]
+    async fn live_balances_read_isolates_bad_tokens_and_filters_zeroes() {
+        let network = crate::config::default_networks().remove(0);
+        // Any fixed address may hold dust on mainnet, so assert the
+        // structural guarantees instead of exact holdings: the bogus token
+        // must not abort the batch and can never report a balance, entries
+        // are nonzero and pinned to a real block, and Binance 8 definitely
+        // holds USDC, exercising the nonzero path.
+        let bogus = Address::repeat_byte(0x11);
+        let usdc = Address::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap();
+        let binance = Address::from_str("0xf977814e90da44bfa03b6295a0616a897441acec").unwrap();
+        let result = read_token_balances(&network, binance, &[usdc, bogus, Address::ZERO])
+            .await
+            .unwrap();
+        println!("source={} balances={:?}", result.source, result.balances);
+        assert_eq!(result.tokens_checked, 3);
+        assert!(result.block_number.parse::<u64>().unwrap() > 0);
+        let bogus_checksum = bogus.to_checksum(None);
+        assert!(
+            result
+                .balances
+                .iter()
+                .all(|entry| entry.token != bogus_checksum)
+        );
+        assert!(result.balances.iter().all(|entry| {
+            entry
+                .balance
+                .parse::<u128>()
+                .map_or(true, |value| value > 0)
+        }));
+        assert!(
+            result
+                .balances
+                .iter()
+                .any(|entry| entry.token == usdc.to_checksum(None))
         );
     }
 

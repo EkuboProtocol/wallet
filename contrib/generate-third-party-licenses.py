@@ -98,7 +98,8 @@ def main():
     lines = [
         "# Third-Party Licenses",
         "",
-        "Ekubo Wallet is distributed with the third-party Rust packages listed",
+        "Ekubo Wallet is © Ekubo, Inc. It is distributed with the third-party",
+        "Rust packages listed",
         "below (all supported platforms combined). Each package is listed with",
         "its license expression; the full text of each package-shipped license",
         "file follows in the appendix. Regenerate this document with",

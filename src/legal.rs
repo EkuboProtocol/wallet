@@ -36,17 +36,19 @@ pub const THIRD_PARTY_LICENSES: &str = include_str!("../THIRD_PARTY_LICENSES.md"
 pub const TERMS_OF_SERVICE: &str = "\
 # Ekubo Wallet Terms of Service
 
-Version 1 — 2026-08-04
+Version 1 — Effective 2026-08-04
 
-By accepting these terms you agree to all of the following before this
-software signs anything on your behalf.
+These terms are an agreement between you and Ekubo, Inc. (the
+\"developer\"). By accepting them you agree to all of the following before
+this software signs anything on your behalf.
 
 ## 1. What this software is
 
-Ekubo Wallet is a local-first EVM wallet, command-line tool, and MCP server.
-Private keys are generated or imported on your machine and stay in your
-operating system's credential store. The developer operates no servers for
-this software and never has access to your keys or funds.
+Ekubo Wallet is a local-first EVM wallet, command-line tool, and MCP server
+developed by Ekubo, Inc. Private keys are generated or imported on your
+machine and stay in your operating system's credential store. The developer
+operates no servers for this software and never has access to your keys or
+funds.
 
 ## 2. You direct all signing, including through agents
 
@@ -66,8 +68,8 @@ be incomplete or wrong. You accept all of these risks by using this software.
 
 ## 4. No liability for agent-directed signing
 
-TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE DEVELOPER AND COPYRIGHT HOLDERS
-ARE NOT RESPONSIBLE OR LIABLE FOR ANY LOSSES INCURRED DUE TO USING AN AGENT
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, EKUBO, INC. AND ALL COPYRIGHT
+HOLDERS ARE NOT RESPONSIBLE OR LIABLE FOR ANY LOSSES INCURRED DUE TO USING AN AGENT
 OR OTHER AUTOMATED TOOLING TO SIGN TRANSACTIONS OR TYPED DATA WITH THIS
 SOFTWARE. THIS INCLUDES, WITHOUT LIMITATION, LOSS OF FUNDS, TOKENS, OR
 ACCESS RESULTING FROM AGENT ERROR, PROMPT INJECTION, MALICIOUS OR DEFECTIVE
@@ -92,14 +94,15 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 1 — 2026-08-04
+Version 1 — Effective 2026-08-04
 
-This policy must be acknowledged separately from the terms of service.
+This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
+separately from the terms of service.
 
 ## 1. The developer collects nothing
 
 This software is local-first. It contains no telemetry, no analytics, no
-crash reporting, and no developer-operated services. The developer receives
+crash reporting, and no developer-operated services. Ekubo, Inc. receives
 no data from your use of this software.
 
 ## 2. Requests to RPC endpoints

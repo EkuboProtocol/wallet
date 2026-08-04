@@ -17,42 +17,23 @@ sol! {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct NativeTransfer {
-    #[schemars(with = "String")]
-    pub to: Address,
-    pub amount_wei: DecimalU256,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Erc20Transfer {
+pub struct Transfer {
+    /// Token contract to transfer. Address
+    /// 0x0000000000000000000000000000000000000000 transfers the native token.
     #[schemars(with = "String")]
     pub token: Address,
+    /// Recipient of the transfer.
     #[schemars(with = "String")]
     pub to: Address,
+    /// Raw smallest-unit quantity: wei for the native token, the token's own
+    /// smallest unit otherwise.
     pub amount: DecimalU256,
 }
 
-pub fn native_transfer_plan(
+pub fn transfer_plan(
     chain_id: &DecimalU256,
     sender: Address,
-    transfers: Vec<NativeTransfer>,
-) -> Result<ExecutionPlan> {
-    ensure!(!transfers.is_empty(), "at least one transfer is required");
-    make_plan(
-        chain_id,
-        sender,
-        transfers
-            .into_iter()
-            .map(|transfer| (transfer.to, Bytes::new(), transfer.amount_wei))
-            .collect(),
-    )
-}
-
-pub fn erc20_transfer_plan(
-    chain_id: &DecimalU256,
-    sender: Address,
-    transfers: Vec<Erc20Transfer>,
+    transfers: Vec<Transfer>,
 ) -> Result<ExecutionPlan> {
     ensure!(!transfers.is_empty(), "at least one transfer is required");
     make_plan(
@@ -61,6 +42,9 @@ pub fn erc20_transfer_plan(
         transfers
             .into_iter()
             .map(|transfer| {
+                if transfer.token.is_zero() {
+                    return (transfer.to, Bytes::new(), transfer.amount);
+                }
                 let call = transferCall {
                     to: transfer.to,
                     amount: U256::from_str_radix(transfer.amount.as_str(), 10)
