@@ -787,6 +787,12 @@ fn render_raw(value: &DynSolValue) -> String {
             let rendered: Vec<String> = items.iter().take(8).map(render_raw).collect();
             format!("({})", rendered.join(", "))
         }
+        // CustomStruct exists only with the dyn-abi eip712 feature; ABI
+        // decoding of calldata never produces it.
+        DynSolValue::CustomStruct { tuple, .. } => {
+            let rendered: Vec<String> = tuple.iter().take(8).map(render_raw).collect();
+            format!("({})", rendered.join(", "))
+        }
         DynSolValue::Function(_) => "<unsupported>".into(),
     }
 }

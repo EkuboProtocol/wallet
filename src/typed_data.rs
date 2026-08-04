@@ -1,0 +1,919 @@
+//! EIP-712 typed-data signing requests.
+//!
+//! Typed-data signatures can be as powerful as transactions (token permits,
+//! order authorizations, delegations), but the wallet policy language and
+//! simulation cannot evaluate their effects. Every typed-data request
+//! therefore queues for explicit human review: the MCP tool only creates a
+//! pending request, and the separate CLI displays the complete typed data,
+//! requires terminal approval plus OS owner authentication, and only then
+//! signs. The signature is persisted in the encrypted database and handed
+//! back to the waiting agent.
+
+use crate::policy_store::PolicyStore;
+use alloy::primitives::{Address, B256, U256, address};
+use alloy_dyn_abi::TypedData;
+use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, TimeDelta, Utc};
+use rusqlite::{OptionalExtension, params};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::{path::Path, str::FromStr};
+use uuid::Uuid;
+
+/// The canonical Permit2 deployment, identical on every chain.
+pub const PERMIT2_ADDRESS: Address = address!("0x000000000022D473030F116dDEE9F6B43aC78BA3");
+
+const ERC2612_PERMIT_TYPE: &str =
+    "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)";
+const DAI_PERMIT_TYPE: &str =
+    "Permit(address holder,address spender,uint256 nonce,uint256 expiry,bool allowed)";
+const PERMIT2_SINGLE_TYPE: &str = "PermitSingle(PermitDetails details,address spender,uint256 sigDeadline)PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)";
+const PERMIT2_BATCH_TYPE: &str = "PermitBatch(PermitDetails[] details,address spender,uint256 sigDeadline)PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)";
+const PERMIT2_TRANSFER_TYPE: &str = "PermitTransferFrom(TokenPermissions permitted,address spender,uint256 nonce,uint256 deadline)TokenPermissions(address token,uint256 amount)";
+const PERMIT2_BATCH_TRANSFER_TYPE: &str = "PermitBatchTransferFrom(TokenPermissions[] permitted,address spender,uint256 nonce,uint256 deadline)TokenPermissions(address token,uint256 amount)";
+
+/// Typed-data approval requests expire like exceptional transactions do.
+pub const TYPED_DATA_APPROVAL_EXPIRY_SECONDS: i64 = 900;
+const MAX_AWAITING_PER_WALLET: i64 = 64;
+/// Serialized typed data larger than this is rejected before parsing.
+pub const MAX_TYPED_DATA_BYTES: usize = 262_144;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedDataStatus {
+    AwaitingApproval,
+    Rejected,
+    Signed,
+    Expired,
+}
+
+impl TypedDataStatus {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "awaiting_approval" => Ok(Self::AwaitingApproval),
+            "rejected" => Ok(Self::Rejected),
+            "signed" => Ok(Self::Signed),
+            "expired" => Ok(Self::Expired),
+            _ => anyhow::bail!("stored typed-data request has invalid status {value}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct PendingTypedData {
+    pub request_id: Uuid,
+    pub wallet_id: String,
+    pub chain_id: String,
+    /// The exact EIP-712 payload: `types`, `primaryType`, `domain`, `message`.
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
+    pub typed_data: serde_json::Value,
+    /// The EIP-712 signing hash of the exact payload.
+    pub digest: String,
+    pub status: TypedDataStatus,
+    /// False only for permits the active policy authorized automatically.
+    pub approval_required: bool,
+    /// The policy revision that authorized an automatic signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_revision: Option<u64>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_at: Option<DateTime<Utc>>,
+    /// The 65-byte r||s||v signature, present only once signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+/// Parse and canonicalize an EIP-712 payload, returning the parsed typed data
+/// and its signing hash. The domain must pin the chain the caller claims, so
+/// a signature can never be silently valid on a different chain than the one
+/// the user reviewed.
+pub fn parse_typed_data(value: &serde_json::Value) -> Result<(TypedData, u64, B256)> {
+    let serialized = serde_json::to_string(value)?;
+    ensure!(
+        serialized.len() <= MAX_TYPED_DATA_BYTES,
+        "typed data exceeds the {MAX_TYPED_DATA_BYTES}-byte maximum"
+    );
+    let typed: TypedData = serde_json::from_value(value.clone())
+        .context("typed data is not a valid EIP-712 payload")?;
+    let chain_id: u64 = typed
+        .domain
+        .chain_id
+        .context("typed data domain must include chainId")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("typed data domain chainId does not fit uint64"))?;
+    ensure!(chain_id > 0, "typed data domain chainId must be positive");
+    ensure!(
+        typed.primary_type != "EIP712Domain",
+        "refusing to sign a bare EIP712Domain payload"
+    );
+    let digest = typed
+        .eip712_signing_hash()
+        .context("failed to compute the EIP-712 signing hash")?;
+    Ok((typed, chain_id, digest))
+}
+
+/// One token approval a recognized permit payload grants when signed.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct PermitApproval {
+    /// Which permit shape was recognized: `erc2612_permit`, `dai_permit`,
+    /// `permit2_permit`, or `permit2_signature_transfer`.
+    pub kind: String,
+    pub token: String,
+    pub spender: String,
+    /// The approved or transferable amount in the token's smallest unit.
+    pub amount: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
+}
+
+impl PermitApproval {
+    pub fn tuple(&self) -> Result<(Address, Address, U256)> {
+        Ok((
+            Address::from_str(&self.token).context("permit token address is invalid")?,
+            Address::from_str(&self.spender).context("permit spender address is invalid")?,
+            U256::from_str_radix(&self.amount, 10).context("permit amount is invalid")?,
+        ))
+    }
+}
+
+/// Recognize permit-style payloads whose signature grants token approvals.
+///
+/// Recognition matches the complete EIP-712 type encoding, not just the
+/// primary type name, so a look-alike type with different semantics is never
+/// treated as a permit. Returns `None` for payloads that are not a recognized
+/// permit shape; those always require human review. For recognized shapes the
+/// signer-side identity field (ERC-2612 `owner`, DAI `holder`) must match the
+/// signing wallet.
+pub fn interpret_permit_approvals(
+    typed: &TypedData,
+    wallet: Address,
+) -> Result<Option<Vec<PermitApproval>>> {
+    let encoded = typed
+        .encode_type()
+        .context("failed to encode the typed-data primary type")?;
+    let verifying_contract = typed.domain.verifying_contract;
+    let message = &typed.message;
+
+    if encoded == ERC2612_PERMIT_TYPE {
+        let token = verifying_contract.context("permit domain has no verifyingContract")?;
+        ensure!(
+            field_address(message, "owner")? == wallet,
+            "permit owner does not match the signing wallet"
+        );
+        return Ok(Some(vec![PermitApproval {
+            kind: "erc2612_permit".into(),
+            token: token.to_checksum(None),
+            spender: field_address(message, "spender")?.to_checksum(None),
+            amount: field_u256(message, "value")?.to_string(),
+            deadline: Some(field_u256(message, "deadline")?.to_string()),
+        }]));
+    }
+    if encoded == DAI_PERMIT_TYPE {
+        let token = verifying_contract.context("permit domain has no verifyingContract")?;
+        ensure!(
+            field_address(message, "holder")? == wallet,
+            "permit holder does not match the signing wallet"
+        );
+        let allowed = message
+            .get("allowed")
+            .and_then(serde_json::Value::as_bool)
+            .context("DAI permit is missing the allowed flag")?;
+        return Ok(Some(vec![PermitApproval {
+            kind: "dai_permit".into(),
+            token: token.to_checksum(None),
+            spender: field_address(message, "spender")?.to_checksum(None),
+            amount: if allowed { U256::MAX } else { U256::ZERO }.to_string(),
+            deadline: Some(field_u256(message, "expiry")?.to_string()),
+        }]));
+    }
+
+    let permit2 = |kind: &str,
+                   entries: Vec<(Address, U256)>,
+                   spender: Address,
+                   deadline: U256|
+     -> Result<Option<Vec<PermitApproval>>> {
+        ensure!(
+            verifying_contract == Some(PERMIT2_ADDRESS),
+            "Permit2-shaped typed data does not verify against the canonical Permit2 contract"
+        );
+        Ok(Some(
+            entries
+                .into_iter()
+                .map(|(token, amount)| PermitApproval {
+                    kind: kind.into(),
+                    token: token.to_checksum(None),
+                    spender: spender.to_checksum(None),
+                    amount: amount.to_string(),
+                    deadline: Some(deadline.to_string()),
+                })
+                .collect(),
+        ))
+    };
+
+    match encoded.as_str() {
+        PERMIT2_SINGLE_TYPE => {
+            let details = message
+                .get("details")
+                .context("PermitSingle has no details")?;
+            permit2(
+                "permit2_permit",
+                vec![(
+                    field_address(details, "token")?,
+                    field_u256(details, "amount")?,
+                )],
+                field_address(message, "spender")?,
+                field_u256(message, "sigDeadline")?,
+            )
+        }
+        PERMIT2_BATCH_TYPE => {
+            let details = message
+                .get("details")
+                .and_then(serde_json::Value::as_array)
+                .context("PermitBatch has no details array")?;
+            let entries = details
+                .iter()
+                .map(|entry| Ok((field_address(entry, "token")?, field_u256(entry, "amount")?)))
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(!entries.is_empty(), "PermitBatch approves no tokens");
+            permit2(
+                "permit2_permit",
+                entries,
+                field_address(message, "spender")?,
+                field_u256(message, "sigDeadline")?,
+            )
+        }
+        PERMIT2_TRANSFER_TYPE => {
+            let permitted = message
+                .get("permitted")
+                .context("PermitTransferFrom has no permitted token")?;
+            permit2(
+                "permit2_signature_transfer",
+                vec![(
+                    field_address(permitted, "token")?,
+                    field_u256(permitted, "amount")?,
+                )],
+                field_address(message, "spender")?,
+                field_u256(message, "deadline")?,
+            )
+        }
+        PERMIT2_BATCH_TRANSFER_TYPE => {
+            let permitted = message
+                .get("permitted")
+                .and_then(serde_json::Value::as_array)
+                .context("PermitBatchTransferFrom has no permitted array")?;
+            let entries = permitted
+                .iter()
+                .map(|entry| Ok((field_address(entry, "token")?, field_u256(entry, "amount")?)))
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(
+                !entries.is_empty(),
+                "PermitBatchTransferFrom permits no tokens"
+            );
+            permit2(
+                "permit2_signature_transfer",
+                entries,
+                field_address(message, "spender")?,
+                field_u256(message, "deadline")?,
+            )
+        }
+        _ => Ok(None),
+    }
+}
+
+fn field_address(value: &serde_json::Value, field: &str) -> Result<Address> {
+    let raw = value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("typed-data message field {field} is missing or not a string"))?;
+    Address::from_str(raw).with_context(|| format!("typed-data field {field} is not an address"))
+}
+
+fn field_u256(value: &serde_json::Value, field: &str) -> Result<U256> {
+    let raw = value
+        .get(field)
+        .with_context(|| format!("typed-data message field {field} is missing"))?;
+    match raw {
+        serde_json::Value::Number(number) => {
+            let number = number
+                .as_u64()
+                .with_context(|| format!("typed-data field {field} is not an unsigned integer"))?;
+            Ok(U256::from(number))
+        }
+        serde_json::Value::String(text) => {
+            let parsed = if let Some(hexadecimal) = text.strip_prefix("0x") {
+                U256::from_str_radix(hexadecimal, 16)
+            } else {
+                U256::from_str_radix(text, 10)
+            };
+            parsed.with_context(|| format!("typed-data field {field} is not a uint256"))
+        }
+        _ => anyhow::bail!("typed-data field {field} has an unsupported JSON type"),
+    }
+}
+
+pub struct TypedDataStore {
+    database: PolicyStore,
+}
+
+impl TypedDataStore {
+    pub fn production(data_dir: &Path) -> Result<Self> {
+        Ok(Self {
+            database: PolicyStore::production(data_dir)?,
+        })
+    }
+
+    #[must_use]
+    pub const fn new(database: PolicyStore) -> Self {
+        Self { database }
+    }
+
+    /// Queue one typed-data payload for human review. An identical payload
+    /// already awaiting approval for the same wallet is reused.
+    pub fn create(
+        &mut self,
+        wallet_id: &str,
+        chain_id: u64,
+        typed_data: &serde_json::Value,
+        digest: B256,
+    ) -> Result<PendingTypedData> {
+        crate::config::validate_wallet_id(wallet_id)?;
+        let created_at = Utc::now();
+        let digest = format!("{digest:#x}");
+        let transaction = self.database.connection.transaction()?;
+        transaction.execute(
+            "UPDATE pending_typed_data SET status = 'expired', updated_at = ?1
+             WHERE status = 'awaiting_approval' AND expires_at <= ?1",
+            [created_at.to_rfc3339()],
+        )?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT request_id FROM pending_typed_data
+                 WHERE wallet_id = ?1 AND chain_id = ?2 AND digest = ?3
+                   AND status = 'awaiting_approval'",
+                params![wallet_id, chain_id.to_string(), digest],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            transaction.commit()?;
+            return self.get(Uuid::parse_str(&existing).context("stored request ID is invalid")?);
+        }
+        let awaiting: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM pending_typed_data
+             WHERE wallet_id = ?1 AND status = 'awaiting_approval'",
+            [wallet_id],
+            |row| row.get(0),
+        )?;
+        ensure!(
+            awaiting < MAX_AWAITING_PER_WALLET,
+            "wallet already has {MAX_AWAITING_PER_WALLET} typed-data requests awaiting approval"
+        );
+
+        let request_id = Uuid::new_v4();
+        let expires_at = created_at + TimeDelta::seconds(TYPED_DATA_APPROVAL_EXPIRY_SECONDS);
+        transaction.execute(
+            "INSERT INTO pending_typed_data(
+                request_id, wallet_id, chain_id, typed_data_json, digest,
+                status, created_at, expires_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting_approval', ?6, ?7, ?6)",
+            params![
+                request_id.to_string(),
+                wallet_id,
+                chain_id.to_string(),
+                serde_json::to_string(typed_data)?,
+                digest,
+                created_at.to_rfc3339(),
+                expires_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        self.get(request_id)
+    }
+
+    /// Persist a signature the active policy authorized automatically for a
+    /// recognized permit. The insert re-checks the policy revision inside the
+    /// transaction, so a policy change between evaluation and persistence
+    /// fails closed. It is recorded in the same lifecycle table but never
+    /// appears in the approval queue.
+    pub fn record_automatic_signed(
+        &mut self,
+        wallet_id: &str,
+        chain_id: u64,
+        typed_data: &serde_json::Value,
+        digest: B256,
+        policy_revision: u64,
+        signature: &str,
+    ) -> Result<PendingTypedData> {
+        crate::config::validate_wallet_id(wallet_id)?;
+        validate_signature_hex(signature)?;
+        let policy_revision =
+            i64::try_from(policy_revision).context("policy revision is too large")?;
+        let transaction = self.database.connection.transaction()?;
+        let active_revision: Option<i64> = transaction
+            .query_row(
+                "SELECT revision FROM wallet_policies WHERE wallet_id = ?1",
+                [wallet_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        ensure!(
+            active_revision == Some(policy_revision),
+            "active policy revision changed before signed typed data persistence"
+        );
+        let request_id = Uuid::new_v4();
+        let created_at = Utc::now();
+        transaction.execute(
+            "INSERT INTO pending_typed_data(
+                request_id, wallet_id, chain_id, typed_data_json, digest,
+                status, approval_required, policy_revision,
+                created_at, expires_at, updated_at, signature
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'signed', 0, ?6, ?7, ?7, ?7, ?8)",
+            params![
+                request_id.to_string(),
+                wallet_id,
+                chain_id.to_string(),
+                serde_json::to_string(typed_data)?,
+                format!("{digest:#x}"),
+                policy_revision,
+                created_at.to_rfc3339(),
+                signature,
+            ],
+        )?;
+        transaction.commit()?;
+        self.get(request_id)
+    }
+
+    pub fn get(&self, request_id: Uuid) -> Result<PendingTypedData> {
+        let mut record = self.read(request_id)?;
+        if record.status == TypedDataStatus::AwaitingApproval && record.expires_at <= Utc::now() {
+            self.database.connection.execute(
+                "UPDATE pending_typed_data SET status = 'expired', updated_at = ?2
+                 WHERE request_id = ?1 AND status = 'awaiting_approval'",
+                params![request_id.to_string(), Utc::now().to_rfc3339()],
+            )?;
+            record = self.read(request_id)?;
+        }
+        Ok(record)
+    }
+
+    pub fn reject(&mut self, request_id: Uuid) -> Result<PendingTypedData> {
+        let current = self.get(request_id)?;
+        ensure!(
+            current.status == TypedDataStatus::AwaitingApproval,
+            "typed-data request is not awaiting approval"
+        );
+        let now = Utc::now().to_rfc3339();
+        let changed = self.database.connection.execute(
+            "UPDATE pending_typed_data
+             SET status = 'rejected', rejected_at = ?2, updated_at = ?2
+             WHERE request_id = ?1 AND status = 'awaiting_approval'",
+            params![request_id.to_string(), now],
+        )?;
+        ensure!(changed == 1, "typed-data request changed during rejection");
+        self.get(request_id)
+    }
+
+    /// Atomically record approval and the exact signature. The stored payload
+    /// digest must still match what the approver reviewed.
+    pub fn store_signature(
+        &mut self,
+        request_id: Uuid,
+        expected_digest: &str,
+        signature: &str,
+    ) -> Result<PendingTypedData> {
+        validate_signature_hex(signature)?;
+        let transaction = self.database.connection.transaction()?;
+        let (digest, status, expires_at): (String, String, String) = transaction
+            .query_row(
+                "SELECT digest, status, expires_at
+                 FROM pending_typed_data WHERE request_id = ?1",
+                [request_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .with_context(|| format!("unknown typed-data request {request_id}"))?;
+        ensure!(
+            digest == expected_digest,
+            "typed-data request digest mismatch"
+        );
+        ensure!(
+            TypedDataStatus::parse(&status)? == TypedDataStatus::AwaitingApproval,
+            "typed-data request is not awaiting approval"
+        );
+        ensure!(
+            parse_time(&expires_at)? > Utc::now(),
+            "typed-data request expired"
+        );
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "UPDATE pending_typed_data SET
+                status = 'signed', approved_at = ?2, updated_at = ?2, signature = ?3
+             WHERE request_id = ?1 AND status = 'awaiting_approval'",
+            params![request_id.to_string(), now, signature],
+        )?;
+        transaction.commit()?;
+        self.get(request_id)
+    }
+
+    pub fn awaiting_approval(&self, wallet_id: Option<&str>) -> Result<Vec<PendingTypedData>> {
+        if let Some(wallet_id) = wallet_id {
+            crate::config::validate_wallet_id(wallet_id)?;
+        }
+        let mut statement = self.database.connection.prepare(
+            "SELECT request_id FROM pending_typed_data
+             WHERE status = 'awaiting_approval' AND (?1 IS NULL OR wallet_id = ?1)
+             ORDER BY created_at DESC",
+        )?;
+        let request_ids = statement
+            .query_map([wallet_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        request_ids
+            .into_iter()
+            .map(|value| {
+                let id = Uuid::parse_str(&value).context("stored request ID is invalid")?;
+                self.get(id)
+            })
+            .filter(|result| {
+                result.as_ref().map_or(true, |record| {
+                    record.status == TypedDataStatus::AwaitingApproval
+                })
+            })
+            .collect()
+    }
+
+    fn read(&self, request_id: Uuid) -> Result<PendingTypedData> {
+        let row = self
+            .database
+            .connection
+            .query_row(
+                "SELECT wallet_id, chain_id, typed_data_json, digest, status,
+                        created_at, expires_at, updated_at, approved_at, rejected_at,
+                        signature, approval_required, policy_revision
+                 FROM pending_typed_data WHERE request_id = ?1",
+                [request_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, i64>(11)?,
+                        row.get::<_, Option<i64>>(12)?,
+                    ))
+                },
+            )
+            .with_context(|| format!("unknown typed-data request {request_id}"))?;
+        let (
+            wallet_id,
+            chain_id,
+            typed_data_json,
+            digest,
+            status,
+            created_at,
+            expires_at,
+            updated_at,
+            approved_at,
+            rejected_at,
+            signature,
+            approval_required,
+            policy_revision,
+        ) = row;
+        crate::config::validate_wallet_id(&wallet_id)?;
+        let typed_data: serde_json::Value =
+            serde_json::from_str(&typed_data_json).context("stored typed data is invalid JSON")?;
+        // Re-derive the digest so a corrupted or edited row can never present
+        // one payload while binding a signature to another.
+        let (_, stored_chain_id, actual_digest) = parse_typed_data(&typed_data)?;
+        ensure!(
+            format!("{actual_digest:#x}") == digest,
+            "stored typed-data digest mismatch"
+        );
+        ensure!(
+            stored_chain_id.to_string() == chain_id,
+            "stored typed-data chain mismatch"
+        );
+        if let Some(signature) = &signature {
+            validate_signature_hex(signature)?;
+        }
+        let approval_required = match approval_required {
+            0 => false,
+            1 => true,
+            _ => anyhow::bail!("stored approval requirement is invalid"),
+        };
+        ensure!(
+            approval_required || policy_revision.is_some(),
+            "automatic typed-data signature has no policy revision"
+        );
+        Ok(PendingTypedData {
+            request_id,
+            wallet_id,
+            chain_id,
+            typed_data,
+            digest,
+            status: TypedDataStatus::parse(&status)?,
+            approval_required,
+            policy_revision: policy_revision
+                .map(|value| u64::try_from(value).context("stored policy revision is invalid"))
+                .transpose()?,
+            created_at: parse_time(&created_at)?,
+            expires_at: parse_time(&expires_at)?,
+            updated_at: parse_time(&updated_at)?,
+            approved_at: approved_at.as_deref().map(parse_time).transpose()?,
+            rejected_at: rejected_at.as_deref().map(parse_time).transpose()?,
+            signature,
+        })
+    }
+}
+
+fn parse_time(value: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(value)
+        .context("stored timestamp is invalid")?
+        .with_timezone(&Utc))
+}
+
+fn validate_signature_hex(value: &str) -> Result<()> {
+    let encoded = value
+        .strip_prefix("0x")
+        .context("signature must start with 0x")?;
+    ensure!(
+        encoded.len() == 130 && encoded.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "signature must be 65 hexadecimal bytes"
+    );
+    B256::from_str(&format!("0x{}", &encoded[..64])).context("invalid signature encoding")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy_store::DatabaseKey;
+    use serde_json::json;
+
+    pub(crate) fn permit_payload() -> serde_json::Value {
+        json!({
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "Permit": [
+                    {"name": "owner", "type": "address"},
+                    {"name": "spender", "type": "address"},
+                    {"name": "value", "type": "uint256"},
+                    {"name": "nonce", "type": "uint256"},
+                    {"name": "deadline", "type": "uint256"}
+                ]
+            },
+            "primaryType": "Permit",
+            "domain": {
+                "name": "USD Coin",
+                "version": "2",
+                "chainId": 1,
+                "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            },
+            "message": {
+                "owner": "0x1111111111111111111111111111111111111111",
+                "spender": "0x2222222222222222222222222222222222222222",
+                "value": "1000000",
+                "nonce": "0",
+                "deadline": "1900000000"
+            }
+        })
+    }
+
+    fn store() -> (tempfile::TempDir, TypedDataStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let database = PolicyStore::open(
+            &directory.path().join("policies.db"),
+            &DatabaseKey::new([9; 32]),
+        )
+        .unwrap();
+        (directory, TypedDataStore::new(database))
+    }
+
+    #[test]
+    fn parses_and_digests_typed_data_with_pinned_chain() {
+        let (_, chain_id, digest) = parse_typed_data(&permit_payload()).unwrap();
+        assert_eq!(chain_id, 1);
+        assert_ne!(digest, B256::ZERO);
+
+        let mut chainless = permit_payload();
+        chainless["domain"]
+            .as_object_mut()
+            .unwrap()
+            .remove("chainId");
+        assert!(parse_typed_data(&chainless).is_err());
+
+        let mut domain_only = permit_payload();
+        domain_only["primaryType"] = json!("EIP712Domain");
+        assert!(parse_typed_data(&domain_only).is_err());
+    }
+
+    #[test]
+    fn lifecycle_persists_exact_payload_and_signature() {
+        let (_directory, mut store) = store();
+        let payload = permit_payload();
+        let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
+        let request = store.create("primary", chain_id, &payload, digest).unwrap();
+        assert_eq!(request.status, TypedDataStatus::AwaitingApproval);
+        assert_eq!(request.typed_data, payload);
+
+        // The identical payload reuses the pending request.
+        let duplicate = store.create("primary", chain_id, &payload, digest).unwrap();
+        assert_eq!(duplicate.request_id, request.request_id);
+        assert_eq!(store.awaiting_approval(None).unwrap().len(), 1);
+
+        let signature = format!("0x{}", "11".repeat(65));
+        let signed = store
+            .store_signature(request.request_id, &request.digest, &signature)
+            .unwrap();
+        assert_eq!(signed.status, TypedDataStatus::Signed);
+        assert_eq!(signed.signature.as_deref(), Some(signature.as_str()));
+        assert!(signed.approved_at.is_some());
+        assert!(store.awaiting_approval(None).unwrap().is_empty());
+
+        // A signed request cannot be re-signed or rejected.
+        assert!(
+            store
+                .store_signature(request.request_id, &request.digest, &signature)
+                .is_err()
+        );
+        assert!(store.reject(request.request_id).is_err());
+    }
+
+    #[test]
+    fn recognizes_erc2612_permits_only_for_the_signing_wallet() {
+        let payload = permit_payload();
+        let (typed, _, _) = parse_typed_data(&payload).unwrap();
+        let wallet = Address::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        let approvals = interpret_permit_approvals(&typed, wallet).unwrap().unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].kind, "erc2612_permit");
+        assert_eq!(
+            approvals[0].token,
+            Address::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+                .unwrap()
+                .to_checksum(None)
+        );
+        assert_eq!(approvals[0].amount, "1000000");
+
+        let stranger = Address::repeat_byte(0x77);
+        assert!(interpret_permit_approvals(&typed, stranger).is_err());
+    }
+
+    #[test]
+    fn lookalike_permit_types_are_not_treated_as_approvals() {
+        let mut payload = permit_payload();
+        // Same primary type name, different fields: must not be recognized.
+        payload["types"]["Permit"] = json!([
+            {"name": "owner", "type": "address"},
+            {"name": "spender", "type": "address"},
+            {"name": "data", "type": "bytes32"}
+        ]);
+        payload["message"] = json!({
+            "owner": "0x1111111111111111111111111111111111111111",
+            "spender": "0x2222222222222222222222222222222222222222",
+            "data": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        });
+        let (typed, _, _) = parse_typed_data(&payload).unwrap();
+        let wallet = Address::from_str("0x1111111111111111111111111111111111111111").unwrap();
+        assert!(
+            interpret_permit_approvals(&typed, wallet)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn permit2_payload(verifying_contract: &str) -> serde_json::Value {
+        json!({
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "PermitSingle": [
+                    {"name": "details", "type": "PermitDetails"},
+                    {"name": "spender", "type": "address"},
+                    {"name": "sigDeadline", "type": "uint256"}
+                ],
+                "PermitDetails": [
+                    {"name": "token", "type": "address"},
+                    {"name": "amount", "type": "uint160"},
+                    {"name": "expiration", "type": "uint48"},
+                    {"name": "nonce", "type": "uint48"}
+                ]
+            },
+            "primaryType": "PermitSingle",
+            "domain": {
+                "name": "Permit2",
+                "chainId": 1,
+                "verifyingContract": verifying_contract
+            },
+            "message": {
+                "details": {
+                    "token": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                    "amount": "1461501637330902918203684832716283019655932542975",
+                    "expiration": "1900000000",
+                    "nonce": "0"
+                },
+                "spender": "0x3333333333333333333333333333333333333333",
+                "sigDeadline": "1900000000"
+            }
+        })
+    }
+
+    #[test]
+    fn permit2_is_recognized_only_at_the_canonical_deployment() {
+        let (typed, _, _) = parse_typed_data(&permit2_payload(
+            "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        ))
+        .unwrap();
+        let wallet = Address::repeat_byte(0x11);
+        let approvals = interpret_permit_approvals(&typed, wallet).unwrap().unwrap();
+        assert_eq!(approvals[0].kind, "permit2_permit");
+        assert_eq!(
+            approvals[0].spender,
+            Address::from_str("0x3333333333333333333333333333333333333333")
+                .unwrap()
+                .to_checksum(None)
+        );
+
+        let (impostor, _, _) = parse_typed_data(&permit2_payload(
+            "0x4444444444444444444444444444444444444444",
+        ))
+        .unwrap();
+        assert!(interpret_permit_approvals(&impostor, wallet).is_err());
+    }
+
+    #[test]
+    fn automatic_permit_signature_binds_the_policy_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut database = PolicyStore::open(
+            &directory.path().join("policies.db"),
+            &DatabaseKey::new([9; 32]),
+        )
+        .unwrap();
+        database
+            .put(
+                "primary",
+                &crate::core::policy::WalletPolicy::allow_all_with_approval(),
+                None,
+            )
+            .unwrap();
+        let mut store = TypedDataStore::new(database);
+        let payload = permit_payload();
+        let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
+        let signature = format!("0x{}", "33".repeat(65));
+
+        // A stale revision fails closed.
+        assert!(
+            store
+                .record_automatic_signed("primary", chain_id, &payload, digest, 2, &signature)
+                .is_err()
+        );
+        let signed = store
+            .record_automatic_signed("primary", chain_id, &payload, digest, 1, &signature)
+            .unwrap();
+        assert_eq!(signed.status, TypedDataStatus::Signed);
+        assert!(!signed.approval_required);
+        assert_eq!(signed.policy_revision, Some(1));
+        assert!(signed.approved_at.is_none());
+        assert!(store.awaiting_approval(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejection_is_terminal_and_digest_is_bound() {
+        let (_directory, mut store) = store();
+        let payload = permit_payload();
+        let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
+        let request = store.create("primary", chain_id, &payload, digest).unwrap();
+        assert!(
+            store
+                .store_signature(
+                    request.request_id,
+                    &format!("{:#x}", B256::repeat_byte(0xEE)),
+                    &format!("0x{}", "22".repeat(65)),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.reject(request.request_id).unwrap().status,
+            TypedDataStatus::Rejected
+        );
+        assert!(store.reject(request.request_id).is_err());
+    }
+}

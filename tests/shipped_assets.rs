@@ -191,6 +191,10 @@ fn packaged_completions_offer_every_subcommand() {
         "token",
         "validate",
         "schema",
+        "address-book",
+        "legal",
+        "accept",
+        "status",
     ];
     for shell in ["bash", "zsh", "fish"] {
         let output = cli().arg("completion").arg(shell).output().unwrap();
@@ -210,6 +214,47 @@ fn packaged_completions_offer_every_subcommand() {
             "{shell} completion exposes a hidden internal subcommand"
         );
     }
+}
+
+#[test]
+fn third_party_licenses_cover_every_locked_dependency() {
+    // THIRD_PARTY_LICENSES.md ships in the binary via wallet_get_legal, so a
+    // dependency change without regeneration must fail the build, keeping the
+    // attribution document current with each release.
+    let lock = fs::read_to_string(repository_root().join("Cargo.lock")).unwrap();
+    let document = fs::read_to_string(repository_root().join("THIRD_PARTY_LICENSES.md")).unwrap();
+    let mut checked = 0;
+    let mut missing = Vec::new();
+    let mut lines = lock.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim() != "[[package]]" {
+            continue;
+        }
+        let field = |line: Option<&str>, key: &str| -> Option<String> {
+            line?
+                .trim()
+                .strip_prefix(key)?
+                .trim()
+                .strip_prefix("= \"")?
+                .strip_suffix('"')
+                .map(str::to_owned)
+        };
+        let name = field(lines.next(), "name").expect("lockfile package has a name");
+        let version = field(lines.next(), "version").expect("lockfile package has a version");
+        if name == "ekubo-wallet" {
+            continue;
+        }
+        checked += 1;
+        if !document.contains(&format!("- {name} {version}")) {
+            missing.push(format!("{name} {version}"));
+        }
+    }
+    assert!(checked > 100, "lockfile parse found too few packages");
+    assert!(
+        missing.is_empty(),
+        "THIRD_PARTY_LICENSES.md is stale; regenerate it with \
+         contrib/generate-third-party-licenses.py. Missing: {missing:?}"
+    );
 }
 
 #[test]

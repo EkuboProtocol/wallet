@@ -1,4 +1,5 @@
 pub mod abi_decoder;
+pub mod address_book;
 pub mod approval;
 pub mod approval_summary;
 pub mod batch_read;
@@ -9,12 +10,14 @@ pub mod core;
 pub mod custody;
 pub mod execution;
 pub mod human_presence;
+pub mod legal;
 pub mod mcp;
 pub mod pending;
 pub mod policy_store;
 pub mod rpc;
 pub mod simulation;
 pub mod token_store;
+pub mod typed_data;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

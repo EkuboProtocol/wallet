@@ -9,6 +9,8 @@ pub enum PresenceAction {
     ChangeNetworkConfiguration,
     ApprovePolicyException,
     RemoveWallet,
+    SignTypedData,
+    ModifyAddressBook,
 }
 
 impl fmt::Display for PresenceAction {
@@ -19,6 +21,8 @@ impl fmt::Display for PresenceAction {
             Self::ChangeNetworkConfiguration => "change the wallet network configuration",
             Self::ApprovePolicyException => "approve a policy exception",
             Self::RemoveWallet => "remove the wallet and its private key",
+            Self::SignTypedData => "sign EIP-712 typed data",
+            Self::ModifyAddressBook => "modify the address book",
         })
     }
 }

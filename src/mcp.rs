@@ -1,5 +1,6 @@
 use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
+    address_book::{AddressBookEntry, AddressBookStore},
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call},
     config::{
         ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource,
@@ -10,19 +11,24 @@ use crate::{
         policy::WalletPolicy,
         transfers::{Erc20Transfer, NativeTransfer, erc20_transfer_plan, native_transfer_plan},
     },
-    custody::OsKeyStore,
+    custody::{KeyStore, OsKeyStore},
     execution::{
         ReceiptStatus, SignedExecution, SigningOverrides, broadcast_signed_execution,
         sign_execution,
     },
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceAction, PresenceRequest},
+    legal::{self, LegalDocument, LegalStatus, LegalStore},
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     rpc::{WalletStatus, transaction_known, transaction_receipt, verify_chain_id, wallet_status},
     simulation::{SimulationResult, simulate_execution},
     token_store::{StoredToken, TokenStore},
+    typed_data::{
+        PendingTypedData, PermitApproval, TypedDataStatus, TypedDataStore,
+        interpret_permit_approvals, parse_typed_data,
+    },
 };
-use alloy::primitives::Address;
+use alloy::{primitives::Address, signers::SignerSync};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, TimeDelta, Utc};
 use rmcp::{
@@ -50,6 +56,7 @@ struct WalletMcpServer {
     config: ConfigStore,
     policies: Arc<Mutex<PolicyStore>>,
     pending: Arc<Mutex<PendingStore>>,
+    typed_data: Arc<Mutex<TypedDataStore>>,
     human_presence: Arc<dyn HumanPresence>,
 }
 
@@ -67,17 +74,30 @@ impl WalletMcpServer {
         );
         let policies = PolicyStore::production(config.data_dir())?;
         let pending = PendingStore::production(config.data_dir())?;
-        Self::new(config, policies, pending)
+        let typed_data = TypedDataStore::production(config.data_dir())?;
+        Self::new(config, policies, pending, typed_data)
     }
 
-    fn new(config: ConfigStore, policies: PolicyStore, pending: PendingStore) -> Result<Self> {
-        Self::with_human_presence(config, policies, pending, Arc::new(PlatformHumanPresence))
+    fn new(
+        config: ConfigStore,
+        policies: PolicyStore,
+        pending: PendingStore,
+        typed_data: TypedDataStore,
+    ) -> Result<Self> {
+        Self::with_human_presence(
+            config,
+            policies,
+            pending,
+            typed_data,
+            Arc::new(PlatformHumanPresence),
+        )
     }
 
     fn with_human_presence(
         config: ConfigStore,
         policies: PolicyStore,
         pending: PendingStore,
+        typed_data: TypedDataStore,
         human_presence: Arc<dyn HumanPresence>,
     ) -> Result<Self> {
         for wallet in config.load()?.wallets {
@@ -91,6 +111,7 @@ impl WalletMcpServer {
             config,
             policies: Arc::new(Mutex::new(policies)),
             pending: Arc::new(Mutex::new(pending)),
+            typed_data: Arc::new(Mutex::new(typed_data)),
             human_presence,
         })
     }
@@ -312,6 +333,98 @@ struct PortfolioInput {
 
 const fn default_token_limit() -> usize {
     200
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct LegalInput {
+    /// Include the complete text of this document in the response.
+    #[serde(default)]
+    document: Option<LegalDocument>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct LegalDocumentOutput {
+    document: LegalDocument,
+    title: String,
+    digest: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct LegalOutput {
+    status: LegalStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document: Option<LegalDocumentOutput>,
+    instruction: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AddressBookInput {
+    /// Decimal chain ID filter; omitted lists every chain.
+    #[serde(default)]
+    chain_id: Option<crate::token_store::ChainIdInput>,
+    /// Exact alias to look up. Requires `chain_id`.
+    #[serde(default)]
+    alias: Option<String>,
+    #[serde(default = "default_token_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct AddressBookOutput {
+    /// Total stored entries matching the chain filter, ignoring paging.
+    total: u64,
+    entries: Vec<AddressBookEntry>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SignTypedDataInput {
+    wallet_id: String,
+    /// Complete EIP-712 payload: `types`, `primaryType`, `domain`, `message`.
+    /// The domain must include a `chainId` matching a configured network.
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
+    typed_data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TypedDataWaitInput {
+    request_id: uuid::Uuid,
+    #[serde(default = "default_wait_seconds")]
+    timeout_seconds: u8,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct TypedDataOutput {
+    request_id: uuid::Uuid,
+    wallet_id: String,
+    chain_id: String,
+    /// The EIP-712 signing hash of the exact payload.
+    digest: String,
+    status: TypedDataStatus,
+    /// False when a recognized permit was authorized by the active policy.
+    approval_required: bool,
+    expires_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    approved_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rejected_at: Option<DateTime<Utc>>,
+    /// The 65-byte r||s||v signature, present only once signed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<String>,
+    /// Token approvals this payload grants, when it is a recognized permit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permit_approvals: Option<Vec<PermitApproval>>,
+    /// Policy findings for recognized permits, evaluated like `approve()` calls.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    policy_findings: Vec<crate::core::policy::PolicyFinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -993,9 +1106,231 @@ impl WalletMcpServer {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
+
+    #[tool(
+        name = "wallet_get_legal",
+        description = "Read the legal acceptance status, and optionally the complete text of the Terms of Service, Privacy Policy, or Third-Party Licenses. Acceptance itself is a separate human CLI operation; every other wallet tool fails until the user has accepted the current terms and privacy policy via `ekubo-wallet legal accept`.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn wallet_get_legal(
+        &self,
+        Parameters(input): Parameters<LegalInput>,
+    ) -> Result<Json<LegalOutput>, ErrorData> {
+        let status = LegalStore::new(self.config.data_dir())
+            .status()
+            .map_err(|error| tool_error(&error))?;
+        let instruction = if status.signing_allowed {
+            "The current Terms of Service and Privacy Policy are accepted; the wallet tools are available.".into()
+        } else {
+            "Every wallet tool except this one is disabled until the user accepts the current Terms of Service and separately acknowledges the Privacy Policy. Offer to display each document (this tool returns their text), then tell the user to run `ekubo-wallet legal accept` in their own terminal. Never run that command for them and never claim acceptance on their behalf.".to_string()
+        };
+        Ok(Json(LegalOutput {
+            status,
+            document: input.document.map(|document| LegalDocumentOutput {
+                document,
+                title: document.title().into(),
+                digest: document.digest(),
+                text: document.text(),
+            }),
+            instruction,
+        }))
+    }
+
+    #[tool(
+        name = "wallet_address_book",
+        description = "Look up user-configured aliases for addresses on particular chains. Entries are lookup convenience data with no signing authority and never affect policy decisions; adding, changing, or removing entries is a separate human CLI operation with OS owner authentication. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn wallet_address_book(
+        &self,
+        Parameters(input): Parameters<AddressBookInput>,
+    ) -> Result<Json<AddressBookOutput>, ErrorData> {
+        let chain_id = input
+            .chain_id
+            .as_ref()
+            .map(crate::token_store::ChainIdInput::value)
+            .transpose()
+            .map_err(|error| tool_error(&error))?;
+        let store = AddressBookStore::production(self.config.data_dir())
+            .map_err(|error| tool_error(&error))?;
+        if let Some(alias) = &input.alias {
+            let chain_id = chain_id
+                .ok_or_else(|| ErrorData::invalid_params("alias lookup requires chain_id", None))?;
+            let entries = store
+                .get(chain_id, alias)
+                .map_err(|error| tool_error(&error))?
+                .into_iter()
+                .collect::<Vec<_>>();
+            return Ok(Json(AddressBookOutput {
+                total: entries.len() as u64,
+                entries,
+            }));
+        }
+        let entries = store
+            .list(chain_id, input.limit.min(1_000), input.offset)
+            .map_err(|error| tool_error(&error))?;
+        let total = store.count(chain_id).map_err(|error| tool_error(&error))?;
+        Ok(Json(AddressBookOutput { total, entries }))
+    }
+
+    #[tool(
+        name = "wallet_sign_typed_data",
+        description = "Sign an exact EIP-712 typed-data payload. Recognized permits (ERC-2612 Permit and canonical Permit2) are policy-checked exactly like approve() calls: a permitted approval signs immediately, and anything else — over-limit permits and every unrecognized payload — queues for explicit human approval through the separate CLI. The domain must pin a configured chainId. When a request queues, wait on it with wallet_wait_for_typed_data.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
+    )]
+    fn wallet_sign_typed_data(
+        &self,
+        Parameters(input): Parameters<SignTypedDataInput>,
+    ) -> Result<Json<TypedDataOutput>, ErrorData> {
+        legal::require_current_acceptance(self.config.data_dir())
+            .map_err(|error| tool_error(&error))?;
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let (typed, chain_id, digest) =
+            parse_typed_data(&input.typed_data).map_err(|error| tool_error(&error))?;
+        self.config
+            .network_by_chain_id(&chain_id.to_string())
+            .map_err(|error| tool_error(&error))?;
+        let permit_approvals = interpret_permit_approvals(&typed, wallet.address)
+            .map_err(|error| tool_error(&error))?;
+
+        // A recognized permit is an approval as far as policy goes: evaluate
+        // it against the approval-spender rules, and sign immediately when
+        // the active policy permits it.
+        let mut policy_findings = Vec::new();
+        if let Some(approvals) = &permit_approvals {
+            let stored_policy = self
+                .policies
+                .lock()
+                .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?
+                .get(&wallet.id)
+                .map_err(|error| tool_error(&error))?
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!("wallet {} has no local policy", wallet.id),
+                        None,
+                    )
+                })?;
+            let tuples = approvals
+                .iter()
+                .map(PermitApproval::tuple)
+                .collect::<Result<Vec<_>>>()
+                .map_err(|error| tool_error(&error))?;
+            policy_findings = crate::core::policy::evaluate_permit_approvals(
+                &stored_policy.policy,
+                &chain_id.to_string(),
+                &tuples,
+            );
+            if crate::core::policy::policy_allows(&policy_findings) {
+                let record = self
+                    .sign_permit_automatically(
+                        &wallet,
+                        chain_id,
+                        &input.typed_data,
+                        digest,
+                        stored_policy.revision,
+                    )
+                    .map_err(|error| tool_error(&error))?;
+                let mut output = typed_data_output(record);
+                output.permit_approvals = permit_approvals;
+                output.policy_findings = policy_findings;
+                return Ok(Json(output));
+            }
+        }
+
+        let record = self
+            .typed_data
+            .lock()
+            .map_err(|_| ErrorData::internal_error("typed-data database lock was poisoned", None))?
+            .create(&wallet.id, chain_id, &input.typed_data, digest)
+            .map_err(|error| tool_error(&error))?;
+        let mut output = typed_data_output(record);
+        output.permit_approvals = permit_approvals;
+        output.policy_findings = policy_findings;
+        Ok(Json(output))
+    }
+
+    #[tool(
+        name = "wallet_wait_for_typed_data",
+        description = "Wait for a pending typed-data request to be approved and signed or rejected through the separate human CLI, and read the signature once signed. This tool cannot approve, reject, or sign.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn wallet_wait_for_typed_data(
+        &self,
+        Parameters(input): Parameters<TypedDataWaitInput>,
+    ) -> Result<Json<TypedDataOutput>, ErrorData> {
+        validate_wait_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
+        loop {
+            let record = self
+                .typed_data
+                .lock()
+                .map_err(|_| {
+                    ErrorData::internal_error("typed-data database lock was poisoned", None)
+                })?
+                .get(input.request_id)
+                .map_err(|error| tool_error(&error))?;
+            if record.status != TypedDataStatus::AwaitingApproval
+                || tokio::time::Instant::now() >= deadline
+            {
+                let timed_out = record.status == TypedDataStatus::AwaitingApproval;
+                let mut output = typed_data_output(record);
+                if timed_out {
+                    output.instruction = Some(format!(
+                        "Still awaiting human approval; the request expires at {}. Call wallet_wait_for_typed_data again with request_id {}; do not ask the user to report approval in chat.",
+                        output.expires_at.to_rfc3339(),
+                        output.request_id
+                    ));
+                }
+                return Ok(Json(output));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 impl WalletMcpServer {
+    /// Sign a policy-authorized permit with the wallet key and persist the
+    /// signature. The persistence step re-checks the policy revision, so a
+    /// concurrent policy change discards the signature instead of storing it.
+    fn sign_permit_automatically(
+        &self,
+        wallet: &WalletMetadata,
+        chain_id: u64,
+        typed_data: &serde_json::Value,
+        digest: alloy::primitives::B256,
+        policy_revision: u64,
+    ) -> Result<PendingTypedData> {
+        let material = OsKeyStore.load(&wallet.id)?;
+        let signer = material.signer();
+        ensure!(
+            signer.address() == wallet.address,
+            "credential-store private key does not match wallet metadata"
+        );
+        let signature = signer
+            .sign_hash_sync(&digest)
+            .context("failed to sign typed data")?;
+        self.typed_data
+            .lock()
+            .map_err(|_| anyhow::anyhow!("typed-data database lock was poisoned"))?
+            .record_automatic_signed(
+                &wallet.id,
+                chain_id,
+                typed_data,
+                digest,
+                policy_revision,
+                &format!("0x{}", hex::encode(signature.as_bytes())),
+            )
+    }
+
     fn pending_record_by_id(&self, request_id: uuid::Uuid) -> Result<PendingTransaction> {
         let record = self
             .pending
@@ -1053,6 +1388,7 @@ impl WalletMcpServer {
         network: NetworkConfig,
         plan: ExecutionPlan,
     ) -> Result<ExecutionStatusOutput> {
+        legal::require_current_acceptance(self.config.data_dir())?;
         plan.validate()?;
         ensure!(
             plan.sender == wallet.address,
@@ -1327,17 +1663,34 @@ impl WalletMcpServer {
 }
 
 const SECURITY_RESOURCE_URI: &str = "wallet://docs/security-model";
+const TERMS_RESOURCE_URI: &str = "wallet://legal/terms-of-service";
+const PRIVACY_RESOURCE_URI: &str = "wallet://legal/privacy-policy";
+const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
 // This server is a general-purpose local EVM wallet. It is deliberately not
 // bound to any particular protocol, dapp, or companion MCP server: it accepts a
 // signer-neutral execution plan from whatever produced it and applies the same
 // validation, simulation, and policy rules to all of them. Naming a specific
 // counterpart here would both mislead an agent about the wallet's scope and
 // imply that plans from that source are more trusted, which they are not.
-const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local fork or eth_getProof path. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is separate public display data: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, tell the user the exact `ekubo-wallet approve <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes.";
-const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local fork, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database (tokens.db) is unencrypted public display data used for listings and portfolio reads. MCP tools may add to it, entries are verified against the token contracts through Multicall3 at insert, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n";
+const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local fork or eth_getProof path. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is separate public display data: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, tell the user the exact `ekubo-wallet approve <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes. Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf. Third-party license attributions are available through wallet_get_legal and the wallet://legal resources. EIP-712 typed-data signing always queues for explicit human CLI approval via wallet_sign_typed_data, then wallet_wait_for_typed_data returns the signature once the user approves; policies cannot evaluate typed data, so there is no automatic typed-data path. The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI with OS owner authentication.";
+const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local fork, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database (tokens.db) is unencrypted public display data used for listings and portfolio reads. MCP tools may add to it, entries are verified against the token contracts through Multicall3 at insert, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n- The address book (address_book.db) is unencrypted lookup data mapping per-chain aliases to addresses. Only the human CLI can mutate it, after OS owner authentication. Nothing in the signing or policy path reads it, and an alias never substitutes for reviewing the actual address.\n- EIP-712 typed-data requests always queue in the encrypted database for separate human CLI review, which displays the complete payload, requires terminal approval plus OS owner authentication, and only then signs. The MCP server can create and observe typed-data requests but cannot approve or sign them.\n- No MCP tool other than wallet_get_legal is reachable until the user has accepted the current Terms of Service and Privacy Policy through the interactive CLI; the signing paths repeat the check as defense in depth. Acceptance binds the exact document digests; changed documents fail closed until re-accepted.\n";
 
 #[tool_handler(router = Self::sanitized_tool_router())]
 impl ServerHandler for WalletMcpServer {
+    /// Hand-written so every tool call passes the legal-acceptance gate. The
+    /// privacy policy governs RPC requests and agent data exposure, so even
+    /// read-only tools stay disabled until acceptance; only `wallet_get_legal`
+    /// is exempt so the documents and status remain readable.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, ErrorData> {
+        self.tool_gate(&request.name)?;
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::sanitized_tool_router().call(tcc).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
@@ -1362,6 +1715,22 @@ impl ServerHandler for WalletMcpServer {
                 .with_title("Wallet trust and security model")
                 .with_description("The local signing, storage, approval, RPC, and retry boundary.")
                 .with_mime_type("text/markdown"),
+            Resource::new(TERMS_RESOURCE_URI, "terms-of-service")
+                .with_title("Terms of Service")
+                .with_description(
+                    "Must be accepted via the separate human CLI before signing tools work.",
+                )
+                .with_mime_type("text/markdown"),
+            Resource::new(PRIVACY_RESOURCE_URI, "privacy-policy")
+                .with_title("Privacy Policy")
+                .with_description(
+                    "Discloses the default RPC endpoints; must be acknowledged separately via the human CLI.",
+                )
+                .with_mime_type("text/markdown"),
+            Resource::new(LICENSES_RESOURCE_URI, "third-party-licenses")
+                .with_title("Third-Party Licenses")
+                .with_description("License attributions for every bundled dependency.")
+                .with_mime_type("text/markdown"),
         ]))
     }
 
@@ -1370,15 +1739,20 @@ impl ServerHandler for WalletMcpServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        if request.uri != SECURITY_RESOURCE_URI {
-            return Err(ErrorData::resource_not_found(
-                "unknown wallet resource",
-                None,
-            ));
-        }
+        let contents = match request.uri.as_ref() {
+            SECURITY_RESOURCE_URI => SECURITY_MODEL.to_string(),
+            TERMS_RESOURCE_URI => LegalDocument::TermsOfService.text(),
+            PRIVACY_RESOURCE_URI => LegalDocument::PrivacyPolicy.text(),
+            LICENSES_RESOURCE_URI => LegalDocument::ThirdPartyLicenses.text(),
+            _ => {
+                return Err(ErrorData::resource_not_found(
+                    "unknown wallet resource",
+                    None,
+                ));
+            }
+        };
         Ok(ReadResourceResult::new(vec![
-            ResourceContents::text(SECURITY_MODEL, SECURITY_RESOURCE_URI)
-                .with_mime_type("text/markdown"),
+            ResourceContents::text(contents, request.uri.clone()).with_mime_type("text/markdown"),
         ])
         .into())
     }
@@ -1455,6 +1829,39 @@ fn signed_execution(record: &PendingTransaction) -> Result<SignedExecution> {
     })
 }
 
+fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
+    let instruction = match record.status {
+        TypedDataStatus::AwaitingApproval => Some(format!(
+            "Typed-data signing requires explicit human approval. Tell the user to run `ekubo-wallet approve {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_typed_data with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
+            record.request_id
+        )),
+        TypedDataStatus::Signed => Some(
+            "The typed data is signed; signature holds the exact 65-byte r||s||v signature. Deliver it to whatever requested the signature.".into(),
+        ),
+        TypedDataStatus::Rejected => Some(
+            "The user rejected this typed-data request. Do not recreate it unless they explicitly ask to sign again.".into(),
+        ),
+        TypedDataStatus::Expired => Some(
+            "The typed-data approval request expired. Create a new request only if the user still wants to sign.".into(),
+        ),
+    };
+    TypedDataOutput {
+        request_id: record.request_id,
+        wallet_id: record.wallet_id,
+        chain_id: record.chain_id,
+        digest: record.digest,
+        status: record.status,
+        approval_required: record.approval_required,
+        expires_at: record.expires_at,
+        approved_at: record.approved_at,
+        rejected_at: record.rejected_at,
+        signature: record.signature,
+        permit_approvals: None,
+        policy_findings: Vec::new(),
+        instruction,
+    }
+}
+
 fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput {
     let status = match record.status {
         PendingStatus::AwaitingApproval => ExecutionStatus::ApprovalRequired,
@@ -1520,6 +1927,16 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
 }
 
 impl WalletMcpServer {
+    /// The per-call legal gate: every tool except `wallet_get_legal` requires
+    /// current acceptance of the terms of service and privacy policy.
+    fn tool_gate(&self, tool_name: &str) -> Result<(), ErrorData> {
+        if tool_name == "wallet_get_legal" {
+            return Ok(());
+        }
+        legal::require_current_acceptance(self.config.data_dir())
+            .map_err(|error| tool_error(&error))
+    }
+
     /// The generated router with schemars' nonstandard integer `format`
     /// annotations removed. Validators warn loudly on every `tools/list` for
     /// formats like `uint32`; the `minimum`/`maximum` bounds already carry
@@ -1623,9 +2040,35 @@ mod tests {
             &DatabaseKey::new([4; 32]),
         )
         .unwrap();
-        let server =
-            WalletMcpServer::new(config, policies, PendingStore::new(pending_database)).unwrap();
+        let typed_data_database = PolicyStore::open(
+            &directory.path().join("policies.db"),
+            &DatabaseKey::new([4; 32]),
+        )
+        .unwrap();
+        let server = WalletMcpServer::new(
+            config,
+            policies,
+            PendingStore::new(pending_database),
+            TypedDataStore::new(typed_data_database),
+        )
+        .unwrap();
         (directory, server)
+    }
+
+    fn accept_legal(server: &WalletMcpServer) {
+        let store = LegalStore::new(server.config.data_dir());
+        store
+            .record_acceptance(
+                LegalDocument::TermsOfService,
+                &LegalDocument::TermsOfService.digest(),
+            )
+            .unwrap();
+        store
+            .record_acceptance(
+                LegalDocument::PrivacyPolicy,
+                &LegalDocument::PrivacyPolicy.digest(),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -1743,8 +2186,10 @@ mod tests {
             [
                 "wallet_add_network",
                 "wallet_add_token",
+                "wallet_address_book",
                 "wallet_batch_eth_call",
                 "wallet_decode_abi_result",
+                "wallet_get_legal",
                 "wallet_get_policy",
                 "wallet_get_portfolio",
                 "wallet_get_status",
@@ -1755,9 +2200,11 @@ mod tests {
                 "wallet_send_erc20_transfers",
                 "wallet_send_execution_plan",
                 "wallet_send_native_transfers",
+                "wallet_sign_typed_data",
                 "wallet_simulate_execution_plan",
                 "wallet_wait_for_approval",
                 "wallet_wait_for_execution",
+                "wallet_wait_for_typed_data",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -1846,9 +2293,284 @@ mod tests {
             &DatabaseKey::new([5; 32]),
         )
         .unwrap();
-        let result = WalletMcpServer::new(config, policies, PendingStore::new(pending_database));
+        let typed_data_database = PolicyStore::open(
+            &directory.path().join("policies.db"),
+            &DatabaseKey::new([5; 32]),
+        )
+        .unwrap();
+        let result = WalletMcpServer::new(
+            config,
+            policies,
+            PendingStore::new(pending_database),
+            TypedDataStore::new(typed_data_database),
+        );
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("has no policy"));
+    }
+
+    fn permit_payload() -> serde_json::Value {
+        serde_json::json!({
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "Permit": [
+                    {"name": "owner", "type": "address"},
+                    {"name": "spender", "type": "address"},
+                    {"name": "value", "type": "uint256"},
+                    {"name": "nonce", "type": "uint256"},
+                    {"name": "deadline", "type": "uint256"}
+                ]
+            },
+            "primaryType": "Permit",
+            "domain": {
+                "name": "Test Token",
+                "chainId": 1,
+                "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            },
+            "message": {
+                "owner": "0x1111111111111111111111111111111111111111",
+                "spender": "0x2222222222222222222222222222222222222222",
+                "value": "1000000",
+                "nonce": "0",
+                "deadline": "1900000000"
+            }
+        })
+    }
+
+    #[test]
+    fn every_tool_except_legal_is_gated_on_acceptance() {
+        let (_directory, server) = server();
+        for tool in WalletMcpServer::sanitized_tool_router().list_all() {
+            let gated = server.tool_gate(&tool.name).is_err();
+            assert_eq!(
+                gated,
+                tool.name != "wallet_get_legal",
+                "unexpected gate state for {}",
+                tool.name
+            );
+        }
+        accept_legal(&server);
+        for tool in WalletMcpServer::sanitized_tool_router().list_all() {
+            assert!(server.tool_gate(&tool.name).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn signing_tools_fail_closed_until_legal_acceptance() {
+        let (_directory, server) = server();
+        let result = server
+            .wallet_send_native_transfers(Parameters(NativeTransfersInput {
+                wallet_id: "primary".into(),
+                chain_id: "1".into(),
+                transfers: vec![NativeTransfer {
+                    to: Address::from_str("0x2222222222222222222222222222222222222222").unwrap(),
+                    amount_wei: DecimalU256::new("1").unwrap(),
+                }],
+            }))
+            .await;
+        let Err(error) = result else {
+            panic!("send unexpectedly bypassed the legal acceptance gate");
+        };
+        assert!(error.message.contains("legal accept"));
+
+        let result = server.wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: permit_payload(),
+        }));
+        let Err(error) = result else {
+            panic!("typed-data signing unexpectedly bypassed the legal acceptance gate");
+        };
+        assert!(error.message.contains("legal accept"));
+    }
+
+    fn order_payload() -> serde_json::Value {
+        serde_json::json!({
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "Order": [
+                    {"name": "maker", "type": "address"},
+                    {"name": "amount", "type": "uint256"}
+                ]
+            },
+            "primaryType": "Order",
+            "domain": {
+                "name": "Test Exchange",
+                "chainId": 1,
+                "verifyingContract": "0x4444444444444444444444444444444444444444"
+            },
+            "message": {
+                "maker": "0x1111111111111111111111111111111111111111",
+                "amount": "5"
+            }
+        })
+    }
+
+    #[test]
+    fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
+        let (_directory, server) = server();
+        accept_legal(&server);
+        // The wallet policy is allow-all, but a payload that is not a
+        // recognized permit cannot be policy-evaluated and must queue.
+        let Json(output) = server
+            .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+                wallet_id: "primary".into(),
+                typed_data: order_payload(),
+            }))
+            .unwrap();
+        assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
+        assert!(output.approval_required);
+        assert_eq!(output.chain_id, "1");
+        assert!(output.signature.is_none());
+        assert!(output.permit_approvals.is_none());
+        assert!(
+            output
+                .instruction
+                .as_deref()
+                .unwrap()
+                .contains("ekubo-wallet approve")
+        );
+
+        // A duplicate payload reuses the pending request.
+        let Json(duplicate) = server
+            .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+                wallet_id: "primary".into(),
+                typed_data: order_payload(),
+            }))
+            .unwrap();
+        assert_eq!(duplicate.request_id, output.request_id);
+
+        // A chain the server does not know is rejected outright.
+        let mut foreign = order_payload();
+        foreign["domain"]["chainId"] = serde_json::json!(999_999);
+        assert!(
+            server
+                .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+                    wallet_id: "primary".into(),
+                    typed_data: foreign,
+                }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn policy_denied_permits_queue_with_findings_instead_of_signing() {
+        let (_directory, server) = server();
+        accept_legal(&server);
+        {
+            let mut policies = server.policies.lock().unwrap();
+            let current = policies.get("primary").unwrap().unwrap();
+            policies
+                .put(
+                    "primary",
+                    &WalletPolicy::require_approval_for_everything(),
+                    Some(current.revision),
+                )
+                .unwrap();
+        }
+        let Json(output) = server
+            .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+                wallet_id: "primary".into(),
+                typed_data: permit_payload(),
+            }))
+            .unwrap();
+        // The permit is recognized and interpreted as an approval, but the
+        // deny-all policy queues it for human review instead of signing.
+        assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
+        assert!(output.approval_required);
+        assert!(output.signature.is_none());
+        let approvals = output.permit_approvals.as_deref().unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].kind, "erc2612_permit");
+        assert!(
+            output
+                .policy_findings
+                .iter()
+                .any(|finding| finding.code == "approval_spender_not_allowed")
+        );
+    }
+
+    #[test]
+    fn legal_tool_reports_status_and_document_text() {
+        let (_directory, server) = server();
+        let Json(output) = server
+            .wallet_get_legal(Parameters(LegalInput {
+                document: Some(LegalDocument::PrivacyPolicy),
+            }))
+            .unwrap();
+        assert!(!output.status.signing_allowed);
+        assert!(output.instruction.contains("legal accept"));
+        let document = output.document.unwrap();
+        assert!(document.text.contains("RPC"));
+        assert_eq!(document.digest, LegalDocument::PrivacyPolicy.digest());
+
+        accept_legal(&server);
+        let Json(output) = server
+            .wallet_get_legal(Parameters(LegalInput { document: None }))
+            .unwrap();
+        assert!(output.status.signing_allowed);
+        assert!(output.document.is_none());
+    }
+
+    #[test]
+    fn address_book_tool_is_lookup_only() {
+        let (_directory, server) = server();
+        let Json(empty) = server
+            .wallet_address_book(Parameters(AddressBookInput {
+                chain_id: None,
+                alias: None,
+                limit: 10,
+                offset: 0,
+            }))
+            .unwrap();
+        assert_eq!(empty.total, 0);
+
+        // Entries written by the CLI store are visible read-only.
+        let mut store = AddressBookStore::production(server.config.data_dir()).unwrap();
+        store
+            .upsert(
+                1,
+                "alice",
+                Address::from_str("0x3333333333333333333333333333333333333333").unwrap(),
+                Some("payroll"),
+            )
+            .unwrap();
+        let Json(found) = server
+            .wallet_address_book(Parameters(AddressBookInput {
+                chain_id: Some(crate::token_store::ChainIdInput::Number(1)),
+                alias: Some("alice".into()),
+                limit: 10,
+                offset: 0,
+            }))
+            .unwrap();
+        assert_eq!(found.total, 1);
+        assert_eq!(found.entries[0].note.as_deref(), Some("payroll"));
+
+        // Alias lookup without a chain is ambiguous and rejected.
+        assert!(
+            server
+                .wallet_address_book(Parameters(AddressBookInput {
+                    chain_id: None,
+                    alias: Some("alice".into()),
+                    limit: 10,
+                    offset: 0,
+                }))
+                .is_err()
+        );
+
+        // The MCP router exposes no mutation tool for the address book.
+        let router = WalletMcpServer::tool_router();
+        let tool = router.get("wallet_address_book").unwrap();
+        assert_eq!(
+            tool.annotations.as_ref().unwrap().read_only_hint,
+            Some(true)
+        );
     }
 
     #[test]

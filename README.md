@@ -134,13 +134,22 @@ broadcast as harmless.
 
 ## First use
 
-Create a wallet from your own terminal:
+Accept the legal documents, then create a wallet from your own terminal:
 
 ```sh
+ekubo-wallet legal show terms      # or: privacy, licenses
+ekubo-wallet legal accept          # separate terms + privacy acknowledgments
 ekubo-wallet wallet create primary
 ekubo-wallet wallet list
 ekubo-wallet policy show primary
 ```
+
+Every MCP tool except `wallet_get_legal` is disabled until the current Terms
+of Service are accepted and the Privacy Policy is separately acknowledged.
+Acceptance binds the exact document digests, so a release that changes a
+document (including its generated list of default RPC endpoints) requires
+re-acceptance before the wallet works again. An agent can read the documents
+and acceptance state, but only the interactive CLI can accept them.
 
 Policy defaults differ by how the key arrived, because the risk differs:
 
@@ -363,6 +372,10 @@ An agent must never run the approval command for you.
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_wait_for_execution` | Bounded polling for a receipt. |
+| `wallet_sign_typed_data` | Sign an exact EIP-712 payload. Recognized permits (ERC-2612, canonical Permit2) are policy-checked like `approve()` calls and sign automatically when allowed; everything else queues for CLI approval. |
+| `wallet_wait_for_typed_data` | Poll a pending typed-data request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
+| `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only with owner authentication. |
+| `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. The only tool available before acceptance. |
 
 MCP operations select networks only with canonical decimal `chain_id` strings
 such as `"1"` or `"4663"`; profile names are CLI and display metadata. No tool
@@ -466,10 +479,14 @@ state.
 | Windows | `%LOCALAPPDATA%\Ekubo\secure-wallet-mcp` | `policies.db` |
 
 The unencrypted `tokens.db` in the same directory holds the public token
-database described above; it contains no security state.
+database described above; it contains no security state. The unencrypted
+`address_book.db` holds per-chain address aliases: lookup convenience data
+that only the CLI can change (after owner authentication) and that nothing in
+the signing or policy path reads. The unencrypted `legal.json` records which
+Terms of Service and Privacy Policy digests were accepted and when.
 
-The one SQLCipher file contains separate `wallet_policies` and
-`pending_transactions` tables. A pending row stores its normalized execution
+The one SQLCipher file contains separate `wallet_policies`,
+`pending_transactions`, and `pending_typed_data` tables. A pending row stores its normalized execution
 plan and digest, policy revision, expiry and lifecycle status; once signed it
 also stores the exact serialized transaction and hash before the first RPC
 submission. An exceptional approval additionally records the digest of its
@@ -495,6 +512,14 @@ Exceptional signing has an additional boundary: the CLI re-simulates, prepares
 the exact nonce/gas/fees/delegation without loading the key, shows those fields,
 binds OS authentication to their review digest, rechecks configuration and
 policy, and signs the prepared object without another RPC lookup.
+
+EIP-712 typed data follows the same shape. Recognized permits (ERC-2612 and
+canonical Permit2, matched by their complete type encodings) are evaluated
+against the policy's approval-spender rules exactly like `approve()` calldata
+and sign automatically only when allowed. Every other payload — and every
+policy-denied permit — queues in the encrypted database for CLI review, which
+displays the complete payload, requires terminal approval plus OS owner
+authentication bound to the signing hash, and only then signs.
 
 SQLCipher protects confidentiality and page integrity, but there is no external
 anti-rollback anchor. Restoring an older valid encrypted database can restore

@@ -149,6 +149,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-type-parser",
  "alloy-sol-types",
+ "derive_more",
  "itoa",
  "serde",
  "serde_json",
@@ -2000,6 +2001,7 @@ name = "ekubo-wallet"
 version = "0.2.1"
 dependencies = [
  "alloy",
+ "alloy-dyn-abi",
  "anyhow",
  "assert_cmd",
  "async-trait",

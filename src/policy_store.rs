@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.secure-wallet-mcp.policy-database-key.v1";
@@ -225,6 +225,42 @@ impl PolicyStore {
                 ],
             )?;
             version = 5;
+        }
+        if version == 5 {
+            run_transaction(
+                &connection,
+                &[
+                    "CREATE TABLE IF NOT EXISTS pending_typed_data (
+                         request_id TEXT PRIMARY KEY NOT NULL,
+                         wallet_id TEXT NOT NULL,
+                         chain_id TEXT NOT NULL,
+                         typed_data_json TEXT NOT NULL,
+                         digest TEXT NOT NULL,
+                         status TEXT NOT NULL CHECK (status IN (
+                             'awaiting_approval', 'rejected', 'signed', 'expired'
+                         )),
+                         approval_required INTEGER NOT NULL DEFAULT 1
+                             CHECK (approval_required IN (0, 1)),
+                         policy_revision INTEGER
+                             CHECK (policy_revision IS NULL OR policy_revision > 0),
+                         created_at TEXT NOT NULL,
+                         expires_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         approved_at TEXT,
+                         rejected_at TEXT,
+                         signature TEXT,
+                         CHECK ((status = 'signed') = (signature IS NOT NULL)),
+                         CHECK (approval_required = 1 OR policy_revision IS NOT NULL)
+                     ) STRICT",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS pending_typed_data_unique_awaiting
+                         ON pending_typed_data(wallet_id, chain_id, digest)
+                         WHERE status = 'awaiting_approval'",
+                    "CREATE INDEX IF NOT EXISTS pending_typed_data_wallet_created
+                         ON pending_typed_data(wallet_id, created_at DESC)",
+                    "UPDATE schema_metadata SET version = 6 WHERE singleton = 1",
+                ],
+            )?;
+            version = 6;
         }
         ensure!(
             version == SCHEMA_VERSION,

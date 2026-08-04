@@ -627,8 +627,11 @@ fn serialize_value(
                 DynSolValue::Array(_) | DynSolValue::FixedArray(_) | DynSolValue::Tuple(_) => {
                     unreachable!("handled above")
                 }
-                #[allow(unreachable_patterns)]
-                _ => fail("invalid_abi", "unsupported ABI value type"),
+                // CustomStruct exists only with the dyn-abi eip712 feature;
+                // ABI decoding of return data never produces it.
+                DynSolValue::CustomStruct { .. } => {
+                    fail("invalid_abi", "unsupported ABI value type")
+                }
             }
         }
     }

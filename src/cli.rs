@@ -1,5 +1,6 @@
 use crate::{
     VERSION,
+    address_book::AddressBookStore,
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi, TerminalApprovalUi},
     approval_summary::{
         TokenMetadataMap, interpret_steps, plan_token_metadata, render_balance_changes,
@@ -9,14 +10,20 @@ use crate::{
         replace_configured_network,
     },
     core::policy::{FindingSeverity, WalletPolicy},
-    custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
+    custody::{CustodyService, KeyStore, OsKeyStore, PrivateKeyMaterial},
     execution::{PreparedExecution, SigningOverrides, prepare_execution, sign_prepared_execution},
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceAction, PresenceRequest},
+    legal::{self, LegalDocument, LegalStore},
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     rpc::verify_chain_id,
     simulation::{SimulationResult, simulate_execution},
+    typed_data::{
+        PendingTypedData, TypedDataStatus, TypedDataStore, interpret_permit_approvals,
+        parse_typed_data,
+    },
 };
+use alloy::{primitives::Address, signers::SignerSync};
 use anyhow::{Context, Result, ensure};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -67,6 +74,11 @@ enum Command {
     Transaction(TransactionArgs),
     /// Inspect the local token database.
     Token(TokenArgs),
+    /// Manage per-chain address aliases used for agent lookups.
+    #[command(name = "address-book")]
+    AddressBook(AddressBookArgs),
+    /// Read legal documents and record their acceptance.
+    Legal(LegalArgs),
     /// List exceptional requests, or review and sign one locally.
     Approve {
         request_id: Option<Uuid>,
@@ -204,6 +216,77 @@ struct TokenArgs {
     command: TokenCommand,
 }
 
+#[derive(Debug, Args)]
+struct AddressBookArgs {
+    #[command(subcommand)]
+    command: AddressBookCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AddressBookCommand {
+    /// Print address book entries as JSON, optionally scoped to one network.
+    List {
+        /// Network name, alias, or decimal chain ID.
+        network: Option<String>,
+        #[arg(long, default_value_t = 200)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
+    /// Add or update one alias after owner authentication.
+    Add {
+        /// Network name, alias, or decimal chain ID.
+        network: String,
+        alias: String,
+        address: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Remove one alias after owner authentication.
+    #[command(alias = "delete")]
+    Remove {
+        /// Network name, alias, or decimal chain ID.
+        network: String,
+        alias: String,
+    },
+}
+
+#[derive(Debug, Args)]
+struct LegalArgs {
+    #[command(subcommand)]
+    command: LegalCommand,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum LegalDocumentArg {
+    Terms,
+    Privacy,
+    Licenses,
+}
+
+impl LegalDocumentArg {
+    const fn document(self) -> LegalDocument {
+        match self {
+            Self::Terms => LegalDocument::TermsOfService,
+            Self::Privacy => LegalDocument::PrivacyPolicy,
+            Self::Licenses => LegalDocument::ThirdPartyLicenses,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum LegalCommand {
+    /// Print acceptance status for the terms of service and privacy policy.
+    Status,
+    /// Print the complete text of one legal document.
+    Show { document: LegalDocumentArg },
+    /// Review and accept the terms of service and privacy policy.
+    ///
+    /// Each document is acknowledged separately. Signing (transactions and
+    /// typed data) stays disabled until both are accepted.
+    Accept,
+}
+
 #[derive(Debug, Subcommand)]
 enum TokenCommand {
     /// Print stored tokens as JSON, optionally filtered by decimal chain ID.
@@ -245,6 +328,8 @@ impl Cli {
             Command::Policy(args) => run_policy(config, args.command).await,
             Command::Transaction(args) => run_transaction(&config, args.command),
             Command::Token(args) => run_token(&config, &args.command),
+            Command::AddressBook(args) => run_address_book(&config, args.command).await,
+            Command::Legal(args) => run_legal(&config, &args.command),
             Command::Approve {
                 request_id,
                 no_confirm,
@@ -422,6 +507,193 @@ fn run_token(config: &ConfigStore, command: &TokenCommand) -> Result<()> {
     }
 }
 
+/// Resolve a network by name, alias, or canonical decimal chain ID.
+fn resolve_network(config: &ConfigStore, requested: &str) -> Result<NetworkConfig> {
+    if !requested.is_empty() && requested.bytes().all(|byte| byte.is_ascii_digit()) {
+        config.network_by_chain_id(requested)
+    } else {
+        config.network(requested)
+    }
+}
+
+async fn run_address_book(config: &ConfigStore, command: AddressBookCommand) -> Result<()> {
+    match command {
+        AddressBookCommand::List {
+            network,
+            limit,
+            offset,
+        } => {
+            let chain_id = network
+                .as_deref()
+                .map(|requested| resolve_network(config, requested))
+                .transpose()?
+                .map(|network| network.chain_id);
+            let store = AddressBookStore::production(config.data_dir())?;
+            print_json(&serde_json::json!({
+                "total": store.count(chain_id)?,
+                "entries": store.list(chain_id, limit, offset)?,
+            }))
+        }
+        AddressBookCommand::Add {
+            network,
+            alias,
+            address,
+            note,
+        } => {
+            require_interactive("address book changes")?;
+            crate::address_book::validate_alias(&alias)?;
+            let network = resolve_network(config, &network)?;
+            let address =
+                Address::from_str(&address).context("address must be a 20-byte EVM address")?;
+            let existing =
+                AddressBookStore::production(config.data_dir())?.get(network.chain_id, &alias)?;
+            let digest = configuration_digest(&serde_json::json!({
+                "operation": "upsert",
+                "chain_id": network.chain_id.to_string(),
+                "alias": alias,
+                "address": format!("{address:#x}"),
+                "note": note,
+            }))?;
+            let mut request = ApprovalRequest::new(
+                ApprovalKind::AddressBookChange,
+                "Add address book entry",
+                "Store this alias for agent lookups. Aliases carry no signing authority, but an \
+                 agent will resolve payments to this address when the user names the alias.",
+            )
+            .fact("Network", &network.name)
+            .fact("Chain ID", network.chain_id.to_string())
+            .fact("Alias", &alias)
+            .fact("Address", address.to_checksum(None))
+            .digest(&digest);
+            if let Some(note) = &note {
+                request = request.fact("Note", note);
+            }
+            if let Some(existing) = &existing {
+                request = request.warning(format!(
+                    "This replaces the existing entry for {alias}, currently {}.",
+                    existing.address
+                ));
+            }
+            require_approval(request).await?;
+            PlatformHumanPresence
+                .confirm(&PresenceRequest {
+                    action: PresenceAction::ModifyAddressBook,
+                    wallet_id: format!("alias {alias} on chain {}", network.chain_id),
+                    operation_digest: Some(digest),
+                })
+                .await?;
+            let entry = AddressBookStore::production(config.data_dir())?.upsert(
+                network.chain_id,
+                &alias,
+                address,
+                note.as_deref(),
+            )?;
+            print_json(&entry)
+        }
+        AddressBookCommand::Remove { network, alias } => {
+            require_interactive("address book changes")?;
+            let network = resolve_network(config, &network)?;
+            let existing = AddressBookStore::production(config.data_dir())?
+                .get(network.chain_id, &alias)?
+                .with_context(|| {
+                    format!(
+                        "no address book entry {alias} on chain {}",
+                        network.chain_id
+                    )
+                })?;
+            let digest = configuration_digest(&serde_json::json!({
+                "operation": "remove",
+                "chain_id": network.chain_id.to_string(),
+                "alias": alias,
+                "address": existing.address,
+            }))?;
+            require_approval(
+                ApprovalRequest::new(
+                    ApprovalKind::AddressBookChange,
+                    "Remove address book entry",
+                    "Remove this alias from agent lookups.",
+                )
+                .fact("Network", &network.name)
+                .fact("Chain ID", network.chain_id.to_string())
+                .fact("Alias", &alias)
+                .fact("Address", &existing.address)
+                .digest(&digest),
+            )
+            .await?;
+            PlatformHumanPresence
+                .confirm(&PresenceRequest {
+                    action: PresenceAction::ModifyAddressBook,
+                    wallet_id: format!("alias {alias} on chain {}", network.chain_id),
+                    operation_digest: Some(digest),
+                })
+                .await?;
+            let removed = AddressBookStore::production(config.data_dir())?
+                .remove(network.chain_id, &alias)?;
+            print_json(&serde_json::json!({
+                "removed": removed,
+            }))
+        }
+    }
+}
+
+fn run_legal(config: &ConfigStore, command: &LegalCommand) -> Result<()> {
+    let store = LegalStore::new(config.data_dir());
+    match command {
+        LegalCommand::Status => print_json(&store.status()?),
+        LegalCommand::Show { document } => {
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(document.document().text().as_bytes())?;
+            stdout.flush()?;
+            Ok(())
+        }
+        LegalCommand::Accept => {
+            require_interactive("legal acceptance")?;
+            let accept = |document: LegalDocument, prompt: &str| -> Result<bool> {
+                let text = document.text();
+                let digest = document.digest();
+                cliclack::note(document.title(), terminal_note_safe(&text))?;
+                cliclack::log::info(format!("Document digest: {digest}"))?;
+                let accepted = cliclack::confirm(prompt).initial_value(false).interact()?;
+                if accepted {
+                    store.record_acceptance(document, &digest)?;
+                }
+                Ok(accepted)
+            };
+            cliclack::intro("Ekubo Wallet legal acceptance")?;
+            ensure!(
+                accept(
+                    LegalDocument::TermsOfService,
+                    "Do you accept these Terms of Service?",
+                )?,
+                "the Terms of Service were not accepted; signing stays disabled"
+            );
+            ensure!(
+                accept(
+                    LegalDocument::PrivacyPolicy,
+                    "Do you separately acknowledge this Privacy Policy?",
+                )?,
+                "the Privacy Policy was not acknowledged; signing stays disabled"
+            );
+            cliclack::outro("Recorded. Signing is now enabled for this installation.")?;
+            print_json(&store.status()?)
+        }
+    }
+}
+
+/// Legal texts are trusted compile-time strings, but they pass through the
+/// same control-character stripping as every other terminal output.
+fn terminal_note_safe(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() && character != '\n' {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 async fn run_policy(config: ConfigStore, command: PolicyCommand) -> Result<()> {
     match command {
         PolicyCommand::Show { wallet_id } => {
@@ -532,17 +804,20 @@ fn run_transaction(config: &ConfigStore, command: TransactionCommand) -> Result<
 fn list_pending_approvals(config: &ConfigStore) -> Result<()> {
     let pending = PendingStore::production(config.data_dir())?;
     let awaiting = pending.awaiting_approval(None)?;
-    if awaiting.is_empty() {
+    let awaiting_typed_data =
+        TypedDataStore::production(config.data_dir())?.awaiting_approval(None)?;
+    if awaiting.is_empty() && awaiting_typed_data.is_empty() {
         eprintln!("No requests are awaiting approval.");
     } else {
         eprintln!(
             "{} request(s) awaiting approval. Review one with `ekubo-wallet approve <request-id>`; \
              unapproved requests expire at their listed expires_at.",
-            awaiting.len()
+            awaiting.len() + awaiting_typed_data.len()
         );
     }
     print_json(&serde_json::json!({
         "pending_approvals": awaiting,
+        "pending_typed_data": awaiting_typed_data,
     }))
 }
 
@@ -550,7 +825,24 @@ fn run_reject(config: &ConfigStore, request_id: Option<Uuid>) -> Result<()> {
     let Some(request_id) = request_id else {
         return list_pending_approvals(config);
     };
-    let request = PendingStore::production(config.data_dir())?.reject(request_id)?;
+    let request = match PendingStore::production(config.data_dir())?.reject(request_id) {
+        Ok(request) => request,
+        Err(transaction_error) => {
+            let mut typed_data = TypedDataStore::production(config.data_dir())?;
+            let Ok(request) = typed_data.reject(request_id) else {
+                return Err(transaction_error);
+            };
+            eprintln!(
+                "Rejected. An MCP agent waiting on this typed-data request sees the rejection \
+                 automatically."
+            );
+            return print_json(&serde_json::json!({
+                "rejected": request.request_id,
+                "digest": request.digest,
+                "rejected_at": request.rejected_at,
+            }));
+        }
+    };
     eprintln!("Rejected. An MCP agent waiting on this request sees the rejection automatically.");
     print_json(&serde_json::json!({
         "rejected": request.request_id,
@@ -568,8 +860,19 @@ async fn run_approve(
         return list_pending_approvals(config);
     };
     require_interactive("transaction approval")?;
+    legal::require_current_acceptance(config.data_dir())?;
     let mut pending = PendingStore::production(config.data_dir())?;
-    let request = pending.get(request_id)?;
+    let request = match pending.get(request_id) {
+        Ok(request) => request,
+        Err(transaction_error) => {
+            drop(pending);
+            let typed_data = TypedDataStore::production(config.data_dir())?;
+            let Ok(request) = typed_data.get(request_id) else {
+                return Err(transaction_error);
+            };
+            return approve_typed_data(config, typed_data, request, no_confirm).await;
+        }
+    };
     ensure!(
         request.approval_required,
         "transaction did not require approval"
@@ -687,6 +990,155 @@ async fn run_approve(
         "digest": approved.digest,
         "transaction_hash": approved.signed_transaction_hash,
         "approved_at": approved.approved_at,
+    }))
+}
+
+async fn approve_typed_data(
+    config: &ConfigStore,
+    mut store: TypedDataStore,
+    request: PendingTypedData,
+    no_confirm: bool,
+) -> Result<()> {
+    ensure!(
+        request.status == TypedDataStatus::AwaitingApproval,
+        "typed-data request is not awaiting approval"
+    );
+    let wallet = config.wallet(&request.wallet_id)?;
+    config.network_by_chain_id(&request.chain_id)?;
+    let (typed, chain_id, digest) = parse_typed_data(&request.typed_data)?;
+    ensure!(
+        chain_id.to_string() == request.chain_id && format!("{digest:#x}") == request.digest,
+        "typed-data request no longer matches its stored payload"
+    );
+    let permit_approvals = interpret_permit_approvals(&typed, wallet.address)?;
+
+    let mut approval = ApprovalRequest::new(
+        ApprovalKind::TypedDataSignature,
+        "Approve typed-data signature",
+        "Review and sign this exact EIP-712 payload with the wallet key. The complete payload is \
+         printed above this summary.",
+    )
+    .fact("Wallet", &request.wallet_id)
+    .fact("Chain ID", &request.chain_id)
+    .fact("Primary type", &typed.primary_type)
+    .fact(
+        "Domain",
+        format!(
+            "name={:?}; version={:?}; verifyingContract={}",
+            typed.domain.name.as_deref().unwrap_or("<none>"),
+            typed.domain.version.as_deref().unwrap_or("<none>"),
+            typed
+                .domain
+                .verifying_contract
+                .map_or_else(|| "<none>".into(), |contract| contract.to_checksum(None)),
+        ),
+    )
+    .fact("Signing hash", &request.digest)
+    .digest(&request.digest);
+    approval.id = request.request_id;
+    approval.expires_at = request.expires_at;
+
+    if let Some(approvals) = &permit_approvals {
+        for (index, permit) in approvals.iter().enumerate() {
+            approval = approval.fact(
+                format!("Grants approval {}", index + 1),
+                format!(
+                    "{}: allow {} to spend up to {} of token {}{}",
+                    permit.kind,
+                    permit.spender,
+                    permit.amount,
+                    permit.token,
+                    permit
+                        .deadline
+                        .as_deref()
+                        .map_or_else(String::new, |deadline| format!("; deadline {deadline}")),
+                ),
+            );
+        }
+        approval = approval.warning(
+            "Signing grants the token approvals listed above; the active policy did not authorize \
+             them automatically.",
+        );
+        let stored_policy = PolicyStore::production(config.data_dir())?
+            .get(&wallet.id)?
+            .with_context(|| format!("wallet {} has no local policy", wallet.id))?;
+        let tuples = approvals
+            .iter()
+            .map(crate::typed_data::PermitApproval::tuple)
+            .collect::<Result<Vec<_>>>()?;
+        for finding in crate::core::policy::evaluate_permit_approvals(
+            &stored_policy.policy,
+            &request.chain_id,
+            &tuples,
+        ) {
+            if finding.severity != FindingSeverity::Info {
+                approval = approval.warning(format!("{}: {}", finding.code, finding.message));
+            }
+        }
+    } else {
+        approval = approval.warning(
+            "This payload is not a recognized permit. A typed-data signature can authorize \
+             transfers, orders, or delegations; verify every field of the printed payload.",
+        );
+    }
+
+    let mut stderr = io::stderr().lock();
+    serde_json::to_writer_pretty(
+        &mut stderr,
+        &serde_json::json!({
+            "approval": approval,
+            "typed_data": request.typed_data,
+        }),
+    )?;
+    stderr.write_all(b"\n")?;
+    stderr.flush()?;
+    drop(stderr);
+    if !no_confirm {
+        require_approval(approval).await?;
+    }
+
+    PlatformHumanPresence
+        .confirm(&PresenceRequest {
+            action: PresenceAction::SignTypedData,
+            wallet_id: wallet.id.clone(),
+            operation_digest: Some(request.digest.clone()),
+        })
+        .await?;
+
+    // Re-read mutable local authority after the potentially long human
+    // review; the final SQL write repeats the pending checks atomically.
+    let current = store.get(request.request_id)?;
+    ensure!(
+        current.status == TypedDataStatus::AwaitingApproval && current.digest == request.digest,
+        "typed-data request changed during approval"
+    );
+    ensure!(
+        config.wallet(&request.wallet_id)? == wallet,
+        "wallet configuration changed during approval"
+    );
+    let material = OsKeyStore.load(&wallet.id)?;
+    let signer = material.signer();
+    ensure!(
+        signer.address() == wallet.address,
+        "credential-store private key does not match wallet metadata"
+    );
+    let signature = signer
+        .sign_hash_sync(&digest)
+        .context("failed to sign typed data")?;
+    let stored = store.store_signature(
+        request.request_id,
+        &request.digest,
+        &format!("0x{}", hex::encode(signature.as_bytes())),
+    )?;
+    eprintln!(
+        "Approved and signed. An MCP agent waiting on this request reads the signature \
+         automatically; nothing further is needed here."
+    );
+    print_json(&serde_json::json!({
+        "approved": stored.request_id,
+        "digest": stored.digest,
+        "signature": stored.signature,
+        "approved_at": stored.approved_at,
     }))
 }
 
@@ -1223,7 +1675,7 @@ fn print_completion_values(config: &ConfigStore, requested: &str) -> Result<()> 
             .collect::<Vec<_>>(),
         "approvals" => {
             if config.data_dir().join("policies.db").exists() {
-                PendingStore::production(config.data_dir())?
+                let mut candidates = PendingStore::production(config.data_dir())?
                     .awaiting_approval(None)?
                     .into_iter()
                     .map(|request| {
@@ -1232,7 +1684,22 @@ fn print_completion_values(config: &ConfigStore, requested: &str) -> Result<()> 
                             format!("{} on chain {}", request.wallet_id, request.chain_id),
                         )
                     })
-                    .collect()
+                    .collect::<Vec<_>>();
+                candidates.extend(
+                    TypedDataStore::production(config.data_dir())?
+                        .awaiting_approval(None)?
+                        .into_iter()
+                        .map(|request| {
+                            (
+                                request.request_id.to_string(),
+                                format!(
+                                    "typed data for {} on chain {}",
+                                    request.wallet_id, request.chain_id
+                                ),
+                            )
+                        }),
+                );
+                candidates
             } else {
                 Vec::new()
             }

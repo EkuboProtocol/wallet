@@ -348,8 +348,8 @@ pub fn evaluate_policy(
                 step.transaction.to,
                 spender,
                 amount,
-                plan,
-                step.step,
+                plan.chain_id.as_str(),
+                Some(step.step),
                 &mut findings,
             );
         } else if data.len() >= 68 && data[..4] == [0xa9, 0x05, 0x9c, 0xbb] {
@@ -445,24 +445,54 @@ pub fn policy_allows(findings: &[PolicyFinding]) -> bool {
         .all(|finding| finding.severity != FindingSeverity::Error)
 }
 
+/// Evaluate token approvals extracted from recognized EIP-712 permit typed
+/// data against the same approval-spender rules that govern `approve()`
+/// calldata. A permit is an approval as far as policy is concerned.
+#[must_use]
+pub fn evaluate_permit_approvals(
+    policy: &WalletPolicy,
+    chain_id: &str,
+    approvals: &[(Address, Address, U256)],
+) -> Vec<PolicyFinding> {
+    let mut findings = Vec::new();
+    let Some(chain) = policy.chain(chain_id) else {
+        findings.push(error(
+            "chain_not_allowed",
+            format!("chain {chain_id} has no policy"),
+            None,
+        ));
+        return findings;
+    };
+    for (index, (token, spender, amount)) in approvals.iter().enumerate() {
+        let step = u32::try_from(index + 1).ok();
+        evaluate_approval(
+            chain,
+            *token,
+            *spender,
+            *amount,
+            chain_id,
+            step,
+            &mut findings,
+        );
+    }
+    findings
+}
+
 fn evaluate_approval(
     chain: &ChainPolicy,
     token: Address,
     spender: Address,
     amount: U256,
-    plan: &ExecutionPlan,
-    step: u32,
+    chain_id: &str,
+    step: Option<u32>,
     findings: &mut Vec<PolicyFinding>,
 ) {
     let spender_key = key(spender);
     let Some(spender_rule) = exact_or_wildcard(&chain.approval_spenders, &spender_key) else {
         findings.push(error(
             "approval_spender_not_allowed",
-            format!(
-                "{spender} is not an allowed approval spender on chain {}",
-                plan.chain_id
-            ),
-            Some(step),
+            format!("{spender} is not an allowed approval spender on chain {chain_id}"),
+            step,
         ));
         return;
     };
@@ -470,11 +500,8 @@ fn evaluate_approval(
     let Some(token_rule) = exact_or_wildcard(&spender_rule.tokens, &token_key) else {
         findings.push(error(
             "approval_token_not_allowed",
-            format!(
-                "{spender} may not receive approvals for token {token} on chain {}",
-                plan.chain_id
-            ),
-            Some(step),
+            format!("{spender} may not receive approvals for token {token} on chain {chain_id}"),
+            step,
         ));
         return;
     };
@@ -483,10 +510,10 @@ fn evaluate_approval(
         findings.push(error(
             "approval_amount_limit",
             format!(
-                "{token} approval {amount} exceeds {} for {spender} on chain {}",
-                token_rule.max_amount, plan.chain_id
+                "{token} approval {amount} exceeds {} for {spender} on chain {chain_id}",
+                token_rule.max_amount
             ),
-            Some(step),
+            step,
         ));
     }
 }

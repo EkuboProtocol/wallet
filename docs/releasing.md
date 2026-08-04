@@ -182,6 +182,12 @@ or certificate in GitHub.
 ## Release procedure
 
 1. Update `Cargo.toml`, commit through a reviewed pull request, and wait for CI.
+   If dependencies changed, regenerate `THIRD_PARTY_LICENSES.md` with
+   `contrib/generate-third-party-licenses.py` (the shipped-assets test fails if
+   it is stale). If the release changes any default RPC endpoint or the legal
+   documents themselves, the privacy policy or terms digest changes with it and
+   every user must re-accept via `ekubo-wallet legal accept` before signing
+   resumes — mention that in the release notes.
 2. Create an annotated tag named exactly `v<version>` on the reviewed `main`
    commit and push it.
 3. Review and approve the jobs waiting on the `release` environment only after

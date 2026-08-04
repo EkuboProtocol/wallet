@@ -15,6 +15,8 @@ pub enum ApprovalKind {
     PolicyException,
     ExportPrivateKey,
     RemoveWallet,
+    TypedDataSignature,
+    AddressBookChange,
 }
 
 /// One label/value pair in a human-readable approval summary.
