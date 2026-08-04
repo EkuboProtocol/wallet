@@ -1129,7 +1129,20 @@ fn transaction_line(record: &PendingTransaction) -> String {
 async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction]) -> Result<()> {
     const DONE: usize = usize::MAX;
     loop {
-        let mut select = cliclack::select(format!("{} recorded transaction(s)", records.len()));
+        // Only one page of records is drawn at a time, so a long history
+        // cannot outgrow the screen and scroll it away on every keystroke.
+        let rows = interactive_list_rows();
+        let mut select = cliclack::select(list_prompt(
+            &format!("{} recorded transaction(s)", records.len()),
+            records.len(),
+            rows,
+        ))
+        .max_rows(rows)
+        // Quitting is the first item, so it never requires scrolling to the
+        // end of a long history, while the cursor still starts on the newest
+        // record.
+        .item(DONE, "Done", "quit")
+        .initial_value(0);
         for (index, record) in records.iter().enumerate() {
             select = select.item(
                 index,
@@ -1138,8 +1151,9 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
                 "",
             );
         }
-        select = select.item(DONE, "Done", "quit");
-        let choice = select.interact()?;
+        let Some(choice) = interact_or_quit(&mut select)? else {
+            return Ok(());
+        };
         if choice == DONE {
             return Ok(());
         }
@@ -1148,6 +1162,35 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
             format!("Request {}", records[choice].request_id),
             crate::render::terminal_safe_multiline(&detail),
         )?;
+    }
+}
+
+/// The visible page size for an interactive list in this CLI.
+///
+/// The prompt draws a header, a footer, and a blank separator around the list,
+/// and the shell prompt returns underneath it; leaving that many rows free
+/// keeps the whole prompt on one screen.
+fn interactive_list_rows() -> usize {
+    const PROMPT_CHROME_ROWS: usize = 6;
+    crate::render::interactive_list_rows(PROMPT_CHROME_ROWS)
+}
+
+/// Say how to move through a list that does not fit on one screen.
+fn list_prompt(title: &str, items: usize, rows: usize) -> String {
+    if items > rows {
+        format!("{title}; ↑/↓ to scroll, {rows} of {items} shown")
+    } else {
+        title.to_owned()
+    }
+}
+
+/// Run one selection prompt, treating Esc and Ctrl+C as "leave the list"
+/// rather than as an error.
+fn interact_or_quit<T: Clone + Eq>(select: &mut cliclack::Select<T>) -> Result<Option<T>> {
+    match select.interact() {
+        Ok(choice) => Ok(Some(choice)),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -3085,6 +3128,25 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_lists_advertise_scrolling_and_short_ones_stay_quiet() {
+        assert_eq!(
+            list_prompt("40 record(s)", 40, 12),
+            "40 record(s); ↑/↓ to scroll, 12 of 40 shown"
+        );
+        assert_eq!(list_prompt("4 record(s)", 4, 12), "4 record(s)");
+        // A list exactly filling the page needs no scrolling hint either.
+        assert_eq!(list_prompt("12 record(s)", 12, 12), "12 record(s)");
+    }
+
+    #[test]
+    fn interactive_lists_are_sized_to_the_terminal() {
+        // The page is bounded and always leaves room for the prompt chrome.
+        let rows = interactive_list_rows();
+        assert!(rows >= 3);
+        assert!(rows < 10_000);
+    }
 
     #[tokio::test]
     async fn transaction_line_and_detail_render_offline() {

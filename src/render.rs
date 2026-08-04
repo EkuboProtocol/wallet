@@ -70,6 +70,31 @@ pub fn terminal_safe_multiline(value: &str) -> String {
         .collect()
 }
 
+/// Rows below which an interactive list stops being scrollable at all.
+const MINIMUM_LIST_ROWS: usize = 3;
+/// Assumed terminal height when the real one cannot be read.
+const FALLBACK_TERMINAL_ROWS: usize = 24;
+
+/// How many list rows one interactive prompt may draw.
+///
+/// An interactive prompt redraws its entire body on every keystroke. A body
+/// taller than the terminal therefore scrolls the view to the bottom each time
+/// a cursor key is pressed, which makes a long list unusable. Sizing the
+/// visible page to the live terminal height keeps the whole prompt on one
+/// screen and lets the prompt's own paging scroll the list instead.
+///
+/// `chrome_rows` is what the prompt draws around the list — header, footer,
+/// and any lines already printed above it. Every interactive list must pass
+/// the result to `max_rows`; the height is recomputed on each render, so a
+/// terminal resized between prompts is respected.
+#[must_use]
+pub fn interactive_list_rows(chrome_rows: usize) -> usize {
+    let rows = console::Term::stderr()
+        .size_checked()
+        .map_or(FALLBACK_TERMINAL_ROWS, |(rows, _)| rows as usize);
+    rows.saturating_sub(chrome_rows).max(MINIMUM_LIST_ROWS)
+}
+
 /// "3 minutes ago", "in 2 hours", "just now".
 #[must_use]
 pub fn relative_time(when: DateTime<Utc>) -> String {
@@ -227,6 +252,16 @@ mod tests {
         assert!(rendered.contains("1.:\n") || rendered.contains("1.:"));
         assert!(rendered.contains("  name: ethereum"));
         assert!(rendered.contains("empty: (none)"));
+    }
+
+    #[test]
+    fn interactive_lists_never_shrink_below_a_scrollable_page() {
+        // Chrome can never eat the list: a tiny or unreadable terminal still
+        // leaves enough rows for the page to scroll through.
+        assert_eq!(interactive_list_rows(usize::MAX), MINIMUM_LIST_ROWS);
+        assert!(interactive_list_rows(6) >= MINIMUM_LIST_ROWS);
+        // Reserving more rows never yields a taller list.
+        assert!(interactive_list_rows(10) <= interactive_list_rows(4));
     }
 
     #[test]

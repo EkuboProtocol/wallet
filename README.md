@@ -601,7 +601,9 @@ those persisted bytes. Inspect the ledger with `ekubo-wallet transaction list`
 and `ekubo-wallet transaction show <request-id-or-hash>`: on a terminal these
 open a human-readable view — `list` is an interactive browser with relative
 ages, expandable details, block-explorer links, and receipt-decoded token
-balance changes. Every reporting command prints exact JSON instead when
+balance changes. It draws one page sized to the terminal and scrolls with the
+arrow keys, so a long history never outgrows the screen; `Done` is the first
+entry and `Esc` also leaves the browser. Every reporting command prints exact JSON instead when
 `--json` is passed or when stdout is not a terminal, so scripts and agents
 always receive machine-readable output.
 

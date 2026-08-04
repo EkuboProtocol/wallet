@@ -2010,6 +2010,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "cliclack",
+ "console",
  "directories",
  "fs2",
  "futures",
