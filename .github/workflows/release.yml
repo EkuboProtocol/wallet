@@ -48,7 +48,7 @@ jobs:
 
       - name: Test the tagged source
         env:
-          RUST_MIN_STACK: 16777216
+          RUST_MIN_STACK: 67108864
         run: cargo test --locked --all-features
 
       - name: Install RustSec audit client

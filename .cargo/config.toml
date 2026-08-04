@@ -5,4 +5,4 @@
 # the same tests need well under 64 KiB elsewhere. Reserving address space is
 # free on 64-bit hosts; `force = false` lets an explicit RUST_MIN_STACK win.
 [env]
-RUST_MIN_STACK = { value = "16777216", force = false }
+RUST_MIN_STACK = { value = "67108864", force = false }
