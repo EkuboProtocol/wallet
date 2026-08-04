@@ -412,12 +412,20 @@ fn format_fixed_point(base_units: &str, decimals: u8) -> String {
     }
 }
 
-/// Treat the top bit of a uint256 as unlimited. Every conventional "infinite"
-/// allowance sentinel in use (`uint256::MAX`, `uint96::MAX`-style halves, and
-/// `type(uint256).max / 2`) is at or above this threshold, and no realistic
-/// token supply reaches it.
+/// An allowance is treated as unlimited at or above `type(uint128).max`.
+///
+/// This covers every sentinel in common use: `type(uint256).max`,
+/// `type(uint256).max / 2`, `type(uint160).max` as used by Permit2, and
+/// `type(uint128).max`. It cannot produce a realistic false positive either,
+/// because 2^128 base units is 3.4e20 whole tokens at eighteen decimals, which
+/// is far beyond any circulating supply.
+///
+/// It deliberately does not flag `type(uint96).max`, which some older protocols
+/// use as their infinite sentinel. At eighteen decimals that is 7.9e10 tokens —
+/// large, but within the supply of real tokens, so warning on it would train a
+/// reviewer to dismiss the warning.
 fn is_effectively_unlimited(amount: U256) -> bool {
-    amount >= (U256::from(1_u8) << 255)
+    amount >= (U256::from(1_u8) << 128) - U256::from(1_u8)
 }
 
 fn selector_text(data: &Bytes) -> String {
@@ -683,8 +691,32 @@ mod tests {
         );
         assert_eq!(interpretation.warnings.len(), 1);
         assert!(interpretation.warnings[0].contains("unlimited"));
-        assert!(is_effectively_unlimited(U256::MAX));
-        assert!(!is_effectively_unlimited(U256::from(u128::MAX)));
+    }
+
+    #[test]
+    fn unlimited_threshold_covers_the_sentinels_actually_in_use() {
+        for unlimited in [
+            U256::MAX,
+            U256::MAX / U256::from(2_u8),
+            (U256::from(1_u8) << 160) - U256::from(1_u8), // Permit2
+            U256::from(u128::MAX),
+        ] {
+            assert!(
+                is_effectively_unlimited(unlimited),
+                "{unlimited} should read as unlimited"
+            );
+        }
+        for finite in [
+            U256::ZERO,
+            U256::from(1_000_000_u64),
+            // 100 billion tokens at eighteen decimals: large but real.
+            U256::from(10_u8).pow(U256::from(29_u8)),
+        ] {
+            assert!(
+                !is_effectively_unlimited(finite),
+                "{finite} should read as a finite allowance"
+            );
+        }
     }
 
     #[test]
