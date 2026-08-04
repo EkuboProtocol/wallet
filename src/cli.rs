@@ -135,12 +135,8 @@ enum PolicyCommand {
 
 #[derive(Debug, Subcommand)]
 enum NetworkCommand {
-    /// List configured networks, showing only each RPC's scheme, host, and port.
-    List {
-        /// Print complete RPC URLs, which may contain provider credentials.
-        #[arg(long)]
-        show_rpc_urls: bool,
-    },
+    /// List configured networks, including their complete RPC URLs.
+    List,
     /// Print the built-in public network presets.
     Presets,
     /// Replace configured networks with the built-in presets.
@@ -839,18 +835,11 @@ async fn require_approval(request: ApprovalRequest) -> Result<()> {
 
 async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()> {
     match command {
-        // Only the human CLI can be asked for complete RPC URLs, and only
-        // explicitly. No MCP tool returns them under any flag.
-        NetworkCommand::List { show_rpc_urls } => {
-            let disclosure = if show_rpc_urls {
-                RpcDisclosure::Complete
-            } else {
-                RpcDisclosure::OriginOnly
-            };
-            print_json(&describe_networks(&config.load()?.networks, disclosure))
-        }
+        // The human CLI prints complete RPC URLs so the configuration can
+        // actually be read back and edited. No MCP tool returns them.
+        NetworkCommand::List => print_json(&describe_networks(&config.load()?.networks)),
         NetworkCommand::Presets => print_json(&serde_json::json!({
-            "networks": describe_networks(&default_networks(), RpcDisclosure::Complete),
+            "networks": describe_networks(&default_networks()),
         })),
         NetworkCommand::Reset => {
             let networks = default_networks();
@@ -868,7 +857,7 @@ async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()
             })?;
             print_json(&serde_json::json!({
                 "reset": true,
-                "networks": describe_networks(&networks, RpcDisclosure::OriginOnly),
+                "networks": describe_networks(&networks),
             }))
         }
         NetworkCommand::Add(args) => {
@@ -892,7 +881,7 @@ async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()
                 replace_configured_network(&mut state.networks, candidate.clone())
             })?;
             print_json(&serde_json::json!({
-                "network": describe_network(&candidate, RpcDisclosure::OriginOnly),
+                "network": describe_network(&candidate),
                 "rpc_verified": true,
             }))
         }
@@ -923,84 +912,40 @@ async fn run_network(config: &ConfigStore, command: NetworkCommand) -> Result<()
     }
 }
 
-/// How much of a configured RPC URL a listing may reveal.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RpcDisclosure {
-    /// Scheme, host, and port only. A credential in the userinfo, path, or
-    /// query is never printed.
-    OriginOnly,
-    /// The complete URL, including any credential it carries.
-    Complete,
-}
-
-fn describe_networks(
-    networks: &[NetworkConfig],
-    disclosure: RpcDisclosure,
-) -> Vec<serde_json::Value> {
-    networks
-        .iter()
-        .map(|network| describe_network(network, disclosure))
-        .collect()
+fn describe_networks(networks: &[NetworkConfig]) -> Vec<serde_json::Value> {
+    networks.iter().map(describe_network).collect()
 }
 
 #[cfg(test)]
 mod network_disclosure_tests {
     use super::*;
 
-    fn credential_bearing_network() -> NetworkConfig {
+    #[test]
+    fn cli_listing_round_trips_the_complete_configuration() {
+        // The listing is how an operator reads back and edits configuration, so
+        // it must reproduce the RPC URL exactly rather than an abbreviation.
         let mut network = default_networks().remove(0);
-        network.rpc_url = "https://user:s3cret@rpc.example.invalid:8545/v2/api-key-1234?token=abcd"
+        network.rpc_url = "https://rpc.example.invalid:8545/v2/api-key-1234?token=abcd"
             .parse()
             .unwrap();
-        network
-    }
-
-    #[test]
-    fn default_listing_shows_only_the_rpc_origin() {
-        let value = describe_network(&credential_bearing_network(), RpcDisclosure::OriginOnly);
-        let text = value.to_string();
-        assert_eq!(
-            value["rpc_origin"].as_str(),
-            Some("https://rpc.example.invalid:8545")
-        );
-        assert!(value.get("rpc_url").is_none());
-        for secret in ["s3cret", "api-key-1234", "abcd"] {
-            assert!(!text.contains(secret), "origin listing leaked {secret}");
-        }
-    }
-
-    #[test]
-    fn explicit_disclosure_returns_the_complete_url() {
-        let network = credential_bearing_network();
-        let value = describe_network(&network, RpcDisclosure::Complete);
+        let value = describe_network(&network);
         assert_eq!(value["rpc_url"].as_str(), Some(network.rpc_url.as_str()));
-        assert!(value.get("rpc_origin").is_none());
+        assert_eq!(value["chain_id"].as_str(), Some("1"));
     }
 }
 
-fn describe_network(network: &NetworkConfig, disclosure: RpcDisclosure) -> serde_json::Value {
-    let rpc = match disclosure {
-        RpcDisclosure::OriginOnly => {
-            serde_json::json!({ "rpc_origin": crate::mcp::rpc_origin(&network.rpc_url) })
-        }
-        RpcDisclosure::Complete => serde_json::json!({ "rpc_url": network.rpc_url.as_str() }),
-    };
-    let mut value = serde_json::json!({
+fn describe_network(network: &NetworkConfig) -> serde_json::Value {
+    serde_json::json!({
         "name": network.name,
         "display_name": network.display_name,
         "aliases": network.aliases,
         "chain_id": network.chain_id.to_string(),
+        "rpc_url": network.rpc_url.as_str(),
         "max_gas_limit": network.max_gas_limit,
         "native_currency": network.native_currency,
         "block_explorer_url": network.block_explorer_url,
         "documentation_url": network.documentation_url,
-    });
-    if let (Some(object), Some(rpc)) = (value.as_object_mut(), rpc.as_object()) {
-        for (key, entry) in rpc {
-            object.insert(key.clone(), entry.clone());
-        }
-    }
-    value
+    })
 }
 
 fn network_candidate(mut args: NetworkAddArgs) -> Result<NetworkConfig> {

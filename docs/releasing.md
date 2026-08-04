@@ -40,6 +40,49 @@ be inconsistent with keeping this code all-rights-reserved. If Ekubo later
 chooses public source distribution, crates.io trusted publishing should be
 added as a separate protected job after the required first manual publication.
 
+## What the repository actually needs
+
+Nothing. A release publishes today with no secrets, no variables, and no
+external accounts: the archives build, `SHA256SUMS` is generated, Sigstore
+signs and verifies every file keylessly through the workflow's OIDC identity,
+and the release is created with the built-in `github.token`. Only platform code
+signing is missing, and the notes say so.
+
+Adding platform signing is the only reason to configure anything. Sorted by what
+it costs:
+
+| Integration | Mechanism | Stored in GitHub | Needs an external account |
+| --- | --- | --- | --- |
+| Sigstore signing of every archive | Keyless, GitHub OIDC | nothing | no — already working |
+| GitHub build provenance | GitHub OIDC | nothing | GitHub Enterprise Cloud for a private repository |
+| Windows Authenticode | Azure federated credential (OIDC) | three GUIDs and three names — no key, no password | Azure subscription, Entra tenant, Artifact Signing account |
+| macOS Developer ID | Long-lived key material | three genuine secrets and three identifiers | Apple Developer Program organization membership |
+
+Windows signing is already trusted-publishing style: the certificate's private
+key never leaves Microsoft, and GitHub exchanges its OIDC token for a
+short-lived Azure credential. `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID` are identifiers rather than credentials; they are stored
+as environment secrets only to keep the release environment's configuration in
+one place. There is no client secret to rotate or leak.
+
+macOS is the exception, and it cannot be fixed with configuration. Apple offers
+no OIDC or trusted-publishing equivalent for Developer ID signing: the
+certificate's private key must reach the signing machine, and notarization
+needs a downloadable App Store Connect API key. Exactly three values are
+therefore irreducibly secret:
+
+- `APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64`
+- `APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD`
+- `APPLE_NOTARY_API_KEY_P8_BASE64`
+
+The other three Apple values — `APPLE_CODESIGN_IDENTITY`, `APPLE_NOTARY_KEY_ID`,
+and `APPLE_NOTARY_ISSUER_ID` — are identifiers stored alongside them.
+
+Because those three secrets are the entire long-lived attack surface of the
+release pipeline, keep them on the protected `release` environment with required
+reviewers rather than at repository scope, so a push to a branch cannot reach
+them.
+
 ## Accounts and one-time configuration
 
 ### GitHub
@@ -49,8 +92,11 @@ added as a separate protected job after the required first manual publication.
    if the final owner differs).
 2. Enable GitHub Actions. Artifact attestations work for public repositories;
    private-repository attestations require GitHub Enterprise Cloud.
-3. Create an environment named `release`. Restrict deployment tags to `v*`, add
-   required reviewers, prevent self-review, and disable administrator bypass.
+3. The `release` environment already exists and already restricts deployments to
+   `v*` tags, which is what makes the Azure federated credential's
+   `environment:release` subject meaningful. Before distributing signed builds
+   outside the team, also add required reviewers, prevent self-review, and
+   disable administrator bypass.
 4. Protect `main`, require the `CI` checks, require pull-request review, and
    prevent force pushes and deletion. Add a tag ruleset for `v*` that restricts
    creation and prevents updates/deletion.

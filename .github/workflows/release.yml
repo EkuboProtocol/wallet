@@ -153,6 +153,9 @@ jobs:
     name: Sign, notarize, and package macOS binaries
     needs: [validate, build-native-signing-targets]
     runs-on: macos-15
+    # Scopes the Apple secrets to the protected environment, which only accepts
+    # `v*` tag deployments, rather than exposing them at repository scope.
+    environment: release
     outputs:
       signed: ${{ steps.sign.outputs.signed }}
     steps:
@@ -276,6 +279,10 @@ jobs:
     name: Sign and package Windows binary
     needs: [validate, build-native-signing-targets]
     runs-on: windows-2025
+    # Required for OIDC: the Azure federated credential is registered against
+    # subject `repo:<owner>/<repo>:environment:release`, so the token minted for
+    # this job only matches while it deploys to that environment.
+    environment: release
     permissions:
       contents: read
       id-token: write

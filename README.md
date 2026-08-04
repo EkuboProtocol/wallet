@@ -177,11 +177,11 @@ catalog, and `network reset` replaces the configured list with fresh copies of
 the presets while preserving wallets and policies. Configuration permits one RPC
 profile per chain ID so MCP calls remain unambiguous.
 
-`network list` prints each profile with an `rpc_origin` — scheme, host, and port
-only — because a provider credential usually lives in the URL's userinfo, path,
-or query. That is enough to confirm which endpoint a chain resolves to. Pass
-`--show-rpc-urls` to print complete URLs, and expect credentials in the output.
-No MCP tool returns an RPC URL under any flag.
+`network list` prints each profile in full, including its complete RPC URL, so
+the configuration can be read back and edited. RPC URLs are configuration rather
+than key material, and the human CLI does not redact them. No MCP tool returns
+an RPC URL: `wallet_list` deliberately omits them so an agent can discover valid
+chain IDs without seeing provider credentials.
 
 | CLI name | Chain ID | Max transaction gas | Default public RPC |
 | --- | ---: | ---: | --- |
