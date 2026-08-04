@@ -1342,7 +1342,7 @@ const SECURITY_RESOURCE_URI: &str = "wallet://docs/security-model";
 const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local fork or eth_getProof path. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is separate public display data: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, wait only when the user independently chooses the CLI override path. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes.";
 const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local fork, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database (tokens.db) is unencrypted public display data used for listings and portfolio reads. MCP tools may add to it, entries are verified against the token contracts through Multicall3 at insert, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n";
 
-#[tool_handler]
+#[tool_handler(router = Self::sanitized_tool_router())]
 impl ServerHandler for WalletMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -1525,6 +1525,63 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
     }
 }
 
+impl WalletMcpServer {
+    /// The generated router with schemars' nonstandard integer `format`
+    /// annotations removed. Validators warn loudly on every `tools/list` for
+    /// formats like `uint32`; the `minimum`/`maximum` bounds already carry
+    /// the constraint.
+    fn sanitized_tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        for route in router.map.values_mut() {
+            let mut input = serde_json::Value::Object((*route.attr.input_schema).clone());
+            strip_nonstandard_formats(&mut input);
+            if let serde_json::Value::Object(object) = input {
+                route.attr.input_schema = std::sync::Arc::new(object);
+            }
+            if let Some(output) = route.attr.output_schema.take() {
+                let mut output = serde_json::Value::Object((*output).clone());
+                strip_nonstandard_formats(&mut output);
+                if let serde_json::Value::Object(object) = output {
+                    route.attr.output_schema = Some(std::sync::Arc::new(object));
+                }
+            }
+        }
+        router
+    }
+}
+
+/// Remove `"format"` annotations that are not JSON Schema formats: the
+/// integer-width and float families schemars emits for Rust numeric types.
+fn strip_nonstandard_formats(value: &mut serde_json::Value) {
+    fn is_nonstandard(format: &str) -> bool {
+        let base = format
+            .strip_prefix("uint")
+            .or_else(|| format.strip_prefix("int"));
+        matches!(base, Some(rest) if rest.is_empty() || rest.bytes().all(|byte| byte.is_ascii_digit()))
+            || matches!(format, "float" | "double")
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("format")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(is_nonstandard)
+            {
+                map.remove("format");
+            }
+            for child in map.values_mut() {
+                strip_nonstandard_formats(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_nonstandard_formats(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub async fn serve(config: ConfigStore) -> Result<()> {
     let server = WalletMcpServer::production(config)?;
     let running = server
@@ -1642,13 +1699,40 @@ mod tests {
             }
         }
 
-        for tool in WalletMcpServer::tool_router().list_all() {
+        fn assert_no_nonstandard_formats(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(format) = map.get("format").and_then(serde_json::Value::as_str) {
+                        assert!(
+                            !(format.starts_with("uint")
+                                || format.starts_with("int")
+                                || format == "float"
+                                || format == "double"),
+                            "nonstandard format {format:?} at {path}"
+                        );
+                    }
+                    for (key, child) in map {
+                        assert_no_nonstandard_formats(child, &format!("{path}.{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        assert_no_nonstandard_formats(item, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for tool in WalletMcpServer::sanitized_tool_router().list_all() {
             let name = tool.name.clone();
             let input = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
             assert_no_boolean_schemas(&input, &format!("{name}.inputSchema"));
+            assert_no_nonstandard_formats(&input, &format!("{name}.inputSchema"));
             if let Some(output) = &tool.output_schema {
                 let output = serde_json::to_value(output.as_ref()).unwrap();
                 assert_no_boolean_schemas(&output, &format!("{name}.outputSchema"));
+                assert_no_nonstandard_formats(&output, &format!("{name}.outputSchema"));
             }
         }
     }
