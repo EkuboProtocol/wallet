@@ -1349,7 +1349,7 @@ impl WalletMcpServer {
         let plan = transfer_plan(&chain_id, wallet.address, input.transfers)
             .map_err(|error| tool_error(&error))?;
         Ok(Json(
-            self.send_new_plan(wallet, network, plan, input.on_simulation_failure)
+            Box::pin(self.send_new_plan(wallet, network, plan, input.on_simulation_failure))
                 .await
                 .map_err(|error| tool_error(&error))?,
         ))
@@ -1405,16 +1405,16 @@ impl WalletMcpServer {
                 )
                 .await
                 .map_err(|error| tool_error(&error))?;
-                self.send_new_plan(wallet, network, plan, input.on_simulation_failure)
+                Box::pin(self.send_new_plan(wallet, network, plan, input.on_simulation_failure))
                     .await
             }
             (None, Some(simulation_id), None) => {
-                self.send_recorded_simulation(
+                Box::pin(self.send_recorded_simulation(
                     wallet,
                     network,
                     simulation_id,
                     input.on_simulation_failure,
-                )
+                ))
                 .await
             }
             (None, None, Some(request_id)) => {
@@ -3580,15 +3580,14 @@ mod tests {
             Utc::now(),
         );
 
-        let error = server
-            .send_recorded_simulation(
-                server.config.wallet("primary").unwrap(),
-                server.config.network_by_chain_id("1").unwrap(),
-                recorded.simulation_id,
-                OnSimulationFailure::Fail,
-            )
-            .await
-            .expect_err("the recorded failure is reported, not re-simulated");
+        let error = Box::pin(server.send_recorded_simulation(
+            server.config.wallet("primary").unwrap(),
+            server.config.network_by_chain_id("1").unwrap(),
+            recorded.simulation_id,
+            OnSimulationFailure::Fail,
+        ))
+        .await
+        .expect_err("the recorded failure is reported, not re-simulated");
         // The recorded result's own guidance comes back, so nothing asked the
         // RPC to execute this plan a second time.
         assert!(
@@ -3599,15 +3598,14 @@ mod tests {
         // And the record is spent, so one simulation can authorize at most one
         // send however many times the identifier is replayed.
         assert!(server.simulations.lock().unwrap().is_empty());
-        let replayed = server
-            .send_recorded_simulation(
-                server.config.wallet("primary").unwrap(),
-                server.config.network_by_chain_id("1").unwrap(),
-                recorded.simulation_id,
-                OnSimulationFailure::Fail,
-            )
-            .await
-            .expect_err("a spent simulation must not send again");
+        let replayed = Box::pin(server.send_recorded_simulation(
+            server.config.wallet("primary").unwrap(),
+            server.config.network_by_chain_id("1").unwrap(),
+            recorded.simulation_id,
+            OnSimulationFailure::Fail,
+        ))
+        .await
+        .expect_err("a spent simulation must not send again");
         assert!(replayed.to_string().contains("already sent"), "{replayed}");
     }
 
@@ -3634,15 +3632,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        let error = server
-            .send_recorded_simulation(
-                server.config.wallet("primary").unwrap(),
-                server.config.network_by_chain_id("1").unwrap(),
-                recorded.simulation_id,
-                OnSimulationFailure::Fail,
-            )
-            .await
-            .expect_err("findings from a policy that is no longer active must not be sent");
+        let error = Box::pin(server.send_recorded_simulation(
+            server.config.wallet("primary").unwrap(),
+            server.config.network_by_chain_id("1").unwrap(),
+            recorded.simulation_id,
+            OnSimulationFailure::Fail,
+        ))
+        .await
+        .expect_err("findings from a policy that is no longer active must not be sent");
         assert!(error.to_string().contains("moved to revision 2"), "{error}");
     }
 
@@ -3670,15 +3667,14 @@ mod tests {
             hypothetical,
             Utc::now(),
         );
-        let error = server
-            .send_recorded_simulation(
-                server.config.wallet("primary").unwrap(),
-                server.config.network_by_chain_id("1").unwrap(),
-                recorded.simulation_id,
-                OnSimulationFailure::Fail,
-            )
-            .await
-            .expect_err("a hypothetical result must not authorize a send");
+        let error = Box::pin(server.send_recorded_simulation(
+            server.config.wallet("primary").unwrap(),
+            server.config.network_by_chain_id("1").unwrap(),
+            recorded.simulation_id,
+            OnSimulationFailure::Fail,
+        ))
+        .await
+        .expect_err("a hypothetical result must not authorize a send");
         assert!(error.to_string().contains("hypothetical"), "{error}");
     }
 
