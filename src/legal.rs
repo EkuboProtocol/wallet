@@ -94,7 +94,7 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 1 — Effective 2026-08-04
+Version 2 — Effective 2026-08-05
 
 This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
 separately from the terms of service.
@@ -116,16 +116,48 @@ may log or retain them under their own policies, and are outside the
 developer's control. The developer is not responsible for data those
 endpoints collect.
 
-Other than the configured RPC endpoints, this software makes no network
-requests by default. If you add or replace a network, requests for that
-network go to the endpoint you configure. Each release keeps the following
-list current with its built-in defaults.
+Apart from these RPC endpoints and the referenced-artifact fetches described
+in section 4, this software makes no network requests. If you add or replace
+a network, requests for that network go to the endpoint you configure. Each
+release keeps the following list current with its built-in defaults.
 
 ## 3. Default RPC endpoints in this release
 ";
 
 const PRIVACY_POLICY_CLOSING: &str = "
-## 4. Data exposed through agents and tooling
+## 4. Execution plans fetched by reference
+
+The transactions this wallet simulates and signs are built elsewhere. A
+producer — the Ekubo MCP server, another protocol server, a dapp, or any
+other tool — hands the wallet an execution plan, or a bundle of read-only
+calls, as a reference rather than as inline text: a URL where the exact body
+is stored, plus a digest of those bytes. When you or your agent passes such a
+reference to a wallet tool, this process fetches the body from that URL
+itself. These fetches are the only network requests this software makes that
+do not go to a configured RPC endpoint.
+
+The request is an unauthenticated HTTPS GET for exactly the URL given. It
+carries no wallet address, key, credential, cookie, policy, or other data of
+yours, and the wallet sends nothing back to the host; only public https hosts
+on the default port are accepted, redirects and credentials in the URL are
+refused, and the response is size-capped. The operator of the host named by
+the URL is an independent third party outside the developer's control. It can
+observe your IP address, the time of the fetch, and which reference you
+fetched — and because a plan is prepared for a specific sender and action, a
+fetch tells that operator the machine at that address is about to simulate or
+sign that particular plan. Hosts may log or retain this under their own
+policies. Usually the host is the same producer that prepared the plan and
+therefore already knows its contents, but the URL comes from whatever
+produced the reference, so it can name any public host: fetching resolves a
+plan you are being asked to sign, and you should treat the reference with the
+same scrutiny as its source. The developer is not responsible for data those
+hosts collect.
+
+A plan or call bundle you hold inline travels instead as a
+`data:application/json` URI, which the wallet decodes locally and never
+fetches over the network.
+
+## 5. Data exposed through agents and tooling
 
 Any MCP client, agent, or other tooling you connect to this wallet can read
 what its tools return: wallet addresses, balances, token holdings,
@@ -135,21 +167,23 @@ determined by your agent stack, not by this software. THE DEVELOPER IS NOT
 RESPONSIBLE FOR ANY DATA DISCLOSED OR LEAKED THROUGH THE AGENT OR ASSOCIATED
 TOOLING.
 
-## 5. Local data
+## 6. Local data
 
 Keys stay in the operating system credential store. Policies, transaction
 lifecycle records, token metadata, the address book, legal acceptance
 records, and pending policy proposals are stored in an encrypted local
-database. Wallet metadata and network configuration, including the RPC URLs
-you configure, are stored unencrypted in the wallet data directory. Nothing
-in this section leaves your machine except as described in sections 2 and 4.
+database. A resolved execution plan is stored in that database as part of the
+record of the request it becomes; the URL it was fetched from is not retained.
+Wallet metadata and network configuration, including the RPC URLs you
+configure, are stored unencrypted in the wallet data directory. Nothing in
+this section leaves your machine except as described in sections 2, 4, and 5.
 
-## 6. Acknowledgment
+## 7. Acknowledgment
 
 Acknowledgment is recorded locally against the exact text of this document,
 including the endpoint list above. A release that changes the default
-endpoints changes this document and requires a fresh acknowledgment before
-signing resumes.
+endpoints, or anything else disclosed here, changes this document and
+requires a fresh acknowledgment before signing resumes.
 ";
 
 /// The complete privacy policy, with the default endpoint list generated from
@@ -386,7 +420,19 @@ mod tests {
                 "privacy policy does not disclose default endpoint {origin}"
             );
         }
-        assert!(policy.contains("Other than the configured RPC endpoints"));
+        assert!(policy.contains("Apart from these RPC endpoints"));
+    }
+
+    /// The only outbound requests that are not a configured RPC are the
+    /// reference fetches in `crate::plan_fetch`, so the policy has to name
+    /// them, say the wallet performs the fetch, and say what the host learns.
+    #[test]
+    fn privacy_policy_discloses_reference_fetches() {
+        let policy = privacy_policy();
+        assert!(policy.contains("## 4. Execution plans fetched by reference"));
+        assert!(policy.contains("this process fetches the body from that URL\nitself"));
+        assert!(policy.contains("observe your IP address, the time of the fetch"));
+        assert!(policy.contains("data:application/json"));
     }
 
     #[test]
