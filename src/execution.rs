@@ -603,9 +603,7 @@ fn cancellation_fees(
         floor_priority.context("cancellation has no incumbent envelope to outbid")?,
     );
     let max_priority_fee_per_gas = market_priority_fee.max(floor_priority);
-    let max_fee_per_gas = market_max_fee
-        .max(floor_max)
-        .max(max_priority_fee_per_gas);
+    let max_fee_per_gas = market_max_fee.max(floor_max).max(max_priority_fee_per_gas);
     let cap = incumbents
         .iter()
         .map(|fees| fees.0)

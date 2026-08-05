@@ -1115,7 +1115,8 @@ async fn run_transaction(
             // in-flight unique index bounds this at one row per wallet and
             // chain, so a long listing still costs at most a couple of RPCs.
             let pending = std::sync::Mutex::new(pending);
-            let transactions = crate::reconcile::reconcile_all(config, &pending, transactions).await;
+            let transactions =
+                crate::reconcile::reconcile_all(config, &pending, transactions).await;
             if mode == OutputMode::Json {
                 return print_json(&serde_json::json!({ "transactions": transactions }));
             }

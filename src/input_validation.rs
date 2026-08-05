@@ -12,7 +12,9 @@ pub fn parse_chain_id(value: &str) -> Result<u64> {
             && value.bytes().all(|byte| byte.is_ascii_digit()),
         "chain ID must be a canonical positive decimal integer"
     );
-    value.parse().map_err(|_| anyhow::anyhow!("chain ID must fit uint64"))
+    value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("chain ID must fit uint64"))
 }
 
 /// Validate a timeout in seconds; must be between 1 and 55.

@@ -57,7 +57,11 @@ pub fn build_approval_request(
     let mut request = ApprovalRequest::new(
         kind,
         format!("{:?} Request", kind),
-        format!("Executing {:?} with {} step(s)", kind, plan.ordered_steps.len()),
+        format!(
+            "Executing {:?} with {} step(s)",
+            kind,
+            plan.ordered_steps.len()
+        ),
     );
 
     // Add plan-specific facts

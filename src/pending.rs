@@ -1081,7 +1081,9 @@ mod tests {
             .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", ORIGINAL_HASH)
             .unwrap();
         store.claim_for_submission(signed.request_id).unwrap();
-        store.mark_broadcast(signed.request_id, ORIGINAL_HASH).unwrap();
+        store
+            .mark_broadcast(signed.request_id, ORIGINAL_HASH)
+            .unwrap();
         signed.request_id
     }
 

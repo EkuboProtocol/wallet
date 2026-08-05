@@ -69,9 +69,7 @@ pub fn status_tone(status: PendingStatus) -> Tone {
         PendingStatus::AwaitingApproval
         | PendingStatus::Submitting
         | PendingStatus::Broadcast
-        | PendingStatus::Cancelling => {
-            Tone::Warning
-        }
+        | PendingStatus::Cancelling => Tone::Warning,
         PendingStatus::Rejected
         | PendingStatus::Reverted
         | PendingStatus::Expired
@@ -207,10 +205,11 @@ async fn load_receipt(
     for hash in hashes {
         match transaction_receipt_details(network, hash).await {
             Ok(Some(receipt)) => {
-                let tokens: Vec<Address> = transfer_activity(record.execution_plan.sender, &receipt)
-                    .into_iter()
-                    .map(|(token, _)| token)
-                    .collect();
+                let tokens: Vec<Address> =
+                    transfer_activity(record.execution_plan.sender, &receipt)
+                        .into_iter()
+                        .map(|(token, _)| token)
+                        .collect();
                 let metadata = load_token_metadata(network, &tokens).await;
                 return Some(ReceiptSection::Ready { receipt, metadata });
             }
@@ -625,7 +624,11 @@ struct App {
 }
 
 /// Compose a fresh detail view for one record.
-async fn detail_view(config: &ConfigStore, record: &PendingTransaction, index: usize) -> DetailView {
+async fn detail_view(
+    config: &ConfigStore,
+    record: &PendingTransaction,
+    index: usize,
+) -> DetailView {
     let network = config.network_by_chain_id(&record.chain_id).ok();
     let explorer = broadcast_hash(record).and_then(|hash| {
         network
