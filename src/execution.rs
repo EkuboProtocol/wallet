@@ -571,6 +571,161 @@ pub fn signed_transaction_nonce(serialized_transaction: &str) -> Result<u64> {
     Ok(decode_envelope(&bytes)?.nonce())
 }
 
+/// Same-nonce replacement floor. Nodes drop a replacement unless it outbids
+/// the incumbent on both EIP-1559 fee fields — geth's default floor is 10% —
+/// so bump by 12.5% (×9/8, integer-exact) to clear it with margin.
+const REPLACEMENT_FEE_BUMP_NUMERATOR: u128 = 9;
+const REPLACEMENT_FEE_BUMP_DENOMINATOR: u128 = 8;
+/// Defense-in-depth ceiling for the one signing path that consults no
+/// policy: a cancellation's fee never exceeds twice the highest fee already
+/// on the table (the incumbent envelopes and the current market estimate).
+const CANCELLATION_FEE_CAP_MULTIPLIER: u128 = 2;
+const CANCELLATION_GAS_MULTIPLIER: u64 = 2;
+
+fn bumped_fee(fee: u128) -> u128 {
+    fee.saturating_mul(REPLACEMENT_FEE_BUMP_NUMERATOR)
+        .div_ceil(REPLACEMENT_FEE_BUMP_DENOMINATOR)
+}
+
+/// Fee selection for a cancellation, split from the RPC calls so the one
+/// policy-free pricing decision is directly testable: outbid every incumbent
+/// at the replacement floor, never price under the current market, and keep
+/// the pair EIP-1559-consistent.
+fn cancellation_fees(
+    incumbents: &[(u128, u128)],
+    market_max_fee: u128,
+    market_priority_fee: u128,
+) -> Result<(u128, u128)> {
+    let floor_max = incumbents.iter().map(|fees| bumped_fee(fees.0)).max();
+    let floor_priority = incumbents.iter().map(|fees| bumped_fee(fees.1)).max();
+    let (floor_max, floor_priority) = (
+        floor_max.context("cancellation has no incumbent envelope to outbid")?,
+        floor_priority.context("cancellation has no incumbent envelope to outbid")?,
+    );
+    let max_priority_fee_per_gas = market_priority_fee.max(floor_priority);
+    let max_fee_per_gas = market_max_fee
+        .max(floor_max)
+        .max(max_priority_fee_per_gas);
+    let cap = incumbents
+        .iter()
+        .map(|fees| fees.0)
+        .max()
+        .unwrap_or(0)
+        .max(market_max_fee)
+        .saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER);
+    ensure!(
+        max_fee_per_gas <= cap,
+        "cancellation fee escalation exceeds its safety cap"
+    );
+    Ok((max_fee_per_gas, max_priority_fee_per_gas))
+}
+
+/// Prepare and sign a cancellation for an exact stored envelope: a 0-value
+/// self-send with empty calldata and no authorization list, at the stuck
+/// envelope's own nonce, priced to outbid it at the node's replacement floor.
+///
+/// Every field is derived from the stored envelopes and the chain — the
+/// caller cannot steer the nonce, target, value, or calldata — which is why
+/// this one signing path consults no policy: like rebroadcasting exact bytes,
+/// it cannot expand what was already authorized, only narrow an in-flight
+/// authorization to nothing at the cost of gas. Gas is estimated rather than
+/// hardcoded because a wallet with an active EIP-7702 delegation executes its
+/// implementation's code even on a plain self-send.
+pub async fn sign_cancellation<K: KeyStore>(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    original_serialized_transaction: &str,
+    newest_cancellation: Option<&str>,
+    keys: &K,
+) -> Result<SignedExecution> {
+    let original = decode_envelope(&decode_serialized(original_serialized_transaction)?)?;
+    let nonce = original.nonce();
+    let mut incumbents = Vec::with_capacity(2);
+    for serialized in std::iter::once(original_serialized_transaction).chain(newest_cancellation) {
+        let envelope = decode_envelope(&decode_serialized(serialized)?)?;
+        ensure!(
+            envelope
+                .recover_signer()
+                .context("failed to recover incumbent envelope sender")?
+                == wallet.address,
+            "cancellation target envelope was not signed by this wallet"
+        );
+        ensure!(
+            envelope.chain_id() == Some(network.chain_id),
+            "cancellation target envelope chain does not match configured network"
+        );
+        ensure!(
+            envelope.nonce() == nonce,
+            "cancellation envelopes disagree on the nonce"
+        );
+        incumbents.push((
+            envelope.max_fee_per_gas(),
+            envelope.max_priority_fee_per_gas().unwrap_or(0),
+        ));
+    }
+
+    let planned = crate::simulation::PlannedCall {
+        mode: ExecutionMode::Direct,
+        to: wallet.address,
+        data: alloy::primitives::Bytes::new(),
+        value: U256::ZERO,
+    };
+    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let estimate_request = alloy::rpc::types::TransactionRequest::default()
+        .from(wallet.address)
+        .to(wallet.address)
+        .value(U256::ZERO);
+    let (chain_id, market, estimated_gas) = tokio::time::timeout(RPC_TIMEOUT, async {
+        tokio::try_join!(
+            provider.get_chain_id(),
+            provider.estimate_eip1559_fees(),
+            provider.estimate_gas(estimate_request),
+        )
+    })
+    .await
+    .context("cancellation preparation RPC timed out")?
+    .map_err(|error| sanitized_rpc_error(network, &error))?;
+    ensure!(
+        chain_id == network.chain_id,
+        "RPC reports chain {chain_id}, not {}",
+        network.chain_id
+    );
+    let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(
+        &incumbents,
+        market.max_fee_per_gas,
+        market.max_priority_fee_per_gas,
+    )?;
+    let mut gas_limit = estimated_gas.saturating_mul(CANCELLATION_GAS_MULTIPLIER);
+    if let Some(maximum) = network.max_gas_limit.as_deref() {
+        let maximum = maximum
+            .parse::<u64>()
+            .context("configured maximum gas limit does not fit uint64")?;
+        ensure!(
+            estimated_gas <= maximum,
+            "estimated cancellation gas {estimated_gas} exceeds the network maximum gas limit {maximum}"
+        );
+        gas_limit = gas_limit.min(maximum);
+    }
+
+    // All RPC preparation completed before this function loads key material.
+    let material = keys.load(&wallet.id)?;
+    let local_signer = material.signer();
+    ensure!(
+        local_signer.address() == wallet.address,
+        "credential-store private key does not match wallet metadata"
+    );
+    sign_prepared(
+        &local_signer,
+        network.chain_id,
+        nonce,
+        gas_limit,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
+        &planned,
+        false,
+    )
+}
+
 pub async fn broadcast_signed_execution(
     signed: &SignedExecution,
     wallet: &WalletMetadata,
@@ -733,6 +888,37 @@ mod tests {
         "already known",
         "replacement transaction underpriced",
     ];
+
+    #[test]
+    fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
+        // A quiet market: the incumbent's bumped fees decide both fields.
+        let (max_fee, priority) = cancellation_fees(&[(800, 80)], 100, 10).unwrap();
+        assert_eq!(max_fee, 900);
+        assert_eq!(priority, 90);
+
+        // A hot market: current estimates already clear the floor.
+        let (max_fee, priority) = cancellation_fees(&[(800, 80)], 2_000, 200).unwrap();
+        assert_eq!(max_fee, 2_000);
+        assert_eq!(priority, 200);
+
+        // Repricing outbids the highest incumbent, not the first.
+        let (max_fee, priority) = cancellation_fees(&[(800, 80), (1_600, 160)], 100, 10).unwrap();
+        assert_eq!(max_fee, 1_800);
+        assert_eq!(priority, 180);
+
+        // The bump rounds up so a tiny fee still strictly increases.
+        assert_eq!(bumped_fee(1), 2);
+        assert_eq!(bumped_fee(0), 0);
+
+        // The pair stays EIP-1559-consistent when the priority floor passes
+        // the market maximum fee.
+        let (max_fee, priority) = cancellation_fees(&[(100, 100)], 50, 5).unwrap();
+        assert_eq!(priority, 113);
+        assert!(max_fee >= priority);
+
+        // No incumbent means nothing to cancel.
+        assert!(cancellation_fees(&[], 100, 10).is_err());
+    }
 
     #[test]
     fn a_rejected_send_whose_transaction_landed_is_reported_as_mined() {
