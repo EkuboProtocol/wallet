@@ -112,7 +112,8 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
     );
     ensure!(Utc::now() < request.expires_at, "approval request expired");
 
-    cliclack::intro("Ekubo Wallet approval")?;
+    crate::tui::init_prompt_theme();
+    crate::tui::intro("Ekubo Wallet approval");
 
     let mut body = terminal_safe(&request.summary);
     for fact in &request.facts {
@@ -133,19 +134,23 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
         request.expires_at.to_rfc3339()
     )?;
 
-    cliclack::note(terminal_safe(&request.title), body)?;
+    crate::tui::note(terminal_safe(&request.title), body);
     for warning in &request.warnings {
-        cliclack::log::warning(terminal_safe(warning))?;
+        crate::tui::warning(terminal_safe(warning));
     }
 
-    let approved = cliclack::confirm("Approve this action?")
-        .initial_value(false)
-        .interact()?;
+    // Esc or Ctrl+C reads as a rejection: an approval must be explicit.
+    let approved = crate::tui::optional(
+        inquire::Confirm::new("Approve this action?")
+            .with_default(false)
+            .prompt(),
+    )?
+    .unwrap_or(false);
     if approved {
-        cliclack::outro("Approved; owner authentication is still required.")?;
+        crate::tui::outro("Approved; owner authentication is still required.");
         Ok(ApprovalDecision::Approved)
     } else {
-        cliclack::outro_cancel("Rejected. Nothing was signed or submitted.")?;
+        crate::tui::outro_cancel("Rejected. Nothing was signed or submitted.");
         Ok(ApprovalDecision::Rejected)
     }
 }

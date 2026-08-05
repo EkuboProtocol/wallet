@@ -23,7 +23,6 @@ file follows in the appendix. Regenerate this document with
 - rmcp 3.1.0 — https://github.com/modelcontextprotocol/rust-sdk/
 - rmcp-macros 3.1.0 — https://github.com/modelcontextprotocol/rust-sdk/
 - sync_wrapper 1.0.2 — Actyx AG <developer@actyx.io> — https://github.com/Actyx/sync_wrapper
-- unicode-linebreak 0.1.5 — Axel Forsman <axelsfor@gmail.com> — https://github.com/axelf4/unicode-linebreak
 
 ## Apache-2.0 AND ISC
 
@@ -50,12 +49,12 @@ file follows in the appendix. Regenerate this document with
 - base64ct 1.8.3 — RustCrypto Developers — https://github.com/RustCrypto/formats
 - blocking 1.6.2 — Stjepan Glavina <stjepang@gmail.com> — https://github.com/smol-rs/blocking
 - concurrent-queue 2.5.0 — Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net> — https://github.com/smol-rs/concurrent-queue
+- const-oid 0.10.2 — RustCrypto Developers — https://github.com/RustCrypto/formats
 - const-oid 0.9.6 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/const-oid
 - crypto-bigint 0.5.5 — RustCrypto Developers — https://github.com/RustCrypto/crypto-bigint
 - der 0.7.10 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/der
 - ecdsa 0.16.9 — RustCrypto Developers — https://github.com/RustCrypto/signatures/tree/master/ecdsa
 - elliptic-curve 0.13.8 — RustCrypto Developers — https://github.com/RustCrypto/traits/tree/master/elliptic-curve
-- encode_unicode 1.0.0 — Torbjørn Birch Moltu <t.b.moltu@lyse.net> — https://github.com/tormol/encode_unicode
 - equivalent 1.0.2 — https://github.com/indexmap-rs/equivalent
 - event-listener 5.4.2 — Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> — https://github.com/smol-rs/event-listener
 - event-listener-strategy 0.5.4 — John Nunley <dev@notgull.net> — https://github.com/smol-rs/event-listener-strategy
@@ -74,12 +73,12 @@ file follows in the appendix. Regenerate this document with
 - pin-project-lite 0.2.17 — https://github.com/taiki-e/pin-project-lite
 - pkcs8 0.10.2 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/pkcs8
 - polling 3.11.0 — Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> — https://github.com/smol-rs/polling
-- portable-atomic 1.14.0 — https://github.com/taiki-e/portable-atomic
 - rfc6979 0.4.0 — RustCrypto Developers — https://github.com/RustCrypto/signatures/tree/master/rfc6979
 - rustc-hash 2.1.3 — The Rust Project Developers — https://github.com/rust-lang/rustc-hash
 - sec1 0.7.3 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/sec1
 - secrecy 0.10.3 — Tony Arcieri <tony@iqlusion.io> — https://github.com/iqlusioninc/crates/tree/main/secrecy
 - serdect 0.2.0 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/serdect
+- signal-hook 0.3.18 — Michal 'vorner' Vaner <vorner@vorner.cz>, Thomas Himmelstoss <thimm@posteo.de> — https://github.com/vorner/signal-hook
 - signature 2.2.0 — RustCrypto Developers — https://github.com/RustCrypto/traits/tree/master/signature
 - simd_cesu8 1.2.0 — Sean C. Roach <me@seancroach.dev> — https://github.com/seancroach/simd_cesu8
 - spki 0.7.3 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/spki
@@ -157,10 +156,10 @@ file follows in the appendix. Regenerate this document with
 - byte-slice-cast 1.2.3 — Sebastian Dröge <sebastian@centricular.com> — https://github.com/sdroege/bytes-num-slice-cast
 - bytes 1.12.1 — Carl Lerche <me@carllerche.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/tokio-rs/bytes
 - cfg_aliases 0.2.2 — Zicklag <zicklag@katharostech.com> — https://github.com/katharostech/cfg_aliases
-- cliclack 0.5.5 — Alexander Fadeev <fadeevab.com@gmail.com> — https://github.com/fadeevab/cliclack
 - combine 4.6.7 — Markus Westerlind <marwes91@gmail.com> — https://github.com/Marwes/combine
-- console 0.16.4 — https://github.com/console-rs/console
 - convert_case 0.10.0 — rutrum <dave@rutrum.net> — https://github.com/rutrum/convert-case
+- crossterm 0.29.0 — T. Post — https://github.com/crossterm-rs/crossterm
+- crossterm_winapi 0.9.1 — T. Post — https://github.com/crossterm-rs/crossterm-winapi
 - crunchy 0.2.4 — Eira Fransham <jackefransham@gmail.com> — https://github.com/eira-fransham/crunchy
 - darling 0.23.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
 - darling_core 0.23.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
@@ -176,12 +175,13 @@ file follows in the appendix. Regenerate this document with
 - float-cmp 0.10.0 — Mike Dilger <mike@mikedilger.com> — https://github.com/mikedilger/float-cmp
 - fs_extra 1.3.0 — Denis Kurilenko <webdesus@gmail.com> — https://github.com/webdesus/fs_extra
 - funty 2.0.0 — myrrlyn <self@myrrlyn.dev> — https://github.com/myrrlyn/funty
+- fuzzy-matcher 0.3.7 — Jinzhou Zhang <lotabout@gmail.com> — https://github.com/lotabout/fuzzy-matcher
 - generic-array 0.14.7 — Bartłomiej Kamiński <fizyk20@gmail.com>, Aaron Trent <novacrazy@gmail.com> — https://github.com/fizyk20/generic-array.git
 - http-body 1.1.0 — Carl Lerche <me@carllerche.com>, Lucio Franco <luciofranco14@gmail.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/http-body
 - http-body-util 0.1.4 — Carl Lerche <me@carllerche.com>, Lucio Franco <luciofranco14@gmail.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/http-body
 - hyper 1.11.0 — Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/hyper
 - hyper-util 0.1.20 — Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/hyper-util
-- indicatif 0.18.6 — https://github.com/console-rs/indicatif
+- inquire 0.9.4 — Mikael Mello <git@mikaelmello.com> — https://github.com/mikaelmello/inquire
 - libm 0.2.16 — Alex Crichton <alex@alexcrichton.com>, Amanieu d'Antras <amanieu@gmail.com>, Jorge Aparicio <japaricious@gmail.com>, Trevor Gross <tg@trevorgross.com> — https://github.com/rust-lang/compiler-builtins
 - libredox 0.1.19 — 4lDO2 <4lDO2@protonmail.com> — https://gitlab.redox-os.org/redox-os/libredox.git
 - libsqlite3-sys 0.38.1 — The rusqlite developers — https://github.com/rusqlite/rusqlite
@@ -208,12 +208,10 @@ file follows in the appendix. Regenerate this document with
 - schemars_derive 1.2.2 — Graham Esau <gesau@hotmail.co.uk> — https://github.com/GREsau/schemars
 - sharded-slab 0.1.7 — Eliza Weisman <eliza@buoyant.io> — https://github.com/hawkw/sharded-slab
 - slab 0.4.12 — Carl Lerche <me@carllerche.com> — https://github.com/tokio-rs/slab
-- smawk 0.3.3 — Martin Geisler <martin@geisler.net> — https://github.com/mgeisler/smawk
 - strsim 0.11.1 — Danny Guo <danny@dannyguo.com>, maxbachmann <oss@maxbachmann.de> — https://github.com/rapidfuzz/strsim-rs
 - synstructure 0.13.2 — Nika Layzell <nika@thelayzells.com> — https://github.com/mystor/synstructure
 - tap 1.0.1 — Elliott Linder <elliott.darfink@gmail.com>, myrrlyn <self@myrrlyn.dev> — https://github.com/myrrlyn/tap
 - termtree 0.5.1 — https://github.com/rust-cli/termtree
-- textwrap 0.16.2 — Martin Geisler <martin@geisler.net> — https://github.com/mgeisler/textwrap
 - tokio 1.53.1 — Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/tokio
 - tokio-macros 2.7.2 — Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/tokio
 - tokio-stream 0.1.19 — Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/tokio
@@ -229,7 +227,6 @@ file follows in the appendix. Regenerate this document with
 - tracing-subscriber 0.3.23 — Eliza Weisman <eliza@buoyant.io>, David Barsky <me@davidbarsky.com>, Tokio Contributors <team@tokio.rs> — https://github.com/tokio-rs/tracing
 - try-lock 0.2.5 — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/try-lock
 - uds_windows 1.2.1 — Azure IoT Edge Devs, Harald Hoyer <harald@redhat.com> — https://github.com/haraldh/rust_uds_windows
-- unit-prefix 0.5.2 — Fabio Valentini <decathorpe@gmail.com>, Benjamin Sago <ogham@bsago.me> — https://codeberg.org/commons-rs/unit-prefix
 - valuable 0.1.1 — https://github.com/tokio-rs/valuable
 - want 0.3.1 — Sean McArthur <sean@seanmonstar.com> — https://github.com/seanmonstar/want
 - wasmtimer 0.4.3 — WhizSid <whizsid@aol.com>, Pierre Krieger <pierre.krieger1708@gmail.com> — https://github.com/whizsid/wasmtimer-rs
@@ -248,7 +245,7 @@ file follows in the appendix. Regenerate this document with
 
 - aes 0.8.4 — RustCrypto Developers — https://github.com/RustCrypto/block-ciphers
 - allocator-api2 0.2.21 — Zakarum <zaq.dev@icloud.com> — https://github.com/zakarumych/allocator-api2
-- alloy 2.1.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-chains 0.2.36 — Alloy Contributors — https://github.com/alloy-rs/chains
 - alloy-consensus 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-consensus-any 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
@@ -260,6 +257,7 @@ file follows in the appendix. Regenerate this document with
 - alloy-eip7702 0.6.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7928 0.4.5 — Ishika Choudhury <ishikac720@gmail.com>, Soubhik Singha Mahapatra <soubhiksinghamahapatra@gmail.com> — https://github.com/alloy-rs/eips
 - alloy-eips 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-ens 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-genesis 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-json-abi 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-json-rpc 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
@@ -362,6 +360,7 @@ file follows in the appendix. Regenerate this document with
 - directories 6.0.0 — Simon Ochsenreither <simon@ochsenreither.de> — https://github.com/soc/directories-rs
 - dirs-sys 0.5.0 — Simon Ochsenreither <simon@ochsenreither.de> — https://github.com/dirs-dev/dirs-sys-rs
 - displaydoc 0.2.7 — Jane Lusby <jlusby@yaah.dev> — https://github.com/yaahc/displaydoc
+- document-features 0.2.12 — Slint Developers <info@slint.dev> — https://github.com/slint-ui/document-features
 - dyn-clone 1.0.20 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/dyn-clone
 - either 1.17.0 — https://github.com/rayon-rs/either
 - enumflags2 0.7.12 — maik klein <maikklein@googlemail.com>, Maja Kądziołka <maya@compilercrim.es> — https://github.com/meithecatte/enumflags2
@@ -424,11 +423,13 @@ file follows in the appendix. Regenerate this document with
 - keyring-core 1.0.0 — Daniel Brotsky <dev@brotsky.com> — https://github.com/open-source-cooperative/keyring-core.git
 - lazy_static 1.5.0 — Marvin Löbel <loebel.marvin@gmail.com> — https://github.com/rust-lang-nursery/lazy-static.rs
 - libc 0.2.189 — https://github.com/rust-lang/libc
+- litrs 1.0.0 — Lukas Kalbertodt <lukas.kalbertodt@gmail.com> — https://github.com/LukasKalbertodt/litrs
 - lock_api 0.4.14 — Amanieu d'Antras <amanieu@gmail.com> — https://github.com/Amanieu/parking_lot
 - log 0.4.33 — The Rust Project Developers — https://github.com/rust-lang/log
 - macro-string 0.2.0 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/macro-string
 - num 0.4.3 — The Rust Project Developers — https://github.com/rust-num/num
 - num-bigint 0.4.8 — The Rust Project Developers — https://github.com/rust-num/num-bigint
+- num-bigint 0.5.1 — https://github.com/rust-num/num-bigint
 - num-complex 0.4.6 — The Rust Project Developers — https://github.com/rust-num/num-complex
 - num-conv 0.2.2 — Jacob Pratt <jacob@jhpratt.dev> — https://github.com/jhpratt/num-conv
 - num-integer 0.1.46 — The Rust Project Developers — https://github.com/rust-num/num-integer
@@ -513,6 +514,7 @@ file follows in the appendix. Regenerate this document with
 - sha3 0.10.9 — RustCrypto Developers — https://github.com/RustCrypto/hashes
 - sha3 0.11.0 — RustCrypto Developers — https://github.com/RustCrypto/hashes
 - shlex 2.0.1 — comex <comexk@gmail.com>, Fenhl <fenhl@fenhl.net>, Adrian Taylor <adetaylor@chromium.org>, Alex Touchet <alextouchet@outlook.com>, Daniel Parks <dp+git@oxidized.org>, Garrett Berg <googberg@gmail.com> — https://github.com/comex/rust-shlex
+- signal-hook-mio 0.2.5 — Michal 'vorner' Vaner <vorner@vorner.cz>, Thomas Himmelstoss <thimm@posteo.de> — https://github.com/vorner/signal-hook
 - signal-hook-registry 1.4.8 — Michal 'vorner' Vaner <vorner@vorner.cz>, Masaki Hara <ackie.h.gmai@gmail.com> — https://github.com/vorner/signal-hook
 - simdutf8 0.1.5 — Hans Kratz <hans@appfour.com> — https://github.com/rusticstuff/simdutf8
 - siphasher 1.0.3 — Frank Denis <github@pureftpd.org> — https://github.com/jedisct1/rust-siphash
@@ -649,7 +651,7 @@ file follows in the appendix. Regenerate this document with
 
 ## Packages without a shipped license file
 
-- alloy 2.1.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus-any 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-contract 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -660,6 +662,7 @@ file follows in the appendix. Regenerate this document with
 - alloy-eip7702 0.6.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7928 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eips 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-ens 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-genesis 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-json-abi 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-json-rpc 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -697,6 +700,7 @@ file follows in the appendix. Regenerate this document with
 - fixed-hash 0.8.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - impl-codec 0.6.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - impl-trait-for-tuples 0.2.3: Apache-2.0 OR MIT — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- inquire 0.9.4: MIT — MIT License: https://opensource.org/license/mit
 - jni 0.22.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - jni-macros 0.22.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - jni-sys-macros 0.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -760,7 +764,7 @@ This project is dual-licensed under the Unlicense and MIT licenses.
 You may use this code under the terms of either license.
 ```
 
-## License text for: allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.5, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.91, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, concurrent-queue 2.5.0, const-hex 1.19.1, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, futures-lite 2.6.1, futures-utils-wasm 0.1.0, group 0.13.0, hermit-abi 0.5.2, itoa 1.0.18, linux-raw-sys 0.12.1, macro-string 0.2.0, nybbles 0.4.8, once_cell 1.21.4, ordered-stream 0.2.0, parking 2.2.1, paste 1.0.15, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, portable-atomic 1.14.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 2.1.3, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_repr 0.1.21, simd_cesu8 1.2.0, syn 1.0.109, syn 2.0.119, syn 3.0.3, thiserror 1.0.69, thiserror 2.0.19, thiserror-impl 1.0.69, thiserror-impl 2.0.19, tinyvec 1.12.0, unicode-ident 1.0.24, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, winnow 1.0.4, wit-bindgen 0.57.1, zbus_polkit 5.0.0, zmij 1.0.23, zvariant_utils 3.5.0
+## License text for: allocator-api2 0.2.21, alloy-chains 0.2.36, alloy-trie 0.9.5, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-recursion 1.1.1, async-signal 0.2.14, async-task 4.7.1, async-trait 0.1.91, atomic-waker 1.1.2, blocking 1.6.2, borsh 1.8.0, borsh-derive 1.8.0, concurrent-queue 2.5.0, const-hex 1.19.1, displaydoc 0.2.7, dyn-clone 1.0.20, endi 1.1.1, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, fixed-cache 0.1.10, futures-lite 2.6.1, futures-utils-wasm 0.1.0, group 0.13.0, hermit-abi 0.5.2, itoa 1.0.18, linux-raw-sys 0.12.1, macro-string 0.2.0, nybbles 0.4.8, once_cell 1.21.4, ordered-stream 0.2.0, parking 2.2.1, paste 1.0.15, pastey 0.2.3, pest 2.8.8, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, ref-cast 1.0.26, ref-cast-impl 1.0.26, rustc-hash 2.1.3, rustix 1.1.4, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.151, serde_repr 0.1.21, simd_cesu8 1.2.0, syn 1.0.109, syn 2.0.119, syn 3.0.3, thiserror 1.0.69, thiserror 2.0.19, thiserror-impl 1.0.69, thiserror-impl 2.0.19, tinyvec 1.12.0, unicode-ident 1.0.24, wasi 0.11.1+wasi-snapshot-preview1, wasip2 1.0.4+wasi-0.2.12, winnow 1.0.4, wit-bindgen 0.57.1, zbus_polkit 5.0.0, zmij 1.0.23, zvariant_utils 3.5.0
 
 ```text
 Permission is hereby granted, free of charge, to any
@@ -1705,7 +1709,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: bitflags 2.13.1, glob 0.3.4, log 0.4.33, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.46, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, regex 1.13.1, regex-automata 0.4.16, regex-syntax 0.8.11, rustc-hex 2.1.0, semver 0.11.0, threadpool 1.8.1
+## License text for: bitflags 2.13.1, glob 0.3.4, log 0.4.33, num 0.4.3, num-bigint 0.4.8, num-bigint 0.5.1, num-complex 0.4.6, num-integer 0.1.46, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, regex 1.13.1, regex-automata 0.4.16, regex-syntax 0.8.11, rustc-hex 2.1.0, semver 0.11.0, threadpool 1.8.1
 
 ```text
 Copyright (c) 2014 The Rust Project Developers
@@ -2324,32 +2328,6 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: cliclack 0.5.5
-
-```text
-MIT License
-
-Copyright (c) 2023 Alexander Fadeev
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
 ## License text for: combine 4.6.7
 
 ```text
@@ -2376,30 +2354,34 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## License text for: console 0.16.4, indicatif 0.18.6
+## License text for: const-oid 0.10.2
 
 ```text
-The MIT License (MIT)
+Copyright (c) 2020-2026 The RustCrypto Project Developers
 
-Copyright (c) 2017 Armin Ronacher <armin.ronacher@active-4.com>
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: const-oid 0.9.6
@@ -2596,6 +2578,32 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: crossterm 0.29.0, crossterm_winapi 0.9.1
+
+```text
+MIT License
+
+Copyright (c) 2019 Timon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## License text for: crunchy 0.2.4
@@ -2979,6 +2987,30 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## License text for: document-features 0.2.12
+
+```text
+Copyright (c) 2020 Olivier Goffart <ogoffart@sixtyfps.io>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## License text for: dunce 1.0.5, hex-conservative 0.2.2, hex-conservative 1.2.0, secp256k1 0.30.0, secp256k1 0.31.1, secp256k1-sys 0.10.1, secp256k1-sys 0.11.0
 
 ```text
@@ -3221,28 +3253,6 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: encode_unicode 1.0.0
-
-```text
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE
-```
-
 ## License text for: enumflags2 0.7.12
 
 ```text
@@ -3363,7 +3373,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: eth-keystore 0.5.0, parity-scale-codec 3.7.5, unicode-linebreak 0.1.5
+## License text for: eth-keystore 0.5.0, parity-scale-codec 3.7.5
 
 ```text
 Apache License
@@ -4210,6 +4220,32 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: fuzzy-matcher 0.3.7
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2019 Jinzhou Zhang
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## License text for: generic-array 0.14.7
@@ -5325,6 +5361,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+## License text for: litrs 1.0.0
+
+```text
+Copyright (c) 2020 Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: lock_api 0.4.14, parking_lot 0.12.5, parking_lot_core 0.9.12, rustc_version 0.3.3, rustc_version 0.4.1, thread_local 1.1.10
@@ -6708,7 +6774,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## License text for: signal-hook-registry 1.4.8
+## License text for: signal-hook 0.3.18, signal-hook-mio 0.2.5, signal-hook-registry 1.4.8
 
 ```text
 Copyright (c) 2017 tokio-jsonrpc developers
@@ -6838,32 +6904,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-```
-
-## License text for: smawk 0.3.3
-
-```text
-MIT License
-
-Copyright (c) 2017 Martin Geisler
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ## License text for: spki 0.7.3
@@ -7263,32 +7303,6 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: textwrap 0.16.2
-
-```text
-MIT License
-
-Copyright (c) 2016 Martin Geisler
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
 ## License text for: time 0.3.55, time-core 0.1.9, time-macros 0.2.32
 
 ```text
@@ -7601,32 +7615,6 @@ MIT License
 MIT License
 
 Copyright (c) [year] [fullname]
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-## License text for: unit-prefix 0.5.2
-
-```text
-MIT License
-
-Copyright (c) 2024 Benjamin Sago, Fabio Valentini
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
