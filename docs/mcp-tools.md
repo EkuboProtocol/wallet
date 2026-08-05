@@ -13,11 +13,11 @@
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
-| `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
+| `wallet_simulate_execution_plan` | Resolve the exact plan from `execution_plan_url` — a producer reference's public https URL verified against `expected_content_keccak256`, or a `data:application/json` URI carrying the plan inline — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
 | `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
 | `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
 | `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. Takes the same `on_simulation_failure` choice as `wallet_send_execution_plan`. |
-| `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
+| `wallet_send_execution_plan` | Resolve a plan from `execution_plan_url`, then validate, simulate, policy-check, sign, and broadcast it; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_wait_for_execution` | Wait for the plan to be executed: bounded polling for the receipt, plus an optional number of confirmations before resolving. |
@@ -41,6 +41,20 @@ when the user wants one of those and nothing connected can prepare it. That is
 a capability pointer, not a trust statement: a plan from there is validated,
 simulated, and policy-checked exactly like a plan from anywhere else, and no
 code path in this process treats a plan's origin as meaningful.
+
+Plans arrive by URL rather than as inline tool arguments, because the agent
+relaying a producer's tool result into a wallet tool call pays for every byte
+of it as model output. A producer returns an `execution_plan_reference` — a
+short-lived https URL holding the plan body plus `content_keccak256` over its
+exact bytes — and the agent passes the URL and digest through unchanged. The
+wallet fetches the body itself (public https only: default port, no
+credentials, fragments, or redirects, no private or reserved addresses even
+after DNS resolution, 16 MiB cap), recomputes the digest, refuses a mismatch,
+and then parses and validates the plan exactly as if it had been supplied
+inline. A plan held locally travels as a `data:application/json;base64` URI of
+its exact bytes and touches no network. A 404 means the reference expired:
+re-run the producer's preparation tool. This fetch is the only outbound
+request this process makes that is not a configured chain RPC.
 
 `eth_simulateV1` is the most expensive request this wallet makes, and an agent
 that simulates a plan to show the user what it does should not pay for that

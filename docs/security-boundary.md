@@ -1,10 +1,24 @@
 # Security boundary
 
 The MCP client, model output, configured RPC, and local files are treated as
-untrusted. Before normal signing, the process validates the plan, simulates its
-exact target/value/calldata, evaluates the active encrypted policy, resolves
-nonce/fees, loads the key, signs locally, validates the recovered sender and
-complete envelope, and durably stores the bytes and hash before broadcasting.
+untrusted. Before normal signing, the process resolves the plan from the
+caller-named URL, validates it, simulates its exact target/value/calldata,
+evaluates the active encrypted policy, resolves nonce/fees, loads the key,
+signs locally, validates the recovered sender and complete envelope, and
+durably stores the bytes and hash before broadcasting.
+
+Resolving a plan by URL is the one outbound request that is not a configured
+chain RPC, and the URL is caller-controlled, so its admission is narrow:
+`https` on the default port to a public host; no credentials, fragments, or
+redirects; every resolved address must be globally routable and the connection
+is pinned to the vetted set, so a rebinding resolver cannot swap targets
+between the check and the connect; responses are capped at 16 MiB; and error
+paths report status and size without echoing a byte of the body, so this
+wallet cannot be used to exfiltrate what an internal endpoint returns. The
+fetched bytes are checked against the caller-supplied keccak256 digest when
+one is given, and the result is parsed and validated identically to an inline
+plan — a URL grants no trust. `data:` URIs decode locally and touch no
+network.
 
 Exceptional signing has an additional boundary: the CLI re-simulates, prepares
 the exact nonce/gas/fees/delegation without loading the key, shows those fields,

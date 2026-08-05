@@ -121,6 +121,9 @@ fn decode_data_uri(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// The suffix checks run on an already-lowercased copy of the hostname; the
+// lint pattern-matches them as file-extension comparisons, which they are not.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 async fn fetch_remote_plan(url: &str, policy: FetchPolicy) -> Result<Vec<u8>> {
     let parsed = Url::parse(url).context("execution plan URL is not a valid URL")?;
     ensure!(

@@ -19,6 +19,16 @@ The supported server is one `ekubo-wallet server` stdio process. There is no
 privileged daemon or custom IPC. CLI management commands are local, interactive
 processes and expose no generic signing primitive.
 
+Execution plans arrive by caller-named URL, which adds one outbound request
+that is not a configured chain RPC and one SSRF-shaped surface. The fetch
+admits only public `https` on the default port — no credentials, fragments,
+redirects, or private/reserved addresses, with every resolved address vetted
+and pinned for the connection — caps the response at 16 MiB, verifies the
+caller-supplied keccak256 digest over the exact fetched bytes when given, and
+never echoes response bytes in an error. The fetched plan then passes the same
+parse, validation, simulation, and policy path as any inline plan, so the URL
+transport grants no authority; `data:` URIs decode locally with no network.
+
 ### Key custody, and the presence check that is deliberately absent
 
 Private keys are individual OS credential-store entries keyed by wallet ID,
