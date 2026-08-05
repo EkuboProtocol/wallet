@@ -706,6 +706,16 @@ struct ExecutionStatusOutput {
     instruction: Option<String>,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+struct SimulateOutput {
+    #[serde(flatten)]
+    result: SimulationResult,
+    /// What the caller holding this result should do next; present only when
+    /// the path forward is commonly misread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instruction: Option<String>,
+}
+
 #[tool_router]
 impl WalletMcpServer {
     #[tool(
@@ -804,7 +814,7 @@ impl WalletMcpServer {
     async fn wallet_simulate_execution_plan(
         &self,
         Parameters(input): Parameters<SimulateInput>,
-    ) -> Result<Json<SimulationResult>, ErrorData> {
+    ) -> Result<Json<SimulateOutput>, ErrorData> {
         // Local lookups settle first so an invalid wallet or chain never
         // becomes an outbound request to a caller-chosen URL.
         let wallet = self
@@ -899,7 +909,21 @@ impl WalletMcpServer {
                 session.read_context()
             });
         }
-        Ok(Json(result))
+        // The instruction rides on the result an agent is actually holding
+        // when it first sees allowed=false, because that is the moment the
+        // findings get misread as a dead end. A fork result carries no such
+        // instruction: its findings are advisory and nothing about it can be
+        // sent.
+        let instruction = match result.simulation_id {
+            Some(simulation_id) if !result.allowed && result.simulation.success => {
+                Some(policy_denial_next_step(simulation_id))
+            }
+            _ => None,
+        };
+        Ok(Json(SimulateOutput {
+            result,
+            instruction,
+        }))
     }
 
     #[tool(
@@ -2662,6 +2686,19 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
     })
 }
 
+/// The next step for an agent holding a sendable simulation the policy
+/// denied. A denial routes the plan to a human review; it is not a failure,
+/// and widening the policy is never a precondition for the action in hand.
+fn policy_denial_next_step(simulation_id: uuid::Uuid) -> String {
+    format!(
+        "Policy denial is the ordinary route to human approval, not a dead end. Call \
+         wallet_send_execution_plan with simulation_id {simulation_id} to queue this exact result \
+         for the user's review, then follow the returned instruction through \
+         wallet_wait_for_approval. Do not stop to report the findings as a blocker, and do not \
+         ask the user to change their policy before this action can proceed."
+    )
+}
+
 fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput {
     let status = match record.status {
         PendingStatus::AwaitingApproval => ExecutionStatus::ApprovalRequired,
@@ -2685,7 +2722,7 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
     };
     let instruction = match status {
         ExecutionStatus::ApprovalRequired => Some(format!(
-            "Awaiting human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_approval with this request_id, repeating after each timeout, until it resolves.",
+            "Awaiting human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_approval with this request_id, repeating after each timeout, until it resolves. Approval is a step in the work, not the end of it: do not stop here holding an unresolved request, and do not ask the user to report their decision in chat.",
             record.request_id
         )),
         ExecutionStatus::TimedOut => Some(
@@ -3464,6 +3501,15 @@ mod tests {
             .expect("the simulation tool is published");
         let description = simulate.description.clone().unwrap_or_default();
         assert!(description.contains("not a reason to stop"));
+
+        // And on the result itself, in band, at the moment the agent decides
+        // what to do next: instructions and descriptions are read once, but
+        // the denial arrives mid-task.
+        let next_step = policy_denial_next_step(uuid::Uuid::nil());
+        assert!(next_step.contains("not a dead end"));
+        assert!(next_step.contains("wallet_send_execution_plan"));
+        assert!(next_step.contains(&uuid::Uuid::nil().to_string()));
+        assert!(next_step.contains("do not ask the user to change their policy"));
     }
 
     fn sendable_plan() -> ExecutionPlan {
