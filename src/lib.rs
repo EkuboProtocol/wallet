@@ -24,6 +24,7 @@ pub mod plan_fetch;
 pub mod policy_store;
 pub mod reconcile;
 pub mod render;
+pub mod response_formatting;
 pub mod rpc;
 pub mod simulation;
 pub mod simulation_store;
