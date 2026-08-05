@@ -1,28 +1,5 @@
 # wallet-mcp-server
 
-## Work in your own worktree, not the shared checkout
-
-Multiple agents run against this checkout at the same time, and `origin/main`
-moves fast — several pushes an hour during active work. Edit in a disposable
-worktree instead:
-
-```sh
-git fetch origin
-git worktree add .claude/worktrees/<name> -b <name> origin/main
-```
-
-Do everything there, push, then remove the worktree and its branch.
-
-Treat any dirty file you did not edit this session as another agent's live
-work. Never `git checkout`, `git restore`, or `git stash` it, and never
-`git add -A`. Stage only the hunks belonging to files you actually changed.
-Never commit a full-file snapshot — `git checkout <ref> -- <file>` as a
-"revert" silently deletes whatever landed in that file in between.
-
-`git fetch` immediately before every push and expect non-fast-forward
-rejections. Integrate upstream in the worktree (fetch, rebase or cherry-pick,
-build, push from there) rather than in the shared tree.
-
 ## Every commit runs the gate first
 
 ```sh
