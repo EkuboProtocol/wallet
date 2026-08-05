@@ -70,6 +70,21 @@ authorization and outer envelope are recovered and validated after signing.
 
 ## Storage and lifecycle
 
+Private keys are not in this directory at all. Each is an OS credential-store
+entry under `org.ekubo.wallet.private-key.v1` keyed by wallet ID, and the
+SQLCipher key is a separate entry under
+`org.ekubo.wallet.policy-database-key.v1`. Keeping them apart is what lets the
+data directory be copied — backed up, synced, attached to a bug report —
+without carrying key material, and it means the frequently handled secret (the
+database key, read by nearly every command) is not the same secret as the one
+read only to sign.
+
+Those entries carry no presence requirement: the wallet is built for unattended
+agent operation, so a key the OS refuses to release without a live human would
+defeat the automatic signing path. For that path the policy is the security
+boundary rather than key custody. See
+[the threat model](threat-model.md#key-custody-and-the-presence-check-that-is-deliberately-absent).
+
 The platform data directory contains:
 
 - `config.json`: private-permission wallet metadata and network profiles;

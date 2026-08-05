@@ -19,6 +19,36 @@ The supported server is one `ekubo-wallet server` stdio process. There is no
 privileged daemon or custom IPC. CLI management commands are local, interactive
 processes and expose no generic signing primitive.
 
+### Key custody, and the presence check that is deliberately absent
+
+Private keys are individual OS credential-store entries keyed by wallet ID,
+never SQLCipher rows, and the database key is a separate entry. The split is
+what keeps the data directory free of key material: copies of it — backups,
+syncs, snapshots, bug reports — cannot yield a key whatever else leaks, and the
+database key is handled far more often than any private key, since almost every
+command opens the database while only signing reads a key. It also puts the key
+behind per-item access control the OS enforces, which an encrypted page cannot
+once its key is resident. It does not defend against code already running as
+the user: both secrets share one credential store and one login, which is why
+in-process code execution is out of scope above.
+
+The credential-store backend can mark an entry as requiring biometric or
+passcode presence before release. This wallet does not use that, by design, and
+the omission is load-bearing rather than pending. The product's purpose is
+unattended agent operation against long-running goals, including loops; an
+entry the OS will not release without a live human cannot be read at 3am, so
+presence enforcement and the automatic signing path are mutually exclusive.
+`send_new_plan` accordingly performs no presence check.
+
+The consequence is explicit: **for the automatic path, the policy is the
+security boundary, and key custody is not.** Anything the policy permits is
+reachable by a compromised or misled agent without a further gate, so a
+wallet's exposure is bounded by what its policy allows and by what it holds.
+Owner authentication (`human_presence`) covers the exceptional review path,
+where a human is present by definition, and configuration mutations. It is an
+application-level check in the CLI process, not an OS gate on key release, and
+it is not a control against in-process execution.
+
 ## Signing invariants
 
 1. Private keys never appear in MCP inputs/results, policies, logs, config, or
