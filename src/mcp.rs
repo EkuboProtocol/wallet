@@ -17,6 +17,7 @@ use crate::{
         sign_execution,
     },
     fork::{ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
+    input_validation::{parse_chain_id, validate_timeout_seconds},
     legal::{self, LegalDocument, LegalStatus, LegalStore},
     message::{
         MessageDisplay, MessageStatus, MessageStore, PendingMessage, SiweMessage, describe_message,
@@ -1463,7 +1464,7 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<ApprovalWaitInput>,
     ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
-        validate_wait_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
         loop {
@@ -1524,7 +1525,7 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<WaitInput>,
     ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
-        validate_wait_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
         ensure_tool(
             (1..=1_000).contains(&input.confirmations),
             "confirmations must be between 1 and 1000",
@@ -1772,7 +1773,7 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<TypedDataWaitInput>,
     ) -> Result<Json<TypedDataOutput>, ErrorData> {
-        validate_wait_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
         loop {
@@ -1866,7 +1867,7 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<MessageWaitInput>,
     ) -> Result<Json<MessageOutput>, ErrorData> {
-        validate_wait_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
         loop {
@@ -2541,16 +2542,6 @@ fn tool_error(error: &impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(error.to_string(), None)
 }
 
-fn parse_chain_id(value: &str) -> Result<u64> {
-    ensure!(
-        !value.is_empty()
-            && !value.starts_with('0')
-            && value.bytes().all(|byte| byte.is_ascii_digit()),
-        "chain ID must be a canonical positive decimal integer"
-    );
-    value.parse().context("chain ID must fit uint64")
-}
-
 /// The scheme, host, and port of an RPC URL, with any userinfo, path, and query
 /// removed. Provider credentials commonly live in the path or query, so this is
 /// the most that may be shown without disclosing them.
@@ -2573,14 +2564,6 @@ const fn default_wait_seconds() -> u8 {
 
 const fn default_confirmations() -> u16 {
     1
-}
-
-fn validate_wait_seconds(seconds: u8) -> Result<()> {
-    ensure!(
-        (1..=55).contains(&seconds),
-        "timeout_seconds must be between 1 and 55"
-    );
-    Ok(())
 }
 
 fn signed_execution(record: &PendingTransaction) -> Result<SignedExecution> {

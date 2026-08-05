@@ -4,6 +4,7 @@ pub mod address_book_browser;
 pub mod approval;
 pub mod approval_summary;
 pub mod batch_read;
+pub mod input_validation;
 pub mod clear_signing;
 pub mod cli;
 pub mod config;
