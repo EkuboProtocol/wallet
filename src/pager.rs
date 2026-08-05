@@ -44,9 +44,10 @@ const MINIMUM_BODY_COLUMNS: usize = 20;
 
 /// Show `body` under `title` on the alternate screen until the reader leaves.
 ///
-/// Returns [`Outcome::ReadToEnd`] only if the end of the document was on
-/// screen: a document shorter than the viewport counts immediately, since
-/// there is nothing left to scroll to.
+/// Returns [`Outcome::ReadToEnd`] only if the reader pressed Enter with the
+/// end of the document on screen. A document shorter than the viewport is at
+/// its end from the first frame, since there is nothing to scroll to, but
+/// leaving it still takes that keypress.
 ///
 /// Requires a terminal on stdin and stderr; without one there is nothing to
 /// take over and no keys to read, so the caller gets [`Outcome::Quit`] rather
@@ -86,15 +87,18 @@ pub fn read_fully(title: &str, body: &str) -> Result<Outcome> {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 match action(key) {
                     Action::Quit => return Ok(Outcome::Quit),
-                    // Paging past the last line is how the reader leaves a
-                    // document they finished, so the same key that scrolls
-                    // also continues once there is nothing left to scroll.
-                    Action::PageDown if offset >= max_offset => {
+                    // Only the deliberate key leaves a finished document. The
+                    // scrolling keys stop at the last line however hard they
+                    // are leaned on, so nobody pages their way into the
+                    // question waiting on the other side.
+                    Action::Continue if offset >= max_offset => {
                         return Ok(Outcome::ReadToEnd);
                     }
                     Action::LineDown => offset = offset.saturating_add(1),
                     Action::LineUp => offset = offset.saturating_sub(1),
-                    Action::PageDown => offset = offset.saturating_add(viewport),
+                    Action::PageDown | Action::Continue => {
+                        offset = offset.saturating_add(viewport);
+                    }
                     Action::PageUp => offset = offset.saturating_sub(viewport),
                     Action::Top => offset = 0,
                     Action::Bottom => offset = max_offset,
@@ -114,6 +118,11 @@ enum Action {
     LineDown,
     PageUp,
     PageDown,
+    /// Page down, and leave the document once there is nothing left below.
+    /// Separate from [`Action::PageDown`] because leaving is an answer to
+    /// whatever the caller asks next, and a repeat-rate key is no way to give
+    /// one.
+    Continue,
     Top,
     Bottom,
     Quit,
@@ -131,7 +140,8 @@ fn action(key: KeyEvent) -> Action {
         KeyCode::Up | KeyCode::Char('k') => Action::LineUp,
         KeyCode::Down | KeyCode::Char('j') => Action::LineDown,
         KeyCode::PageUp | KeyCode::Char('b') => Action::PageUp,
-        KeyCode::PageDown | KeyCode::Char(' ' | 'f') | KeyCode::Enter => Action::PageDown,
+        KeyCode::PageDown | KeyCode::Char(' ' | 'f') => Action::PageDown,
+        KeyCode::Enter => Action::Continue,
         KeyCode::Home | KeyCode::Char('g') => Action::Top,
         KeyCode::End | KeyCode::Char('G') => Action::Bottom,
         KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
@@ -547,6 +557,21 @@ mod tests {
             action(press(KeyCode::Char('G'), KeyModifiers::NONE)),
             Action::Bottom
         ));
+    }
+
+    #[test]
+    fn only_enter_can_leave_a_finished_document() {
+        // Held-down PgDn used to run off the end of the legal text and answer
+        // the acceptance prompt underneath it. Every scrolling key has to stop
+        // at the last line and leave the decision to Enter.
+        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        for code in [KeyCode::PageDown, KeyCode::Char(' '), KeyCode::Char('f')] {
+            assert!(
+                matches!(action(press(code)), Action::PageDown),
+                "{code:?} should only scroll"
+            );
+        }
+        assert!(matches!(action(press(KeyCode::Enter)), Action::Continue));
     }
 
     #[test]
