@@ -10,7 +10,7 @@ use alloy::{
 };
 use anyhow::{Context, Result, ensure};
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -41,6 +41,43 @@ pub struct WalletStatus {
 pub struct ReceiptStatus {
     pub succeeded: bool,
     pub block_number: u64,
+    /// What the transaction actually cost. Carried on every receipt lookup
+    /// because the receipt already contains it: the price a transaction paid
+    /// is otherwise unrecoverable after the fact, and `eth_gasPrice`-style
+    /// reads through a public RPC are not a dependable substitute.
+    pub gas_used: u64,
+    pub effective_gas_price: u128,
+}
+
+/// What a mined transaction actually cost, decimal-encoded for JSON.
+///
+/// Reported on every settled record so the price a transaction paid never has
+/// to be reconstructed from balance deltas, and so a caller deciding whether
+/// gas is currently cheap has a real number from this wallet's own recent
+/// history rather than an onchain read that a public RPC may answer with a
+/// plausible zero.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct MinedFee {
+    /// Gas units the receipt reports as burned.
+    pub gas_used: String,
+    /// Wei per gas the chain actually charged.
+    pub effective_gas_price: String,
+    /// `gas_used` × `effective_gas_price`, in wei.
+    pub transaction_fee_wei: String,
+}
+
+impl ReceiptStatus {
+    /// Gas actually burned times the price actually paid.
+    #[must_use]
+    pub fn mined_fee(&self) -> MinedFee {
+        MinedFee {
+            gas_used: self.gas_used.to_string(),
+            effective_gas_price: self.effective_gas_price.to_string(),
+            transaction_fee_wei: u128::from(self.gas_used)
+                .saturating_mul(self.effective_gas_price)
+                .to_string(),
+        }
+    }
 }
 
 pub async fn verify_chain_id(network: &NetworkConfig) -> Result<()> {
@@ -176,6 +213,8 @@ pub async fn transaction_receipt(
                 block_number: receipt
                     .block_number
                     .context("RPC returned a receipt without a block number")?,
+                gas_used: receipt.gas_used,
+                effective_gas_price: receipt.effective_gas_price,
             })
         })
         .transpose()

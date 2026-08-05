@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.policy-database-key.v1";
@@ -457,6 +457,24 @@ impl PolicyStore {
                 ],
             )?;
             version = 9;
+        }
+        if version == 9 {
+            // What the transaction actually paid, kept alongside the block it
+            // mined in. Plain ALTERs: no CHECK constraint mentions these, and
+            // rows settled before this migration simply have no fee to report.
+            //
+            // Persisted rather than recomputed because the receipt is the only
+            // place the effective price exists, and it is read once during
+            // settlement anyway.
+            run_transaction(
+                &connection,
+                &[
+                    "ALTER TABLE pending_transactions ADD COLUMN gas_used TEXT",
+                    "ALTER TABLE pending_transactions ADD COLUMN effective_gas_price TEXT",
+                    "UPDATE schema_metadata SET version = 10 WHERE singleton = 1",
+                ],
+            )?;
+            version = 10;
         }
         ensure!(
             version == SCHEMA_VERSION,

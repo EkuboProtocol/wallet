@@ -130,6 +130,7 @@ pub async fn reconcile_record(
                 record.request_id,
                 receipt.succeeded,
                 &receipt.block_number.to_string(),
+                Some(&receipt.mined_fee()),
             )
         }
         ChainObservation::Replaced => {
@@ -187,6 +188,7 @@ async fn reconcile_cancelling(
             record.request_id,
             receipt.succeeded,
             &receipt.block_number.to_string(),
+            Some(&receipt.mined_fee()),
         );
     }
     let envelope_nonce = signed_transaction_nonce(
@@ -203,8 +205,11 @@ async fn reconcile_cancelling(
     // winner, and every hash in the history is equally "cancelled by us".
     for cancel_hash in record.cancel_transaction_hashes.iter().rev() {
         if let Some(receipt) = transaction_receipt(network, cancel_hash).await? {
-            return lock(pending)?
-                .mark_cancelled(record.request_id, &receipt.block_number.to_string());
+            return lock(pending)?.mark_cancelled(
+                record.request_id,
+                &receipt.block_number.to_string(),
+                Some(&receipt.mined_fee()),
+            );
         }
     }
     // Close the race window: the original may have mined between the nonce
@@ -214,6 +219,7 @@ async fn reconcile_cancelling(
             record.request_id,
             receipt.succeeded,
             &receipt.block_number.to_string(),
+            Some(&receipt.mined_fee()),
         );
     }
     lock(pending)?.mark_replaced(record.request_id)
@@ -267,6 +273,7 @@ pub async fn submit_claimed(
                         .block_number
                         .as_deref()
                         .context("confirmed transaction is missing a block number")?,
+                    broadcast.mined_fee.as_ref(),
                 )?,
             BroadcastReceiptStatus::Pending => broadcast_record,
         }
@@ -355,6 +362,7 @@ pub async fn attempt_cancellation<K: KeyStore>(
                     .block_number
                     .as_deref()
                     .context("mined cancellation is missing a block number")?,
+                broadcast.mined_fee.as_ref(),
             )?,
         // An outright rejection usually means the race is already over —
         // "nonce too low" for a just-mined original — so ask the chain what
@@ -405,6 +413,8 @@ mod tests {
         ReceiptStatus {
             succeeded,
             block_number: 100,
+            gas_used: 21_000,
+            effective_gas_price: 1_000_000_000,
         }
     }
 

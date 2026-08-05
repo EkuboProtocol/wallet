@@ -5,6 +5,7 @@
 
 use crate::{
     config::validate_wallet_id, core::execution_plan::ExecutionPlan, policy_store::PolicyStore,
+    rpc::MinedFee,
 };
 use alloy::primitives::B256;
 use anyhow::{Context, Result, ensure};
@@ -89,6 +90,11 @@ pub struct PendingTransaction {
     pub broadcast_transaction_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_number: Option<String>,
+    /// What the mined transaction actually cost, taken from its receipt at
+    /// settlement. Absent while unsettled, on records that never mined, and on
+    /// rows settled before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mined_fee: Option<MinedFee>,
     /// The exact bytes of the newest owner-requested cancellation envelope: a
     /// 0-value self-send at the original envelope's nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -261,7 +267,7 @@ impl PendingStore {
                     transaction_hash,
                 ],
             )
-            .context("another transaction is already in flight for this wallet and chain: reconcile it with wallet_get_execution_status, wait for it with wallet_wait_for_execution, or cancel it with wallet_attempt_cancel")?;
+            .with_context(|| in_flight_conflict(&transaction, wallet_id, plan.chain_id.as_str()))?;
         transaction.commit()?;
         self.get(request_id)
     }
@@ -367,7 +373,8 @@ impl PendingStore {
         validate_hex(serialized_transaction, None)?;
         validate_hex(transaction_hash, Some(32))?;
         let transaction = self.database.connection.transaction()?;
-        let (wallet_id, digest, policy_revision, status, expires_at, approval_required): (
+        let (wallet_id, chain_id, digest, policy_revision, status, expires_at, approval_required): (
+            String,
             String,
             String,
             i64,
@@ -376,7 +383,7 @@ impl PendingStore {
             i64,
         ) = transaction
             .query_row(
-                "SELECT wallet_id, plan_digest, policy_revision, status, expires_at,
+                "SELECT wallet_id, chain_id, plan_digest, policy_revision, status, expires_at,
                         approval_required
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id.to_string()],
@@ -388,6 +395,7 @@ impl PendingStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
@@ -432,7 +440,7 @@ impl PendingStore {
                     review_digest,
                 ],
             )
-            .context("another transaction is already in flight for this wallet and chain: reconcile it with wallet_get_execution_status, wait for it with wallet_wait_for_execution, or cancel it with wallet_attempt_cancel")?;
+            .with_context(|| in_flight_conflict(&transaction, &wallet_id, &chain_id))?;
         transaction.commit()?;
         self.get(request_id)
     }
@@ -595,16 +603,20 @@ impl PendingStore {
         &mut self,
         request_id: Uuid,
         block_number: &str,
+        fee: Option<&MinedFee>,
     ) -> Result<PendingTransaction> {
         validate_block_number(block_number)?;
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET
-                status = 'cancelled', block_number = ?2, updated_at = ?3
+                status = 'cancelled', block_number = ?2, updated_at = ?3,
+                gas_used = ?4, effective_gas_price = ?5
              WHERE request_id = ?1 AND status = 'cancelling'",
             params![
                 request_id.to_string(),
                 block_number,
-                Utc::now().to_rfc3339()
+                Utc::now().to_rfc3339(),
+                fee.map(|fee| fee.gas_used.as_str()),
+                fee.map(|fee| fee.effective_gas_price.as_str()),
             ],
         )?;
         ensure!(changed == 1, "pending transaction is not being cancelled");
@@ -634,17 +646,21 @@ impl PendingStore {
         request_id: Uuid,
         succeeded: bool,
         block_number: &str,
+        fee: Option<&MinedFee>,
     ) -> Result<PendingTransaction> {
         validate_block_number(block_number)?;
         let status = if succeeded { "confirmed" } else { "reverted" };
         let changed = self.database.connection.execute(
-            "UPDATE pending_transactions SET status = ?2, block_number = ?3, updated_at = ?4
+            "UPDATE pending_transactions SET status = ?2, block_number = ?3, updated_at = ?4,
+                gas_used = ?5, effective_gas_price = ?6
              WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
             params![
                 request_id.to_string(),
                 status,
                 block_number,
-                Utc::now().to_rfc3339()
+                Utc::now().to_rfc3339(),
+                fee.map(|fee| fee.gas_used.as_str()),
+                fee.map(|fee| fee.effective_gas_price.as_str()),
             ],
         )?;
         ensure!(
@@ -736,7 +752,7 @@ impl PendingStore {
                         approved_at, rejected_at, serialized_transaction,
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
                         approval_required, review_digest, cancel_serialized_transaction,
-                        cancel_transaction_hashes
+                        cancel_transaction_hashes, gas_used, effective_gas_price
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id.to_string()],
                 |row| {
@@ -761,6 +777,8 @@ impl PendingStore {
                         review_digest: row.get(17)?,
                         cancel_serialized_transaction: row.get(18)?,
                         cancel_transaction_hashes: row.get(19)?,
+                        gas_used: row.get(20)?,
+                        effective_gas_price: row.get(21)?,
                     })
                 },
             )
@@ -790,6 +808,8 @@ struct PendingRow {
     review_digest: Option<String>,
     cancel_serialized_transaction: Option<String>,
     cancel_transaction_hashes: Option<String>,
+    gas_used: Option<String>,
+    effective_gas_price: Option<String>,
 }
 
 impl PendingRow {
@@ -856,6 +876,13 @@ impl PendingRow {
             self.status != "cancelling" || self.cancel_serialized_transaction.is_some(),
             "cancelling transaction has no cancellation envelope"
         );
+        // Both columns are written together at settlement, so either both are
+        // present or the row predates fee recording.
+        let mined_fee = match (&self.gas_used, &self.effective_gas_price) {
+            (Some(gas_used), Some(price)) => Some(mined_fee(gas_used, price)?),
+            (None, None) => None,
+            _ => anyhow::bail!("stored transaction fee is incomplete"),
+        };
         Ok(PendingTransaction {
             request_id,
             wallet_id: self.wallet_id,
@@ -876,6 +903,7 @@ impl PendingRow {
             signed_transaction_hash: self.signed_transaction_hash,
             broadcast_transaction_hash: self.broadcast_transaction_hash,
             block_number: self.block_number,
+            mined_fee,
             cancel_serialized_transaction: self.cancel_serialized_transaction,
             cancel_transaction_hashes,
         })
@@ -905,6 +933,61 @@ fn validate_block_number(block_number: &str) -> Result<()> {
         "block number must be canonical decimal"
     );
     Ok(())
+}
+
+/// Explain an in-flight slot conflict by naming the record that holds it.
+///
+/// The unique index reports only that a conflict happened, and every tool that
+/// could resolve one — status, wait, cancel — is keyed by `request_id`. A
+/// caller whose earlier send was interrupted after signing never received that
+/// ID, so without it here the slot is unrecoverable through this server and
+/// every later send on the wallet and chain keeps failing. Naming the blocker
+/// discloses nothing the caller could not already read for its own wallet.
+fn in_flight_conflict(
+    transaction: &rusqlite::Transaction<'_>,
+    wallet_id: &str,
+    chain_id: &str,
+) -> String {
+    let blocker: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT request_id, status FROM pending_transactions
+             WHERE wallet_id = ?1 AND chain_id = ?2
+               AND status IN ('signed', 'submitting', 'broadcast', 'cancelling')",
+            params![wallet_id, chain_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    let resolution = blocker.map_or_else(
+        || {
+            "reconcile it with wallet_get_execution_status, wait for it with \
+            wallet_wait_for_execution, or cancel it with wallet_attempt_cancel"
+                .to_owned()
+        },
+        |(blocking_request_id, status)| {
+            format!(
+                "request {blocking_request_id} is {status}. Reconcile it with \
+                 wallet_get_execution_status, wait for it with wallet_wait_for_execution, \
+                 or cancel it with wallet_attempt_cancel, passing that request_id"
+            )
+        },
+    );
+    format!("another transaction is already in flight for this wallet and chain: {resolution}")
+}
+
+/// Rebuild a stored fee, recomputing the product rather than persisting it so
+/// the reported total can never disagree with its own components.
+fn mined_fee(gas_used: &str, effective_gas_price: &str) -> Result<MinedFee> {
+    let gas: u128 = gas_used.parse().context("stored gas usage is invalid")?;
+    let price: u128 = effective_gas_price
+        .parse()
+        .context("stored effective gas price is invalid")?;
+    Ok(MinedFee {
+        gas_used: gas.to_string(),
+        effective_gas_price: price.to_string(),
+        transaction_fee_wei: gas.saturating_mul(price).to_string(),
+    })
 }
 
 fn parse_time(value: &str) -> Result<DateTime<Utc>> {
@@ -1007,7 +1090,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .finalize(request.request_id, true, "123")
+                .finalize(request.request_id, true, "123", None)
                 .unwrap()
                 .status,
             PendingStatus::Confirmed
@@ -1048,12 +1131,73 @@ mod tests {
 
         store.claim_for_submission(first.request_id).unwrap();
         store.mark_broadcast(first.request_id, first_hash).unwrap();
-        store.finalize(first.request_id, true, "123").unwrap();
+        store.finalize(first.request_id, true, "123", None).unwrap();
         assert!(
             store
                 .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0304", second_hash,)
                 .is_ok()
         );
+    }
+
+    /// A send interrupted after signing leaves the caller without the
+    /// `request_id`, and every tool that could clear the slot needs one. The
+    /// rejection has to hand it back or the wallet is stuck on that chain.
+    #[test]
+    fn the_in_flight_rejection_names_the_request_holding_the_slot() {
+        let (_directory, mut store) = store();
+        let blocker = store
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                1,
+                "0x0102",
+                "0x3333333333333333333333333333333333333333333333333333333333333333",
+            )
+            .unwrap();
+        let error = store
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                1,
+                "0x0304",
+                "0x5555555555555555555555555555555555555555555555555555555555555555",
+            )
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&blocker.request_id.to_string()),
+            "rejection must name the blocking request: {message}"
+        );
+        assert!(message.contains("signed"), "{message}");
+        assert!(message.contains("wallet_attempt_cancel"), "{message}");
+    }
+
+    /// The receipt is the only place the price paid exists, so settlement has
+    /// to capture it: a caller pricing gas from its own history reads this
+    /// rather than reconstructing it from balance deltas.
+    #[test]
+    fn settlement_records_what_the_transaction_actually_cost() {
+        let (_directory, mut store) = store();
+        let hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
+        let signed = store
+            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", hash)
+            .unwrap();
+        assert!(signed.mined_fee.is_none());
+        store.claim_for_submission(signed.request_id).unwrap();
+        store.mark_broadcast(signed.request_id, hash).unwrap();
+        let fee = MinedFee {
+            gas_used: "447730".into(),
+            effective_gas_price: "320000000".into(),
+            transaction_fee_wei: "143273600000000".into(),
+        };
+        let settled = store
+            .finalize(signed.request_id, true, "123", Some(&fee))
+            .unwrap();
+        assert_eq!(settled.mined_fee.as_ref(), Some(&fee));
+        // Survives a reload: the fee is persisted, not just returned.
+        assert_eq!(store.get(signed.request_id).unwrap().mined_fee, Some(fee));
     }
 
     #[test]
@@ -1098,7 +1242,7 @@ mod tests {
 
         // Terminal: no rebroadcast, no receipt, no second replacement.
         assert!(store.claim_broadcast_retry(first.request_id).is_err());
-        assert!(store.finalize(first.request_id, true, "123").is_err());
+        assert!(store.finalize(first.request_id, true, "123", None).is_err());
         assert!(store.mark_replaced(first.request_id).is_err());
 
         // The wallet+chain in-flight slot is free for the next transaction.
@@ -1169,11 +1313,11 @@ mod tests {
             [CANCEL_HASH_ONE, CANCEL_HASH_TWO]
         );
 
-        let cancelled = store.mark_cancelled(request_id, "123").unwrap();
+        let cancelled = store.mark_cancelled(request_id, "123", None).unwrap();
         assert_eq!(cancelled.status, PendingStatus::Cancelled);
         assert_eq!(cancelled.block_number.as_deref(), Some("123"));
-        assert!(store.mark_cancelled(request_id, "124").is_err());
-        assert!(store.finalize(request_id, true, "124").is_err());
+        assert!(store.mark_cancelled(request_id, "124", None).is_err());
+        assert!(store.finalize(request_id, true, "124", None).is_err());
 
         // Terminal: the wallet+chain in-flight slot is free again.
         broadcast_original(&mut store);
@@ -1215,7 +1359,10 @@ mod tests {
             .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
             .unwrap();
         assert_eq!(
-            store.finalize(request_id, true, "123").unwrap().status,
+            store
+                .finalize(request_id, true, "123", None)
+                .unwrap()
+                .status,
             PendingStatus::Confirmed
         );
     }

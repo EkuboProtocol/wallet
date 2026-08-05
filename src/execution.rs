@@ -147,6 +147,10 @@ pub struct BroadcastResult {
     pub receipt_status: ReceiptStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub block_number: Option<String>,
+    /// What the mined transaction cost. Present exactly when a receipt was
+    /// read, which is also when `receipt_status` is not `Pending`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mined_fee: Option<crate::rpc::MinedFee>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broadcast_error: Option<String>,
 }
@@ -811,6 +815,7 @@ async fn send_exact_bytes(
         transaction_hash: signed.transaction_hash.clone(),
         receipt_status: ReceiptStatus::Pending,
         block_number: None,
+        mined_fee: None,
         broadcast_error: None,
     })
 }
@@ -865,6 +870,7 @@ fn send_failure_outcome(
         transaction_hash: hash.into(),
         receipt_status: ReceiptStatus::Pending,
         block_number: None,
+        mined_fee: None,
         // The node holds this exact transaction, so submission succeeded and
         // the rejection described an earlier attempt rather than a problem
         // with this one. That is indistinguishable from an ordinary accepted
@@ -882,6 +888,7 @@ fn receipt_result(hash: &str, receipt: crate::rpc::ReceiptStatus) -> BroadcastRe
             ReceiptStatus::Reverted
         },
         block_number: Some(receipt.block_number.to_string()),
+        mined_fee: Some(receipt.mined_fee()),
         broadcast_error: None,
     }
 }
@@ -974,6 +981,8 @@ mod tests {
                 Some(crate::rpc::ReceiptStatus {
                     succeeded: true,
                     block_number: 27_923_617,
+                    gas_used: 21_000,
+                    effective_gas_price: 1_000_000_000,
                 }),
                 false,
                 (*rejection).to_owned(),
@@ -994,6 +1003,8 @@ mod tests {
             Some(crate::rpc::ReceiptStatus {
                 succeeded: false,
                 block_number: 42,
+                gas_used: 21_000,
+                effective_gas_price: 1_000_000_000,
             }),
             false,
             "nonce too low".to_owned(),

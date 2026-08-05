@@ -3811,6 +3811,7 @@ mod tests {
             signed_transaction_hash: None,
             broadcast_transaction_hash: None,
             block_number: None,
+            mined_fee: None,
             cancel_serialized_transaction: None,
             cancel_transaction_hashes: Vec::new(),
         };

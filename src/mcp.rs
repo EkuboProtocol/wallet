@@ -693,6 +693,13 @@ struct ExecutionStatusOutput {
     transaction_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     block_number: Option<String>,
+    /// What this transaction actually cost, read from its receipt: gas burned,
+    /// the price the chain charged, and their product in wei. Present once the
+    /// record settles. This is the wallet's own record of a real price paid —
+    /// prefer it over an onchain gas-price read when judging whether gas is
+    /// currently cheap, and treat it as backward-looking either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mined_fee: Option<crate::rpc::MinedFee>,
     /// How many blocks deep the mined receipt is (1 = head), when measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     confirmations: Option<u64>,
@@ -2768,6 +2775,7 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
             .broadcast_transaction_hash
             .or(record.signed_transaction_hash),
         block_number: record.block_number,
+        mined_fee: record.mined_fee,
         confirmations: None,
         receipt_status,
         broadcast_error: None,
