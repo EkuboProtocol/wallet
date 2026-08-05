@@ -30,10 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/mai
 ```
 
 Read [`install.sh`](install.sh) before piping it to a shell. Replace `main` with
-an exact release tag for a reproducible installation. While the repository is
-private the installer needs credentials to reach the release assets: it uses the
-GitHub CLI when you are logged in (`gh auth login`), and otherwise honors
-`GITHUB_TOKEN`.
+an exact release tag for a reproducible installation.
 
 Then accept the legal documents and create a wallet:
 
