@@ -86,7 +86,8 @@ enum Command {
     Transaction(TransactionArgs),
     /// Inspect the local token database.
     Token(TokenArgs),
-    /// Manage per-chain address aliases used for agent lookups.
+    /// Browse and edit per-chain address aliases used for agent lookups.
+    /// Bare, on a terminal, this opens the full-screen editor.
     #[command(name = "address-book")]
     AddressBook(AddressBookArgs),
     /// Read legal documents and record their acceptance.
@@ -243,7 +244,7 @@ struct TokenArgs {
 #[derive(Debug, Args)]
 struct AddressBookArgs {
     #[command(subcommand)]
-    command: AddressBookCommand,
+    command: Option<AddressBookCommand>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -257,7 +258,8 @@ enum AddressBookCommand {
         #[arg(long, default_value_t = 0)]
         offset: usize,
     },
-    /// Add or update one alias after terminal confirmation.
+    /// Add or update one alias after terminal confirmation and owner
+    /// authentication.
     Add {
         /// Network name, alias, or decimal chain ID.
         network: String,
@@ -266,7 +268,8 @@ enum AddressBookCommand {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Remove one alias after terminal confirmation.
+    /// Remove one alias after terminal confirmation and owner
+    /// authentication.
     #[command(alias = "delete")]
     Remove {
         /// Network name, alias, or decimal chain ID.
@@ -399,7 +402,7 @@ impl Cli {
             Command::Policy(args) => run_policy(&config, args.command, mode).await,
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
             Command::Token(args) => run_token(&config, &args.command, mode),
-            Command::AddressBook(args) => run_address_book(&config, args.command, mode),
+            Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
             Command::Legal(args) => run_legal(&config, &args.command, mode),
             Command::Review {
                 request_id,
@@ -657,136 +660,122 @@ fn resolve_network(config: &ConfigStore, requested: &str) -> Result<NetworkConfi
     }
 }
 
-fn run_address_book(
+async fn run_address_book(
     config: &ConfigStore,
-    command: AddressBookCommand,
+    command: Option<AddressBookCommand>,
     mode: OutputMode,
 ) -> Result<()> {
     match command {
-        AddressBookCommand::List {
+        // The bare command opens the full-screen editor; without a terminal
+        // (or under --json) it degrades to the plain listing.
+        None => {
+            if mode == OutputMode::Json || !crate::tui::interactive() {
+                return list_address_book(config, None, 200, 0, mode);
+            }
+            crate::address_book_browser::browse(config, &PlatformHumanPresence).await
+        }
+        Some(AddressBookCommand::List {
             network,
             limit,
             offset,
-        } => {
-            let chain_id = network
-                .as_deref()
-                .map(|requested| resolve_network(config, requested))
-                .transpose()?
-                .map(|network| network.chain_id);
-            let store = AddressBookStore::production(config.data_dir())?;
-            let total = store.count(chain_id)?;
-            let entries = store.list(chain_id, limit, offset)?;
-            emit(
-                mode,
-                &serde_json::json!({ "total": total, "entries": entries }),
-                || {
-                    if entries.is_empty() {
-                        return Ok(
-                            "The address book is empty. Add an alias with `ekubo-wallet address-book add <network> <alias> <address>`.".into(),
-                        );
-                    }
-                    let mut lines = vec![format!("{total} entrie(s), showing {}:", entries.len())];
-                    for entry in &entries {
-                        lines.push(format!(
-                            "  {} → {} (chain {}){}",
-                            entry.alias,
-                            entry.address,
-                            entry.chain_id,
-                            entry
-                                .note
-                                .as_deref()
-                                .map_or_else(String::new, |note| format!(" — {note}")),
-                        ));
-                    }
-                    Ok(lines.join("\n"))
-                },
-            )
-        }
-        AddressBookCommand::Add {
+        }) => list_address_book(config, network.as_deref(), limit, offset, mode),
+        Some(AddressBookCommand::Add {
             network,
             alias,
             address,
             note,
-        } => {
+        }) => {
             require_interactive("address book changes")?;
             crate::address_book::validate_alias(&alias)?;
             let network = resolve_network(config, &network)?;
             let address =
                 Address::from_str(&address).context("address must be a 20-byte EVM address")?;
-            let existing =
-                AddressBookStore::production(config.data_dir())?.get(network.chain_id, &alias)?;
-            // An alias is a lookup table for agents, not a key or a
-            // permission: nothing here can sign, and a wrong entry is fixed
-            // by typing the command again. So it is confirmed, not approved.
-            let mut question = crate::tui::Confirmation::new(
-                "Add address book entry",
-                "Store this alias for agent lookups. Aliases carry no signing authority, but an \
-                 agent will resolve payments to this address when the user names the alias.",
-            )
-            .fact("Network", &network.name)
-            .fact("Chain ID", network.chain_id.to_string())
-            .fact("Alias", &alias)
-            .fact("Address", address.to_checksum(None));
-            if let Some(note) = &note {
-                question = question.fact("Note", note);
-            }
-            if let Some(existing) = &existing {
-                question = question.warning(format!(
-                    "This replaces the existing entry for {alias}, currently {}.",
-                    existing.address
-                ));
-            }
-            if !question.ask("Save this alias?")? {
-                crate::tui::outro_cancel("Address book unchanged.");
-                return Ok(());
-            }
-            let entry = AddressBookStore::production(config.data_dir())?.upsert(
-                network.chain_id,
-                &alias,
+            let draft = crate::address_book_browser::EntryDraft {
+                chain_id: network.chain_id,
+                network_name: network.name,
+                alias,
                 address,
-                note.as_deref(),
-            )?;
-            emit(mode, &entry, || {
-                Ok(format!(
-                    "Stored {} → {} on chain {}.",
-                    entry.alias, entry.address, entry.chain_id
-                ))
-            })
+                note: note.filter(|note| !note.trim().is_empty()),
+            };
+            match crate::address_book_browser::confirm_and_save(
+                config,
+                &PlatformHumanPresence,
+                &draft,
+            )
+            .await?
+            {
+                Some(entry) => emit(mode, &entry, || {
+                    Ok(format!(
+                        "Stored {} → {} on chain {}.",
+                        entry.alias, entry.address, entry.chain_id
+                    ))
+                }),
+                None => Ok(()),
+            }
         }
-        AddressBookCommand::Remove { network, alias } => {
+        Some(AddressBookCommand::Remove { network, alias }) => {
             require_interactive("address book changes")?;
             let network = resolve_network(config, &network)?;
-            let existing = AddressBookStore::production(config.data_dir())?
-                .get(network.chain_id, &alias)?
-                .with_context(|| {
-                    format!(
-                        "no address book entry {alias} on chain {}",
-                        network.chain_id
-                    )
-                })?;
-            if !crate::tui::Confirmation::new(
-                "Remove address book entry",
-                "Remove this alias from agent lookups.",
+            match crate::address_book_browser::confirm_and_remove(
+                config,
+                &PlatformHumanPresence,
+                &network.name,
+                network.chain_id,
+                &alias,
             )
-            .fact("Network", &network.name)
-            .fact("Chain ID", network.chain_id.to_string())
-            .fact("Alias", &alias)
-            .fact("Address", &existing.address)
-            .ask("Remove this alias?")?
+            .await?
             {
-                crate::tui::outro_cancel("Address book unchanged.");
-                return Ok(());
+                Some(removed) => emit(mode, &serde_json::json!({ "removed": removed }), || {
+                    Ok(format!(
+                        "Removed {} → {} from chain {}.",
+                        removed.alias, removed.address, removed.chain_id
+                    ))
+                }),
+                None => Ok(()),
             }
-            let removed = AddressBookStore::production(config.data_dir())?
-                .remove(network.chain_id, &alias)?;
-            emit(mode, &serde_json::json!({ "removed": removed }), || {
-                Ok(format!(
-                    "Removed {} → {} from chain {}.",
-                    removed.alias, removed.address, removed.chain_id
-                ))
-            })
         }
     }
+}
+
+fn list_address_book(
+    config: &ConfigStore,
+    network: Option<&str>,
+    limit: usize,
+    offset: usize,
+    mode: OutputMode,
+) -> Result<()> {
+    let chain_id = network
+        .map(|requested| resolve_network(config, requested))
+        .transpose()?
+        .map(|network| network.chain_id);
+    let store = AddressBookStore::production(config.data_dir())?;
+    let total = store.count(chain_id)?;
+    let entries = store.list(chain_id, limit, offset)?;
+    emit(
+        mode,
+        &serde_json::json!({ "total": total, "entries": entries }),
+        || {
+            if entries.is_empty() {
+                return Ok(
+                    "The address book is empty. Run `ekubo-wallet address-book` to add aliases interactively, or `ekubo-wallet address-book add <network> <alias> <address>`.".into(),
+                );
+            }
+            let mut lines = vec![format!("{total} entrie(s), showing {}:", entries.len())];
+            for entry in &entries {
+                lines.push(format!(
+                    "  {} → {} (chain {}){}",
+                    entry.alias,
+                    entry.address,
+                    entry.chain_id,
+                    entry
+                        .note
+                        .as_deref()
+                        .map_or_else(String::new, |note| format!(" — {note}")),
+                ));
+            }
+            Ok(lines.join("\n"))
+        },
+    )
 }
 
 fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> Result<()> {
@@ -1302,11 +1291,7 @@ fn pending_approval_rows(
     let none = || Span::toned("—", Tone::Muted);
     let short = |request_id: Uuid| {
         Span::toned(
-            request_id
-                .to_string()
-                .split('-')
-                .next()
-                .unwrap_or_default(),
+            request_id.to_string().split('-').next().unwrap_or_default(),
             Tone::Muted,
         )
     };

@@ -483,6 +483,25 @@ impl SearchableTable {
     pub(crate) fn viewport(&self) -> usize {
         self.viewport
     }
+
+    /// Whether keystrokes currently edit the `/` filter — callers with their
+    /// own key bindings must not steal letters from a search being typed.
+    pub(crate) const fn typing(&self) -> bool {
+        self.typing
+    }
+
+    /// The underlying row index of the current selection, for callers whose
+    /// extra key bindings act on "the selected row" outside a
+    /// [`TableEvent::Picked`].
+    pub(crate) fn selected(&self) -> Option<usize> {
+        self.selected_row()
+    }
+
+    /// Whether a confirmed `/` filter is narrowing the rows, so callers
+    /// composing their own footer hints can mirror [`Self::footer_hints`].
+    pub(crate) fn searching(&self) -> bool {
+        !self.filter.is_empty()
+    }
 }
 
 /// Whether `key` is the session-level interrupt every full-screen surface

@@ -21,7 +21,7 @@ use std::{fs, path::Path, str::FromStr};
 /// Plain-SQLite file used before the table moved into the encrypted
 /// database. Never trusted or imported: deleted on sight.
 const LEGACY_DATABASE_FILE: &str = "address_book.db";
-const MAX_NOTE_LEN: usize = 256;
+pub(crate) const MAX_NOTE_LEN: usize = 256;
 
 /// One stored alias, the address rendered checksummed.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
