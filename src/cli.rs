@@ -1145,7 +1145,7 @@ async fn run_transaction(
             let detail = crate::tx_browser::load_detail(config, &record).await;
             println!(
                 "{}",
-                crate::tx_browser::lines_to_text(&detail, crate::tui::paint_stdout)
+                crate::fullscreen::lines_to_text(&detail, crate::tui::paint_stdout)
             );
             Ok(())
         }
@@ -2539,6 +2539,53 @@ fn custom_network_field(flag: &str) -> &'static RequiredField {
         .expect("every custom network field is listed")
 }
 
+/// Full-screen pick of one configured network, searchable by everything the
+/// wallet knows about it: name, display name, aliases, chain ID, RPC URL,
+/// and explorer URL. `Ok(None)` means the user backed out.
+fn pick_network(networks: &[NetworkConfig], action: &str) -> Result<Option<usize>> {
+    use crate::fullscreen::{Span, TableColumn, TableRow, pick_table};
+    use ratatui::layout::Constraint;
+    let columns = vec![
+        TableColumn::new("Network", Constraint::Fill(1)),
+        TableColumn::new("Display name", Constraint::Fill(1)),
+        TableColumn::new("Chain", Constraint::Length(10)).right_aligned(),
+        TableColumn::new("RPC", Constraint::Fill(2)),
+    ];
+    let rows = networks
+        .iter()
+        .map(|network| {
+            let display_name = network.display_name.clone().unwrap_or_default();
+            let aliases = network.aliases.join(" ");
+            let explorer = network
+                .block_explorer_url
+                .as_ref()
+                .map(Url::to_string)
+                .unwrap_or_default();
+            TableRow::new(
+                vec![
+                    Span::plain(&network.name),
+                    if display_name.is_empty() {
+                        Span::toned("—", crate::tui::Tone::Muted)
+                    } else {
+                        Span::plain(&display_name)
+                    },
+                    Span::plain(network.chain_id.to_string()),
+                    Span::toned(network.rpc_url.as_str(), crate::tui::Tone::Muted),
+                ],
+                &[
+                    &network.name,
+                    &display_name,
+                    &aliases,
+                    &network.chain_id.to_string(),
+                    network.rpc_url.as_str(),
+                    &explorer,
+                ],
+            )
+        })
+        .collect();
+    pick_table("Networks", action, columns, rows)
+}
+
 /// Interactive field-by-field editing of one configured network. Every
 /// change is drafted locally, shown in the menu, and only trusted after the
 /// same authorization and live chain-ID verification as `network add`.
@@ -2559,22 +2606,7 @@ async fn run_network_edit(
             })
             .with_context(|| format!("{name} is not a configured network"))?
     } else {
-        let labels = networks
-            .iter()
-            .map(|network| {
-                format!(
-                    "{} — {} (chain {})",
-                    network.name,
-                    network
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| network.name.clone()),
-                    network.chain_id
-                )
-            })
-            .collect();
-        let Some(index) = crate::tui::pick("Edit which network?", labels, interactive_list_rows())?
-        else {
+        let Some(index) = pick_network(&networks, "edit")? else {
             crate::tui::outro_cancel("Nothing edited.");
             return Ok(());
         };

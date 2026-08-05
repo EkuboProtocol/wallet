@@ -7,45 +7,31 @@
 //! the terminal width, so the values worth searching for (the full request
 //! ID, a transaction hash) were exactly the ones it could not see.
 //!
-//! This browser draws with ratatui on the alternate screen instead. Every
-//! frame lays out against the live terminal size, so resizing mid-session
-//! just reflows; `/` filters against a haystack built from the record itself
-//! (full request ID, hashes, wallet, network, status, addresses) rather than
-//! the rendered row; and the expanded view is a styled document — status in
+//! This browser is built on [`crate::fullscreen`]: a [`SearchableTable`]
+//! list whose network column names the chain and whose `/` search matches
+//! the record itself (full request ID, hashes, wallet, network, status,
+//! addresses), and an expanded view that is a styled document — status in
 //! its lifecycle color, balance changes in an aligned table, the explorer
 //! URL one keystroke from a browser — instead of a wall of `label: value`
 //! lines.
-//!
-//! Everything drawn here is either chrome this module authored or stored
-//! data passed through [`crate::render::terminal_safe_line`] at the moment a
-//! [`Span`] is built, so escape sequences in stored text can never reach the
-//! terminal.
 
 use std::collections::BTreeMap;
-use std::io::{self, IsTerminal, Stderr};
+use std::io::{self, IsTerminal};
 use std::str::FromStr;
 
 use alloy::primitives::{Address, B256, U256, b256};
 use anyhow::Result;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use num_bigint::BigUint;
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line as UiLine, Span as UiSpan},
-    widgets::{Cell, Paragraph, Row as UiRow, Table, TableState},
-};
-use unicode_width::UnicodeWidthChar;
+use ratatui::{layout::Constraint, text::Line as UiLine, widgets::Paragraph};
 
 use crate::{
     approval_summary::{TokenMetadataMap, format_fixed_point, load_token_metadata},
     config::{ConfigStore, NetworkConfig},
+    fullscreen::{
+        Line, Screen, SearchableTable, Span, TableColumn, TableEvent, TableRow, chrome,
+        footer_line, is_interrupt, title_line, ui_span, wrap_lines,
+    },
     pending::{PendingStatus, PendingTransaction},
     render::terminal_safe_line,
     rpc::{ReceiptDetails, transaction_receipt_details},
@@ -88,158 +74,6 @@ pub fn status_tone(status: PendingStatus) -> Tone {
     }
 }
 
-/// One run of text with one semantic tone. Built through the constructors,
-/// which sanitize, so a span can never carry stored escape sequences.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Span {
-    text: String,
-    tone: Option<Tone>,
-}
-
-impl Span {
-    fn plain(text: impl AsRef<str>) -> Self {
-        Self {
-            text: terminal_safe_line(text.as_ref()),
-            tone: None,
-        }
-    }
-
-    fn toned(text: impl AsRef<str>, tone: Tone) -> Self {
-        Self {
-            tone: Some(tone),
-            ..Self::plain(text)
-        }
-    }
-}
-
-/// One display line of the detail document.
-pub type Line = Vec<Span>;
-
-fn tone_style(tone: Tone) -> Style {
-    match tone {
-        Tone::Success => Style::new().fg(Color::Green),
-        Tone::Warning => Style::new().fg(Color::Yellow),
-        Tone::Danger => Style::new().fg(Color::Red),
-        Tone::Info => Style::new().fg(Color::Cyan),
-        Tone::Muted => Style::new().fg(Color::DarkGray),
-        Tone::Emphasis => Style::new().add_modifier(Modifier::BOLD),
-    }
-}
-
-fn ui_span(span: &Span) -> UiSpan<'static> {
-    match span.tone {
-        Some(tone) => UiSpan::styled(span.text.clone(), tone_style(tone)),
-        None => UiSpan::raw(span.text.clone()),
-    }
-}
-
-/// Render detail lines for stdout: `paint` decides whether tones become ANSI
-/// colors (see [`crate::tui::paint_stdout`]) or stay plain for a pipe.
-pub fn lines_to_text(lines: &[Line], paint: impl Fn(&str, Tone) -> String) -> String {
-    lines
-        .iter()
-        .map(|line| {
-            line.iter()
-                .map(|span| match span.tone {
-                    Some(tone) => paint(&span.text, tone),
-                    None => span.text.clone(),
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn display_width(text: &str) -> usize {
-    text.chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
-        .sum()
-}
-
-/// Wrap one line to `columns`, breaking at a space where one is in reach and
-/// mid-word otherwise, so a 66-character hash lands on two fully visible
-/// lines rather than being clipped at the terminal edge. Tones survive the
-/// break: wrapping happens on a flattened `(char, tone)` stream and the
-/// pieces are reassembled into runs afterwards.
-fn wrap_line(line: &Line, columns: usize) -> Vec<Line> {
-    let columns = columns.max(1);
-    let flat: Vec<(char, Option<Tone>)> = line
-        .iter()
-        .flat_map(|span| span.text.chars().map(|character| (character, span.tone)))
-        .collect();
-    if flat.is_empty() {
-        return vec![Vec::new()];
-    }
-    let mut lines = Vec::new();
-    let mut start = 0;
-    while start < flat.len() {
-        let mut width = 0;
-        let mut end = start;
-        let mut last_space = None;
-        while end < flat.len() {
-            let advance = UnicodeWidthChar::width(flat[end].0).unwrap_or(0);
-            if width + advance > columns && end > start {
-                break;
-            }
-            if flat[end].0 == ' ' {
-                last_space = Some(end);
-            }
-            width += advance;
-            end += 1;
-        }
-        if end == flat.len() {
-            lines.push(reassemble(&flat[start..end]));
-            break;
-        }
-        // The space a line breaks at is dropped; everything else survives.
-        let (line_end, next_start) = match last_space {
-            Some(space) if space > start => (space, space + 1),
-            _ => (end, end),
-        };
-        lines.push(reassemble(&flat[start..line_end]));
-        start = next_start;
-    }
-    lines
-}
-
-/// Merge a wrapped slice back into spans, one per run of equal tone.
-fn reassemble(flat: &[(char, Option<Tone>)]) -> Line {
-    let mut spans: Line = Vec::new();
-    for (character, tone) in flat {
-        match spans.last_mut() {
-            Some(span) if span.tone == *tone => span.text.push(*character),
-            _ => spans.push(Span {
-                text: character.to_string(),
-                tone: *tone,
-            }),
-        }
-    }
-    spans
-}
-
-fn wrap_lines(lines: &[Line], columns: usize) -> Vec<Line> {
-    lines
-        .iter()
-        .flat_map(|line| wrap_line(line, columns))
-        .collect()
-}
-
-/// One transaction as the list shows and searches it. The visible cells are
-/// precomputed; only the age is formatted at draw time so it does not go
-/// stale while the browser sits open.
-struct ListRow {
-    short_id: String,
-    status: &'static str,
-    tone: Tone,
-    wallet: String,
-    network: String,
-    calls: String,
-    created_at: chrono::DateTime<chrono::Utc>,
-    /// Lowercased searchable text: the values a person knows a transaction
-    /// by, not the truncated row the screen happens to show.
-    haystack: String,
-}
-
 /// The network column: the configured name for the chain, the stored name
 /// when the network has since been removed, and only then the raw chain ID.
 fn network_label(
@@ -271,46 +105,55 @@ fn configured_networks(config: &ConfigStore) -> BTreeMap<String, NetworkConfig> 
         .unwrap_or_default()
 }
 
+fn list_columns() -> Vec<TableColumn> {
+    vec![
+        TableColumn::new("Id", Constraint::Length(8)),
+        TableColumn::new("Age", Constraint::Length(14)),
+        TableColumn::new("Status", Constraint::Length(26)),
+        TableColumn::new("Wallet", Constraint::Fill(1)),
+        TableColumn::new("Network", Constraint::Fill(1)),
+        TableColumn::new("Calls", Constraint::Length(5)).right_aligned(),
+    ]
+}
+
+/// The ages in the rows are formatted at build time, so the caller rebuilds
+/// the rows whenever it re-enters the list rather than letting them go stale.
 fn list_rows(
     networks: &BTreeMap<String, NetworkConfig>,
     records: &[PendingTransaction],
-) -> Vec<ListRow> {
+) -> Vec<TableRow> {
     records
         .iter()
         .map(|record| {
             let network = network_label(networks, record);
-            let haystack = [
-                record.request_id.to_string(),
-                record.wallet_id.clone(),
-                network.clone(),
-                record.chain_id.clone(),
-                status_label(record.status).to_owned(),
-                record.signed_transaction_hash.clone().unwrap_or_default(),
-                record
-                    .broadcast_transaction_hash
-                    .clone()
-                    .unwrap_or_default(),
-                format!("{:#x}", record.execution_plan.sender),
-                record
-                    .execution_plan
-                    .ordered_steps
-                    .iter()
-                    .map(|step| format!("{:#x}", step.transaction.to))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            ]
-            .join(" ")
-            .to_lowercase();
-            ListRow {
-                short_id: short_request_id(record.request_id),
-                status: status_label(record.status),
-                tone: status_tone(record.status),
-                wallet: terminal_safe_line(&record.wallet_id),
-                network: terminal_safe_line(&network),
-                calls: record.execution_plan.ordered_steps.len().to_string(),
-                created_at: record.created_at,
-                haystack,
-            }
+            let steps = &record.execution_plan.ordered_steps;
+            let cells = vec![
+                Span::toned(short_request_id(record.request_id), Tone::Muted),
+                Span::plain(crate::render::relative_time(record.created_at)),
+                Span::toned(status_label(record.status), status_tone(record.status)),
+                Span::plain(&record.wallet_id),
+                Span::plain(&network),
+                Span::plain(steps.len().to_string()),
+            ];
+            let counterparties = steps
+                .iter()
+                .map(|step| format!("{:#x}", step.transaction.to))
+                .collect::<Vec<_>>()
+                .join(" ");
+            TableRow::new(
+                cells,
+                &[
+                    &record.request_id.to_string(),
+                    &record.wallet_id,
+                    &network,
+                    &record.chain_id,
+                    status_label(record.status),
+                    record.signed_transaction_hash.as_deref().unwrap_or(""),
+                    record.broadcast_transaction_hash.as_deref().unwrap_or(""),
+                    &format!("{:#x}", record.execution_plan.sender),
+                    &counterparties,
+                ],
+            )
         })
         .collect()
 }
@@ -324,14 +167,6 @@ fn short_request_id(request_id: uuid::Uuid) -> String {
         .next()
         .unwrap_or_default()
         .to_owned()
-}
-
-/// Whether a row matches the search: every whitespace-separated term appears
-/// somewhere in the haystack, so "reverted base" or a pasted hash both work.
-fn matches_filter(haystack: &str, filter: &str) -> bool {
-    filter
-        .split_whitespace()
-        .all(|term| haystack.contains(&term.to_lowercase()))
 }
 
 /// What one receipt lookup produced, resolved before the detail document is
@@ -651,6 +486,7 @@ fn short_address(address: Address) -> String {
 /// The wallet's net token movements as an aligned table: one row per token,
 /// received amounts green, sent amounts red, columns sized to their content.
 fn balance_table(activity: &[(Address, (U256, U256))], metadata: &TokenMetadataMap) -> Vec<Line> {
+    use crate::fullscreen::display_width;
     let rows: Vec<(String, Option<String>, Option<String>)> = activity
         .iter()
         .map(|(token, (received, sent))| {
@@ -741,68 +577,13 @@ struct DetailView {
 }
 
 struct App {
-    rows: Vec<ListRow>,
-    /// Indices into `rows` that pass the current filter, in list order.
-    visible: Vec<usize>,
-    table: TableState,
-    filter: String,
-    /// Whether keystrokes currently edit the filter instead of navigating.
-    typing: bool,
+    list: SearchableTable,
     view: View,
     /// One-frame status text shown in the footer instead of the key hints.
     notice: Option<String>,
-    /// Body rows the last frame had, so paging moves by what is on screen.
+    /// Body rows the last frame had, so detail paging moves by what is on
+    /// screen.
     viewport: usize,
-}
-
-impl App {
-    fn new(rows: Vec<ListRow>) -> Self {
-        let visible = (0..rows.len()).collect();
-        Self {
-            rows,
-            visible,
-            table: TableState::default().with_selected(Some(0)),
-            filter: String::new(),
-            typing: false,
-            view: View::List,
-            notice: None,
-            viewport: 1,
-        }
-    }
-
-    /// Re-derive the visible rows after a filter edit, keeping the selection
-    /// on the same record when it survives the filter.
-    fn refilter(&mut self) {
-        let selected_row = self
-            .table
-            .selected()
-            .and_then(|position| self.visible.get(position).copied());
-        self.visible = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| matches_filter(&row.haystack, &self.filter))
-            .map(|(index, _)| index)
-            .collect();
-        let position = selected_row
-            .and_then(|row| self.visible.iter().position(|&index| index == row))
-            .unwrap_or(0);
-        self.table.select(if self.visible.is_empty() {
-            None
-        } else {
-            Some(position.min(self.visible.len() - 1))
-        });
-    }
-
-    fn move_selection(&mut self, delta: isize) {
-        if self.visible.is_empty() {
-            return;
-        }
-        let last = self.visible.len() - 1;
-        let current = self.table.selected().unwrap_or(0);
-        let target = current.saturating_add_signed(delta).min(last);
-        self.table.select(Some(target));
-    }
 }
 
 /// Interactive loop: pick a transaction, read its expanded details
@@ -812,7 +593,16 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
         return Ok(());
     }
     let networks = configured_networks(config);
-    let mut app = App::new(list_rows(&networks, records));
+    let mut app = App {
+        list: SearchableTable::new(
+            "Transactions",
+            list_columns(),
+            list_rows(&networks, records),
+        ),
+        view: View::List,
+        notice: None,
+        viewport: 1,
+    };
     let mut screen = Screen::enter()?;
     loop {
         screen.terminal.draw(|frame| draw(frame, &mut app))?;
@@ -823,16 +613,14 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
             _ => continue,
         };
         app.notice = None;
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c' | 'd'))
-        {
+        if is_interrupt(key) {
             return Ok(());
         }
         match &mut app.view {
-            View::List => match handle_list_key(&mut app, key) {
-                ListOutcome::Stay => {}
-                ListOutcome::Quit => return Ok(()),
-                ListOutcome::Open(index) => {
+            View::List => match app.list.handle_key(key) {
+                TableEvent::Stay => {}
+                TableEvent::Quit => return Ok(()),
+                TableEvent::Picked(index) => {
                     // Composing the detail can wait on an RPC; say so instead
                     // of freezing on the last frame.
                     app.notice = Some("Loading details…".into());
@@ -855,7 +643,12 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
             },
             View::Detail(detail) => match handle_detail_key(detail, key, app.viewport) {
                 DetailOutcome::Stay => {}
-                DetailOutcome::Back => app.view = View::List,
+                DetailOutcome::Back => {
+                    // The relative ages in the rows were formatted when the
+                    // list was built; refresh them on the way back to it.
+                    app.list.set_rows(list_rows(&networks, records));
+                    app.view = View::List;
+                }
                 DetailOutcome::OpenExplorer => {
                     if let Some(url) = &detail.explorer {
                         app.notice = Some(match open_in_browser(url) {
@@ -869,70 +662,6 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
             },
         }
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum ListOutcome {
-    Stay,
-    Quit,
-    /// Open the record at this index into the caller's record slice.
-    Open(usize),
-}
-
-fn handle_list_key(app: &mut App, key: KeyEvent) -> ListOutcome {
-    if app.typing {
-        match key.code {
-            KeyCode::Esc => {
-                app.filter.clear();
-                app.typing = false;
-                app.refilter();
-            }
-            // Enter only keeps the filter and hands the keys back to the
-            // list; opening the selection takes a second, deliberate Enter.
-            KeyCode::Enter => app.typing = false,
-            KeyCode::Backspace => {
-                app.filter.pop();
-                app.refilter();
-            }
-            KeyCode::Char(character) => {
-                app.filter.push(character);
-                app.refilter();
-            }
-            KeyCode::Up => app.move_selection(-1),
-            KeyCode::Down => app.move_selection(1),
-            _ => {}
-        }
-        return ListOutcome::Stay;
-    }
-    let page = app.viewport.max(1).cast_signed();
-    match key.code {
-        KeyCode::Char('q') => return ListOutcome::Quit,
-        KeyCode::Esc if app.filter.is_empty() => return ListOutcome::Quit,
-        KeyCode::Esc => {
-            app.filter.clear();
-            app.refilter();
-        }
-        KeyCode::Enter => {
-            if let Some(index) = app
-                .table
-                .selected()
-                .and_then(|position| app.visible.get(position).copied())
-            {
-                return ListOutcome::Open(index);
-            }
-        }
-        KeyCode::Char('/') => app.typing = true,
-        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-        KeyCode::PageUp => app.move_selection(-page),
-        KeyCode::PageDown => app.move_selection(page),
-        KeyCode::Home | KeyCode::Char('g') => app.table.select_first(),
-        KeyCode::End | KeyCode::Char('G') if !app.visible.is_empty() => {
-            app.table.select(Some(app.visible.len() - 1));
-        }
-        _ => {}
-    }
-    ListOutcome::Stay
 }
 
 enum DetailOutcome {
@@ -977,105 +706,23 @@ fn open_in_browser(url: &str) -> Result<()> {
 }
 
 fn draw(frame: &mut ratatui::Frame, app: &mut App) {
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Fill(1),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-    app.viewport = body.height.saturating_sub(1).max(1) as usize;
-
+    let (header, body, footer) = chrome(frame.area());
     match &mut app.view {
         View::List => {
-            let title = if app.filter.is_empty() {
-                format!("Transactions — {}", app.rows.len())
-            } else {
-                format!(
-                    "Transactions — {} of {} match \u{201c}{}\u{201d}",
-                    app.visible.len(),
-                    app.rows.len(),
-                    terminal_safe_line(&app.filter),
-                )
-            };
+            frame.render_widget(title_line(&app.list.title()), header);
+            app.list.draw(frame, body);
+            app.viewport = app.list.viewport();
             frame.render_widget(
-                UiLine::from(UiSpan::styled(
-                    title,
-                    Style::new().add_modifier(Modifier::BOLD),
-                )),
-                header,
+                footer_line(app.notice.as_deref(), &app.list.footer_hints("details")),
+                footer,
             );
-
-            if app.visible.is_empty() {
-                frame.render_widget(
-                    Paragraph::new(UiLine::from(UiSpan::styled(
-                        "No transactions match the search.",
-                        tone_style(Tone::Muted),
-                    )))
-                    .alignment(Alignment::Center),
-                    body,
-                );
-            } else {
-                let rows: Vec<UiRow> = app
-                    .visible
-                    .iter()
-                    .map(|&index| {
-                        let row = &app.rows[index];
-                        UiRow::new(vec![
-                            Cell::from(UiSpan::styled(
-                                row.short_id.clone(),
-                                tone_style(Tone::Muted),
-                            )),
-                            Cell::from(crate::render::relative_time(row.created_at)),
-                            Cell::from(UiSpan::styled(row.status, tone_style(row.tone))),
-                            Cell::from(row.wallet.clone()),
-                            Cell::from(row.network.clone()),
-                            Cell::from(UiLine::from(row.calls.clone()).alignment(Alignment::Right)),
-                        ])
-                    })
-                    .collect();
-                let table = Table::new(
-                    rows,
-                    [
-                        Constraint::Length(8),
-                        Constraint::Length(14),
-                        Constraint::Length(26),
-                        Constraint::Fill(1),
-                        Constraint::Fill(1),
-                        Constraint::Length(5),
-                    ],
-                )
-                .header(
-                    UiRow::new(vec!["Id", "Age", "Status", "Wallet", "Network", "Calls"])
-                        .style(tone_style(Tone::Muted)),
-                )
-                .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-                .column_spacing(2);
-                frame.render_stateful_widget(table, body, &mut app.table);
-            }
-
-            let hints = if app.typing {
-                format!(
-                    "Search: {}▏  Enter to keep · Esc to clear",
-                    terminal_safe_line(&app.filter)
-                )
-            } else if app.filter.is_empty() {
-                "↑↓ select · Enter details · / search · q quit".to_owned()
-            } else {
-                "↑↓ select · Enter details · / edit search · Esc clear search · q quit".to_owned()
-            };
-            frame.render_widget(footer_line(app.notice.as_deref(), &hints), footer);
         }
         View::Detail(detail) => {
-            frame.render_widget(
-                UiLine::from(UiSpan::styled(
-                    detail.title.clone(),
-                    Style::new().add_modifier(Modifier::BOLD),
-                )),
-                header,
-            );
+            frame.render_widget(title_line(&detail.title), header);
             let columns = (body.width as usize).saturating_sub(2).max(10);
             let wrapped = wrap_lines(&detail.lines, columns);
             let viewport = body.height.max(1) as usize;
+            app.viewport = viewport;
             let max_offset = wrapped.len().saturating_sub(viewport);
             detail.offset = detail.offset.min(max_offset);
             let visible: Vec<UiLine> = wrapped
@@ -1083,7 +730,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 .skip(detail.offset)
                 .take(viewport)
                 .map(|line| {
-                    let mut spans = vec![UiSpan::raw(" ")];
+                    let mut spans = vec![ratatui::text::Span::raw(" ")];
                     spans.extend(line.iter().map(ui_span));
                     UiLine::from(spans)
                 })
@@ -1106,44 +753,11 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     }
 }
 
-fn footer_line<'a>(notice: Option<&'a str>, hints: &'a str) -> UiLine<'a> {
-    match notice {
-        Some(notice) => UiLine::from(UiSpan::styled(
-            terminal_safe_line(notice),
-            tone_style(Tone::Info),
-        )),
-        None => UiLine::from(UiSpan::styled(hints.to_owned(), tone_style(Tone::Muted))),
-    }
-}
-
-/// Owns the terminal takeover. Restoring on drop rather than at the end of
-/// [`browse`] means an error or a panic mid-session still hands the terminal
-/// back in raw-mode-off, main-screen state.
-struct Screen {
-    terminal: Terminal<CrosstermBackend<Stderr>>,
-}
-
-impl Screen {
-    fn enter() -> Result<Self> {
-        terminal::enable_raw_mode()?;
-        execute!(io::stderr(), EnterAlternateScreen)?;
-        Ok(Self {
-            terminal: Terminal::new(CrosstermBackend::new(io::stderr()))?,
-        })
-    }
-}
-
-impl Drop for Screen {
-    fn drop(&mut self) {
-        let _unused = execute!(io::stderr(), LeaveAlternateScreen);
-        let _unused = terminal::disable_raw_mode();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::approval_summary::TokenMetadata;
+    use crate::fullscreen::{display_width, lines_to_text};
     use crate::rpc::ReceiptLog;
 
     fn record() -> PendingTransaction {
@@ -1219,25 +833,15 @@ mod tests {
         let mut record = record();
         record.broadcast_transaction_hash = Some(format!("0x{}", "ab".repeat(32)));
         let rows = list_rows(&networks, std::slice::from_ref(&record));
-        assert_eq!(rows[0].network, "ethereum");
-        assert_eq!(rows[0].calls, "1");
+        // Columns: id, age, status, wallet, network, calls.
+        assert_eq!(rows[0].cells[4], Span::plain("ethereum"));
+        assert_eq!(rows[0].cells[5], Span::plain("1"));
         // The haystack finds what the truncated row never showed: the full
         // request ID, the hash, and the counterparty address.
-        assert!(matches_filter(
-            &rows[0].haystack,
-            &uuid::Uuid::nil().to_string()
-        ));
-        assert!(matches_filter(
-            &rows[0].haystack,
-            &format!("0x{}", "AB".repeat(32))
-        ));
-        assert!(matches_filter(
-            &rows[0].haystack,
-            "0x2222222222222222222222222222222222222222"
-        ));
-        // Multiple terms all have to hit, in any order.
-        assert!(matches_filter(&rows[0].haystack, "awaiting primary"));
-        assert!(!matches_filter(&rows[0].haystack, "awaiting other-wallet"));
+        let haystack = &rows[0].haystack;
+        assert!(haystack.contains(&uuid::Uuid::nil().to_string()));
+        assert!(haystack.contains(&format!("0x{}", "ab".repeat(32))));
+        assert!(haystack.contains("0x2222222222222222222222222222222222222222"));
     }
 
     #[test]
@@ -1246,41 +850,14 @@ mod tests {
         let mut record = record();
         record.chain_id = "424242".into();
         let rows = list_rows(&networks, std::slice::from_ref(&record));
-        assert_eq!(rows[0].network, "ethereum", "the stored name still applies");
+        assert_eq!(
+            rows[0].cells[4],
+            Span::plain("ethereum"),
+            "the stored name still applies"
+        );
         record.network_name = String::new();
         let rows = list_rows(&networks, std::slice::from_ref(&record));
-        assert_eq!(rows[0].network, "chain 424242");
-    }
-
-    #[test]
-    fn wrapping_respects_width_preserves_tones_and_loses_no_hash_digits() {
-        let hash = format!("0x{}", "ab".repeat(32));
-        let line: Line = vec![Span::toned("Hash        ", Tone::Muted), Span::plain(&hash)];
-        let wrapped = wrap_line(&line, 30);
-        assert!(wrapped.len() > 1, "a 66-character hash cannot fit one line");
-        for piece in &wrapped {
-            let width: usize = piece.iter().map(|span| display_width(&span.text)).sum();
-            assert!(width <= 30, "{piece:?} fits the wrap width");
-        }
-        // Every hash character survives the break, in order: the value can
-        // be read (and checked) across lines rather than being clipped.
-        let rejoined: String = wrapped
-            .iter()
-            .flat_map(|piece| piece.iter())
-            .map(|span| span.text.as_str())
-            .collect::<String>()
-            .replace(' ', "");
-        assert!(rejoined.contains(&hash));
-        // The label kept its tone after reassembly.
-        assert_eq!(wrapped[0][0].tone, Some(Tone::Muted));
-    }
-
-    #[test]
-    fn wrapping_prefers_a_space_and_keeps_blank_lines() {
-        let line: Line = vec![Span::plain("alpha beta gamma")];
-        let wrapped = wrap_line(&line, 11);
-        assert_eq!(text_of(&wrapped), "alpha beta\ngamma");
-        assert_eq!(wrap_line(&Vec::new(), 10), vec![Vec::new()]);
+        assert_eq!(rows[0].cells[4], Span::plain("chain 424242"));
     }
 
     #[test]
@@ -1392,83 +969,6 @@ mod tests {
     }
 
     #[test]
-    fn filtering_keeps_the_selection_on_the_same_record_when_it_survives() {
-        let networks = BTreeMap::new();
-        let mut second = record();
-        second.request_id = uuid::Uuid::from_u128(7);
-        second.wallet_id = "trading".into();
-        let records = vec![record(), second];
-        let mut app = App::new(list_rows(&networks, &records));
-        app.table.select(Some(1));
-        app.filter = "trading".into();
-        app.refilter();
-        assert_eq!(app.visible, vec![1], "only the matching record remains");
-        assert_eq!(app.table.selected(), Some(0), "still on the trading record");
-        // Clearing the filter restores the full list, selection intact.
-        app.filter.clear();
-        app.refilter();
-        assert_eq!(app.visible, vec![0, 1]);
-        assert_eq!(app.table.selected(), Some(1));
-        // A filter matching nothing leaves nothing selected rather than a
-        // phantom cursor on an empty table.
-        app.filter = "no-such-thing".into();
-        app.refilter();
-        assert_eq!(app.table.selected(), None);
-    }
-
-    #[test]
-    fn list_keys_navigate_filter_and_quit() {
-        let networks = BTreeMap::new();
-        let records = vec![record(), record(), record()];
-        let mut app = App::new(list_rows(&networks, &records));
-        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
-
-        assert_eq!(
-            handle_list_key(&mut app, press(KeyCode::Down)),
-            ListOutcome::Stay
-        );
-        assert_eq!(app.table.selected(), Some(1));
-        handle_list_key(&mut app, press(KeyCode::End));
-        assert_eq!(app.table.selected(), Some(2));
-        handle_list_key(&mut app, press(KeyCode::Home));
-        assert_eq!(app.table.selected(), Some(0));
-
-        // '/' starts a search; typed characters land in the filter.
-        handle_list_key(&mut app, press(KeyCode::Char('/')));
-        assert!(app.typing);
-        handle_list_key(&mut app, press(KeyCode::Char('p')));
-        assert_eq!(app.filter, "p");
-        // The Enter that confirms the filter must not also open the
-        // selection; only the next Enter, back in the list, does that.
-        assert_eq!(
-            handle_list_key(&mut app, press(KeyCode::Enter)),
-            ListOutcome::Stay
-        );
-        assert!(
-            !app.typing,
-            "Enter keeps the filter and returns to the list"
-        );
-        assert_eq!(
-            handle_list_key(&mut app, press(KeyCode::Enter)),
-            ListOutcome::Open(0)
-        );
-        // Esc first clears the filter, and only then quits.
-        assert_eq!(
-            handle_list_key(&mut app, press(KeyCode::Esc)),
-            ListOutcome::Stay
-        );
-        assert!(app.filter.is_empty());
-        assert_eq!(
-            handle_list_key(&mut app, press(KeyCode::Esc)),
-            ListOutcome::Quit
-        );
-        assert_eq!(
-            handle_list_key(&mut app, press(KeyCode::Char('q'))),
-            ListOutcome::Quit
-        );
-    }
-
-    #[test]
     fn detail_keys_scroll_and_leave() {
         let mut detail = DetailView {
             title: "Request".into(),
@@ -1476,7 +976,7 @@ mod tests {
             explorer: None,
             offset: 0,
         };
-        let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let press = |code| KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
         assert!(matches!(
             handle_detail_key(&mut detail, press(KeyCode::Down), 10),
             DetailOutcome::Stay
@@ -1494,15 +994,5 @@ mod tests {
             handle_detail_key(&mut detail, press(KeyCode::Char('o')), 10),
             DetailOutcome::OpenExplorer
         ));
-    }
-
-    #[test]
-    fn stored_text_cannot_draw_chrome() {
-        // A wallet ID with an embedded escape sequence reaches the screen
-        // with the control characters flattened to spaces.
-        let span = Span::plain("evil\u{1b}[2Jwallet");
-        assert!(!span.text.contains('\u{1b}'));
-        let toned = Span::toned("bad\nvalue", Tone::Info);
-        assert!(!toned.text.contains('\n'));
     }
 }

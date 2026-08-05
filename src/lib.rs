@@ -10,6 +10,7 @@ pub mod core;
 pub mod custody;
 pub mod execution;
 pub mod fork;
+pub mod fullscreen;
 pub mod human_presence;
 pub mod legal;
 pub mod mcp;
