@@ -326,9 +326,10 @@ pub fn default_data_dir() -> Result<PathBuf> {
 ///
 /// Each RPC is an endpoint its own chain or its operator publishes for wallet
 /// use, chosen so it is documented somewhere a user can read rather than
-/// aggregated from a directory, and verified to answer `eth_simulateV1` —
+/// aggregated from a directory. Each was checked against `eth_simulateV1` —
 /// without which this wallet cannot simulate and therefore cannot sign
-/// automatically. They are public, shared, and rate-limited: a funded wallet
+/// automatically — and the endpoints that do not answer it are called out
+/// inline below. They are public, shared, and rate-limited: a funded wallet
 /// should be pointed at a dedicated provider with `ekubo-wallet network add`.
 #[must_use]
 pub fn default_networks() -> Vec<NetworkConfig> {
@@ -338,12 +339,12 @@ pub fn default_networks() -> Vec<NetworkConfig> {
             "Ethereum Mainnet",
             &["mainnet", "eth"],
             1,
-            "https://ethereum-rpc.publicnode.com",
+            "https://rpc.mevblocker.io",
             "16777216",
             "Ether",
             "ETH",
             "https://etherscan.io",
-            "https://ethereum.publicnode.com",
+            "https://mevblocker.io",
         ),
         network(
             "base",
@@ -381,6 +382,9 @@ pub fn default_networks() -> Vec<NetworkConfig> {
             "https://robinhoodchain.blockscout.com",
             "https://docs.robinhood.com/chain/connecting/",
         ),
+        // The published Monad RPC does not answer `eth_simulateV1`, so
+        // simulation-gated automatic signing fails on this network until the
+        // operator adds it or the user configures an endpoint that has it.
         network(
             "monad",
             "Monad",
@@ -440,6 +444,21 @@ pub fn default_networks() -> Vec<NetworkConfig> {
             "BERA",
             "https://berascan.com",
             "https://docs.berachain.com/general/introduction/connect-to-berachain",
+        ),
+        // The published MegaETH RPC does not answer `eth_simulateV1` yet, so
+        // simulation-gated automatic signing fails on this network until the
+        // operator adds it or the user configures an endpoint that has it.
+        network(
+            "megaeth",
+            "MegaETH",
+            &["megaeth-mainnet", "mega"],
+            4326,
+            "https://mainnet.megaeth.com/rpc",
+            "10000000000",
+            "Ether",
+            "ETH",
+            "https://megaexplorer.xyz",
+            "https://docs.megaeth.com",
         ),
     ]
 }
