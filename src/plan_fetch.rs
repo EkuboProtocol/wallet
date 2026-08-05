@@ -98,11 +98,15 @@ pub async fn resolve_execution_plan(
     expected_content_keccak256: Option<&str>,
     policy: FetchPolicy,
 ) -> Result<ExecutionPlan> {
-    let bytes =
-        fetch_verified_bytes(url, expected_content_keccak256, policy, EXECUTION_PLAN_SUBJECT)
-            .await?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .context("execution plan body is not valid JSON")?;
+    let bytes = fetch_verified_bytes(
+        url,
+        expected_content_keccak256,
+        policy,
+        EXECUTION_PLAN_SUBJECT,
+    )
+    .await?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("execution plan body is not valid JSON")?;
     ExecutionPlan::parse(value)
 }
 
@@ -420,7 +424,11 @@ mod tests {
         let error = resolve_execution_plan(&url, Some(&wrong), FetchPolicy::production())
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("must not be simulated or signed"));
+        assert!(
+            error
+                .to_string()
+                .contains("must not be simulated or signed")
+        );
     }
 
     #[tokio::test]
