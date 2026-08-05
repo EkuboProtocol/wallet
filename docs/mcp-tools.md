@@ -53,8 +53,22 @@ after DNS resolution, 16 MiB cap), recomputes the digest, refuses a mismatch,
 and then parses and validates the plan exactly as if it had been supplied
 inline. A plan held locally travels as a `data:application/json;base64` URI of
 its exact bytes and touches no network. A 404 means the reference expired:
-re-run the producer's preparation tool. This fetch is the only outbound
-request this process makes that is not a configured chain RPC.
+re-run the producer's preparation tool. These fetches are the only outbound
+requests this process makes that are not a configured chain RPC.
+
+Read-call bundles travel under the same discipline. A producer returns a
+`read_calls_reference` — a short-lived https URL holding an exact
+`wallet_batch_eth_call` argument body (`chain_id`, optional `block_parameter`
+and `from`, `calls` with their decode plans) plus `content_keccak256` — and
+the agent passes `read_calls_url` as `calls_url` and the digest as
+`expected_content_keccak256`, unchanged, with the reference's `chain_id` and
+no inline `calls`. The same admission policy, digest verification, and size
+cap apply. The fetched body is parsed against exactly the inline argument
+surface with unknown fields rejected, so a bundle can never carry a
+`fork_id`, another `calls_url`, or any field the tool call itself did not
+declare, and its `chain_id` must equal the one the tool call selected. The
+body alone supplies `block_parameter`, `from`, and `calls`; `fork_id` remains
+a tool-call decision, so a bundle can be read against a fork.
 
 `eth_simulateV1` is the most expensive request this wallet makes, and an agent
 that simulates a plan to show the user what it does should not pay for that
@@ -155,6 +169,10 @@ decimal chain ID, uses Multicall3 by default with an individual `eth_call`
 fallback, sends `msg.sender`-dependent calls individually, and can decode each
 exact result in the same call. `block_parameter` accepts `latest`, `pending`,
 `safe`, `finalized`, `earliest`, or a canonical hexadecimal block quantity.
+Calls are supplied either inline or by a producer's `read_calls_reference`
+(`calls_url` plus `expected_content_keccak256`, mutually exclusive with
+inline `calls`; with `calls_url`, leave `from` unset and `block_parameter` at
+its default — the fetched body governs both).
 
 Five decode plan kinds are supported: `function_result`, `abi_parameters`,
 `multicall3`, `function_result_bytes_array`, and `semantic_value`. Complete

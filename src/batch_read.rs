@@ -4,6 +4,7 @@ use crate::{
     },
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
+    plan_fetch::{FetchPolicy, READ_CALLS_SUBJECT, fetch_verified_bytes},
 };
 use alloy::{
     consensus::BlockHeader,
@@ -62,13 +63,100 @@ pub struct BatchEthCallInput {
     pub block_parameter: String,
     #[serde(default)]
     pub from: Option<String>,
+    /// Inline read calls. Pass exactly one of `calls` and `calls_url`.
+    #[serde(default)]
     pub calls: Vec<BatchReadCall>,
+    /// A producer `read_calls_reference` URL holding the exact call bundle:
+    /// the same JSON object as this tool's inline arguments minus `fork_id`
+    /// (`chain_id`, optional `block_parameter` and `from`, `calls`). Fetched
+    /// under the execution-plan admission policy — public https on the
+    /// default port or a `data:application/json` URI, digest-verified,
+    /// size-capped. The body's `chain_id` must equal `chain_id` above, and
+    /// the body alone supplies `block_parameter`, `from`, and `calls`.
+    #[serde(default)]
+    pub calls_url: Option<String>,
+    /// The keccak256 digest the producer published beside `calls_url`,
+    /// passed unchanged; it is recomputed over the fetched bytes and a
+    /// mismatch is a hard failure. Only valid with `calls_url`.
+    #[serde(default)]
+    pub expected_content_keccak256: Option<String>,
     /// Read the hypothetical state of this temporary simulation fork instead
     /// of real chain state. A fork pins its own parent block, so
     /// `block_parameter` must be left at `latest`, and at most
     /// 64 calls may be sent because they share the pinned block's gas limit.
     #[serde(default)]
     pub fork_id: Option<uuid::Uuid>,
+}
+
+/// The exact stored body of a read-calls reference: this tool's inline
+/// argument surface and nothing else. `deny_unknown_fields` is the smuggling
+/// boundary — a fetched body cannot carry a `fork_id`, a nested `calls_url`,
+/// a digest, or any future top-level field this tool grows, so a producer's
+/// bundle can never widen what the tool call itself declared.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadCallsBody {
+    pub chain_id: String,
+    #[serde(default = "default_block_parameter")]
+    pub block_parameter: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    pub calls: Vec<BatchReadCall>,
+}
+
+/// Settle the `calls_url` reference surface into an effective inline input.
+///
+/// Exclusivity is checked before any fetch, so a malformed tool call never
+/// becomes an outbound request to a caller-chosen URL. The resolved input
+/// then flows through the same validation as an inline one.
+pub async fn resolve_read_input(
+    input: BatchEthCallInput,
+    policy: FetchPolicy,
+) -> Result<BatchEthCallInput> {
+    let Some(url) = input.calls_url.clone() else {
+        ensure!(
+            input.expected_content_keccak256.is_none(),
+            "expected_content_keccak256 accompanies calls_url; inline calls are already exact"
+        );
+        return Ok(input);
+    };
+    ensure!(
+        input.calls.is_empty(),
+        "pass exactly one of calls and calls_url"
+    );
+    ensure!(
+        input.from.is_none(),
+        "a referenced bundle carries its own from; leave it unset"
+    );
+    ensure!(
+        input.block_parameter == default_block_parameter(),
+        "a referenced bundle carries its own block_parameter; leave it at latest"
+    );
+    let bytes = fetch_verified_bytes(
+        &url,
+        input.expected_content_keccak256.as_deref(),
+        policy,
+        READ_CALLS_SUBJECT,
+    )
+    .await?;
+    let body: ReadCallsBody = serde_json::from_slice(&bytes)
+        .context("read-call bundle is not a valid wallet_batch_eth_call argument object")?;
+    ensure!(
+        body.chain_id == input.chain_id,
+        "read-call bundle targets chain {} but the tool call selected chain {}; \
+         pass the reference's chain_id unchanged",
+        body.chain_id,
+        input.chain_id
+    );
+    Ok(BatchEthCallInput {
+        chain_id: input.chain_id,
+        block_parameter: body.block_parameter,
+        from: body.from,
+        calls: body.calls,
+        calls_url: None,
+        expected_content_keccak256: None,
+        fork_id: input.fork_id,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -508,6 +596,10 @@ fn format_result(
 
 fn validate_input(input: &BatchEthCallInput) -> Result<()> {
     ensure!(
+        input.calls_url.is_none() && input.expected_content_keccak256.is_none(),
+        "resolve calls_url into inline calls before executing the batch"
+    );
+    ensure!(
         !input.chain_id.is_empty()
             && !input.chain_id.starts_with('0')
             && input.chain_id.bytes().all(|byte| byte.is_ascii_digit()),
@@ -701,19 +793,133 @@ mod tests {
         assert!(result.return_data.is_none());
     }
 
-    #[test]
-    fn validates_batch_bounds_before_rpc() {
-        let input = BatchEthCallInput {
+    fn inline_input() -> BatchEthCallInput {
+        BatchEthCallInput {
             chain_id: "1".into(),
             block_parameter: "latest".into(),
             from: None,
             calls: vec![call()],
+            calls_url: None,
+            expected_content_keccak256: None,
             fork_id: None,
-        };
+        }
+    }
+
+    #[test]
+    fn validates_batch_bounds_before_rpc() {
+        let input = inline_input();
         assert!(validate_input(&input).is_ok());
         let mut empty = input;
         empty.calls.clear();
         assert!(validate_input(&empty).is_err());
+    }
+
+    #[test]
+    fn read_calls_body_rejects_anything_beyond_the_inline_surface() {
+        let minimal = "{\"chain_id\":\"1\",\"calls\":[{\"to\":\
+                       \"0x1111111111111111111111111111111111111111\",\"data\":\"0x1234\"}]}";
+        let body: ReadCallsBody = serde_json::from_str(minimal).unwrap();
+        assert_eq!(body.block_parameter, "latest");
+        assert_eq!(body.calls.len(), 1);
+
+        let digest_field = format!("\"expected_content_keccak256\":\"0x{}\"", "11".repeat(32));
+        for smuggled in [
+            "\"fork_id\":\"00000000-0000-4000-8000-000000000000\"",
+            "\"calls_url\":\"https://mcp.example.org/read/x\"",
+            digest_field.as_str(),
+            "\"anything_future\":1",
+        ] {
+            let raw = format!("{{\"chain_id\":\"1\",\"calls\":[],{smuggled}}}");
+            assert!(
+                serde_json::from_str::<ReadCallsBody>(&raw).is_err(),
+                "body must reject {smuggled}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_read_input_enforces_reference_exclusivity_before_fetching() {
+        // A URL that would fail loudly if it were ever fetched: every case
+        // below must error on exclusivity alone.
+        let url = Some("https://never.fetched.invalid/read/x".to_owned());
+
+        let mut both = inline_input();
+        both.calls_url = url.clone();
+        let error = resolve_read_input(both, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exactly one of calls"));
+
+        let mut stray_digest = inline_input();
+        stray_digest.expected_content_keccak256 = Some(format!("0x{}", "11".repeat(32)));
+        let error = resolve_read_input(stray_digest, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("accompanies calls_url"));
+
+        let mut with_from = inline_input();
+        with_from.calls.clear();
+        with_from.calls_url = url.clone();
+        with_from.from = Some("0x1111111111111111111111111111111111111111".into());
+        let error = resolve_read_input(with_from, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("its own from"));
+
+        let mut with_block = inline_input();
+        with_block.calls.clear();
+        with_block.calls_url = url;
+        with_block.block_parameter = "pending".into();
+        let error = resolve_read_input(with_block, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("its own block_parameter"));
+    }
+
+    #[tokio::test]
+    async fn resolve_read_input_applies_a_data_uri_bundle_without_the_network() {
+        use base64::Engine as _;
+        let body = serde_json::json!({
+            "chain_id": "1",
+            "block_parameter": "pending",
+            "calls": [{
+                "to": "0x1111111111111111111111111111111111111111",
+                "data": "0x1234",
+            }],
+        })
+        .to_string();
+        let digest = format!("0x{:x}", alloy::primitives::keccak256(body.as_bytes()));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
+
+        let mut input = inline_input();
+        input.calls.clear();
+        input.calls_url = Some(format!("data:application/json;base64,{encoded}"));
+        input.expected_content_keccak256 = Some(digest);
+        let resolved = resolve_read_input(input, FetchPolicy::production())
+            .await
+            .unwrap();
+        assert!(resolved.calls_url.is_none());
+        assert!(resolved.expected_content_keccak256.is_none());
+        assert_eq!(resolved.block_parameter, "pending");
+        assert_eq!(resolved.calls.len(), 1);
+        assert!(validate_input(&resolved).is_ok());
+    }
+
+    #[tokio::test]
+    async fn resolve_read_input_refuses_a_bundle_for_another_chain() {
+        use base64::Engine as _;
+        let body = "{\"chain_id\":\"8453\",\"calls\":[{\"to\":\
+                    \"0x1111111111111111111111111111111111111111\",\"data\":\"0x1234\"}]}";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+        let mut input = inline_input();
+        input.calls.clear();
+        input.calls_url = Some(format!("data:application/json;base64,{encoded}"));
+        let error = resolve_read_input(input, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("targets chain 8453"));
+        assert!(message.contains("selected chain 1"));
     }
 
     #[tokio::test]
@@ -727,6 +933,8 @@ mod tests {
             chain_id: "1".into(),
             block_parameter: "latest".into(),
             from: None,
+            calls_url: None,
+            expected_content_keccak256: None,
             fork_id: None,
             calls: vec![BatchReadCall {
                 id: Some("weth-total-supply".into()),

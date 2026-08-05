@@ -1,19 +1,22 @@
-//! Resolving an execution plan from a URL instead of inline tool arguments.
+//! Resolving referenced artifacts from a URL instead of inline tool arguments.
 //!
-//! Producers such as the Ekubo MCP server return an `execution_plan_reference`
-//! — a short-lived `https` URL where the plan body is stored plus a keccak256
-//! digest of its exact bytes — so the agent between the producer and this
-//! wallet relays a line of text instead of re-emitting kilobytes of calldata.
-//! This wallet fetches the body itself, verifies the digest, and then parses
-//! and validates the plan exactly as it would an inline one; a fetched plan
-//! earns no extra trust from having a URL, and an inline plan is still
-//! expressible as a `data:` URI that never touches the network.
+//! Producers such as the Ekubo MCP server return references — a short-lived
+//! `https` URL where a body is stored plus a keccak256 digest of its exact
+//! bytes — so the agent between the producer and this wallet relays a line of
+//! text instead of re-emitting kilobytes of calldata. Two artifact kinds
+//! travel this way: execution plans (`execution_plan_reference`) and
+//! read-call bundles (`read_calls_reference`, exact `wallet_batch_eth_call`
+//! argument bodies). This wallet fetches the body itself, verifies the
+//! digest, and then parses and validates it exactly as it would an inline
+//! one; a fetched body earns no extra trust from having a URL, and an inline
+//! body is still expressible as a `data:` URI that never touches the network.
 //!
-//! The fetch is this process's only outbound request that is not a configured
-//! chain RPC, so admission is deliberately narrow: `https` on the default
-//! port to a public, resolvable host; no credentials, fragments, redirects,
-//! or private/internal addresses; a hard response-size cap; and errors that
-//! describe the failure without echoing a byte of the response body.
+//! These fetches are this process's only outbound requests that are not a
+//! configured chain RPC, so admission is deliberately narrow: `https` on the
+//! default port to a public, resolvable host; no credentials, fragments,
+//! redirects, or private/internal addresses; a hard response-size cap; and
+//! errors that describe the failure without echoing a byte of the response
+//! body.
 
 use crate::core::execution_plan::{ExecutionPlan, MAX_SERIALIZED_PLAN_BYTES};
 use alloy::primitives::keccak256;
@@ -59,6 +62,31 @@ impl FetchPolicy {
     }
 }
 
+/// Names the artifact being fetched in every admission and integrity error,
+/// so a failed plan fetch and a failed read-bundle fetch stay as specific as
+/// they were when plans were the only referenced artifact.
+#[derive(Clone, Copy, Debug)]
+pub struct FetchSubject {
+    /// The artifact's noun in error messages: "execution plan URL is not…".
+    pub noun: &'static str,
+    /// What a 404 should tell the agent to do about the expired reference.
+    pub refresh_hint: &'static str,
+    /// The consequence clause of a digest mismatch.
+    pub mismatch_consequence: &'static str,
+}
+
+pub const EXECUTION_PLAN_SUBJECT: FetchSubject = FetchSubject {
+    noun: "execution plan",
+    refresh_hint: "re-run the producer's preparation tool for a fresh plan and reference",
+    mismatch_consequence: "it must not be simulated or signed",
+};
+
+pub const READ_CALLS_SUBJECT: FetchSubject = FetchSubject {
+    noun: "read-call bundle",
+    refresh_hint: "re-run the producer's tool for a fresh bundle and reference",
+    mismatch_consequence: "its calls must not be executed",
+};
+
 /// Fetch, verify, parse, and validate one execution plan.
 ///
 /// `expected_content_keccak256` is the digest published beside the URL by
@@ -70,21 +98,37 @@ pub async fn resolve_execution_plan(
     expected_content_keccak256: Option<&str>,
     policy: FetchPolicy,
 ) -> Result<ExecutionPlan> {
-    let bytes = if url.starts_with("data:") {
-        decode_data_uri(url)?
-    } else {
-        fetch_remote_plan(url, policy).await?
-    };
-    if let Some(expected) = expected_content_keccak256 {
-        verify_digest(&bytes, expected)?;
-    }
+    let bytes =
+        fetch_verified_bytes(url, expected_content_keccak256, policy, EXECUTION_PLAN_SUBJECT)
+            .await?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .context("execution plan body is not valid JSON")?;
     ExecutionPlan::parse(value)
 }
 
+/// Fetch one referenced body — remote `https` or local `data:` URI — and
+/// verify it against the digest its producer published, without interpreting
+/// the bytes. Callers parse and validate the result exactly as they would an
+/// inline body.
+pub async fn fetch_verified_bytes(
+    url: &str,
+    expected_content_keccak256: Option<&str>,
+    policy: FetchPolicy,
+    subject: FetchSubject,
+) -> Result<Vec<u8>> {
+    let bytes = if url.starts_with("data:") {
+        decode_data_uri(url, subject)?
+    } else {
+        fetch_remote(url, policy, subject).await?
+    };
+    if let Some(expected) = expected_content_keccak256 {
+        verify_digest(&bytes, expected, subject)?;
+    }
+    Ok(bytes)
+}
+
 /// Decode `data:application/json[;base64],…` without touching the network.
-fn decode_data_uri(url: &str) -> Result<Vec<u8>> {
+fn decode_data_uri(url: &str, subject: FetchSubject) -> Result<Vec<u8>> {
     let remainder = url
         .strip_prefix("data:")
         .expect("caller matched the data: prefix");
@@ -114,9 +158,10 @@ fn decode_data_uri(url: &str) -> Result<Vec<u8>> {
     } else {
         percent_decode_str(payload).collect()
     };
+    let noun = subject.noun;
     ensure!(
         bytes.len() <= MAX_SERIALIZED_PLAN_BYTES,
-        "execution plan body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+        "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
     );
     Ok(bytes)
 }
@@ -124,25 +169,28 @@ fn decode_data_uri(url: &str) -> Result<Vec<u8>> {
 // The suffix checks run on an already-lowercased copy of the hostname; the
 // lint pattern-matches them as file-extension comparisons, which they are not.
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
-async fn fetch_remote_plan(url: &str, policy: FetchPolicy) -> Result<Vec<u8>> {
-    let parsed = Url::parse(url).context("execution plan URL is not a valid URL")?;
+async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> Result<Vec<u8>> {
+    let noun = subject.noun;
+    let parsed = Url::parse(url).with_context(|| format!("{noun} URL is not a valid URL"))?;
     ensure!(
         parsed.scheme() == "https" || (policy.allow_insecure && parsed.scheme() == "http"),
-        "execution plan URLs must use https"
+        "{noun} URLs must use https"
     );
     ensure!(
         parsed.username().is_empty() && parsed.password().is_none(),
-        "execution plan URLs must not carry credentials"
+        "{noun} URLs must not carry credentials"
     );
     ensure!(
         parsed.fragment().is_none(),
-        "execution plan URLs must not carry a fragment"
+        "{noun} URLs must not carry a fragment"
     );
     ensure!(
         policy.allow_insecure || parsed.port().is_none(),
-        "execution plan URLs must use the default https port"
+        "{noun} URLs must use the default https port"
     );
-    let host = parsed.host().context("execution plan URL has no host")?;
+    let host = parsed
+        .host()
+        .with_context(|| format!("{noun} URL has no host"))?;
     let host_text = match &host {
         Host::Domain(domain) => {
             let domain = domain.trim_end_matches('.');
@@ -155,21 +203,21 @@ async fn fetch_remote_plan(url: &str, policy: FetchPolicy) -> Result<Vec<u8>> {
                         && !lowered.ends_with(".localhost")
                         && !lowered.ends_with(".onion")
                         && !lowered.ends_with(".home.arpa")),
-                "execution plan URLs must name a public host"
+                "{noun} URLs must name a public host"
             );
             domain.to_owned()
         }
         Host::Ipv4(address) => {
             ensure!(
                 policy.allow_insecure || is_public_ip(IpAddr::V4(*address)),
-                "execution plan URLs must not target private or reserved addresses"
+                "{noun} URLs must not target private or reserved addresses"
             );
             address.to_string()
         }
         Host::Ipv6(address) => {
             ensure!(
                 policy.allow_insecure || is_public_ip(IpAddr::V6(*address)),
-                "execution plan URLs must not target private or reserved addresses"
+                "{noun} URLs must not target private or reserved addresses"
             );
             address.to_string()
         }
@@ -181,12 +229,12 @@ async fn fetch_remote_plan(url: &str, policy: FetchPolicy) -> Result<Vec<u8>> {
     // connect. The admission decision and the connection use the same bytes.
     let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host_text.as_str(), port))
         .await
-        .context("execution plan host did not resolve")?
+        .with_context(|| format!("{noun} host did not resolve"))?
         .collect();
-    ensure!(!resolved.is_empty(), "execution plan host did not resolve");
+    ensure!(!resolved.is_empty(), "{noun} host did not resolve");
     ensure!(
         policy.allow_insecure || resolved.iter().all(|address| is_public_ip(address.ip())),
-        "execution plan host resolves to a private or reserved address"
+        "{noun} host resolves to a private or reserved address"
     );
 
     let client = reqwest::Client::builder()
@@ -195,28 +243,25 @@ async fn fetch_remote_plan(url: &str, policy: FetchPolicy) -> Result<Vec<u8>> {
         .timeout(TOTAL_TIMEOUT)
         .resolve_to_addrs(&host_text, &resolved)
         .build()
-        .context("could not build the plan fetch client")?;
+        .context("could not build the reference fetch client")?;
     let response = client
         .get(parsed)
         .header("accept", "application/json")
         .send()
         .await
-        .context("execution plan fetch failed")?;
+        .with_context(|| format!("{noun} fetch failed"))?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         bail!(
-            "execution plan reference returned 404: it has expired or never existed; \
-             re-run the producer's preparation tool for a fresh plan and reference"
+            "{noun} reference returned 404: it has expired or never existed; {}",
+            subject.refresh_hint
         );
     }
-    ensure!(
-        status.is_success(),
-        "execution plan fetch returned HTTP {status}"
-    );
+    ensure!(status.is_success(), "{noun} fetch returned HTTP {status}");
     if let Some(length) = response.content_length() {
         ensure!(
             length <= MAX_SERIALIZED_PLAN_BYTES as u64,
-            "execution plan body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+            "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
         );
     }
     let mut body = Vec::new();
@@ -224,18 +269,18 @@ async fn fetch_remote_plan(url: &str, policy: FetchPolicy) -> Result<Vec<u8>> {
     while let Some(chunk) = response
         .chunk()
         .await
-        .context("execution plan fetch failed mid-body")?
+        .with_context(|| format!("{noun} fetch failed mid-body"))?
     {
         ensure!(
             body.len() + chunk.len() <= MAX_SERIALIZED_PLAN_BYTES,
-            "execution plan body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+            "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
         );
         body.extend_from_slice(&chunk);
     }
     Ok(body)
 }
 
-fn verify_digest(bytes: &[u8], expected: &str) -> Result<()> {
+fn verify_digest(bytes: &[u8], expected: &str, subject: FetchSubject) -> Result<()> {
     let normalized = expected.strip_prefix("0x").unwrap_or(expected);
     ensure!(
         normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -244,10 +289,11 @@ fn verify_digest(bytes: &[u8], expected: &str) -> Result<()> {
     let actual = format!("{:x}", keccak256(bytes));
     ensure!(
         actual == normalized.to_ascii_lowercase(),
-        "fetched execution plan bytes hash to 0x{actual} but the reference \
-         promised 0x{}; the plan was altered or the reference is stale, so it \
-         must not be simulated or signed",
-        normalized.to_ascii_lowercase()
+        "fetched {} bytes hash to 0x{actual} but the reference promised 0x{}; \
+         the body was altered or the reference is stale, so {}",
+        subject.noun,
+        normalized.to_ascii_lowercase(),
+        subject.mismatch_consequence
     );
     Ok(())
 }
@@ -413,6 +459,45 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("expired or never existed"));
         assert!(!message.contains("internal detail"));
+    }
+
+    #[tokio::test]
+    async fn read_call_bundle_errors_name_the_bundle_not_the_plan() {
+        let url = serve_once(
+            "HTTP/1.1 404 Not Found",
+            "{\"error\":{\"secret\":\"internal detail\"}}".to_owned(),
+        )
+        .await;
+        let error = fetch_verified_bytes(
+            &url,
+            None,
+            FetchPolicy::insecure_for_tests(),
+            READ_CALLS_SUBJECT,
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("read-call bundle"));
+        assert!(message.contains("expired or never existed"));
+        assert!(!message.contains("internal detail"));
+
+        let body = "{\"chain_id\":\"1\",\"calls\":[]}";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+        let data_url = format!("data:application/json;base64,{encoded}");
+        let wrong = format!("0x{}", "22".repeat(32));
+        let mismatch = fetch_verified_bytes(
+            &data_url,
+            Some(&wrong),
+            FetchPolicy::production(),
+            READ_CALLS_SUBJECT,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("its calls must not be executed")
+        );
     }
 
     #[tokio::test]
