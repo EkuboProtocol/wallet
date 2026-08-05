@@ -4,11 +4,15 @@ use thiserror::Error;
 /// What the owner is being asked to authorize at the platform prompt.
 ///
 /// Every variant is a moment the private key comes out of the credential
-/// store, or leaves it for good. Nothing else belongs here. Changing a
-/// network, saving an alias, importing a token list, editing a policy — none
-/// of those read a byte of key material, and asking for a fingerprint before
-/// each one only teaches the owner to give it without reading. Those are
-/// confirmed in the terminal instead; see [`crate::tui::Confirmation`].
+/// store or leaves it for good — plus one that never touches the key:
+/// replacing a wallet's policy. The policy is what decides what an agent may
+/// sign with nobody watching, so rewriting it grants signing authority even
+/// though it reads no key material, and it is authenticated like signing.
+/// Nothing else belongs here. Changing a network, saving an alias, importing
+/// a token list — none of those grant signing authority, and asking for a
+/// fingerprint before each one only teaches the owner to give it without
+/// reading. Those are confirmed in the terminal instead; see
+/// [`crate::tui::Confirmation`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceRequest {
     SignTransaction { wallet: String },
@@ -16,6 +20,7 @@ pub enum PresenceRequest {
     SignMessage { wallet: String },
     ExportPrivateKey { wallet: String },
     RemoveWallet { wallet: String },
+    ReplacePolicy { wallet: String },
 }
 
 /// How much of a name the platform dialog will carry. The dialog is a single
@@ -47,6 +52,9 @@ impl PresenceRequest {
             }
             Self::RemoveWallet { wallet } => {
                 format!("delete wallet {} and its private key", subject(wallet))
+            }
+            Self::ReplacePolicy { wallet } => {
+                format!("replace the signing policy for wallet {}", subject(wallet))
             }
         }
     }
@@ -294,6 +302,13 @@ mod tests {
             }
             .reason(),
             "delete wallet primary and its private key"
+        );
+        assert_eq!(
+            PresenceRequest::ReplacePolicy {
+                wallet: "primary".into()
+            }
+            .reason(),
+            "replace the signing policy for wallet primary"
         );
     }
 

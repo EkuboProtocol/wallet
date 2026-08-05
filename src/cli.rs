@@ -398,7 +398,7 @@ impl Cli {
             }
             Command::Wallet(args) => run_wallet(config, args.command, mode).await,
             Command::Network(args) => run_network(&config, args.command, mode).await,
-            Command::Policy(args) => run_policy(&config, args.command, mode),
+            Command::Policy(args) => run_policy(&config, args.command, mode).await,
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
             Command::Token(args) => run_token(&config, &args.command, mode),
             Command::AddressBook(args) => run_address_book(&config, args.command, mode),
@@ -906,7 +906,7 @@ fn terminal_note_safe(text: &str) -> String {
         .collect()
 }
 
-fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMode) -> Result<()> {
+async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMode) -> Result<()> {
     match command {
         PolicyCommand::Show { wallet_id } => {
             config.wallet(&wallet_id)?;
@@ -943,22 +943,28 @@ fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMode) ->
             let value = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", policy_file.display()))?;
             let policy = WalletPolicy::parse(value)?;
-            replace_policy(config, &wallet_id, &policy, Some(&policy_file), mode)
+            replace_policy(config, &wallet_id, &policy, Some(&policy_file), mode).await
         }
-        PolicyCommand::AllowAll { wallet_id } => replace_policy(
-            config,
-            &wallet_id,
-            &WalletPolicy::allow_all_with_approval(),
-            None,
-            mode,
-        ),
-        PolicyCommand::RequireApproval { wallet_id } => replace_policy(
-            config,
-            &wallet_id,
-            &WalletPolicy::require_approval_for_everything(),
-            None,
-            mode,
-        ),
+        PolicyCommand::AllowAll { wallet_id } => {
+            replace_policy(
+                config,
+                &wallet_id,
+                &WalletPolicy::allow_all_with_approval(),
+                None,
+                mode,
+            )
+            .await
+        }
+        PolicyCommand::RequireApproval { wallet_id } => {
+            replace_policy(
+                config,
+                &wallet_id,
+                &WalletPolicy::require_approval_for_everything(),
+                None,
+                mode,
+            )
+            .await
+        }
         // Validation reads a file and writes nothing, so it needs neither a
         // configured wallet, the encrypted database, nor owner authentication.
         PolicyCommand::Validate { policy_file } => {
@@ -992,16 +998,23 @@ fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMode) ->
         }
         // The schema is itself a JSON document; there is no human form.
         PolicyCommand::Schema => print_json(&policy_json_schema()),
-        PolicyCommand::Review { wallet_id } => review_policy_proposal(config, &wallet_id, mode),
+        PolicyCommand::Review { wallet_id } => {
+            review_policy_proposal(config, &wallet_id, mode).await
+        }
     }
 }
 
 /// Review and apply the single pending agent-proposed policy for a wallet.
 /// The reviewer sees a minimized permission diff and the agent's rationale,
-/// never a raw JSON comparison; application is confirmed in the terminal and
-/// is revision-guarded end to end. No key material is read, so there is no
-/// platform authentication step.
-fn review_policy_proposal(config: &ConfigStore, wallet_id: &str, mode: OutputMode) -> Result<()> {
+/// never a raw JSON comparison; application is confirmed in the terminal,
+/// then authenticated against the OS — the policy decides what may be signed
+/// with nobody watching, so replacing it requires the owner even though no
+/// key material is read — and is revision-guarded end to end.
+async fn review_policy_proposal(
+    config: &ConfigStore,
+    wallet_id: &str,
+    mode: OutputMode,
+) -> Result<()> {
     let wallet = config.wallet(wallet_id)?;
     require_interactive("policy changes")?;
     let mut policies = PolicyStore::production(config.data_dir())?;
@@ -1054,6 +1067,12 @@ fn review_policy_proposal(config: &ConfigStore, wallet_id: &str, mode: OutputMod
         crate::tui::outro_cancel("Policy unchanged. The proposal is still pending.");
         return Ok(());
     }
+
+    PlatformHumanPresence
+        .confirm(&PresenceRequest::ReplacePolicy {
+            wallet: wallet.id.clone(),
+        })
+        .await?;
 
     // put() enforces the expected revision atomically, so a policy change
     // during the human review fails closed rather than applying stale rules.
@@ -2376,7 +2395,7 @@ fn print_approval_review(approval: &ApprovalRequest, simulation: &SimulationResu
     Ok(())
 }
 
-fn replace_policy(
+async fn replace_policy(
     config: &ConfigStore,
     wallet_id: &str,
     policy: &WalletPolicy,
@@ -2417,6 +2436,11 @@ fn replace_policy(
         crate::tui::outro_cancel("Policy unchanged.");
         return Ok(());
     }
+    PlatformHumanPresence
+        .confirm(&PresenceRequest::ReplacePolicy {
+            wallet: wallet.id.clone(),
+        })
+        .await?;
     let stored = policies.put(
         wallet_id,
         policy,

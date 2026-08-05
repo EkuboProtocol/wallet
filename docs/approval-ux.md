@@ -195,17 +195,22 @@ controls, not spending limits.
 
 ## Platform owner authentication
 
-The platform prompt is asked for at exactly one boundary: the private key
-coming out of the credential store, or leaving it for good. That is
-transaction, typed-data, and message signing, `wallet export`, and
-`wallet remove`. Changing a policy, a network, the address book, or the token
-database reads no key material and is confirmed in the terminal instead —
-a plain yes-or-no under the same facts, defaulting to no. A prompt that also
-appears before every saved alias is a prompt people clear without reading, and
-that costs more than it buys at the one prompt that matters.
+The platform prompt is asked for at two boundaries. The first is the private
+key coming out of the credential store, or leaving it for good: transaction,
+typed-data, and message signing, `wallet export`, and `wallet remove`. The
+second is the signing policy being replaced — `policy set`, the presets, or an
+agent proposal applied through `policy review`. A policy change reads no key
+material, but the policy is what decides what gets signed with nobody
+watching, so rewriting it is authenticated like signing. Changing a network,
+the address book, or the token database grants no signing authority and is
+confirmed in the terminal instead — a plain yes-or-no under the same facts,
+defaulting to no. A prompt that also appears before every saved alias is a
+prompt people clear without reading, and that costs more than it buys at the
+prompts that matter.
 
 The dialog says which wallet and what is about to happen to it: "sign a
-transaction from wallet primary", "reveal the private key for wallet primary".
+transaction from wallet primary", "reveal the private key for wallet primary",
+"replace the signing policy for wallet primary".
 It carries no digest. A digest in an OS dialog is not something a reader can
 check against anything, and it pushed the one clause they could read off the
 end of the line. What the signature is bound to is established by the terminal

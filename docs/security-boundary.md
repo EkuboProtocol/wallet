@@ -85,12 +85,15 @@ key custody. What bounds a compromised or misled agent is what the policy
 permits — the targets, the values, the call shapes — because once the policy
 allows an action, nothing further stands between the request and a signature.
 Owner authentication guards the exceptional path, where a human is present by
-definition, along with key export and wallet removal. It is asked for nowhere
-else: a policy, network, address book, or token change reads no key material,
-so it is confirmed in the terminal rather than authenticated, and the one
-prompt that does gate a signature stays worth reading. It is in any case an
-application-level check in the CLI, not an operating-system gate on the key. Choose a wallet's policy on that
-basis, and keep autonomous wallets funded accordingly.
+definition, along with key export, wallet removal — and policy replacement,
+precisely because the policy is that boundary: rewriting it changes what an
+agent can sign unattended, so it is authenticated like signing even though it
+reads no key material. It is asked for nowhere else: a network, address book,
+or token change grants no signing authority, so it is confirmed in the
+terminal rather than authenticated, and the prompts that do gate signing
+authority stay worth reading. It is in any case an application-level check in
+the CLI, not an operating-system gate on the key. Choose a wallet's policy on
+that basis, and keep autonomous wallets funded accordingly.
 
 SQLCipher protects confidentiality and page integrity, but there is no external
 anti-rollback anchor. Restoring an older valid encrypted database can restore

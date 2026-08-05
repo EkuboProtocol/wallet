@@ -46,16 +46,20 @@ Agents can propose policy changes with the `wallet_propose_policy` tool
 (guided by the `wallet://docs/policy-authoring` and `wallet://schemas/policy`
 resources), but only `policy review` applies one: it shows a minimized
 human-readable diff of the permissions against the current policy together
-with the agent's rationale, asks you to confirm it in the terminal, and fails
-closed if the policy changed since the proposal was written.
+with the agent's rationale, asks you to confirm it in the terminal and
+authenticate against the OS, and fails closed if the policy changed since the
+proposal was written.
 
-Every change above needs an interactive terminal. Two of them ask twice.
+Every change above needs an interactive terminal, and some ask twice.
 Signing a transaction, signing typed data or a message, exporting a private
 key, and removing a wallet are the moments the key itself is used or
 destroyed, so each is reviewed in the terminal and then authenticated against
-the OS — Touch ID, Windows Hello, or polkit. Policy, network, address book,
-and token changes never touch the key and are a yes-or-no in the terminal
-alone.
+the OS — Touch ID, Windows Hello, or polkit. Replacing a policy — a preset,
+a file, or an agent proposal through `policy review` — asks the same two
+ways: the policy decides what signs without you present, so rewriting it is
+authenticated like signing even though it never touches the key. Network,
+address book, and token changes touch neither the key nor the policy and are
+a yes-or-no in the terminal alone.
 
 On Linux, install the polkit action shipped in the archive before signing:
 
