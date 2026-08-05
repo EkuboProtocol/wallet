@@ -12,7 +12,7 @@ _ekubo-wallet() {
   if (( CURRENT == 3 )); then
     case "$words[2]" in
       wallet) _values "wallet command" list create import export remove ;;
-      network) _values "network command" list presets reset add remove delete ;;
+      network) _values "network command" list presets reset add edit remove delete ;;
       policy) _values "policy command" show set allow-all require-approval validate schema review ;;
       transaction|tx) _values "transaction command" list show ;;
       token) _values "token command" list ;;
@@ -38,7 +38,7 @@ _ekubo-wallet() {
         choices=("${(@f)$(ekubo-wallet __complete defaults-described 2>/dev/null)}")
         _describe "default network" choices
         ;;
-      network:remove|network:delete)
+      network:edit|network:remove|network:delete)
         choices=("${(@f)$(ekubo-wallet __complete networks-described 2>/dev/null)}")
         _describe "network" choices
         ;;

@@ -162,39 +162,34 @@ fn policy_validate_accepts_examples_and_rejects_malformed_documents() {
         .failure();
 }
 
+/// Every visible subcommand name clap knows about, at any depth.
+fn declared_subcommands(command: &clap::Command, into: &mut Vec<String>) {
+    for subcommand in command.get_subcommands() {
+        if subcommand.is_hide_set() {
+            continue;
+        }
+        into.push(subcommand.get_name().to_owned());
+        declared_subcommands(subcommand, into);
+    }
+}
+
 #[test]
 fn packaged_completions_offer_every_subcommand() {
-    // The completion scripts are hand-written for dynamic candidate lookups, so
-    // nothing regenerates them when a subcommand is added. This test is what
-    // catches that.
-    let expected = [
-        "server",
-        "version",
-        "wallet",
-        "network",
-        "policy",
-        "transaction",
-        "completion",
-        "create",
-        "import",
-        "export",
-        "remove",
-        "presets",
-        "reset",
-        "add",
-        "show",
-        "set",
-        "allow-all",
-        "require-approval",
-        "token",
-        "validate",
-        "schema",
-        "address-book",
-        "legal",
-        "accept",
-        "status",
-        "review",
-    ];
+    // The completion scripts are hand-written, because the candidates they
+    // offer are looked up at completion time from the live configuration.
+    // Nothing regenerates them when a subcommand is added, so this test is the
+    // only thing that notices — which is why the list it checks is read out of
+    // clap rather than kept by hand here. A hand-kept list goes stale in
+    // exactly the same way, and just as quietly, as the scripts do.
+    let mut expected = Vec::new();
+    declared_subcommands(
+        &<ekubo_wallet::cli::Cli as clap::CommandFactory>::command(),
+        &mut expected,
+    );
+    assert!(
+        expected.len() > 20,
+        "clap reported implausibly few subcommands: {expected:?}"
+    );
     for shell in ["bash", "zsh", "fish"] {
         let output = cli().arg("completion").arg(shell).output().unwrap();
         assert!(
@@ -202,15 +197,20 @@ fn packaged_completions_offer_every_subcommand() {
             "completion {shell} exited non-zero"
         );
         let script = String::from_utf8(output.stdout).expect("completion script is UTF-8");
-        for subcommand in expected {
+        for subcommand in &expected {
             assert!(
-                script.contains(subcommand),
+                script.contains(subcommand.as_str()),
                 "{shell} completion never offers `{subcommand}`"
             );
         }
-        assert!(
-            !script.contains("__configure-agent"),
-            "{shell} completion exposes a hidden internal subcommand"
+        // The scripts call `ekubo-wallet __complete <kind>` to look candidates
+        // up, so the name appears legitimately. What must never happen is the
+        // hidden subcommand being offered as a candidate itself, which shows
+        // up as an occurrence that is not part of that invocation.
+        assert_eq!(
+            script.matches("__complete").count(),
+            script.matches("ekubo-wallet __complete").count(),
+            "{shell} completion offers the hidden __complete subcommand"
         );
     }
 }

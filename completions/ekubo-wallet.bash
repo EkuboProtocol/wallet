@@ -18,7 +18,7 @@ _ekubo_wallet() {
     2)
       case "$first" in
         wallet) choices="list create import export remove" ;;
-        network) choices="list presets reset add remove delete" ;;
+        network) choices="list presets reset add edit remove delete" ;;
         policy) choices="show set allow-all require-approval validate schema review" ;;
         transaction|tx) choices="list show" ;;
         token) choices="list" ;;
@@ -40,7 +40,7 @@ _ekubo_wallet() {
         network:add)
           choices="$(ekubo-wallet __complete defaults 2>/dev/null)"
           ;;
-        network:remove|network:delete)
+        network:edit|network:remove|network:delete)
           choices="$(ekubo-wallet __complete networks 2>/dev/null)"
           ;;
         address-book:list|address-book:add|address-book:remove|address-book:delete)

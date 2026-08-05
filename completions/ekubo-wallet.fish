@@ -12,7 +12,7 @@ complete -c ekubo-wallet -f
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a server -d 'Run the MCP server over stdio'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a version -d 'Print version information'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a wallet -d 'Create, import, inspect, export, or remove wallets'
-complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a network -d 'Inspect, add, reset, or remove networks'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a network -d 'Inspect, add, edit, reset, or remove networks'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a policy -d 'Set or inspect wallet policies'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a transaction -d 'Inspect signed and broadcast transactions'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a tx -d 'Inspect signed and broadcast transactions'
@@ -27,7 +27,7 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l help -d 'Show comman
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print version information'
 
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
-complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from list presets reset add remove delete' -a 'list presets reset add remove delete'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from list presets reset add edit remove delete' -a 'list presets reset add edit remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema review' -a 'show set allow-all require-approval validate schema review'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show' -a 'list show'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from token; and not __fish_seen_subcommand_from list' -a 'list'
@@ -40,7 +40,7 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from completion; and not __f
 
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from export remove; and __fish_seen_subcommand_from wallet' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete defaults-fish 2>/dev/null)'
-complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from remove delete; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from edit remove delete; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show set allow-all require-approval review; and __fish_seen_subcommand_from policy' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from list; and __fish_seen_subcommand_from transaction tx' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from review' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
