@@ -194,6 +194,13 @@ pub struct BalanceChanges {
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct SimulationResult {
+    /// Identifies this exact result so it can be sent without simulating
+    /// again. Usable once, for a short time, and only for the wallet and chain
+    /// it was produced for. Absent on a fork, whose results are hypothetical
+    /// and can never be sent, and on a result that has just been consumed by a
+    /// send.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simulation_id: Option<uuid::Uuid>,
     pub digest: String,
     pub allowed: bool,
     pub policy_findings: Vec<PolicyFinding>,
@@ -647,6 +654,8 @@ pub async fn simulate_execution(
         });
     }
     Ok(SimulationResult {
+        // Stamped by the caller that records it, if it records it at all.
+        simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
         allowed: simulation.success && policy_allows(&findings),
         policy_findings: findings,
@@ -1228,6 +1237,7 @@ fn base_failure_result(
         step: None,
     });
     SimulationResult {
+        simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
         allowed: false,
         policy_findings: findings,

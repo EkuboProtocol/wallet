@@ -20,6 +20,7 @@ pub mod policy_store;
 pub mod render;
 pub mod rpc;
 pub mod simulation;
+pub mod simulation_store;
 pub mod token_store;
 pub mod tui;
 pub mod typed_data;

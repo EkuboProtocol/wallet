@@ -13,11 +13,11 @@
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
-| `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. With a `fork_id`, simulates on top of that fork and appends the plan on success. |
+| `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
 | `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
 | `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
 | `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. Takes the same `on_simulation_failure` choice as `wallet_send_execution_plan`. |
-| `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; or submit an already-approved request ID. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
+| `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_wait_for_execution` | Wait for the plan to be executed: bounded polling for the receipt, plus an optional number of confirmations before resolving. |
@@ -41,6 +41,16 @@ when the user wants one of those and nothing connected can prepare it. That is
 a capability pointer, not a trust statement: a plan from there is validated,
 simulated, and policy-checked exactly like a plan from anywhere else, and no
 code path in this process treats a plan's origin as meaningful.
+
+`eth_simulateV1` is the most expensive request this wallet makes, and an agent
+that simulates a plan to show the user what it does should not pay for that
+work twice. A simulation against real chain state returns a `simulation_id`;
+passing it to `wallet_send_execution_plan` instead of the plan sends exactly
+what was simulated, with no second simulation. The recorded entry carries the
+plan too, so the two cannot disagree. It is usable once, expires two minutes
+after it was produced, and is refused if the wallet, chain, or active policy
+revision has moved since — in each of those cases simulate again and send the
+new identifier. Fork simulations return no `simulation_id` at all.
 
 On simulation failure, `simulation.failure` reports a category, the raw revert
 bytes and selector when available, decoded `Error(string)`/`Panic(uint256)`

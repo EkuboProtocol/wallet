@@ -618,6 +618,7 @@ mod tests {
             BalanceChanges, ExecutionMode, NativeBalanceChange, SimulationExecution,
         };
         SimulationResult {
+            simulation_id: None,
             digest: "0x00".into(),
             allowed: true,
             policy_findings: Vec::new(),

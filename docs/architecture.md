@@ -20,6 +20,14 @@ daemon. There is one signing implementation and no generic digest-signing API.
   parent linkage, simulated block number, call count, canonical Calibur runtime
   hash, balance probes, and returned transfer logs. There is no local EVM,
   `eth_getProof` reconstruction, or `eth_call` fallback for signing decisions.
+- Recorded simulations (`src/simulation_store.rs`) are also in-process only.
+  Simulating against real chain state returns a `simulation_id`, and a send may
+  consume that recorded result instead of executing the identical
+  `eth_simulateV1` request again seconds later. An entry supplies the plan as
+  well as the result, is consumed on use, expires in two minutes, and is
+  refused if the wallet, chain, or policy revision it was evaluated under has
+  moved. The approval CLI is a different process and always re-simulates, so a
+  human decides against the chain as it is when they decide.
 - Temporary simulation forks (`src/fork.rs`) are held only in process memory as
   an ordered list of already-validated plans plus one pinned parent block.
   Every call replays that list as consecutive `eth_simulateV1` blocks, so the
