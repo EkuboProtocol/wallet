@@ -87,7 +87,7 @@ One consequence worth stating while the repository is private: keyless Sigstore
 signing records each signature in the **public** Rekor transparency log. Those
 entries contain this repository's full name, the workflow path, and the release
 tag. The artifacts themselves are not published, but the fact that
-`EkuboProtocol/secure-wallet-mcp-server` cut a given release at a given time
+`EkuboProtocol/wallet-mcp-server` cut a given release at a given time
 becomes publicly discoverable. That is inherent to public-good transparency
 logging and is the price of the verifiability the bundles provide. If that
 disclosure is unacceptable before a public launch, remove the Cosign steps and
@@ -98,7 +98,7 @@ rely on checksums until the repository is public.
 ### GitHub
 
 1. Create or use the Ekubo GitHub organization and create the repository at
-   `EkuboProtocol/secure-wallet-mcp-server` (or update `Cargo.toml` and documentation
+   `EkuboProtocol/wallet-mcp-server` (or update `Cargo.toml` and documentation
    if the final owner differs).
 2. Enable GitHub Actions. Artifact attestations work for public repositories;
    private-repository attestations require GitHub Enterprise Cloud.
@@ -157,9 +157,9 @@ recommended public-trust code-signing path for Win32 software.
 2. Create a dedicated Microsoft Entra application/service principal for this
    release workflow. Do not create a client secret.
 3. Add a federated credential for GitHub Actions with entity type
-   **Environment**, repository `EkuboProtocol/secure-wallet-mcp-server`, and
+   **Environment**, repository `EkuboProtocol/wallet-mcp-server`, and
    environment `release`. Its subject is
-   `repo:EkuboProtocol/secure-wallet-mcp-server:environment:release`.
+   `repo:EkuboProtocol/wallet-mcp-server:environment:release`.
 4. Assign only **Artifact Signing Certificate Profile Signer** to that service
    principal, scoped to the one certificate profile.
 5. Add these `release` environment secrets:
@@ -187,7 +187,7 @@ Artifact Signing account `ekubo`, whose account URI is
 `https://eus.codesigning.azure.net/`. Entra application
 `ekubo-wallet-release-signing` exists with no client secret and one federated
 credential, `github-release-environment`, whose subject is
-`repo:EkuboProtocol/secure-wallet-mcp-server:environment:release`. The three
+`repo:EkuboProtocol/wallet-mcp-server:environment:release`. The three
 `release` environment secrets are set.
 
 What remains, in order:
@@ -258,7 +258,7 @@ Verify the GitHub provenance (replace the owner if the final repository differs)
 
 ```sh
 gh attestation verify ekubo-wallet-<version>-<target>.<archive> \
-  --repo EkuboProtocol/secure-wallet-mcp-server
+  --repo EkuboProtocol/wallet-mcp-server
 ```
 
 Verify its keyless Sigstore signature with the adjacent `.sigstore.json` file:
@@ -267,7 +267,7 @@ Verify its keyless Sigstore signature with the adjacent `.sigstore.json` file:
 cosign verify-blob \
   --bundle ekubo-wallet-<version>-<target>.<archive>.sigstore.json \
   --certificate-identity-regexp \
-  '^https://github.com/EkuboProtocol/secure-wallet-mcp-server/.github/workflows/release.yml@refs/tags/v[0-9]' \
+  '^https://github.com/EkuboProtocol/wallet-mcp-server/.github/workflows/release.yml@refs/tags/v[0-9]' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ekubo-wallet-<version>-<target>.<archive>
 ```

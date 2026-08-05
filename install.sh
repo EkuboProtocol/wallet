@@ -12,7 +12,7 @@
 # download; agent registration and completions work identically.
 set -eu
 
-REPOSITORY=${EKUBO_WALLET_REPOSITORY:-EkuboProtocol/secure-wallet-mcp-server}
+REPOSITORY=${EKUBO_WALLET_REPOSITORY:-EkuboProtocol/wallet-mcp-server}
 VERSION=${EKUBO_WALLET_VERSION:-latest}
 LOCAL_SOURCE=${EKUBO_WALLET_LOCAL_SOURCE:-}
 SERVER_NAME=ekubo-wallet

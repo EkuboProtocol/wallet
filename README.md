@@ -53,7 +53,7 @@ verifies the Sigstore signature when `cosign` is installed, installs
 login shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/secure-wallet-mcp-server/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
 ```
 
 Read [`install.sh`](install.sh) before piping it to a shell. Replace `main` with
@@ -76,13 +76,13 @@ Useful environment variables:
 ### Manual installation
 
 Download the archive for your platform from the
-[releases page](https://github.com/EkuboProtocol/secure-wallet-mcp-server/releases),
+[releases page](https://github.com/EkuboProtocol/wallet-mcp-server/releases),
 verify it, and put the executables on `PATH`:
 
 ```sh
 sha256sum --check SHA256SUMS --ignore-missing
 gh attestation verify ekubo-wallet-<version>-<target>.tar.gz \
-  --repo EkuboProtocol/secure-wallet-mcp-server
+  --repo EkuboProtocol/wallet-mcp-server
 tar -xzf ekubo-wallet-<version>-<target>.tar.gz
 install -m 0755 ekubo-wallet-<version>-<target>/ekubo-wallet ~/.local/bin/
 ln -sf ekubo-wallet ~/.local/bin/ew

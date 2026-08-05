@@ -4,7 +4,7 @@ version = "0.3.0-rc.0"
 edition = "2024"
 rust-version = "1.91"
 description = "Local-first EVM wallet, CLI, and MCP server with policy-enforced signing"
-repository = "https://github.com/EkuboProtocol/secure-wallet-mcp-server"
+repository = "https://github.com/EkuboProtocol/wallet-mcp-server"
 keywords = ["mcp", "ethereum", "wallet", "eip-7702"]
 categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
 

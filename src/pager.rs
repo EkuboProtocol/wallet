@@ -56,7 +56,7 @@ pub fn read_fully(title: &str, body: &str) -> Result<Outcome> {
     if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
         return Ok(Outcome::Quit);
     }
-    let _screen = Screen::enter()?;
+    let mut screen = Screen::enter()?;
     let paragraphs: Vec<&str> = body.split('\n').collect();
 
     let mut offset = 0usize;
@@ -68,12 +68,19 @@ pub fn read_fully(title: &str, body: &str) -> Result<Outcome> {
         if (columns, rows) != last_layout {
             wrapped = wrap(&paragraphs, body_columns(columns));
             last_layout = (columns, rows);
+            // A resized terminal invalidates every painted row, including any
+            // that now sit outside it, so this is the one place worth wiping
+            // the whole screen.
+            screen.invalidate()?;
         }
         let viewport = (rows as usize).saturating_sub(CHROME_ROWS).max(1);
         let max_offset = wrapped.len().saturating_sub(viewport);
         offset = offset.min(max_offset);
 
-        draw(title, &wrapped, offset, max_offset, viewport, columns)?;
+        screen.paint(
+            frame(title, &wrapped, offset, max_offset, viewport, columns),
+            columns,
+        )?;
 
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -139,44 +146,40 @@ fn body_columns(columns: u16) -> usize {
         .max(MINIMUM_BODY_COLUMNS)
 }
 
-fn draw(
+/// How one row is emphasized. Part of a row's identity for diffing, so a line
+/// that keeps its text but changes emphasis still gets repainted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Emphasis {
+    /// The document title.
+    Title,
+    /// Document text.
+    Body,
+    /// The status bar.
+    Status,
+}
+
+/// The rows the screen should be showing, top to bottom. Building the whole
+/// frame up front and handing it over is what lets the painter compare it
+/// against what is already on screen.
+fn frame(
     title: &str,
     wrapped: &[String],
     offset: usize,
     max_offset: usize,
     viewport: usize,
     columns: u16,
-) -> Result<()> {
-    let mut out = io::stderr().lock();
-    // Every row is positioned absolutely. Writing past the last row would
-    // scroll the alternate screen and silently shift everything up by one,
-    // which is the exact failure this pager exists to avoid.
-    queue!(out, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
-    queue!(
-        out,
-        SetAttribute(Attribute::Bold),
-        Print(clip(title, columns as usize)),
-        SetAttribute(Attribute::Reset),
-    )?;
-
-    for (row, line) in wrapped.iter().skip(offset).take(viewport).enumerate() {
-        queue!(
-            out,
-            cursor::MoveTo(0, row_index(row + 1)),
-            Print(" "),
-            Print(line),
-        )?;
+) -> Vec<(Emphasis, String)> {
+    let width = columns as usize;
+    let mut rows = Vec::with_capacity(viewport + CHROME_ROWS);
+    rows.push((Emphasis::Title, clip(title, width)));
+    for line in wrapped.iter().skip(offset).take(viewport) {
+        rows.push((Emphasis::Body, format!(" {line}")));
     }
-
-    queue!(
-        out,
-        cursor::MoveTo(0, row_index(viewport + 1)),
-        SetAttribute(Attribute::Reverse),
-        Print(clip(&footer(offset, max_offset), columns as usize)),
-        SetAttribute(Attribute::Reset),
-    )?;
-    out.flush()?;
-    Ok(())
+    // Short documents leave the viewport partly empty; those rows still have
+    // to be listed so the painter can erase whatever a taller frame left.
+    rows.resize(viewport + 1, (Emphasis::Body, String::new()));
+    rows.push((Emphasis::Status, clip(&footer(offset, max_offset), width)));
+    rows
 }
 
 fn row_index(row: usize) -> u16 {
@@ -339,19 +342,84 @@ fn clip(text: &str, columns: usize) -> String {
     kept
 }
 
-/// Owns the terminal takeover. Restoring on drop rather than at the end of
-/// [`read_fully`] means an error or a panic mid-document still hands the
-/// terminal back in raw-mode-off, main-screen, cursor-visible state.
-struct Screen;
+/// Owns the terminal takeover, and remembers what it drew.
+///
+/// Restoring on drop rather than at the end of [`read_fully`] means an error
+/// or a panic mid-document still hands the terminal back in raw-mode-off,
+/// main-screen, cursor-visible state.
+struct Screen {
+    /// What is currently on each row, so a redraw can rewrite only the rows
+    /// that actually changed.
+    painted: Vec<(Emphasis, String)>,
+}
 
 impl Screen {
     fn enter() -> Result<Self> {
         terminal::enable_raw_mode()?;
         // Claimed only after raw mode succeeds, so the drop below always has
         // exactly the state it needs to undo.
-        let guard = Self;
-        execute!(io::stderr(), EnterAlternateScreen, cursor::Hide)?;
+        let guard = Self {
+            painted: Vec::new(),
+        };
+        execute!(
+            io::stderr(),
+            EnterAlternateScreen,
+            cursor::Hide,
+            Clear(ClearType::All)
+        )?;
         Ok(guard)
+    }
+
+    /// Forget what is on screen, so the next paint rewrites all of it.
+    fn invalidate(&mut self) -> Result<()> {
+        self.painted.clear();
+        execute!(io::stderr(), Clear(ClearType::All))?;
+        Ok(())
+    }
+
+    /// Make the screen show `rows`, writing as little as possible.
+    ///
+    /// Clearing the screen and repainting every row on each keystroke is what
+    /// a first cut does, and it is wrong twice over: the clear (`ESC[2J`) is
+    /// the sequence terminals copy into their scrollback, so every keypress
+    /// leaves another screenful of the document behind, and repainting rows
+    /// that did not change flashes. Comparing against the last frame fixes
+    /// both — pressing Up at the top of a document now writes nothing at all,
+    /// because nothing about the screen is different.
+    fn paint(&mut self, rows: Vec<(Emphasis, String)>, columns: u16) -> Result<()> {
+        let mut out = io::stderr().lock();
+        for (index, row) in rows.iter().enumerate() {
+            if self.painted.get(index) == Some(row) {
+                continue;
+            }
+            let (emphasis, text) = row;
+            queue!(out, cursor::MoveTo(0, row_index(index)))?;
+            match emphasis {
+                Emphasis::Title => queue!(out, SetAttribute(Attribute::Bold))?,
+                Emphasis::Status => queue!(out, SetAttribute(Attribute::Reverse))?,
+                Emphasis::Body => {}
+            }
+            // Attributes are reset before the erase so the cleared remainder
+            // of the line does not inherit the status bar's inverted colors.
+            queue!(
+                out,
+                Print(clip(text, columns as usize)),
+                SetAttribute(Attribute::Reset),
+                Clear(ClearType::UntilNewLine),
+            )?;
+        }
+        // A frame shorter than the last one leaves rows behind; erase them
+        // rather than clearing the whole screen to be rid of them.
+        for index in rows.len()..self.painted.len() {
+            queue!(
+                out,
+                cursor::MoveTo(0, row_index(index)),
+                Clear(ClearType::UntilNewLine)
+            )?;
+        }
+        out.flush()?;
+        self.painted = rows;
+        Ok(())
     }
 }
 
@@ -425,6 +493,32 @@ mod tests {
         assert_eq!(bullet_width("12. item"), 4);
         assert_eq!(bullet_width("-dash-prefixed prose"), 0);
         assert_eq!(bullet_width("2026 was the year"), 0);
+    }
+
+    #[test]
+    fn an_unchanged_view_produces_an_identical_frame() {
+        // The painter writes only the rows that differ from the last frame,
+        // so a keystroke that moves nothing has to produce a byte-identical
+        // frame or it repaints the screen for no reason.
+        let wrapped: Vec<String> = (0..40).map(|line| format!("line {line}")).collect();
+        let before = frame("Title", &wrapped, 0, 20, 22, 80);
+        let after = frame("Title", &wrapped, 0, 20, 22, 80);
+        assert_eq!(before, after);
+        // Scrolling does change it, and the status row along with the body.
+        let scrolled = frame("Title", &wrapped, 1, 20, 22, 80);
+        assert_ne!(before, scrolled);
+    }
+
+    #[test]
+    fn a_frame_always_fills_the_screen_it_was_sized_for() {
+        // Every row is listed even when the document runs out, so the painter
+        // erases leftovers instead of the whole screen being cleared.
+        let short = vec!["only line".to_owned()];
+        let rows = frame("Title", &short, 0, 0, 22, 80);
+        assert_eq!(rows.len(), 24, "title + 22 body rows + status");
+        assert_eq!(rows[0].0, Emphasis::Title);
+        assert_eq!(rows[23].0, Emphasis::Status);
+        assert!(rows[2..23].iter().all(|(_, text)| text.is_empty()));
     }
 
     #[test]

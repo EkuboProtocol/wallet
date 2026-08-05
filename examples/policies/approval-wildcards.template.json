@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/secure-wallet-mcp-server/main/schemas/policy.schema.json",
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
   "version": 2,
   "require_simulation": true,
   "approval_expiry_seconds": 300,
