@@ -2,6 +2,7 @@ pub mod abi_decoder;
 pub mod address_book;
 pub mod address_book_browser;
 pub mod approval;
+pub mod approval_engine;
 pub mod approval_summary;
 pub mod batch_read;
 pub mod input_validation;
