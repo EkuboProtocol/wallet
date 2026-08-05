@@ -109,7 +109,7 @@ database, wrong key, corrupt page, unsupported schema, or configured wallet
 without a policy fails closed.
 
 Policy revisions provide optimistic concurrency. Pending rows bind the full
-plan and digest, policy revision, expiry, approval status, optional review
+plan and digest, policy revision, approval status, optional review
 digest, signed bytes/hash, broadcast hash, block number, and lifecycle state.
 At most one signed/submitting/broadcast transaction exists for a wallet/chain.
 

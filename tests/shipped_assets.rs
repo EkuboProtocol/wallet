@@ -66,10 +66,7 @@ fn allow_all_template_matches_the_built_in_profile() {
     .expect("template parses");
     let built_in = WalletPolicy::allow_all_with_approval();
     assert_eq!(template.chains, built_in.chains);
-    assert_eq!(
-        template.approval_expiry_seconds,
-        built_in.approval_expiry_seconds
-    );
+    assert_eq!(template.version, built_in.version);
 }
 
 #[test]
@@ -81,10 +78,7 @@ fn require_approval_profile_matches_the_shipped_deny_all_example() {
         WalletPolicy::parse(read_json("examples/policies/deny-all.json")).expect("example parses");
     let built_in = WalletPolicy::require_approval_for_everything();
     assert_eq!(example.chains, built_in.chains);
-    assert_eq!(
-        example.approval_expiry_seconds,
-        built_in.approval_expiry_seconds
-    );
+    assert_eq!(example.version, built_in.version);
 }
 
 #[test]

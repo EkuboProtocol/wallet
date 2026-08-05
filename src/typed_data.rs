@@ -13,7 +13,7 @@ use crate::policy_store::PolicyStore;
 use alloy::primitives::{Address, B256, U256, address};
 use alloy_dyn_abi::TypedData;
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,8 +32,6 @@ const PERMIT2_BATCH_TYPE: &str = "PermitBatch(PermitDetails[] details,address sp
 const PERMIT2_TRANSFER_TYPE: &str = "PermitTransferFrom(TokenPermissions permitted,address spender,uint256 nonce,uint256 deadline)TokenPermissions(address token,uint256 amount)";
 const PERMIT2_BATCH_TRANSFER_TYPE: &str = "PermitBatchTransferFrom(TokenPermissions[] permitted,address spender,uint256 nonce,uint256 deadline)TokenPermissions(address token,uint256 amount)";
 
-/// Typed-data approval requests expire like exceptional transactions do.
-pub const TYPED_DATA_APPROVAL_EXPIRY_SECONDS: i64 = 900;
 const MAX_AWAITING_PER_WALLET: i64 = 64;
 /// Serialized typed data larger than this is rejected before parsing.
 pub const MAX_TYPED_DATA_BYTES: usize = 262_144;
@@ -44,7 +42,6 @@ pub enum TypedDataStatus {
     AwaitingApproval,
     Rejected,
     Signed,
-    Expired,
 }
 
 impl TypedDataStatus {
@@ -53,7 +50,6 @@ impl TypedDataStatus {
             "awaiting_approval" => Ok(Self::AwaitingApproval),
             "rejected" => Ok(Self::Rejected),
             "signed" => Ok(Self::Signed),
-            "expired" => Ok(Self::Expired),
             _ => anyhow::bail!("stored typed-data request has invalid status {value}"),
         }
     }
@@ -71,7 +67,6 @@ pub struct PendingTypedData {
     pub digest: String,
     pub status: TypedDataStatus,
     pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<DateTime<Utc>>,
@@ -339,11 +334,6 @@ impl TypedDataStore {
         let created_at = Utc::now();
         let digest = format!("{digest:#x}");
         let transaction = self.database.connection.transaction()?;
-        transaction.execute(
-            "UPDATE pending_typed_data SET status = 'expired', updated_at = ?1
-             WHERE status = 'awaiting_approval' AND expires_at <= ?1",
-            [created_at.to_rfc3339()],
-        )?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT request_id FROM pending_typed_data
@@ -369,12 +359,11 @@ impl TypedDataStore {
         );
 
         let request_id = Uuid::new_v4();
-        let expires_at = created_at + TimeDelta::seconds(TYPED_DATA_APPROVAL_EXPIRY_SECONDS);
         transaction.execute(
             "INSERT INTO pending_typed_data(
                 request_id, wallet_id, chain_id, typed_data_json, digest,
-                status, created_at, expires_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting_approval', ?6, ?7, ?6)",
+                status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting_approval', ?6, ?6)",
             params![
                 request_id.to_string(),
                 wallet_id,
@@ -382,7 +371,6 @@ impl TypedDataStore {
                 serde_json::to_string(typed_data)?,
                 digest,
                 created_at.to_rfc3339(),
-                expires_at.to_rfc3339(),
             ],
         )?;
         transaction.commit()?;
@@ -390,16 +378,7 @@ impl TypedDataStore {
     }
 
     pub fn get(&self, request_id: Uuid) -> Result<PendingTypedData> {
-        let mut record = self.read(request_id)?;
-        if record.status == TypedDataStatus::AwaitingApproval && record.expires_at <= Utc::now() {
-            self.database.connection.execute(
-                "UPDATE pending_typed_data SET status = 'expired', updated_at = ?2
-                 WHERE request_id = ?1 AND status = 'awaiting_approval'",
-                params![request_id.to_string(), Utc::now().to_rfc3339()],
-            )?;
-            record = self.read(request_id)?;
-        }
-        Ok(record)
+        self.read(request_id)
     }
 
     pub fn reject(&mut self, request_id: Uuid) -> Result<PendingTypedData> {
@@ -429,12 +408,11 @@ impl TypedDataStore {
     ) -> Result<PendingTypedData> {
         validate_signature_hex(signature)?;
         let transaction = self.database.connection.transaction()?;
-        let (digest, status, expires_at): (String, String, String) = transaction
+        let (digest, status): (String, String) = transaction
             .query_row(
-                "SELECT digest, status, expires_at
-                 FROM pending_typed_data WHERE request_id = ?1",
+                "SELECT digest, status FROM pending_typed_data WHERE request_id = ?1",
                 [request_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .with_context(|| format!("unknown typed-data request {request_id}"))?;
         ensure!(
@@ -444,10 +422,6 @@ impl TypedDataStore {
         ensure!(
             TypedDataStatus::parse(&status)? == TypedDataStatus::AwaitingApproval,
             "typed-data request is not awaiting approval"
-        );
-        ensure!(
-            parse_time(&expires_at)? > Utc::now(),
-            "typed-data request expired"
         );
         let now = Utc::now().to_rfc3339();
         transaction.execute(
@@ -497,7 +471,7 @@ impl TypedDataStore {
             .connection
             .query_row(
                 "SELECT wallet_id, chain_id, typed_data_json, digest, status,
-                        created_at, expires_at, updated_at, approved_at, rejected_at,
+                        created_at, updated_at, approved_at, rejected_at,
                         signature
                  FROM pending_typed_data WHERE request_id = ?1",
                 [request_id.to_string()],
@@ -510,10 +484,9 @@ impl TypedDataStore {
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
                         row.get::<_, Option<String>>(9)?,
-                        row.get::<_, Option<String>>(10)?,
                     ))
                 },
             )
@@ -525,7 +498,6 @@ impl TypedDataStore {
             digest,
             status,
             created_at,
-            expires_at,
             updated_at,
             approved_at,
             rejected_at,
@@ -556,7 +528,6 @@ impl TypedDataStore {
             digest,
             status: TypedDataStatus::parse(&status)?,
             created_at: parse_time(&created_at)?,
-            expires_at: parse_time(&expires_at)?,
             updated_at: parse_time(&updated_at)?,
             approved_at: approved_at.as_deref().map(parse_time).transpose()?,
             rejected_at: rejected_at.as_deref().map(parse_time).transpose()?,

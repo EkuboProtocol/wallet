@@ -21,12 +21,6 @@
       "additionalProperties": {
         "$ref": "#/$defs/ChainPolicy"
       }
-    },
-    "approval_expiry_seconds": {
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0,
-      "default": 600
     }
   },
   "additionalProperties": false,
@@ -42,14 +36,6 @@
             "string",
             "null"
           ]
-        },
-        "approval_expiry_seconds": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
         },
         "max_calls_per_batch": {
           "type": "integer",

@@ -9,7 +9,7 @@ use crate::{
 };
 use alloy::primitives::B256;
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,6 @@ pub enum PendingStatus {
     Broadcast,
     Confirmed,
     Reverted,
-    Expired,
     Cancelled,
     /// The envelope's nonce was consumed on chain by a different transaction
     /// (for example one sent from the same key imported on another device),
@@ -51,7 +50,6 @@ impl PendingStatus {
             "broadcast" => Ok(Self::Broadcast),
             "confirmed" => Ok(Self::Confirmed),
             "reverted" => Ok(Self::Reverted),
-            "expired" => Ok(Self::Expired),
             "cancelled" => Ok(Self::Cancelled),
             "replaced" => Ok(Self::Replaced),
             "cancelling" => Ok(Self::Cancelling),
@@ -76,7 +74,6 @@ pub struct PendingTransaction {
     pub approval_required: bool,
     pub status: PendingStatus,
     pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<DateTime<Utc>>,
@@ -128,16 +125,11 @@ impl PendingStore {
         network_name: &str,
         plan: &ExecutionPlan,
         policy_revision: u64,
-        approval_expiry_seconds: u32,
     ) -> Result<PendingTransaction> {
         validate_wallet_id(wallet_id)?;
         ensure!(
             !network_name.trim().is_empty(),
             "network name cannot be empty"
-        );
-        ensure!(
-            approval_expiry_seconds > 0,
-            "approval expiry must be positive"
         );
         plan.validate()?;
         let policy_revision =
@@ -157,11 +149,6 @@ impl PendingStore {
 
         let created_at = Utc::now();
         let digest = format!("{:#x}", plan.digest());
-        transaction.execute(
-            "UPDATE pending_transactions SET status = 'expired', updated_at = ?1
-             WHERE status = 'awaiting_approval' AND expires_at <= ?1",
-            [created_at.to_rfc3339()],
-        )?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT request_id FROM pending_transactions
@@ -187,13 +174,12 @@ impl PendingStore {
         );
 
         let request_id = Uuid::new_v4();
-        let expires_at = created_at + TimeDelta::seconds(i64::from(approval_expiry_seconds));
         let plan_json = serde_json::to_string(plan)?;
         transaction.execute(
             "INSERT INTO pending_transactions(
                 request_id, wallet_id, network_name, chain_id, plan_json,
-                plan_digest, policy_revision, status, created_at, expires_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'awaiting_approval', ?8, ?9, ?8)",
+                plan_digest, policy_revision, status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'awaiting_approval', ?8, ?8)",
             params![
                 request_id.to_string(),
                 wallet_id,
@@ -203,7 +189,6 @@ impl PendingStore {
                 digest,
                 policy_revision,
                 created_at.to_rfc3339(),
-                expires_at.to_rfc3339(),
             ],
         )?;
         transaction.commit()?;
@@ -251,9 +236,9 @@ impl PendingStore {
             .execute(
                 "INSERT INTO pending_transactions(
                 request_id, wallet_id, network_name, chain_id, plan_json,
-                plan_digest, policy_revision, status, created_at, expires_at, updated_at,
+                plan_digest, policy_revision, status, created_at, updated_at,
                 serialized_transaction, signed_transaction_hash, approval_required
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'signed', ?8, ?8, ?8, ?9, ?10, 0)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'signed', ?8, ?8, ?9, ?10, 0)",
                 params![
                     request_id.to_string(),
                     wallet_id,
@@ -313,27 +298,17 @@ impl PendingStore {
     }
 
     pub fn get(&self, request_id: Uuid) -> Result<PendingTransaction> {
-        let mut record = self.read(request_id)?;
-        if record.status == PendingStatus::AwaitingApproval && record.expires_at <= Utc::now() {
-            let updated_at = Utc::now();
-            self.database.connection.execute(
-                "UPDATE pending_transactions SET status = 'expired', updated_at = ?2
-                 WHERE request_id = ?1 AND status = 'awaiting_approval'",
-                params![request_id.to_string(), updated_at.to_rfc3339()],
-            )?;
-            record = self.read(request_id)?;
-        }
-        Ok(record)
+        self.read(request_id)
     }
 
     pub fn reject(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
         let transaction = self.database.connection.transaction()?;
-        let (status, expires_at, approval_required): (String, String, i64) = transaction
+        let (status, approval_required): (String, i64) = transaction
             .query_row(
-                "SELECT status, expires_at, approval_required
+                "SELECT status, approval_required
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .with_context(|| format!("unknown pending request {request_id}"))?;
         ensure!(
@@ -343,10 +318,6 @@ impl PendingStore {
         ensure!(
             PendingStatus::parse(&status)? == PendingStatus::AwaitingApproval,
             "pending request is not awaiting approval"
-        );
-        ensure!(
-            parse_time(&expires_at)? > Utc::now(),
-            "pending request expired"
         );
         let now = Utc::now().to_rfc3339();
         transaction.execute(
@@ -373,17 +344,16 @@ impl PendingStore {
         validate_hex(serialized_transaction, None)?;
         validate_hex(transaction_hash, Some(32))?;
         let transaction = self.database.connection.transaction()?;
-        let (wallet_id, chain_id, digest, policy_revision, status, expires_at, approval_required): (
+        let (wallet_id, chain_id, digest, policy_revision, status, approval_required): (
             String,
             String,
             String,
             i64,
-            String,
             String,
             i64,
         ) = transaction
             .query_row(
-                "SELECT wallet_id, chain_id, plan_digest, policy_revision, status, expires_at,
+                "SELECT wallet_id, chain_id, plan_digest, policy_revision, status,
                         approval_required
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id.to_string()],
@@ -395,7 +365,6 @@ impl PendingStore {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
-                        row.get(6)?,
                     ))
                 },
             )
@@ -408,10 +377,6 @@ impl PendingStore {
         ensure!(
             PendingStatus::parse(&status)? == PendingStatus::AwaitingApproval,
             "pending request is not awaiting approval"
-        );
-        ensure!(
-            parse_time(&expires_at)? > Utc::now(),
-            "pending request expired"
         );
         let active_revision: Option<i64> = transaction
             .query_row(
@@ -748,7 +713,7 @@ impl PendingStore {
             .connection
             .query_row(
                 "SELECT wallet_id, network_name, chain_id, plan_json, plan_digest,
-                        policy_revision, status, created_at, expires_at, updated_at,
+                        policy_revision, status, created_at, updated_at,
                         approved_at, rejected_at, serialized_transaction,
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
                         approval_required, review_digest, cancel_serialized_transaction,
@@ -765,20 +730,19 @@ impl PendingStore {
                         policy_revision: row.get(5)?,
                         status: row.get(6)?,
                         created_at: row.get(7)?,
-                        expires_at: row.get(8)?,
-                        updated_at: row.get(9)?,
-                        approved_at: row.get(10)?,
-                        rejected_at: row.get(11)?,
-                        serialized_transaction: row.get(12)?,
-                        signed_transaction_hash: row.get(13)?,
-                        broadcast_transaction_hash: row.get(14)?,
-                        block_number: row.get(15)?,
-                        approval_required: row.get(16)?,
-                        review_digest: row.get(17)?,
-                        cancel_serialized_transaction: row.get(18)?,
-                        cancel_transaction_hashes: row.get(19)?,
-                        gas_used: row.get(20)?,
-                        effective_gas_price: row.get(21)?,
+                        updated_at: row.get(8)?,
+                        approved_at: row.get(9)?,
+                        rejected_at: row.get(10)?,
+                        serialized_transaction: row.get(11)?,
+                        signed_transaction_hash: row.get(12)?,
+                        broadcast_transaction_hash: row.get(13)?,
+                        block_number: row.get(14)?,
+                        approval_required: row.get(15)?,
+                        review_digest: row.get(16)?,
+                        cancel_serialized_transaction: row.get(17)?,
+                        cancel_transaction_hashes: row.get(18)?,
+                        gas_used: row.get(19)?,
+                        effective_gas_price: row.get(20)?,
                     })
                 },
             )
@@ -796,7 +760,6 @@ struct PendingRow {
     policy_revision: i64,
     status: String,
     created_at: String,
-    expires_at: String,
     updated_at: String,
     approved_at: Option<String>,
     rejected_at: Option<String>,
@@ -895,7 +858,6 @@ impl PendingRow {
             approval_required,
             status: PendingStatus::parse(&self.status)?,
             created_at: parse_time(&self.created_at)?,
-            expires_at: parse_time(&self.expires_at)?,
             updated_at: parse_time(&self.updated_at)?,
             approved_at: self.approved_at.as_deref().map(parse_time).transpose()?,
             rejected_at: self.rejected_at.as_deref().map(parse_time).transpose()?,
@@ -1061,7 +1023,7 @@ mod tests {
     #[test]
     fn persists_exact_plan_and_lifecycle_without_spend_state() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1, 60).unwrap();
+        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
         assert_eq!(request.status, PendingStatus::AwaitingApproval);
         let hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
         let signed = store
@@ -1385,7 +1347,7 @@ mod tests {
     #[test]
     fn policy_change_cancels_signed_transaction_before_submission() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1, 60).unwrap();
+        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
         let hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
         store
             .store_signed(
@@ -1436,7 +1398,7 @@ mod tests {
     #[test]
     fn rejection_is_terminal() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1, 60).unwrap();
+        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
         assert_eq!(
             store.reject(request.request_id).unwrap().status,
             PendingStatus::Rejected
@@ -1447,8 +1409,8 @@ mod tests {
     #[test]
     fn duplicate_pending_plan_reuses_request_and_queue_is_bounded() {
         let (_directory, mut store) = store();
-        let first = store.create("primary", "ethereum", &plan(), 1, 60).unwrap();
-        let duplicate = store.create("primary", "ethereum", &plan(), 1, 60).unwrap();
+        let first = store.create("primary", "ethereum", &plan(), 1).unwrap();
+        let duplicate = store.create("primary", "ethereum", &plan(), 1).unwrap();
         assert_eq!(duplicate.request_id, first.request_id);
 
         for value in 2..=MAX_AWAITING_APPROVALS_PER_WALLET {
@@ -1458,7 +1420,6 @@ mod tests {
                     "ethereum",
                     &plan_with_value(&value.to_string()),
                     1,
-                    60,
                 )
                 .unwrap();
         }
@@ -1469,7 +1430,6 @@ mod tests {
                     "ethereum",
                     &plan_with_value(&(MAX_AWAITING_APPROVALS_PER_WALLET + 1).to_string()),
                     1,
-                    60,
                 )
                 .is_err()
         );
@@ -1478,7 +1438,7 @@ mod tests {
     #[test]
     fn policy_change_replaces_stale_duplicate_approval_request() {
         let (_directory, mut store) = store();
-        let stale = store.create("primary", "ethereum", &plan(), 1, 60).unwrap();
+        let stale = store.create("primary", "ethereum", &plan(), 1).unwrap();
         let current = store.database.get("primary").unwrap().unwrap();
         store
             .database
@@ -1489,7 +1449,7 @@ mod tests {
             store.get(stale.request_id).unwrap().status,
             PendingStatus::Cancelled
         );
-        let replacement = store.create("primary", "ethereum", &plan(), 2, 60).unwrap();
+        let replacement = store.create("primary", "ethereum", &plan(), 2).unwrap();
         assert_ne!(replacement.request_id, stale.request_id);
         assert_eq!(replacement.policy_revision, 2);
     }
@@ -1497,7 +1457,7 @@ mod tests {
     #[test]
     fn wallet_state_removal_cancels_pending_requests() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1, 60).unwrap();
+        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
         store.database.delete("primary", 1).unwrap();
         assert_eq!(
             store.get(request.request_id).unwrap().status,

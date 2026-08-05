@@ -548,7 +548,6 @@ struct TypedDataOutput {
     /// The EIP-712 signing hash of the exact payload.
     digest: String,
     status: TypedDataStatus,
-    expires_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     approved_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -610,7 +609,6 @@ struct MessageOutput {
     /// The parsed login, when the message is a recognized ERC-4361 payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     siwe: Option<SiweMessage>,
-    expires_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     approved_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -667,7 +665,6 @@ enum ExecutionStatus {
     SubmissionPending,
     Submitted,
     Reverted,
-    Expired,
     Cancelled,
     /// The envelope's nonce was consumed by a different mined transaction, so
     /// the exact signed bytes can never mine.
@@ -684,7 +681,6 @@ struct ExecutionStatusOutput {
     chain_id: String,
     digest: String,
     status: ExecutionStatus,
-    expires_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     approved_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1556,8 +1552,7 @@ impl WalletMcpServer {
                 if timed_out {
                     output.status = ExecutionStatus::TimedOut;
                     output.instruction = Some(format!(
-                        "Still awaiting human approval; the request expires at {}. Call wallet_wait_for_approval again with request_id {}; do not ask the user to report approval in chat.",
-                        output.expires_at.to_rfc3339(),
+                        "Still awaiting human approval, which does not expire. Call wallet_wait_for_approval again with request_id {}; do not ask the user to report approval in chat.",
                         output.request_id
                     ));
                 }
@@ -1869,8 +1864,7 @@ impl WalletMcpServer {
                 let mut output = typed_data_output(record);
                 if timed_out {
                     output.instruction = Some(format!(
-                        "Still awaiting human approval; the request expires at {}. Call wallet_wait_for_typed_data again with request_id {}; do not ask the user to report approval in chat.",
-                        output.expires_at.to_rfc3339(),
+                        "Still awaiting human approval, which does not expire. Call wallet_wait_for_typed_data again with request_id {}; do not ask the user to report approval in chat.",
                         output.request_id
                     ));
                 }
@@ -1962,8 +1956,7 @@ impl WalletMcpServer {
                     message_output(record, &self.config).map_err(|error| tool_error(&error))?;
                 if timed_out {
                     output.instruction = Some(format!(
-                        "Still awaiting human approval; the request expires at {}. Call wallet_wait_for_message again with request_id {}; do not ask the user to report approval in chat.",
-                        output.expires_at.to_rfc3339(),
+                        "Still awaiting human approval, which does not expire. Call wallet_wait_for_message again with request_id {}; do not ask the user to report approval in chat.",
                         output.request_id
                     ));
                 }
@@ -2220,20 +2213,11 @@ impl WalletMcpServer {
         }
 
         if !simulation.allowed || !simulation.simulation.success {
-            let expiry = stored_policy
-                .policy
-                .approval_expiry_seconds(plan.chain_id.as_str());
             let request = self
                 .pending
                 .lock()
                 .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
-                .create(
-                    &wallet.id,
-                    &network.name,
-                    &plan,
-                    stored_policy.revision,
-                    expiry,
-                )?;
+                .create(&wallet.id, &network.name, &plan, stored_policy.revision)?;
             let mut output = execution_status_output(request);
             output.instruction = Some(if simulation.simulation.success {
                 format!(
@@ -2630,9 +2614,6 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
         TypedDataStatus::Rejected => Some(
             "The user rejected this typed-data request. Do not recreate it unless they explicitly ask to sign again.".into(),
         ),
-        TypedDataStatus::Expired => Some(
-            "The typed-data approval request expired. Create a new request only if the user still wants to sign.".into(),
-        ),
     };
     TypedDataOutput {
         request_id: record.request_id,
@@ -2640,7 +2621,6 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
         chain_id: record.chain_id,
         digest: record.digest,
         status: record.status,
-        expires_at: record.expires_at,
         approved_at: record.approved_at,
         rejected_at: record.rejected_at,
         signature: record.signature,
@@ -2660,9 +2640,6 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
         ),
         MessageStatus::Rejected => Some(
             "The user rejected this message request. Do not recreate it unless they explicitly ask to sign again.".into(),
-        ),
-        MessageStatus::Expired => Some(
-            "The message approval request expired. Create a new request only if the user still wants to sign.".into(),
         ),
     };
     let message = record.message_bytes()?;
@@ -2691,7 +2668,6 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
         status: record.status,
         display,
         siwe,
-        expires_at: record.expires_at,
         approved_at: record.approved_at,
         rejected_at: record.rejected_at,
         signature: record.signature,
@@ -2720,7 +2696,6 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         PendingStatus::Submitting | PendingStatus::Broadcast => ExecutionStatus::SubmissionPending,
         PendingStatus::Confirmed => ExecutionStatus::Submitted,
         PendingStatus::Reverted => ExecutionStatus::Reverted,
-        PendingStatus::Expired => ExecutionStatus::Expired,
         PendingStatus::Cancelled => ExecutionStatus::Cancelled,
         PendingStatus::Replaced => ExecutionStatus::Replaced,
         PendingStatus::Cancelling => ExecutionStatus::CancellationPending,
@@ -2752,9 +2727,6 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         ExecutionStatus::Rejected => Some(
             "The user rejected this request. Do not recreate it unless they explicitly request a new transaction.".into(),
         ),
-        ExecutionStatus::Expired => Some(
-            "The approval request expired. Create a new request only if the user still wants to proceed.".into(),
-        ),
         ExecutionStatus::Cancelled => Some(if record.cancel_transaction_hashes.is_empty() {
             "The signed request was cancelled because its policy revision changed before initial submission.".into()
         } else {
@@ -2774,7 +2746,6 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         chain_id: record.chain_id,
         digest: record.digest,
         status,
-        expires_at: record.expires_at,
         approved_at: record.approved_at,
         rejected_at: record.rejected_at,
         transaction_hash: record

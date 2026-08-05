@@ -52,7 +52,6 @@ pub fn status_label(status: PendingStatus) -> &'static str {
         PendingStatus::Broadcast => "broadcast, awaiting receipt",
         PendingStatus::Confirmed => "confirmed",
         PendingStatus::Reverted => "reverted",
-        PendingStatus::Expired => "expired",
         PendingStatus::Cancelled => "cancelled",
         PendingStatus::Replaced => "replaced on chain",
         PendingStatus::Cancelling => "cancelling, awaiting receipt",
@@ -72,7 +71,6 @@ pub fn status_tone(status: PendingStatus) -> Tone {
         | PendingStatus::Cancelling => Tone::Warning,
         PendingStatus::Rejected
         | PendingStatus::Reverted
-        | PendingStatus::Expired
         | PendingStatus::Cancelled
         | PendingStatus::Replaced => Tone::Danger,
     }
@@ -335,15 +333,6 @@ fn detail_lines(
             vec![Span::plain(crate::render::described_time(
                 record.updated_at,
             ))],
-        ));
-    }
-    if record.status == PendingStatus::AwaitingApproval {
-        lines.push(fact(
-            "Expires",
-            vec![Span::toned(
-                crate::render::described_time(record.expires_at),
-                Tone::Warning,
-            )],
         ));
     }
     if let Some(approved_at) = record.approved_at {
@@ -925,7 +914,6 @@ mod tests {
             approval_required: true,
             status: PendingStatus::AwaitingApproval,
             created_at: now - chrono::TimeDelta::minutes(7),
-            expires_at: now + chrono::TimeDelta::minutes(3),
             updated_at: now - chrono::TimeDelta::minutes(7),
             approved_at: None,
             rejected_at: None,
@@ -955,7 +943,6 @@ mod tests {
         for failed in [
             PendingStatus::Rejected,
             PendingStatus::Reverted,
-            PendingStatus::Expired,
             PendingStatus::Cancelled,
         ] {
             assert_eq!(status_tone(failed), Tone::Danger);
@@ -1004,7 +991,9 @@ mod tests {
         assert!(text.contains(&uuid::Uuid::nil().to_string()));
         assert!(text.contains("ethereum"));
         assert!(text.contains("(chain 1)"));
-        assert!(text.contains("Expires"));
+        // Queued requests no longer expire, so the detail view has no deadline
+        // to show and must not imply one.
+        assert!(!text.contains("Expires"));
         assert!(text.contains("revision 3 · approval required"));
         assert!(text.contains("to 0x2222222222222222222222222222222222222222"));
         // The call value reads in the network currency with the exact wei.

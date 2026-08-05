@@ -18,15 +18,13 @@
 use crate::policy_store::PolicyStore;
 use alloy::primitives::{Address, B256, eip191_hash_message};
 use anyhow::{Context, Result, bail, ensure};
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Write as _, path::Path, str::FromStr};
 use uuid::Uuid;
 
-/// Message approval requests expire exactly like typed-data requests do.
-pub const MESSAGE_APPROVAL_EXPIRY_SECONDS: i64 = 900;
 const MAX_AWAITING_PER_WALLET: i64 = 64;
 /// A human has to read every byte at approval time, so the ceiling sits far
 /// below the typed-data limit. An oversized message is refused rather than
@@ -41,7 +39,6 @@ pub enum MessageStatus {
     AwaitingApproval,
     Rejected,
     Signed,
-    Expired,
 }
 
 impl MessageStatus {
@@ -50,7 +47,6 @@ impl MessageStatus {
             "awaiting_approval" => Ok(Self::AwaitingApproval),
             "rejected" => Ok(Self::Rejected),
             "signed" => Ok(Self::Signed),
-            "expired" => Ok(Self::Expired),
             _ => bail!("stored message request has invalid status {value}"),
         }
     }
@@ -97,7 +93,6 @@ pub struct PendingMessage {
     pub digest: String,
     pub status: MessageStatus,
     pub created_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<DateTime<Utc>>,
@@ -500,11 +495,6 @@ impl MessageStore {
         let chain_id = chain_id.unwrap_or_default();
         let created_at = Utc::now();
         let transaction = self.database.connection.transaction()?;
-        transaction.execute(
-            "UPDATE pending_messages SET status = 'expired', updated_at = ?1
-             WHERE status = 'awaiting_approval' AND expires_at <= ?1",
-            [created_at.to_rfc3339()],
-        )?;
         let existing: Option<String> = transaction
             .query_row(
                 "SELECT request_id FROM pending_messages
@@ -530,12 +520,11 @@ impl MessageStore {
         );
 
         let request_id = Uuid::new_v4();
-        let expires_at = created_at + TimeDelta::seconds(MESSAGE_APPROVAL_EXPIRY_SECONDS);
         transaction.execute(
             "INSERT INTO pending_messages(
                 request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
-                status, created_at, expires_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?8, ?7)",
+                status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?7)",
             params![
                 request_id.to_string(),
                 wallet_id,
@@ -544,7 +533,6 @@ impl MessageStore {
                 encoding.as_str(),
                 digest,
                 created_at.to_rfc3339(),
-                expires_at.to_rfc3339(),
             ],
         )?;
         transaction.commit()?;
@@ -552,16 +540,7 @@ impl MessageStore {
     }
 
     pub fn get(&self, request_id: Uuid) -> Result<PendingMessage> {
-        let mut record = self.read(request_id)?;
-        if record.status == MessageStatus::AwaitingApproval && record.expires_at <= Utc::now() {
-            self.database.connection.execute(
-                "UPDATE pending_messages SET status = 'expired', updated_at = ?2
-                 WHERE request_id = ?1 AND status = 'awaiting_approval'",
-                params![request_id.to_string(), Utc::now().to_rfc3339()],
-            )?;
-            record = self.read(request_id)?;
-        }
-        Ok(record)
+        self.read(request_id)
     }
 
     pub fn reject(&mut self, request_id: Uuid) -> Result<PendingMessage> {
@@ -591,22 +570,17 @@ impl MessageStore {
     ) -> Result<PendingMessage> {
         validate_signature_hex(signature)?;
         let transaction = self.database.connection.transaction()?;
-        let (digest, status, expires_at): (String, String, String) = transaction
+        let (digest, status): (String, String) = transaction
             .query_row(
-                "SELECT digest, status, expires_at
-                 FROM pending_messages WHERE request_id = ?1",
+                "SELECT digest, status FROM pending_messages WHERE request_id = ?1",
                 [request_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .with_context(|| format!("unknown message request {request_id}"))?;
         ensure!(digest == expected_digest, "message request digest mismatch");
         ensure!(
             MessageStatus::parse(&status)? == MessageStatus::AwaitingApproval,
             "message request is not awaiting approval"
-        );
-        ensure!(
-            parse_time(&expires_at)? > Utc::now(),
-            "message request expired"
         );
         let now = Utc::now().to_rfc3339();
         transaction.execute(
@@ -652,7 +626,7 @@ impl MessageStore {
             .connection
             .query_row(
                 "SELECT wallet_id, chain_id, message_hex, message_encoding, digest, status,
-                        created_at, expires_at, updated_at, approved_at, rejected_at, signature
+                        created_at, updated_at, approved_at, rejected_at, signature
                  FROM pending_messages WHERE request_id = ?1",
                 [request_id.to_string()],
                 |row| {
@@ -665,10 +639,9 @@ impl MessageStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(8)?,
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<String>>(10)?,
-                        row.get::<_, Option<String>>(11)?,
                     ))
                 },
             )
@@ -681,7 +654,6 @@ impl MessageStore {
             digest,
             status,
             created_at,
-            expires_at,
             updated_at,
             approved_at,
             rejected_at,
@@ -708,7 +680,6 @@ impl MessageStore {
             digest,
             status: MessageStatus::parse(&status)?,
             created_at: parse_time(&created_at)?,
-            expires_at: parse_time(&expires_at)?,
             updated_at: parse_time(&updated_at)?,
             approved_at: approved_at.as_deref().map(parse_time).transpose()?,
             rejected_at: rejected_at.as_deref().map(parse_time).transpose()?,

@@ -979,16 +979,14 @@ async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMo
                     "policy_file": policy_file.display().to_string(),
                     "digest": digest,
                     "version": policy.version,
-                    "approval_expiry_seconds": policy.approval_expiry_seconds,
                     "chains": policy.chains.keys().collect::<Vec<_>>(),
                     "policy": policy,
                 }),
                 || {
                     Ok(format!(
-                        "{} is a valid policy.\n  digest: {digest}\n  chains: {}\n  approval_expiry_seconds: {}",
+                        "{} is a valid policy.\n  digest: {digest}\n  chains: {}",
                         policy_file.display(),
                         policy.chains.keys().cloned().collect::<Vec<_>>().join(", "),
-                        policy.approval_expiry_seconds,
                     ))
                 },
             )
@@ -1361,7 +1359,6 @@ fn approval_columns() -> Vec<crate::fullscreen::TableColumn> {
         TableColumn::new("Age", Constraint::Length(14)),
         TableColumn::new("Wallet", Constraint::Fill(1)),
         TableColumn::new("Network", Constraint::Fill(1)),
-        TableColumn::new("Expires", Constraint::Length(14)),
     ]
 }
 
@@ -1411,7 +1408,6 @@ fn pending_approval_rows(
                 Span::plain(relative_time(record.created_at)),
                 Span::plain(&record.wallet_id),
                 Span::plain(&network),
-                Span::toned(relative_time(record.expires_at), Tone::Warning),
             ],
             &[
                 &record.request_id.to_string(),
@@ -1432,7 +1428,6 @@ fn pending_approval_rows(
                 Span::plain(relative_time(record.created_at)),
                 Span::plain(&record.wallet_id),
                 Span::plain(&network),
-                Span::toned(relative_time(record.expires_at), Tone::Warning),
             ],
             &[
                 &record.request_id.to_string(),
@@ -1457,7 +1452,6 @@ fn pending_approval_rows(
                 Span::plain(relative_time(record.created_at)),
                 Span::plain(&record.wallet_id),
                 network.as_deref().map_or_else(none, Span::plain),
-                Span::toned(relative_time(record.expires_at), Tone::Warning),
             ],
             &[
                 &record.request_id.to_string(),
@@ -1504,7 +1498,7 @@ fn print_pending_approvals(
     } else {
         eprintln!(
             "{} request(s) awaiting approval. Review one with `ekubo-wallet review <request-id>`; \
-             unapproved requests expire at their listed expires_at.{}",
+             they wait indefinitely.{}",
             awaiting.len() + awaiting_typed_data.len() + awaiting_messages.len(),
             if proposals.is_empty() {
                 String::new()
@@ -1538,25 +1532,20 @@ fn print_pending_approvals(
         || {
             let mut lines = Vec::new();
             for record in awaiting {
-                lines.push(format!(
-                    "{}\n    expires {}",
-                    transaction_line(record),
-                    relative_time(record.expires_at),
-                ));
+                lines.push(transaction_line(record));
             }
             for record in awaiting_typed_data {
                 lines.push(format!(
-                    "{} · typed data for {} on chain {} · {}\n    expires {}",
+                    "{} · typed data for {} on chain {} · {}",
                     relative_time(record.created_at),
                     record.wallet_id,
                     record.chain_id,
                     record.request_id,
-                    relative_time(record.expires_at),
                 ));
             }
             for record in awaiting_messages {
                 lines.push(format!(
-                    "{} · message for {}{} · {}\n    expires {}",
+                    "{} · message for {}{} · {}",
                     relative_time(record.created_at),
                     record.wallet_id,
                     record
@@ -1564,7 +1553,6 @@ fn print_pending_approvals(
                         .as_deref()
                         .map_or_else(String::new, |chain| format!(" (chain {chain} claimed)")),
                     record.request_id,
-                    relative_time(record.expires_at),
                 ));
             }
             for proposal in proposals {
@@ -1902,7 +1890,6 @@ async fn approve_typed_data(
     .fact("Signing hash", &request.digest)
     .digest(&request.digest);
     approval.id = request.request_id;
-    approval.expires_at = request.expires_at;
 
     if let Some(approvals) = &permit_approvals {
         for (index, permit) in approvals.iter().enumerate() {
@@ -2127,7 +2114,6 @@ async fn approve_message(
         .fact("Signing hash", &request.digest)
         .digest(&request.digest);
     approval.id = request.request_id;
-    approval.expires_at = request.expires_at;
 
     let mut stderr = io::stderr().lock();
     serde_json::to_writer_pretty(
@@ -2270,7 +2256,6 @@ fn transaction_approval_request(
     .fact("Maximum transaction fee (wei)", prepared.maximum_fee_wei())
     .digest(prepared.review_digest());
     request.id = pending.request_id;
-    request.expires_at = pending.expires_at;
     let interpretations = interpret_steps(&pending.execution_plan.ordered_steps, token_metadata);
     for (step, interpretation) in pending
         .execution_plan
@@ -3803,7 +3788,6 @@ mod tests {
             approval_required: true,
             status: PendingStatus::AwaitingApproval,
             created_at: now - chrono::TimeDelta::minutes(7),
-            expires_at: now + chrono::TimeDelta::minutes(3),
             updated_at: now - chrono::TimeDelta::minutes(7),
             approved_at: None,
             rejected_at: None,
@@ -3837,7 +3821,6 @@ mod tests {
             digest: format!("0x{}", "cd".repeat(32)),
             status: TypedDataStatus::AwaitingApproval,
             created_at: now,
-            expires_at: now + chrono::TimeDelta::minutes(5),
             updated_at: now,
             approved_at: None,
             rejected_at: None,
@@ -3852,7 +3835,6 @@ mod tests {
             digest: format!("0x{}", "ef".repeat(32)),
             status: MessageStatus::AwaitingApproval,
             created_at: now,
-            expires_at: now + chrono::TimeDelta::minutes(5),
             updated_at: now,
             approved_at: None,
             rejected_at: None,

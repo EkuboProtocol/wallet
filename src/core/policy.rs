@@ -89,8 +89,6 @@ impl Default for NativePolicy {
 pub struct ChainPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval_expiry_seconds: Option<u32>,
     #[serde(default = "default_max_calls")]
     pub max_calls_per_batch: u32,
     #[serde(default)]
@@ -111,8 +109,6 @@ pub struct WalletPolicy {
     #[serde(default = "policy_version")]
     pub version: u8,
     pub chains: BTreeMap<String, ChainPolicy>,
-    #[serde(default = "default_approval_expiry")]
-    pub approval_expiry_seconds: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -152,7 +148,6 @@ impl WalletPolicy {
                     "Allow all actions automatically; approve only policy or simulation failures"
                         .into(),
                 ),
-                approval_expiry_seconds: None,
                 max_calls_per_batch: 4096,
                 native: NativePolicy {
                     max_value_per_transaction: max_uint256(),
@@ -195,7 +190,6 @@ impl WalletPolicy {
             schema: None,
             version: 2,
             chains,
-            approval_expiry_seconds: 600,
         }
     }
 
@@ -212,7 +206,6 @@ impl WalletPolicy {
                     "Deny every automatic signature; each transaction needs an explicit CLI approval"
                         .into(),
                 ),
-                approval_expiry_seconds: None,
                 max_calls_per_batch: 1,
                 native: NativePolicy {
                     max_value_per_transaction: zero(),
@@ -226,7 +219,6 @@ impl WalletPolicy {
             schema: None,
             version: 2,
             chains,
-            approval_expiry_seconds: 600,
         }
     }
 
@@ -235,21 +227,10 @@ impl WalletPolicy {
         self.chains.get(chain_id).or_else(|| self.chains.get("*"))
     }
 
-    #[must_use]
-    pub fn approval_expiry_seconds(&self, chain_id: &str) -> u32 {
-        self.chain(chain_id)
-            .and_then(|chain| chain.approval_expiry_seconds)
-            .unwrap_or(self.approval_expiry_seconds)
-    }
-
     fn normalize_and_validate(&mut self) -> Result<()> {
         ensure!(
             self.version == 2,
             "policy document format version must be 2"
-        );
-        ensure!(
-            self.approval_expiry_seconds > 0,
-            "approval expiry must be positive"
         );
         validate_url(self.schema.as_deref())?;
         let mut chains = BTreeMap::new();
@@ -259,9 +240,6 @@ impl WalletPolicy {
                 chain.max_calls_per_batch > 0 && chain.max_calls_per_batch <= 4096,
                 "max_calls_per_batch must be between 1 and 4096"
             );
-            if let Some(expiry) = chain.approval_expiry_seconds {
-                ensure!(expiry > 0, "approval expiry must be positive");
-            }
             validate_label(chain.label.as_deref())?;
             validate_decimal(&chain.native.max_value_per_transaction)?;
             normalize_target_map(&mut chain.targets)?;
@@ -578,12 +556,6 @@ pub fn json_schema() -> Value {
 #[must_use]
 pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<String> {
     let mut lines = Vec::new();
-    if current.approval_expiry_seconds != proposed.approval_expiry_seconds {
-        lines.push(format!(
-            "~ approval expiry: {}s → {}s",
-            current.approval_expiry_seconds, proposed.approval_expiry_seconds
-        ));
-    }
     let chain_keys: BTreeSet<&String> = current
         .chains
         .keys()
@@ -712,12 +684,6 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
             previous.max_calls_per_batch, next.max_calls_per_batch
         ));
     }
-    if previous.approval_expiry_seconds != next.approval_expiry_seconds {
-        lines.push(format!(
-            "~ chain {label}: approval expiry {:?} → {:?}",
-            previous.approval_expiry_seconds, next.approval_expiry_seconds
-        ));
-    }
 
     let targets: BTreeSet<&String> = previous.targets.keys().chain(next.targets.keys()).collect();
     for target in targets {
@@ -823,15 +789,29 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
     }
 }
 
-/// Discard top-level settings this format no longer has, so a wallet whose
-/// stored policy predates their removal still opens after an upgrade.
+/// Discard settings this format no longer has, so a wallet whose stored policy
+/// predates their removal still opens after an upgrade.
 ///
-/// `require_simulation` is the only one. Every plan is simulated now and a
-/// simulation that does not succeed always denies, so the field has nothing
-/// left to select and is dropped whichever way it was set.
+/// `require_simulation`: every plan is simulated now and a simulation that does
+/// not succeed always denies, so the field has nothing left to select and is
+/// dropped whichever way it was set.
+///
+/// `approval_expiry_seconds`, top-level and per chain: a queued request no
+/// longer expires. Nothing in this wallet decides what may be signed by reading
+/// the local clock, which a machine's owner — or anything running as them — can
+/// set to whatever they like. A request that must not execute after some moment
+/// says so in the transaction it authorizes, where the chain enforces it.
 fn drop_retired_settings(mut input: Value) -> Value {
     if let Some(object) = input.as_object_mut() {
         object.remove("require_simulation");
+        object.remove("approval_expiry_seconds");
+        if let Some(chains) = object.get_mut("chains").and_then(Value::as_object_mut) {
+            for chain in chains.values_mut() {
+                if let Some(chain) = chain.as_object_mut() {
+                    chain.remove("approval_expiry_seconds");
+                }
+            }
+        }
     }
     input
 }
@@ -1016,10 +996,6 @@ const fn default_max_calls() -> u32 {
     16
 }
 
-const fn default_approval_expiry() -> u32 {
-    600
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1091,6 +1067,28 @@ mod tests {
             .expect("a retired setting is discarded, not rejected");
             let round_trip = serde_json::to_value(&policy).unwrap();
             assert!(round_trip.get("require_simulation").is_none());
+        }
+    }
+
+    #[test]
+    fn a_policy_written_against_the_retired_approval_expiry_still_opens() {
+        // Queued requests no longer expire, and no policy setting can give
+        // them a deadline again. A stored policy that still carries the old
+        // field — top level, per chain, or both — must keep parsing, because
+        // failing here would lock the owner out of their own wallet, and the
+        // field must not survive the parse in either direction.
+        let policy = WalletPolicy::parse(json!({
+            "chains": {
+                "1": { "tokens": { "*": {} }, "approval_expiry_seconds": 300 },
+                "*": { "approval_expiry_seconds": 60 }
+            },
+            "approval_expiry_seconds": 600
+        }))
+        .expect("a retired setting is discarded, not rejected");
+        let round_trip = serde_json::to_value(&policy).unwrap();
+        assert!(round_trip.get("approval_expiry_seconds").is_none());
+        for chain in round_trip["chains"].as_object().unwrap().values() {
+            assert!(chain.get("approval_expiry_seconds").is_none());
         }
     }
 

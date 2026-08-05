@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Write as _, io::IsTerminal};
 use uuid::Uuid;
@@ -41,7 +40,6 @@ pub struct ApprovalRequest {
     pub facts: Vec<ApprovalFact>,
     pub warnings: Vec<String>,
     pub digest: Option<String>,
-    pub expires_at: DateTime<Utc>,
 }
 
 impl ApprovalRequest {
@@ -55,7 +53,6 @@ impl ApprovalRequest {
             facts: Vec::new(),
             warnings: Vec::new(),
             digest: None,
-            expires_at: Utc::now() + TimeDelta::minutes(5),
         }
     }
 
@@ -114,7 +111,6 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
             && std::io::stderr().is_terminal(),
         "approval requires an interactive terminal"
     );
-    ensure!(Utc::now() < request.expires_at, "approval request expired");
 
     crate::tui::init_prompt_theme();
     crate::tui::intro("Ekubo Wallet approval");
@@ -131,12 +127,7 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
     if let Some(digest) = &request.digest {
         write!(body, "\nDigest: {}", terminal_safe(digest))?;
     }
-    write!(
-        body,
-        "\nRequest: {}\nExpires: {}",
-        request.id,
-        request.expires_at.to_rfc3339()
-    )?;
+    write!(body, "\nRequest: {}", request.id)?;
 
     crate::tui::note(terminal_safe(&request.title), body);
     for warning in &request.warnings {
@@ -188,6 +179,5 @@ mod tests {
         assert_eq!(request.facts[0].label, "Recipient");
         assert_eq!(request.warnings.len(), 1);
         assert_eq!(request.digest.as_deref(), Some("0x1234"));
-        assert!(request.expires_at > Utc::now());
     }
 }

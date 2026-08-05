@@ -56,9 +56,14 @@ ekubo-wallet policy show primary
 `policy validate` needs no wallet, no database, and no authentication, so a
 policy can be drafted and checked before anything exists to apply it to.
 
-`approval_expiry_seconds` (600 by default, overridable per chain) sets the time
-between request creation and signing. An unsigned request becomes terminally
-expired at that deadline and can no longer be approved, rejected, or submitted.
+A queued request has no expiry, and the policy document has no setting that
+gives it one: it waits until the user approves or rejects it, or until a policy
+change invalidates it. Nothing about what may be signed is decided by reading
+this machine's clock, which its owner — or anything running as them — can set
+to whatever they like. A transaction that must not execute after some moment
+carries that deadline in the calldata the user approved, where the chain
+enforces it and re-simulation at approval time surfaces it as a failure.
+
 `max_calls_per_batch` accepts up to 4096; the transfer and execution-plan tool
 schemas impose no list maximum of their own, so real batches are bounded by the
 selected policy, memory, encoded transaction size, and the per-chain gas cap.

@@ -326,10 +326,7 @@ pub async fn attempt_cancellation<K: KeyStore>(
         PendingStatus::Submitting => {
             bail!("a submission attempt holds this transaction's lease; retry in a moment")
         }
-        PendingStatus::Signed
-        | PendingStatus::AwaitingApproval
-        | PendingStatus::Rejected
-        | PendingStatus::Expired => {
+        PendingStatus::Signed | PendingStatus::AwaitingApproval | PendingStatus::Rejected => {
             bail!("nothing to cancel on chain: the request has no broadcast transaction")
         }
     }

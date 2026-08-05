@@ -22,7 +22,7 @@ acceptance, retarget an alias, or misrepresent a token. A pre-existing plain
 `tokens.db` is imported once (constraint-checked, never overwriting) and
 removed; leftover `address_book.db` or `legal.json` files from unreleased
 builds are deleted without being trusted. A pending row stores its normalized execution
-plan and digest, policy revision, expiry and lifecycle status; once signed it
+plan and digest, policy revision, and lifecycle status; once signed it
 also stores the exact serialized transaction and hash before the first RPC
 submission. An exceptional approval additionally records the digest of its
 reviewed nonce, gas, fees, call, and delegation fields. Retries only rebroadcast

@@ -1,7 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
   "version": 2,
-  "approval_expiry_seconds": 600,
   "chains": {
     "1": {
       "label": "TEMPLATE: replace every address and ceiling before use",

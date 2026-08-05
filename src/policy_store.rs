@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.policy-database-key.v1";
@@ -476,6 +476,183 @@ impl PolicyStore {
             )?;
             version = 10;
         }
+        if version == 10 {
+            // Queued signing requests no longer expire, so all three queues
+            // lose their expires_at column and their 'expired' status.
+            //
+            // Nothing about what may be signed is decided by reading this
+            // machine's clock: it is settable by whoever owns the machine, and
+            // by anything running as them, so it is not something a wallet can
+            // use to decide anything. A transaction that must not execute after
+            // some moment carries that deadline in the calldata the user
+            // approved, where the chain enforces it and simulation surfaces it.
+            // The practical effect is that a request queued before the owner
+            // walked away is still reviewable when they come back.
+            //
+            // Rows the old rule already closed keep a terminal, never-signed
+            // status: transactions become 'cancelled' and signature requests
+            // become 'rejected'. None of them holds a signature or any bytes
+            // that reached the network, so nothing recoverable is lost.
+            run_transaction(
+                &connection,
+                &[
+                    "CREATE TABLE pending_transactions_v11 (
+                         -- gas_used and effective_gas_price carry forward from
+                         -- schema 10: the mined fee is unrecoverable once the
+                         -- receipt is gone, so the rebuild must not drop it.
+                         request_id TEXT PRIMARY KEY NOT NULL,
+                         wallet_id TEXT NOT NULL,
+                         network_name TEXT NOT NULL,
+                         chain_id TEXT NOT NULL,
+                         plan_json TEXT NOT NULL,
+                         plan_digest TEXT NOT NULL,
+                         policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+                         status TEXT NOT NULL CHECK (status IN (
+                             'awaiting_approval', 'rejected', 'signed', 'submitting',
+                             'broadcast', 'confirmed', 'reverted', 'cancelled',
+                             'replaced', 'cancelling'
+                         )),
+                         created_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         approved_at TEXT,
+                         rejected_at TEXT,
+                         serialized_transaction TEXT,
+                         signed_transaction_hash TEXT,
+                         broadcast_transaction_hash TEXT,
+                         block_number TEXT,
+                         approval_required INTEGER NOT NULL DEFAULT 1
+                             CHECK (approval_required IN (0, 1)),
+                         review_digest TEXT,
+                         cancel_serialized_transaction TEXT,
+                         cancel_transaction_hashes TEXT,
+                         gas_used TEXT,
+                         effective_gas_price TEXT,
+                         CHECK (
+                             (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
+                                 AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                             OR status <> 'awaiting_approval'
+                         ),
+                         CHECK (
+                             (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                             OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
+                         ),
+                         CHECK (
+                             (cancel_serialized_transaction IS NULL AND cancel_transaction_hashes IS NULL)
+                             OR (cancel_serialized_transaction IS NOT NULL
+                                 AND cancel_transaction_hashes IS NOT NULL
+                                 AND serialized_transaction IS NOT NULL)
+                         )
+                     ) STRICT",
+                    "INSERT INTO pending_transactions_v11 (
+                         request_id, wallet_id, network_name, chain_id, plan_json,
+                         plan_digest, policy_revision, status, created_at,
+                         updated_at, approved_at, rejected_at, serialized_transaction,
+                         signed_transaction_hash, broadcast_transaction_hash,
+                         block_number, approval_required, review_digest,
+                         cancel_serialized_transaction, cancel_transaction_hashes,
+                         gas_used, effective_gas_price
+                     )
+                     SELECT request_id, wallet_id, network_name, chain_id, plan_json,
+                            plan_digest, policy_revision,
+                            CASE WHEN status = 'expired' THEN 'cancelled' ELSE status END,
+                            created_at, updated_at, approved_at, rejected_at,
+                            serialized_transaction, signed_transaction_hash,
+                            broadcast_transaction_hash, block_number, approval_required,
+                            review_digest, cancel_serialized_transaction,
+                            cancel_transaction_hashes, gas_used, effective_gas_price
+                     FROM pending_transactions",
+                    "DROP TABLE pending_transactions",
+                    "ALTER TABLE pending_transactions_v11 RENAME TO pending_transactions",
+                    "CREATE INDEX pending_transactions_wallet_created
+                         ON pending_transactions(wallet_id, created_at DESC)",
+                    "CREATE INDEX pending_transactions_signed_hash
+                         ON pending_transactions(signed_transaction_hash)
+                         WHERE signed_transaction_hash IS NOT NULL",
+                    "CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
+                         ON pending_transactions(wallet_id, chain_id)
+                         WHERE status IN ('signed', 'submitting', 'broadcast', 'cancelling')",
+                    "CREATE UNIQUE INDEX pending_transactions_unique_pending_plan
+                         ON pending_transactions(wallet_id, chain_id, plan_digest)
+                         WHERE status = 'awaiting_approval'",
+                    "CREATE TABLE pending_typed_data_v11 (
+                         request_id TEXT PRIMARY KEY NOT NULL,
+                         wallet_id TEXT NOT NULL,
+                         chain_id TEXT NOT NULL,
+                         typed_data_json TEXT NOT NULL,
+                         digest TEXT NOT NULL,
+                         status TEXT NOT NULL CHECK (status IN (
+                             'awaiting_approval', 'rejected', 'signed'
+                         )),
+                         approval_required INTEGER NOT NULL DEFAULT 1
+                             CHECK (approval_required IN (0, 1)),
+                         policy_revision INTEGER
+                             CHECK (policy_revision IS NULL OR policy_revision > 0),
+                         created_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         approved_at TEXT,
+                         rejected_at TEXT,
+                         signature TEXT,
+                         CHECK ((status = 'signed') = (signature IS NOT NULL)),
+                         CHECK (approval_required = 1 OR policy_revision IS NOT NULL)
+                     ) STRICT",
+                    "INSERT INTO pending_typed_data_v11 (
+                         request_id, wallet_id, chain_id, typed_data_json, digest,
+                         status, approval_required, policy_revision, created_at,
+                         updated_at, approved_at, rejected_at, signature
+                     )
+                     SELECT request_id, wallet_id, chain_id, typed_data_json, digest,
+                            CASE WHEN status = 'expired' THEN 'rejected' ELSE status END,
+                            approval_required, policy_revision, created_at,
+                            updated_at, approved_at, rejected_at, signature
+                     FROM pending_typed_data",
+                    "DROP TABLE pending_typed_data",
+                    "ALTER TABLE pending_typed_data_v11 RENAME TO pending_typed_data",
+                    "CREATE UNIQUE INDEX pending_typed_data_unique_awaiting
+                         ON pending_typed_data(wallet_id, chain_id, digest)
+                         WHERE status = 'awaiting_approval'",
+                    "CREATE INDEX pending_typed_data_wallet_created
+                         ON pending_typed_data(wallet_id, created_at DESC)",
+                    "CREATE TABLE pending_messages_v11 (
+                         request_id TEXT PRIMARY KEY NOT NULL,
+                         wallet_id TEXT NOT NULL,
+                         chain_id TEXT NOT NULL,
+                         message_hex TEXT NOT NULL
+                             CHECK (message_hex LIKE '0x%' AND length(message_hex) % 2 = 0),
+                         message_encoding TEXT NOT NULL
+                             CHECK (message_encoding IN ('text', 'hex')),
+                         digest TEXT NOT NULL,
+                         status TEXT NOT NULL CHECK (status IN (
+                             'awaiting_approval', 'rejected', 'signed'
+                         )),
+                         created_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         approved_at TEXT,
+                         rejected_at TEXT,
+                         signature TEXT,
+                         CHECK ((status = 'signed') = (signature IS NOT NULL))
+                     ) STRICT",
+                    "INSERT INTO pending_messages_v11 (
+                         request_id, wallet_id, chain_id, message_hex, message_encoding,
+                         digest, status, created_at, updated_at, approved_at,
+                         rejected_at, signature
+                     )
+                     SELECT request_id, wallet_id, chain_id, message_hex, message_encoding,
+                            digest,
+                            CASE WHEN status = 'expired' THEN 'rejected' ELSE status END,
+                            created_at, updated_at, approved_at, rejected_at, signature
+                     FROM pending_messages",
+                    "DROP TABLE pending_messages",
+                    "ALTER TABLE pending_messages_v11 RENAME TO pending_messages",
+                    "CREATE UNIQUE INDEX pending_messages_unique_awaiting
+                         ON pending_messages(wallet_id, chain_id, digest)
+                         WHERE status = 'awaiting_approval'",
+                    "CREATE INDEX pending_messages_wallet_created
+                         ON pending_messages(wallet_id, created_at DESC)",
+                    "UPDATE schema_metadata SET version = 11 WHERE singleton = 1",
+                ],
+            )?;
+            version = 11;
+        }
         ensure!(
             version == SCHEMA_VERSION,
             "unsupported policy database schema {version}"
@@ -859,6 +1036,175 @@ mod tests {
 
     fn key(byte: u8) -> DatabaseKey {
         DatabaseKey::new([byte; 32])
+    }
+
+    /// Build a database in the shape schema 9 left behind: every queue still
+    /// carries `expires_at`, and some rows are already terminally `expired`.
+    fn write_schema_9_database(path: &Path, key: &DatabaseKey) {
+        let connection = Connection::open(path).unwrap();
+        connection
+            .pragma_update(None, "key", key.sqlcipher_literal())
+            .unwrap();
+        let statements = [
+            "CREATE TABLE schema_metadata (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 version INTEGER NOT NULL
+             ) STRICT",
+            "INSERT INTO schema_metadata(singleton, version) VALUES (1, 9)",
+            "CREATE TABLE pending_transactions (
+                 request_id TEXT PRIMARY KEY NOT NULL,
+                 wallet_id TEXT NOT NULL,
+                 network_name TEXT NOT NULL,
+                 chain_id TEXT NOT NULL,
+                 plan_json TEXT NOT NULL,
+                 plan_digest TEXT NOT NULL,
+                 policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+                 status TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 expires_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 approved_at TEXT,
+                 rejected_at TEXT,
+                 serialized_transaction TEXT,
+                 signed_transaction_hash TEXT,
+                 broadcast_transaction_hash TEXT,
+                 block_number TEXT,
+                 approval_required INTEGER NOT NULL DEFAULT 1,
+                 review_digest TEXT,
+                 cancel_serialized_transaction TEXT,
+                 cancel_transaction_hashes TEXT
+             ) STRICT",
+            "CREATE TABLE pending_typed_data (
+                 request_id TEXT PRIMARY KEY NOT NULL,
+                 wallet_id TEXT NOT NULL,
+                 chain_id TEXT NOT NULL,
+                 typed_data_json TEXT NOT NULL,
+                 digest TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 approval_required INTEGER NOT NULL DEFAULT 1,
+                 policy_revision INTEGER,
+                 created_at TEXT NOT NULL,
+                 expires_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 approved_at TEXT,
+                 rejected_at TEXT,
+                 signature TEXT
+             ) STRICT",
+            "CREATE TABLE pending_messages (
+                 request_id TEXT PRIMARY KEY NOT NULL,
+                 wallet_id TEXT NOT NULL,
+                 chain_id TEXT NOT NULL,
+                 message_hex TEXT NOT NULL,
+                 message_encoding TEXT NOT NULL,
+                 digest TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 expires_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 approved_at TEXT,
+                 rejected_at TEXT,
+                 signature TEXT
+             ) STRICT",
+            // One request the old rule had already closed, and one that never
+            // reached its deadline, in each queue that has one.
+            "INSERT INTO pending_transactions(
+                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
+                 policy_revision, status, created_at, expires_at, updated_at
+             ) VALUES ('lapsed', 'primary', 'ethereum', '1', '{}', '0xaa', 1,
+                       'expired', 't0', 't1', 't1')",
+            "INSERT INTO pending_transactions(
+                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
+                 policy_revision, status, created_at, expires_at, updated_at,
+                 serialized_transaction, signed_transaction_hash, broadcast_transaction_hash,
+                 block_number
+             ) VALUES ('mined', 'primary', 'ethereum', '1', '{}', '0xbb', 1,
+                       'confirmed', 't0', 't1', 't2', '0x0102', '0xcc', '0xcc', '17')",
+            "INSERT INTO pending_typed_data(
+                 request_id, wallet_id, chain_id, typed_data_json, digest, status,
+                 created_at, expires_at, updated_at
+             ) VALUES ('td-lapsed', 'primary', '1', '{}', '0xdd', 'expired', 't0', 't1', 't1')",
+            "INSERT INTO pending_messages(
+                 request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
+                 status, created_at, expires_at, updated_at
+             ) VALUES ('msg-queued', 'primary', '', '0x6869', 'text', '0xee',
+                       'awaiting_approval', 't0', 't1', 't1')",
+        ];
+        for statement in statements {
+            connection.execute_batch(statement).unwrap();
+        }
+        drop(connection);
+    }
+
+    #[test]
+    fn upgrading_from_schema_9_drops_expiry_without_losing_a_record() {
+        // The expiry columns and the 'expired' status go away, so every row
+        // has to be carried across by hand. A wallet's signed bytes, hashes,
+        // and block numbers are not reconstructible from anywhere else, so
+        // losing one is unrecoverable — this asserts each queue survives.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        write_schema_9_database(&path, &key(11));
+
+        let store = PolicyStore::open(&path, &key(11)).unwrap();
+        let status = |table: &str, id: &str| -> String {
+            store
+                .connection
+                .query_row(
+                    &format!("SELECT status FROM {table} WHERE request_id = ?1"),
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        // A request the old deadline closed keeps a terminal, never-signed
+        // status rather than vanishing from the owner's history.
+        assert_eq!(status("pending_transactions", "lapsed"), "cancelled");
+        assert_eq!(status("pending_typed_data", "td-lapsed"), "rejected");
+        // Everything else is untouched, including a queued request that is now
+        // reviewable however long the owner takes to come back to it.
+        assert_eq!(
+            status("pending_messages", "msg-queued"),
+            "awaiting_approval"
+        );
+        let (bytes, hash, block): (String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT serialized_transaction, broadcast_transaction_hash, block_number
+                 FROM pending_transactions WHERE request_id = 'mined'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (bytes.as_str(), hash.as_str(), block.as_str()),
+            ("0x0102", "0xcc", "17")
+        );
+
+        // No queue keeps a deadline column, and none accepts the old status.
+        for table in [
+            "pending_transactions",
+            "pending_typed_data",
+            "pending_messages",
+        ] {
+            let columns: i64 = store
+                .connection
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = 'expires_at'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(columns, 0, "{table} still has an expiry column");
+            assert!(
+                store
+                    .connection
+                    .execute(&format!("UPDATE {table} SET status = 'expired'"), [])
+                    .is_err(),
+                "{table} still accepts the retired expired status"
+            );
+        }
     }
 
     #[test]

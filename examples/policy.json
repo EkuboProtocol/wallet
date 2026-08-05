@@ -1,7 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
   "version": 2,
-  "approval_expiry_seconds": 600,
   "chains": {
     "*": {
       "label": "Allow all actions automatically; approve only policy or simulation failures",

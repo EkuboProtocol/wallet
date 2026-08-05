@@ -20,9 +20,9 @@ it costs the user an interruption to approve something that will fail anyway.
 
 Callers that can act on a failure themselves send `on_simulation_failure:
 "fail"` to `wallet_send_execution_plan` or `wallet_send_transfers` and get the
-failure back instead: nothing is written, nothing is queued, and no expiry has
-to run out. The default stays `"request_approval"`, so a caller that never sets
-it behaves exactly as before.
+failure back instead: nothing is written and nothing is queued. The default
+stays `"request_approval"`, so a caller that never sets it behaves exactly as
+before.
 
 The choice controls only whether the user is asked, never whether the failure
 is enforced. `"fail"` means "return the error without queuing" — there is no
@@ -42,7 +42,8 @@ request, and carry on:
 1. `wallet_send_execution_plan` returns `approval_required` with a request ID.
 2. Tell the user the exact `ekubo-wallet review <request-id>` command.
 3. Call `wallet_wait_for_approval` immediately, and again after each timeout,
-   until the request is approved, rejected, or expired.
+   until the request is approved or rejected. A queued request does not
+   expire, so this can span a lunch break or a night's sleep.
 4. On `approved`, call `wallet_send_execution_plan` with the same `request_id`
    to submit the already-signed bytes, then `wallet_wait_for_execution`.
 
@@ -85,7 +86,7 @@ The review includes:
 The terminal decision is a two-way choice, Reject and Approve, with the cursor
 starting on Reject; Esc and Ctrl+C also reject. Whichever way it goes is
 recorded against the request before the command returns, so an agent waiting on
-it never has to wait out the expiry to learn the answer. `--decision approve`
+it learns the answer as soon as the user gives it. `--decision approve`
 and `--decision reject` skip only that prompt; approving still prints the review
 and still requires platform owner authentication.
 
@@ -123,8 +124,8 @@ the review digest, exact bytes, and transaction hash.
 
 `ekubo-wallet review <request-id>` also resolves queued signature requests,
 which carry no transaction and are therefore never simulated. Both kinds are
-stored in the same encrypted database, expire after 15 minutes, deduplicate an
-identical repeated request, and re-derive their signing hash from the stored
+stored in the same encrypted database, wait indefinitely for a decision,
+deduplicate an identical repeated request, and re-derive their signing hash from the stored
 payload on every read, so an edited row can never present one payload while
 binding a signature to another.
 
@@ -171,7 +172,7 @@ through `wallet_wait_for_typed_data` or `wallet_wait_for_message`.
 ## Lifecycle
 
 ```text
-awaiting_approval ── reject/timeout ─────────────▶ rejected | expired
+awaiting_approval ── reject ─────────────────────▶ rejected
         │
         │ terminal review + OS owner authentication
         ▼
@@ -230,7 +231,6 @@ no tool that can emulate this step.
 - A presenter error, terminal disconnect, or authentication denial produces no
   signature.
 - A changed pending row, wallet, network, or policy aborts before signing.
-- A request that expires during review cannot be stored as approved.
 - If another signed transaction is already in flight for that wallet and
   chain, the newly reviewed signature is not persisted or returned; the
   request remains available for a fresh approval after the first transaction
