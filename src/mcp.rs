@@ -2871,7 +2871,7 @@ pub async fn serve(config: ConfigStore) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        config::{WalletMetadata, WalletSource},
+        config::{KeyStorage, WalletMetadata, WalletSource},
         policy_store::DatabaseKey,
     };
     use alloy::primitives::Address;
@@ -2887,6 +2887,7 @@ mod tests {
             created_at: Utc::now(),
             source: WalletSource::Created,
             exported_at: None,
+            key_storage: KeyStorage::default(),
         });
         config.save(&state).unwrap();
         let mut policies = PolicyStore::open(
@@ -3327,6 +3328,7 @@ mod tests {
             created_at: Utc::now(),
             source: WalletSource::Created,
             exported_at: None,
+            key_storage: KeyStorage::default(),
         });
         config.save(&state).unwrap();
         let policies = PolicyStore::open(

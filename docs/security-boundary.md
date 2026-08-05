@@ -72,6 +72,14 @@ secrets sit in the same credential store behind the same login, so anything
 that can read one can generally read the other. The protection is against
 secrets at rest leaving the machine, not against a compromised session.
 
+One opt-in widens the perimeter deliberately: a wallet created or imported
+with `--key-storage cloud-synced` keeps its key in the iCloud-synchronized
+keychain, so the reachable set grows from this machine to every device on the
+same Apple account, and the platform account itself becomes key-bearing. The
+database key and policies never make that move — signing authority stays
+per-machine even when the key roams. The trade and its constraints are laid
+out in [storage](storage.md).
+
 The obvious hardening — marking the key entry as requiring biometric or
 passcode presence, so the OS refuses to release it without a live human — is
 deliberately not applied, and will not be. This wallet exists so an agent can

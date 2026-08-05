@@ -1349,7 +1349,7 @@ fn sanitize_error(message: &str, network: &NetworkConfig) -> String {
 mod tests {
     use super::*;
     use crate::{
-        config::{WalletSource, default_networks},
+        config::{KeyStorage, WalletSource, default_networks},
         core::execution_plan::{
             DecimalU256, ExecutionStep, ExecutionStepKind, PlannedTransaction, RevertDecodePlan,
             SubmitCondition,
@@ -1582,6 +1582,7 @@ mod tests {
             created_at: Utc::now(),
             source: WalletSource::Created,
             exported_at: None,
+            key_storage: KeyStorage::default(),
         };
         let policy = StoredPolicy {
             wallet_id: wallet.id.clone(),
@@ -1605,6 +1606,7 @@ mod tests {
             created_at: Utc::now(),
             source: WalletSource::Created,
             exported_at: None,
+            key_storage: KeyStorage::default(),
         };
         let policy = StoredPolicy {
             wallet_id: wallet.id.clone(),
@@ -1629,6 +1631,7 @@ mod tests {
             created_at: Utc::now(),
             source: WalletSource::Created,
             exported_at: None,
+            key_storage: KeyStorage::default(),
         };
         let weth = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
         let mut execution_plan = plan(1);

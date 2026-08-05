@@ -6,8 +6,8 @@ use crate::{
         TokenMetadataMap, interpret_steps, plan_token_metadata, render_balance_changes,
     },
     config::{
-        ConfigStore, NativeCurrency, NetworkConfig, default_networks, remove_configured_network,
-        replace_configured_network,
+        ConfigStore, KeyStorage, NativeCurrency, NetworkConfig, default_networks,
+        remove_configured_network, replace_configured_network,
     },
     core::policy::{FindingSeverity, WalletPolicy},
     custody::{CustodyService, KeyStore, OsKeyStore, PrivateKeyMaterial},
@@ -126,9 +126,27 @@ enum WalletCommand {
         /// else the safe choice is taken rather than guessed at.
         #[arg(long, value_enum)]
         policy: Option<StartingPolicy>,
+        /// Where the private key lives. Defaults to this machine's local
+        /// credential store; `cloud-synced` places it in the iCloud Keychain
+        /// (macOS only) so every device on the same Apple account receives it.
+        #[arg(long, value_enum, default_value_t = KeyStorageArg::Local)]
+        key_storage: KeyStorageArg,
     },
     /// Import an existing private key from a hidden interactive prompt.
-    Import { wallet_id: String },
+    Import {
+        wallet_id: String,
+        /// Where the private key lives. Defaults to this machine's local
+        /// credential store; `cloud-synced` places it in the iCloud Keychain
+        /// (macOS only) so every device on the same Apple account receives it.
+        #[arg(long, value_enum, default_value_t = KeyStorageArg::Local)]
+        key_storage: KeyStorageArg,
+    },
+    /// Add a wallet whose cloud-synced key another device already created.
+    ///
+    /// Reads the key from the iCloud-synchronized keychain under this wallet
+    /// ID and records the wallet locally; the key itself is never displayed
+    /// or moved. Attached wallets start with the require-approval policy.
+    Attach { wallet_id: String },
     /// Export a private key after terminal confirmation and owner authentication.
     Export { wallet_id: String },
     /// Remove a wallet and key after terminal confirmation and owner authentication.
@@ -333,6 +351,27 @@ impl StartingPolicy {
     }
 }
 
+/// The credential store a new key is written into, chosen when the wallet is
+/// created or imported and fixed for its lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum KeyStorageArg {
+    /// This machine's credential store; the key never leaves the device.
+    Local,
+    /// The iCloud-synchronized keychain (macOS only): the platform replicates
+    /// the key to every device signed into the same Apple account, and
+    /// deleting the wallet removes it from all of them.
+    CloudSynced,
+}
+
+impl KeyStorageArg {
+    const fn storage(self) -> KeyStorage {
+        match self {
+            Self::Local => KeyStorage::Local,
+            Self::CloudSynced => KeyStorage::CloudSynced,
+        }
+    }
+}
+
 /// A decision supplied on the command line instead of at the prompt, so a
 /// script or a remote session can resolve a request without a terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -431,10 +470,11 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                     .iter()
                     .map(|wallet| {
                         format!(
-                            "{}\n  address: {:#x}\n  source: {:?}\n  created: {}\n  key exported: {}",
+                            "{}\n  address: {:#x}\n  source: {:?}\n  key storage: {}\n  created: {}\n  key exported: {}",
                             wallet.id,
                             wallet.address,
                             wallet.source,
+                            wallet.key_storage.describe(),
                             described_time(wallet.created_at),
                             // Only this tool's own exports are recorded; the OS
                             // credential store can hand the key out without
@@ -448,7 +488,11 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                     .join("\n"))
             })
         }
-        WalletCommand::Create { wallet_id, policy } => {
+        WalletCommand::Create {
+            wallet_id,
+            policy,
+            key_storage,
+        } => {
             // Chosen before the key exists, so a wallet is never briefly
             // permissive while the user is still deciding, and a cancelled
             // prompt leaves nothing behind.
@@ -456,7 +500,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                 crate::tui::outro_cancel("No wallet was created.");
                 return Ok(());
             };
-            let wallet = custody.create(&wallet_id)?;
+            let wallet = custody.create(&wallet_id, key_storage.storage())?;
             initialize_wallet_policy(&config, &wallet.id, &starting.policy()).with_context(|| {
                 format!(
                     "wallet {} was created but policy initialization failed; signing will fail closed",
@@ -465,14 +509,18 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
             })?;
             emit(mode, &wallet, || {
                 Ok(format!(
-                    "Created wallet {} at {:#x} with {}.",
+                    "Created wallet {} at {:#x} in the {} with {}.",
                     wallet.id,
                     wallet.address,
+                    wallet.key_storage.describe(),
                     starting.description()
                 ))
             })
         }
-        WalletCommand::Import { wallet_id } => {
+        WalletCommand::Import {
+            wallet_id,
+            key_storage,
+        } => {
             require_interactive("wallet import")?;
             crate::tui::intro("Import an existing wallet");
             let mut input = inquire::Password::new(&crate::tui::question("Private key"))
@@ -483,9 +531,11 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
             let key = PrivateKeyMaterial::from_hex(&input)?;
             input.zeroize();
 
-            let progress =
-                crate::tui::Progress::start("Saving the key in the platform credential store");
-            let result = custody.import(&wallet_id, key);
+            let progress = crate::tui::Progress::start(match key_storage {
+                KeyStorageArg::Local => "Saving the key in the platform credential store",
+                KeyStorageArg::CloudSynced => "Saving the key in the iCloud-synchronized keychain",
+            });
+            let result = custody.import(&wallet_id, key, key_storage.storage());
             match result {
                 Ok(wallet) => {
                     // An imported key usually already controls funds, so
@@ -519,6 +569,43 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                     Err(error)
                 }
             }
+        }
+        WalletCommand::Attach { wallet_id } => {
+            let progress = crate::tui::Progress::start(
+                "Reading the key from the iCloud-synchronized keychain",
+            );
+            let wallet = match custody.attach(&wallet_id) {
+                Ok(wallet) => {
+                    progress.stop("Wallet attached");
+                    wallet
+                }
+                Err(error) => {
+                    progress.error("Wallet attach failed");
+                    return Err(error);
+                }
+            };
+            // The key already controls whatever the other device funded it
+            // with, so nothing signs until a policy is deliberately installed,
+            // exactly as with an imported key.
+            initialize_wallet_policy(
+                &config,
+                &wallet.id,
+                &WalletPolicy::require_approval_for_everything(),
+            )
+            .with_context(|| {
+                format!(
+                    "wallet {} was attached but policy initialization failed; signing will fail closed",
+                    wallet.id
+                )
+            })?;
+            emit(mode, &wallet, || {
+                Ok(format!(
+                    "Attached wallet {} at {:#x} from the cloud-synced credential store. It \
+                     starts with the require-approval policy: nothing signs automatically until \
+                     you install a more permissive policy.",
+                    wallet.id, wallet.address
+                ))
+            })
         }
         WalletCommand::Export { wallet_id } => {
             let wallet = config.wallet(&wallet_id)?;
@@ -1302,11 +1389,7 @@ fn pending_approval_rows(
     let none = || Span::toned("—", Tone::Muted);
     let short = |request_id: Uuid| {
         Span::toned(
-            request_id
-                .to_string()
-                .split('-')
-                .next()
-                .unwrap_or_default(),
+            request_id.to_string().split('-').next().unwrap_or_default(),
             Tone::Muted,
         )
     };
@@ -1872,7 +1955,7 @@ async fn approve_typed_data(
         config.wallet(&request.wallet_id)? == wallet,
         "wallet configuration changed during approval"
     );
-    let material = OsKeyStore.load(&wallet.id)?;
+    let material = OsKeyStore.load(&wallet.id, wallet.key_storage)?;
     let signer = material.signer();
     ensure!(
         signer.address() == wallet.address,
@@ -2077,7 +2160,7 @@ async fn approve_message(
         config.wallet(&request.wallet_id)? == wallet,
         "wallet configuration changed during approval"
     );
-    let material = OsKeyStore.load(&wallet.id)?;
+    let material = OsKeyStore.load(&wallet.id, wallet.key_storage)?;
     let signer = material.signer();
     ensure!(
         signer.address() == wallet.address,

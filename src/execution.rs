@@ -262,7 +262,7 @@ pub fn sign_prepared_execution<K: KeyStore>(
     );
 
     // All RPC preparation completed before this function loads key material.
-    let material = keys.load(&wallet.id)?;
+    let material = keys.load(&wallet.id, wallet.key_storage)?;
     let local_signer = material.signer();
     ensure!(
         local_signer.address() == wallet.address,
@@ -714,7 +714,10 @@ fn sanitize_message(network: &NetworkConfig, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::WalletSource, core::execution_plan::ExecutionPlan};
+    use crate::{
+        config::{KeyStorage, WalletSource},
+        core::execution_plan::ExecutionPlan,
+    };
     use alloy::{primitives::Address, signers::local::PrivateKeySigner};
     use chrono::Utc;
     use serde_json::json;
@@ -797,6 +800,7 @@ mod tests {
             created_at: Utc::now(),
             source: WalletSource::Created,
             exported_at: None,
+            key_storage: KeyStorage::default(),
         }
     }
 
