@@ -1203,7 +1203,8 @@ async fn run_transaction(
             let wallet = config.wallet(&record.wallet_id)?;
             let network = config.network_by_chain_id(&record.chain_id)?;
             let pending = std::sync::Mutex::new(pending);
-            let record = crate::reconcile::reconcile_record(&pending, &network, record, true).await?;
+            let record =
+                crate::reconcile::reconcile_record(&pending, &network, record, true).await?;
             ensure!(
                 record.status == PendingStatus::Broadcast,
                 "nothing to rebroadcast: the transaction is {}",

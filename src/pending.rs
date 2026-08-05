@@ -271,11 +271,7 @@ impl PendingStore {
     /// broadcast, or cancelling state. Senders reconcile this record against
     /// the chain before creating a new signature, so a predecessor that
     /// already mined (or was replaced) never blocks the next transaction.
-    pub fn in_flight(
-        &self,
-        wallet_id: &str,
-        chain_id: &str,
-    ) -> Result<Option<PendingTransaction>> {
+    pub fn in_flight(&self, wallet_id: &str, chain_id: &str) -> Result<Option<PendingTransaction>> {
         validate_wallet_id(wallet_id)?;
         let request_id: Option<String> = self
             .database
