@@ -10,7 +10,7 @@ use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use keyring::{Entry, Error as KeyringError};
-use rand::RngCore;
+use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -713,7 +713,8 @@ fn load_or_create_database_key(database_exists: bool) -> Result<DatabaseKey> {
                 "policy database exists but its credential-store key is missing"
             );
             let mut bytes = [0_u8; 32];
-            rand::rng().fill_bytes(&mut bytes);
+            // ThreadRng's error type is Infallible, so Ok is irrefutable.
+            let Ok(()) = rand::rng().try_fill_bytes(&mut bytes);
             entry
                 .set_secret(&bytes)
                 .context("failed to save policy database key")?;

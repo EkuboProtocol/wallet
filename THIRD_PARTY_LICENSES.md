@@ -49,6 +49,7 @@ file follows in the appendix. Regenerate this document with
 - base64ct 1.8.3 — RustCrypto Developers — https://github.com/RustCrypto/formats
 - blocking 1.6.2 — Stjepan Glavina <stjepang@gmail.com> — https://github.com/smol-rs/blocking
 - concurrent-queue 2.5.0 — Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net> — https://github.com/smol-rs/concurrent-queue
+- const-oid 0.10.2 — RustCrypto Developers — https://github.com/RustCrypto/formats
 - const-oid 0.9.6 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/const-oid
 - crypto-bigint 0.5.5 — RustCrypto Developers — https://github.com/RustCrypto/crypto-bigint
 - der 0.7.10 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/der
@@ -244,7 +245,7 @@ file follows in the appendix. Regenerate this document with
 
 - aes 0.8.4 — RustCrypto Developers — https://github.com/RustCrypto/block-ciphers
 - allocator-api2 0.2.21 — Zakarum <zaq.dev@icloud.com> — https://github.com/zakarumych/allocator-api2
-- alloy 2.1.0 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-chains 0.2.36 — Alloy Contributors — https://github.com/alloy-rs/chains
 - alloy-consensus 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-consensus-any 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
@@ -256,6 +257,7 @@ file follows in the appendix. Regenerate this document with
 - alloy-eip7702 0.6.3 — Alloy Contributors — https://github.com/alloy-rs/eips
 - alloy-eip7928 0.4.5 — Ishika Choudhury <ishikac720@gmail.com>, Soubhik Singha Mahapatra <soubhiksinghamahapatra@gmail.com> — https://github.com/alloy-rs/eips
 - alloy-eips 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
+- alloy-ens 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-genesis 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
 - alloy-json-abi 1.6.1 — Alloy Contributors — https://github.com/alloy-rs/core
 - alloy-json-rpc 2.1.1 — Alloy Contributors — https://github.com/alloy-rs/alloy
@@ -427,6 +429,7 @@ file follows in the appendix. Regenerate this document with
 - macro-string 0.2.0 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/macro-string
 - num 0.4.3 — The Rust Project Developers — https://github.com/rust-num/num
 - num-bigint 0.4.8 — The Rust Project Developers — https://github.com/rust-num/num-bigint
+- num-bigint 0.5.1 — https://github.com/rust-num/num-bigint
 - num-complex 0.4.6 — The Rust Project Developers — https://github.com/rust-num/num-complex
 - num-conv 0.2.2 — Jacob Pratt <jacob@jhpratt.dev> — https://github.com/jhpratt/num-conv
 - num-integer 0.1.46 — The Rust Project Developers — https://github.com/rust-num/num-integer
@@ -648,7 +651,7 @@ file follows in the appendix. Regenerate this document with
 
 ## Packages without a shipped license file
 
-- alloy 2.1.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-consensus-any 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-contract 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -659,6 +662,7 @@ file follows in the appendix. Regenerate this document with
 - alloy-eip7702 0.6.3: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eip7928 0.4.5: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-eips 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
+- alloy-ens 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-genesis 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-json-abi 1.6.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - alloy-json-rpc 2.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -1705,7 +1709,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: bitflags 2.13.1, glob 0.3.4, log 0.4.33, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.46, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, regex 1.13.1, regex-automata 0.4.16, regex-syntax 0.8.11, rustc-hex 2.1.0, semver 0.11.0, threadpool 1.8.1
+## License text for: bitflags 2.13.1, glob 0.3.4, log 0.4.33, num 0.4.3, num-bigint 0.4.8, num-bigint 0.5.1, num-complex 0.4.6, num-integer 0.1.46, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, regex 1.13.1, regex-automata 0.4.16, regex-syntax 0.8.11, rustc-hex 2.1.0, semver 0.11.0, threadpool 1.8.1
 
 ```text
 Copyright (c) 2014 The Rust Project Developers
@@ -2348,6 +2352,36 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+## License text for: const-oid 0.10.2
+
+```text
+Copyright (c) 2020-2026 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: const-oid 0.9.6
