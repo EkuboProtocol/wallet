@@ -61,11 +61,15 @@ it is not a control against in-process execution.
    because that digest is indistinguishable from a transaction, permit, or
    EIP-7702 authorization hash and no approval screen can describe it
    truthfully.
-   A message signature has no readable on-chain effect for the policy language
-   to score, so every message queues for human review with no automatic path;
-   its review escapes control characters, terminal escape sequences, and
-   Unicode bidirectional overrides, because the message body is attacker-
-   controlled text rendered into the approver's terminal.
+   No signature has an automatic path at all. A message signature has no
+   readable on-chain effect for the policy language to score, and a typed-data
+   signature has one the language cannot bound: a permit is redeemed by its
+   holder whenever it likes, so a per-transaction limit that admits one permit
+   admits an unbounded series of them, and this wallet keeps no counters to
+   notice. Every message and every payload therefore queues for human review;
+   that review escapes control characters, terminal escape sequences, and
+   Unicode bidirectional overrides, because the body is attacker-controlled
+   text rendered into the approver's terminal.
 3. The signed sender, chain, target, value, calldata, transaction type, nonce,
    gas, fees, and EIP-7702 authorization are constructed locally and validated
    after signing.

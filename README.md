@@ -60,6 +60,10 @@ and registering the server by hand.
   actions — and read the world between them — before the user is asked to
   approve the first step. Forks are hypothetical throughout and never sign,
   approve, or satisfy a policy rule.
+- Human approval for every off-chain signature — EIP-712 typed data and EIP-191
+  messages alike, permits included. No policy authorizes a signature, because a
+  per-transaction limit cannot bound something its holder redeems whenever it
+  likes.
 - SQLCipher-backed policy and pending-transaction storage.
 - Deterministic ABI return/error decoding, bounded batch reads, native/ERC-20
   transfer helpers, pending approval, receipt reconciliation, and exact-byte

@@ -27,17 +27,17 @@ per-transaction ceiling to apply, and the wallet holds no counters to apply one
 with. That is why signing has no automatic path.
 
 EIP-191 `personal_sign` messages queue the same way, for the additional reason
-that no policy could even score what a message signature authorizes. The CLI prints the
-exact bytes as hex beside their text, escapes control characters, terminal
-escape sequences, and Unicode bidirectional overrides so the message cannot
-repaint or reorder the screen reviewing it, and parses recognized ERC-4361
-sign-in messages into labeled fields with warnings for an unconfigured or
-disagreeing chain, an expired or post-dated login, a domain that disagrees with
-its own URI, and any listed resources. A sign-in message naming an account other
-than the signing wallet is refused outright, and legacy raw `eth_sign` over a
-bare 32-byte digest is refused because no approval screen can describe it
-honestly. A message signature binds no chain, so a `chain_id` sent with one is
-displayed as the requester's claim.
+that no policy could even score what a message signature authorizes. The CLI
+prints the exact bytes as hex beside their text, escapes control characters,
+terminal escape sequences, and Unicode bidirectional overrides so the message
+cannot repaint or reorder the screen reviewing it, and parses recognized
+ERC-4361 sign-in messages into labeled fields with warnings for an unconfigured
+or disagreeing chain, an expired or post-dated login, a domain that disagrees
+with its own URI, and any listed resources. A sign-in message naming an account
+other than the signing wallet is refused outright, and legacy raw `eth_sign`
+over a bare 32-byte digest is refused because no approval screen can describe
+it honestly. A message signature binds no chain, so a `chain_id` sent with one
+is displayed as the requester's claim.
 
 ## Why keys live in the credential store, and why nothing guards them
 

@@ -136,8 +136,8 @@ pub type TokenSpends = BTreeMap<String, BigUint>;
 
 impl WalletPolicy {
     pub fn parse(input: Value) -> Result<Self> {
-        let mut policy: Self =
-            serde_json::from_value(drop_retired_settings(input)).context("invalid wallet policy")?;
+        let mut policy: Self = serde_json::from_value(drop_retired_settings(input))
+            .context("invalid wallet policy")?;
         policy.normalize_and_validate()?;
         Ok(policy)
     }

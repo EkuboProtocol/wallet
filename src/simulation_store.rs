@@ -83,7 +83,8 @@ impl SimulationStore {
             recorded_at: now,
             expires_at: now + TimeDelta::seconds(SIMULATION_TTL_SECONDS),
         };
-        self.recorded.insert(recorded.simulation_id, recorded.clone());
+        self.recorded
+            .insert(recorded.simulation_id, recorded.clone());
         self.evict_oldest_while(|store| {
             store
                 .recorded
@@ -268,6 +269,9 @@ mod tests {
         let now = Utc::now();
         let recorded = store.record("primary", "1", plan, result, now);
         assert_eq!(recorded.result.policy_revision, 7);
-        assert_eq!(recorded.chain_id, default_networks()[0].chain_id.to_string());
+        assert_eq!(
+            recorded.chain_id,
+            default_networks()[0].chain_id.to_string()
+        );
     }
 }
