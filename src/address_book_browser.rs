@@ -183,9 +183,24 @@ pub async fn browse(config: &ConfigStore, presence: &dyn HumanPresence) -> Resul
 /// [`Screen`] guard is released before this returns, so the caller's flows
 /// draw on the ordinary terminal.
 fn pick_action(networks: &[NetworkConfig], entries: &[AddressBookEntry]) -> Result<Action> {
-    let mut list = SearchableTable::new("Address book entries", columns(), rows(networks, entries));
+    let alias_width = alias_column_width(entries);
+    let mut list = SearchableTable::new(
+        "Address book entries",
+        columns(alias_width, false),
+        rows(networks, entries, false),
+    );
+    let mut compact = false;
     let mut screen = Screen::enter()?;
     loop {
+        // Lay out against the live width on every frame: when the full
+        // 42-column address stops fitting, it is the address that shortens
+        // and the muted Updated column that goes — never the alias.
+        let wants_compact = screen.terminal.size()?.width < full_layout_min_width(alias_width);
+        if wants_compact != compact {
+            compact = wants_compact;
+            list.set_columns(columns(alias_width, compact));
+            list.set_rows(rows(networks, entries, compact));
+        }
         screen.terminal.draw(|frame| {
             let (header, body, footer) = chrome(frame.area());
             frame.render_widget(title_line(&list.title()), header);
@@ -253,14 +268,66 @@ fn hints(list: &SearchableTable) -> String {
     format!("↑↓ select · Enter edit · a add · d remove · {search} · q quit")
 }
 
-fn columns() -> Vec<TableColumn> {
-    vec![
-        TableColumn::new("Alias", Constraint::Fill(1)),
-        TableColumn::new("Address", Constraint::Length(42)),
+/// A full `0x…` address is 42 columns; the shortened form keeps 10 leading
+/// and 8 trailing characters around a one-column ellipsis.
+const FULL_ADDRESS_WIDTH: u16 = 42;
+const SHORT_ADDRESS_WIDTH: u16 = 19;
+const UPDATED_WIDTH: u16 = 14;
+
+/// The alias column is sized to its content so the fixed-width address can
+/// never squeeze it: the alias is the one value the user knows an entry by,
+/// so on a small screen it is everything else that gives way.
+fn alias_column_width(entries: &[AddressBookEntry]) -> u16 {
+    let width = entries
+        .iter()
+        // Aliases are validated ASCII, so bytes are display columns.
+        .map(|entry| entry.alias.len())
+        .max()
+        .unwrap_or(0)
+        .clamp("Alias".len(), 24);
+    u16::try_from(width).expect("clamped to at most 24")
+}
+
+/// The narrowest terminal where the full-address layout leaves the network
+/// and note columns readable; below it the compact layout applies.
+fn full_layout_min_width(alias_width: u16) -> u16 {
+    // Fixed columns, four separators of column spacing, and breathing room
+    // for the network and note fills.
+    alias_width + FULL_ADDRESS_WIDTH + UPDATED_WIDTH + 4 * 2 + 24
+}
+
+fn columns(alias_width: u16, compact: bool) -> Vec<TableColumn> {
+    let mut columns = vec![
+        TableColumn::new("Alias", Constraint::Length(alias_width)),
+        TableColumn::new(
+            "Address",
+            Constraint::Length(if compact {
+                SHORT_ADDRESS_WIDTH
+            } else {
+                FULL_ADDRESS_WIDTH
+            }),
+        ),
         TableColumn::new("Network", Constraint::Fill(1)),
         TableColumn::new("Note", Constraint::Fill(1)),
-        TableColumn::new("Updated", Constraint::Length(14)),
-    ]
+    ];
+    if !compact {
+        columns.push(TableColumn::new(
+            "Updated",
+            Constraint::Length(UPDATED_WIDTH),
+        ));
+    }
+    columns
+}
+
+/// `0xa0b86991…2d883e06`: both checkable ends of the address in a narrow
+/// cell. Clipping the tail alone would show a prefix that a vanity-address
+/// lookalike could match; the search still holds the full value, and every
+/// edit and confirmation shows it whole.
+fn short_address(address: &str) -> String {
+    if address.len() <= usize::from(SHORT_ADDRESS_WIDTH) {
+        return address.to_owned();
+    }
+    format!("{}…{}", &address[..10], &address[address.len() - 8..])
 }
 
 /// The network column names the chain when it is still configured and falls
@@ -275,25 +342,31 @@ fn network_label(networks: &[NetworkConfig], chain_id: &str) -> String {
         )
 }
 
-fn rows(networks: &[NetworkConfig], entries: &[AddressBookEntry]) -> Vec<TableRow> {
+fn rows(networks: &[NetworkConfig], entries: &[AddressBookEntry], compact: bool) -> Vec<TableRow> {
     entries
         .iter()
         .map(|entry| {
             let network = network_label(networks, &entry.chain_id);
-            let updated = chrono::DateTime::parse_from_rfc3339(&entry.updated_at).map_or_else(
-                |_| "—".to_owned(),
-                |when| crate::render::relative_time(when.with_timezone(&chrono::Utc)),
-            );
-            let cells = vec![
+            let mut cells = vec![
                 Span::plain(&entry.alias),
-                Span::plain(&entry.address),
+                if compact {
+                    Span::plain(short_address(&entry.address))
+                } else {
+                    Span::plain(&entry.address)
+                },
                 Span::plain(&network),
                 entry
                     .note
                     .as_deref()
                     .map_or_else(|| Span::toned("—", Tone::Muted), Span::plain),
-                Span::toned(updated, Tone::Muted),
             ];
+            if !compact {
+                let updated = chrono::DateTime::parse_from_rfc3339(&entry.updated_at).map_or_else(
+                    |_| "—".to_owned(),
+                    |when| crate::render::relative_time(when.with_timezone(&chrono::Utc)),
+                );
+                cells.push(Span::toned(updated, Tone::Muted));
+            }
             TableRow::new(
                 cells,
                 &[
@@ -525,7 +598,7 @@ mod tests {
             entry("alice", "1", Some("payroll")),
             entry("vault", "424242", None),
         ];
-        let rows = rows(&networks, &entries);
+        let rows = rows(&networks, &entries, false);
         assert_eq!(rows[0].cells[0], Span::plain("alice"));
         assert_eq!(
             rows[0].cells[2],
@@ -552,8 +625,11 @@ mod tests {
     fn editor_keys_map_to_actions_and_never_steal_from_the_search() {
         let networks = networks();
         let entries = vec![entry("alice", "1", None), entry("bob", "1", None)];
-        let mut list =
-            SearchableTable::new("Address book entries", columns(), rows(&networks, &entries));
+        let mut list = SearchableTable::new(
+            "Address book entries",
+            columns(alias_column_width(&entries), false),
+            rows(&networks, &entries, false),
+        );
 
         assert_eq!(
             handle_list_key(&mut list, press(KeyCode::Char('a'))),
@@ -594,7 +670,11 @@ mod tests {
 
     #[test]
     fn an_empty_book_still_offers_add_and_quit() {
-        let mut list = SearchableTable::new("Address book entries", columns(), Vec::new());
+        let mut list = SearchableTable::new(
+            "Address book entries",
+            columns(alias_column_width(&[]), false),
+            Vec::new(),
+        );
         assert_eq!(
             handle_list_key(&mut list, press(KeyCode::Char('a'))),
             Some(Action::Add)
@@ -615,8 +695,11 @@ mod tests {
     fn hints_carry_the_editor_bindings() {
         let networks = networks();
         let entries = vec![entry("alice", "1", None)];
-        let mut list =
-            SearchableTable::new("Address book entries", columns(), rows(&networks, &entries));
+        let mut list = SearchableTable::new(
+            "Address book entries",
+            columns(alias_column_width(&entries), false),
+            rows(&networks, &entries, false),
+        );
         for expected in ["a add", "d remove", "Enter edit", "/ search", "q quit"] {
             assert!(hints(&list).contains(expected), "missing {expected}");
         }
@@ -625,5 +708,41 @@ mod tests {
         assert!(hints(&list).starts_with("Search: a"));
         handle_list_key(&mut list, press(KeyCode::Enter));
         assert!(hints(&list).contains("Esc clear search"));
+    }
+
+    #[test]
+    fn a_small_screen_shortens_the_address_and_never_the_alias() {
+        let networks = networks();
+        let entries = vec![entry("payroll-alice", "1", Some("a fairly long note"))];
+        let full = Address::repeat_byte(0xab).to_checksum(None);
+
+        // The alias column is sized to its widest alias, so the fixed-width
+        // address cannot squeeze it; the header sets the floor and 24 the
+        // ceiling.
+        assert_eq!(alias_column_width(&entries), 13);
+        assert_eq!(alias_column_width(&[]), 5);
+        assert_eq!(alias_column_width(&[entry(&"a".repeat(64), "1", None)]), 24);
+
+        // Compact rows shorten the address around both checkable ends and
+        // drop the Updated column; the search still holds the full value.
+        let compact = rows(&networks, &entries, true);
+        assert_eq!(compact[0].cells.len(), 4);
+        let shortened = short_address(&full);
+        assert_eq!(compact[0].cells[1], Span::plain(&shortened));
+        assert!(shortened.starts_with(&full[..10]) && shortened.ends_with(&full[34..]));
+        assert_eq!(
+            crate::fullscreen::display_width(&shortened),
+            usize::from(SHORT_ADDRESS_WIDTH)
+        );
+        assert!(compact[0].haystack.contains(&full.to_lowercase()));
+        assert_eq!(rows(&networks, &entries, false)[0].cells.len(), 5);
+
+        // A degenerate stored address is shown as-is rather than sliced.
+        assert_eq!(short_address("0xshort"), "0xshort");
+
+        // Column layouts match the rows they pair with.
+        assert_eq!(columns(13, false).len(), 5);
+        assert_eq!(columns(13, true).len(), 4);
+        assert!(full_layout_min_width(13) > 13 + FULL_ADDRESS_WIDTH + UPDATED_WIDTH);
     }
 }

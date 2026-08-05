@@ -308,6 +308,12 @@ impl SearchableTable {
         self.refilter();
     }
 
+    /// Replace the columns, for a surface whose layout changes with the
+    /// terminal width. Pair with a [`Self::set_rows`] whose cells match.
+    pub(crate) fn set_columns(&mut self, columns: Vec<TableColumn>) {
+        self.columns = columns;
+    }
+
     fn selected_row(&self) -> Option<usize> {
         self.state
             .selected()
