@@ -113,8 +113,6 @@ pub struct WalletPolicy {
     pub chains: BTreeMap<String, ChainPolicy>,
     #[serde(default = "default_approval_expiry")]
     pub approval_expiry_seconds: u32,
-    #[serde(default = "default_true")]
-    pub require_simulation: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -138,7 +136,8 @@ pub type TokenSpends = BTreeMap<String, BigUint>;
 
 impl WalletPolicy {
     pub fn parse(input: Value) -> Result<Self> {
-        let mut policy: Self = serde_json::from_value(input).context("invalid wallet policy")?;
+        let mut policy: Self =
+            serde_json::from_value(drop_retired_settings(input)).context("invalid wallet policy")?;
         policy.normalize_and_validate()?;
         Ok(policy)
     }
@@ -197,7 +196,6 @@ impl WalletPolicy {
             version: 2,
             chains,
             approval_expiry_seconds: 600,
-            require_simulation: true,
         }
     }
 
@@ -229,7 +227,6 @@ impl WalletPolicy {
             version: 2,
             chains,
             approval_expiry_seconds: 600,
-            require_simulation: true,
         }
     }
 
@@ -269,7 +266,7 @@ impl WalletPolicy {
             validate_decimal(&chain.native.max_value_per_transaction)?;
             normalize_target_map(&mut chain.targets)?;
             normalize_spender_map(&mut chain.approval_spenders)?;
-            normalize_token_map(&mut chain.tokens, self.require_simulation)?;
+            normalize_token_map(&mut chain.tokens)?;
             ensure!(
                 chains.insert(chain_id, chain).is_none(),
                 "duplicate chain policy"
@@ -614,12 +611,6 @@ pub fn json_schema() -> Value {
 #[must_use]
 pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<String> {
     let mut lines = Vec::new();
-    if current.require_simulation != proposed.require_simulation {
-        lines.push(format!(
-            "~ require_simulation: {} → {}",
-            current.require_simulation, proposed.require_simulation
-        ));
-    }
     if current.approval_expiry_seconds != proposed.approval_expiry_seconds {
         lines.push(format!(
             "~ approval expiry: {}s → {}s",
@@ -865,6 +856,19 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
     }
 }
 
+/// Discard top-level settings this format no longer has, so a wallet whose
+/// stored policy predates their removal still opens after an upgrade.
+///
+/// `require_simulation` is the only one. Every plan is simulated now and a
+/// simulation that does not succeed always denies, so the field has nothing
+/// left to select and is dropped whichever way it was set.
+fn drop_retired_settings(mut input: Value) -> Value {
+    if let Some(object) = input.as_object_mut() {
+        object.remove("require_simulation");
+    }
+    input
+}
+
 fn error(code: &str, message: String, step: Option<u32>) -> PolicyFinding {
     PolicyFinding {
         severity: FindingSeverity::Error,
@@ -922,13 +926,9 @@ fn normalize_spender_map(map: &mut BTreeMap<String, ApprovalSpenderPolicy>) -> R
     Ok(())
 }
 
-fn normalize_token_map(
-    map: &mut BTreeMap<String, TokenPolicy>,
-    require_simulation: bool,
-) -> Result<()> {
+fn normalize_token_map(map: &mut BTreeMap<String, TokenPolicy>) -> Result<()> {
     let mut output = BTreeMap::new();
     for (raw, mut rule) in std::mem::take(map) {
-        ensure!(require_simulation, "token spend limits require simulation");
         validate_label(rule.label.as_deref())?;
         validate_decimal(&rule.max_spend_per_transaction)?;
         let mut recipients = BTreeMap::new();
@@ -1053,10 +1053,6 @@ const fn default_approval_expiry() -> u32 {
     600
 }
 
-const fn default_true() -> bool {
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,14 +1111,20 @@ mod tests {
     }
 
     #[test]
-    fn token_rules_require_simulation() {
-        assert!(
-            WalletPolicy::parse(json!({
+    fn a_policy_written_against_the_retired_simulation_switch_still_opens() {
+        // Simulation is unconditional now. A stored policy that still carries
+        // the old field must keep parsing — failing here would lock the owner
+        // out of their own wallet — and the field must not survive the parse
+        // in either direction.
+        for setting in [true, false] {
+            let policy = WalletPolicy::parse(json!({
                 "chains": { "1": { "tokens": { "*": {} } } },
-                "require_simulation": false
+                "require_simulation": setting
             }))
-            .is_err()
-        );
+            .expect("a retired setting is discarded, not rejected");
+            let round_trip = serde_json::to_value(&policy).unwrap();
+            assert!(round_trip.get("require_simulation").is_none());
+        }
     }
 
     #[test]

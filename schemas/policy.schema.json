@@ -27,10 +27,6 @@
       "format": "uint32",
       "minimum": 0,
       "default": 600
-    },
-    "require_simulation": {
-      "type": "boolean",
-      "default": true
     }
   },
   "additionalProperties": false,

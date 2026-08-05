@@ -635,7 +635,10 @@ pub async fn simulate_execution(
 
     let mut findings = evaluate_policy(plan, &stored_policy.policy, Some(&token_spends));
     let simulation = execution_output(plan, main, network, simulated_header.gas_limit());
-    if !simulation.success && stored_policy.policy.require_simulation {
+    // A plan that does not execute is never allowed, whatever the policy says
+    // about its calls: there is no policy setting that turns a revert into an
+    // automatic signature.
+    if !simulation.success {
         findings.push(PolicyFinding {
             severity: FindingSeverity::Error,
             code: "simulation_failed".into(),
@@ -645,7 +648,7 @@ pub async fn simulate_execution(
     }
     Ok(SimulationResult {
         digest: format!("{:#x}", plan.digest()),
-        allowed: policy_allows(&findings),
+        allowed: simulation.success && policy_allows(&findings),
         policy_findings: findings,
         policy_revision: stored_policy.revision,
         execution_mode: planned.mode,

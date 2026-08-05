@@ -49,10 +49,6 @@ fn every_shipped_policy_example_parses() {
             policy.version, 2,
             "{relative} declares an unexpected version"
         );
-        assert!(
-            policy.require_simulation,
-            "{relative} disables simulation, which no shipped example should do"
-        );
         assert!(!policy.chains.is_empty(), "{relative} configures no chains");
         checked += 1;
     }
@@ -74,7 +70,6 @@ fn allow_all_template_matches_the_built_in_profile() {
         template.approval_expiry_seconds,
         built_in.approval_expiry_seconds
     );
-    assert_eq!(template.require_simulation, built_in.require_simulation);
 }
 
 #[test]
@@ -90,7 +85,6 @@ fn require_approval_profile_matches_the_shipped_deny_all_example() {
         example.approval_expiry_seconds,
         built_in.approval_expiry_seconds
     );
-    assert_eq!(example.require_simulation, built_in.require_simulation);
 }
 
 #[test]

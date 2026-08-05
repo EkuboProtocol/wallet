@@ -21,8 +21,13 @@ configured token the wallet conservatively uses the larger of the wallet's net
 balance decrease and the sum of outgoing standard `Transfer` events, and it
 discovers outgoing transfers from other token contracts so a `"*"` token rule
 covers them. This catches tokens pulled by routers or pre-existing allowances,
-not only direct `transfer` calldata, so finite token limits require
-`require_simulation: true`.
+not only direct `transfer` calldata.
+
+Simulation is not a policy setting. Every plan is simulated before it can sign,
+and a simulation that does not succeed is an error finding of its own, so a
+reverting plan is never allowed no matter what the rest of the document
+permits. Policies written before this was fixed may still carry the retired
+`require_simulation` field; it is discarded when the document is read.
 
 Policy documents have a generated [JSON Schema](../schemas/policy.schema.json)
 derived from the same types the wallet enforces. Print the current one with

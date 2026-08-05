@@ -976,17 +976,15 @@ fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMode) ->
                     "policy_file": policy_file.display().to_string(),
                     "digest": digest,
                     "version": policy.version,
-                    "require_simulation": policy.require_simulation,
                     "approval_expiry_seconds": policy.approval_expiry_seconds,
                     "chains": policy.chains.keys().collect::<Vec<_>>(),
                     "policy": policy,
                 }),
                 || {
                     Ok(format!(
-                        "{} is a valid policy.\n  digest: {digest}\n  chains: {}\n  require_simulation: {}\n  approval_expiry_seconds: {}",
+                        "{} is a valid policy.\n  digest: {digest}\n  chains: {}\n  approval_expiry_seconds: {}",
                         policy_file.display(),
                         policy.chains.keys().cloned().collect::<Vec<_>>().join(", "),
-                        policy.require_simulation,
                         policy.approval_expiry_seconds,
                     ))
                 },
