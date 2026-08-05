@@ -29,11 +29,6 @@ assumed and corrected afterwards:
 - `wallet import` brings in a key that usually already controls funds, so it
   installs the require-approval policy outright: nothing signs automatically
   until you deliberately choose otherwise.
-- Both commands default to keeping the key in this machine's credential
-  store. `--key-storage cloud-synced` places it in the iCloud Keychain
-  instead (macOS only), and `wallet attach <id>` adopts a key another device
-  already synced — under require-approval, like an import. The trade-offs and
-  platform constraints are covered in [storage](storage.md).
 
 Both profiles are one command to install at any time, and every transaction
 under the require-approval profile still runs the full simulation and decoded

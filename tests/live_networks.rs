@@ -37,7 +37,7 @@ use chrono::Utc;
 use ekubo_wallet::{
     abi_decoder::{AbiDecodePlan, AbiParameterInput},
     batch_read::{BatchEthCallInput, BatchReadCall, BatchStrategy, batch_eth_call},
-    config::{KeyStorage, NetworkConfig, WalletMetadata, WalletSource, default_networks},
+    config::{NetworkConfig, WalletMetadata, WalletSource, default_networks},
     core::{execution_plan::ExecutionPlan, policy::WalletPolicy},
     fork::{ForkParent, ForkPreface, ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
     policy_store::StoredPolicy,
@@ -92,7 +92,6 @@ fn wallet() -> WalletMetadata {
         created_at: Utc::now(),
         source: WalletSource::Created,
         exported_at: None,
-        key_storage: KeyStorage::default(),
     }
 }
 

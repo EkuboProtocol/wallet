@@ -26,7 +26,7 @@ complete -c ekubo-wallet -l json -d 'Print machine-readable JSON instead of the 
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l help -d 'Show command help'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print version information'
 
-complete -c ekubo-wallet -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from list create import attach export remove' -a 'list create import attach export remove'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from list presets reset add edit remove delete' -a 'list presets reset add edit remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema review' -a 'show set allow-all require-approval validate schema review'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show' -a 'list show'

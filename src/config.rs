@@ -22,37 +22,6 @@ pub enum WalletSource {
     Imported,
 }
 
-/// Which credential store holds this wallet's private key.
-///
-/// The two stores are distinct namespaces with different custody properties:
-/// a local key never leaves this machine's credential store, while a
-/// cloud-synced key is replicated to every device signed into the same
-/// platform account (iCloud Keychain on macOS). The choice is fixed at
-/// creation and recorded here so every later load, signing, and deletion
-/// consults the store the key actually lives in.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum KeyStorage {
-    #[default]
-    Local,
-    CloudSynced,
-}
-
-impl KeyStorage {
-    #[must_use]
-    pub const fn is_local(&self) -> bool {
-        matches!(self, Self::Local)
-    }
-
-    #[must_use]
-    pub const fn describe(&self) -> &'static str {
-        match self {
-            Self::Local => "local credential store",
-            Self::CloudSynced => "cloud-synced credential store",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WalletMetadata {
@@ -72,12 +41,6 @@ pub struct WalletMetadata {
     /// never a control.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exported_at: Option<DateTime<Utc>>,
-    /// Which credential store holds the private key. Absent in configurations
-    /// written before cloud-synced storage existed, all of which stored keys
-    /// locally, so absence deserializes to `Local` and `Local` serializes to
-    /// absence to keep those files byte-stable.
-    #[serde(default, skip_serializing_if = "KeyStorage::is_local")]
-    pub key_storage: KeyStorage,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -147,8 +110,6 @@ struct StoredWallet {
     custody: Option<LegacyCustodyStatus>,
     #[serde(default)]
     exported_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    key_storage: KeyStorage,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -189,7 +150,6 @@ impl TryFrom<StoredWallet> for WalletMetadata {
             created_at: stored.created_at,
             source: stored.source,
             exported_at: stored.exported_at,
-            key_storage: stored.key_storage,
         })
     }
 }
@@ -804,7 +764,6 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
             source: WalletSource::Created,
             exported_at: None,
-            key_storage: KeyStorage::default(),
         });
         store.save(&config).unwrap();
 
@@ -847,60 +806,6 @@ mod tests {
         assert!(!document.contains("custody"));
         assert!(document.contains("exported_at"));
         assert_eq!(store.load().unwrap(), config);
-    }
-
-    /// Every configuration written before cloud-synced storage existed holds
-    /// only local keys, so a file with no `key_storage` field must load as
-    /// `Local`, and a local wallet must serialize back without the field so
-    /// those files stay byte-stable across a round trip.
-    #[test]
-    fn absent_key_storage_loads_as_local_and_local_stays_absent() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ConfigStore::new(directory.path());
-        let mut config = store.load().unwrap();
-        config.wallets.push(WalletMetadata {
-            id: "primary".into(),
-            address: Address::ZERO,
-            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
-            source: WalletSource::Created,
-            exported_at: None,
-            key_storage: KeyStorage::Local,
-        });
-        store.save(&config).unwrap();
-        assert!(
-            !fs::read_to_string(store.file())
-                .unwrap()
-                .contains("key_storage")
-        );
-        assert_eq!(
-            store.load().unwrap().wallets[0].key_storage,
-            KeyStorage::Local
-        );
-    }
-
-    #[test]
-    fn cloud_synced_key_storage_round_trips() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ConfigStore::new(directory.path());
-        let mut config = store.load().unwrap();
-        config.wallets.push(WalletMetadata {
-            id: "roaming".into(),
-            address: Address::ZERO,
-            created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
-            source: WalletSource::Created,
-            exported_at: None,
-            key_storage: KeyStorage::CloudSynced,
-        });
-        store.save(&config).unwrap();
-        assert!(
-            fs::read_to_string(store.file())
-                .unwrap()
-                .contains("cloud_synced")
-        );
-        assert_eq!(
-            store.load().unwrap().wallets[0].key_storage,
-            KeyStorage::CloudSynced
-        );
     }
 
     /// Only a hand-edited file can disagree with itself, and resolving it in

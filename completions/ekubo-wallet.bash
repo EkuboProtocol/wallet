@@ -17,7 +17,7 @@ _ekubo_wallet() {
       ;;
     2)
       case "$first" in
-        wallet) choices="list create import attach export remove" ;;
+        wallet) choices="list create import export remove" ;;
         network) choices="list presets reset add edit remove delete" ;;
         policy) choices="show set allow-all require-approval validate schema review" ;;
         transaction|tx) choices="list show" ;;

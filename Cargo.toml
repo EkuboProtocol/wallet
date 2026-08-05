@@ -28,9 +28,6 @@ futures = "0.3.31"
 hex = "0.4.3"
 inquire = "0.9.4"
 keyring = "4.1.6"
-# `keyring`'s facade hides the store-specific constructors, so the code that
-# builds entries against a non-default store speaks `keyring-core` directly.
-keyring-core = "1.0.0"
 num-bigint = "0.5.1"
 percent-encoding = "2.3.2"
 rand = "0.10.2"
@@ -54,10 +51,6 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# The `keyring` facade only wires up the local file-based keychain on macOS.
-# Cloud-synced storage needs the protected-data store with its `cloud-sync`
-# configuration, which means depending on the store crate directly.
-apple-native-keyring-store = { version = "1.0.1", features = ["keychain", "protected"] }
 block2 = "0.6.2"
 objc2 = "0.6.3"
 objc2-foundation = { version = "0.3.1", features = ["NSError", "NSString"] }

@@ -11,7 +11,7 @@ _ekubo-wallet() {
 
   if (( CURRENT == 3 )); then
     case "$words[2]" in
-      wallet) _values "wallet command" list create import attach export remove ;;
+      wallet) _values "wallet command" list create import export remove ;;
       network) _values "network command" list presets reset add edit remove delete ;;
       policy) _values "policy command" show set allow-all require-approval validate schema review ;;
       transaction|tx) _values "transaction command" list show ;;
