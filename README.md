@@ -1,4 +1,4 @@
-# Secure Wallet MCP Server
+# Ekubo Wallet MCP Server
 
 `ekubo-wallet` is a local EVM wallet, command-line tool, and stdio MCP server.
 It enforces transaction policy in the same process that reads the signing key,
@@ -221,7 +221,7 @@ chain IDs without seeing provider credentials.
 
 | CLI name | Chain ID | Max transaction gas | Default public RPC |
 | --- | ---: | ---: | --- |
-| `ethereum` | 1 | 16,777,216 | `https://ethereum-rpc.publicnode.com` |
+| `ethereum` | 1 | 16,777,216 | `https://rpc.mevblocker.io` |
 | `base` | 8453 | 16,777,216 | `https://mainnet.base.org` |
 | `arbitrum` | 42161 | 32,000,000 | `https://arb1.arbitrum.io/rpc` |
 | `robinhood` | 4663 | 32,000,000 | `https://rpc.mainnet.chain.robinhood.com` |
@@ -230,6 +230,7 @@ chain IDs without seeing provider credentials.
 | `optimism` | 10 | 16,777,216 | `https://mainnet.optimism.io` |
 | `gnosis` | 100 | 16,777,216 | `https://rpc.gnosischain.com` |
 | `berachain` | 80094 | 16,777,216 | `https://rpc.berachain.com` |
+| `megaeth` | 4326 | 10,000,000,000 | `https://mainnet.megaeth.com/rpc` |
 
 Each is an endpoint its own chain or its operator publishes for wallet use, so
 what you are connecting to is documented somewhere you can read rather than
@@ -239,10 +240,10 @@ server. The configured RPC must support `eth_simulateV1` including sequential
 calls, logs, native-transfer tracing, and state overrides; it also observes the
 full simulation intent, so prefer a trusted dedicated provider.
 
-Monad's published endpoint does not implement `eth_simulateV1`, so nothing can
-be simulated there and nothing signs automatically: every plan fails simulation
-and queues for explicit approval. Point that chain at a provider that supports
-the method before using it.
+The published Monad and MegaETH endpoints do not implement `eth_simulateV1`, so
+nothing can be simulated on those chains and nothing signs automatically: every
+plan fails simulation and queues for explicit approval. Point them at a provider
+that supports the method before using them.
 
 `network add` starts from whatever already describes the chain — the
 configured network with that name or alias, otherwise the built-in preset — so
@@ -449,7 +450,7 @@ tool for freshly prepared calldata.
 ### Token database and portfolio
 
 The wallet keeps a local token database in a **separate, unencrypted SQLite
-file** (`tokens.db`) beside the encrypted security database. Token metadata is
+file** (`tokens.db`) beside the encrypted policy database. Token metadata is
 public display data: MCP tools may write it without owner authentication, and
 nothing in the signing or policy path ever reads it.
 
