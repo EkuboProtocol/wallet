@@ -16,6 +16,38 @@ This is security-sensitive software. It has not been independently audited, and
 nothing here should be read as a claim that it has.
 
 
+## Quick install
+
+The installer downloads the archive for your platform, **verifies its SHA-256
+checksum against `SHA256SUMS` before extracting anything**, additionally
+verifies the Sigstore signature when `cosign` is installed, installs
+`ekubo-wallet` and `ew`, registers the server with every agent CLI it detects
+(Codex, Claude Code, Gemini CLI, and Cursor), and installs completion for your
+login shell:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
+```
+
+Read [`install.sh`](install.sh) before piping it to a shell. Replace `main` with
+an exact release tag for a reproducible installation. While the repository is
+private the installer needs credentials to reach the release assets: it uses the
+GitHub CLI when you are logged in (`gh auth login`), and otherwise honors
+`GITHUB_TOKEN`.
+
+Then accept the legal documents and create a wallet:
+
+```sh
+ekubo-wallet legal accept
+ekubo-wallet wallet create primary
+```
+
+`wallet create` asks which policy template the new wallet starts under. See
+[first use](docs/first-use.md) for what each one permits, and
+[installation](docs/installation.md) for release archives, manual installation,
+and registering the server by hand.
+
+
 ## What it provides
 
 - OS-credential-store custody for generated or imported secp256k1 keys.
@@ -41,37 +73,11 @@ reservations, or spend-history command/tool. Pending transaction rows are
 lifecycle records, not spending-accounting state.
 
 
-## Install
-
-The installer downloads the archive for your platform, **verifies its SHA-256
-checksum against `SHA256SUMS` before extracting anything**, additionally
-verifies the Sigstore signature when `cosign` is installed, installs
-`ekubo-wallet` and `ew`, registers the server with every agent CLI it detects
-(Codex, Claude Code, Gemini CLI, and Cursor), and installs completion for your
-login shell:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
-```
-
-Read [`install.sh`](install.sh) before piping it to a shell. Replace `main` with
-an exact release tag for a reproducible installation. For release archives,
-manual installation, and registering the server by hand, see
-[installation](docs/installation.md).
-
-Then set up a wallet and accept the legal documents — see
-[first use](docs/first-use.md):
-
-```sh
-ekubo-wallet legal accept
-ekubo-wallet wallet create primary
-```
-
 ## Documentation
 
 Using it:
 
-| | |
+| Guide | What it covers |
 | --- | --- |
 | [Installation](docs/installation.md) | Release archives, manual install, registering the MCP server by hand |
 | [First use](docs/first-use.md) | Accepting the legal documents, creating a wallet, choosing its policy |
@@ -83,7 +89,7 @@ Using it:
 
 How it works, and what it does not protect against:
 
-| | |
+| Document | What it covers |
 | --- | --- |
 | [Security boundary](docs/security-boundary.md) | What is trusted, why keys sit outside the database, why nothing enforces presence |
 | [Threat model](docs/threat-model.md) | Signing invariants, attack analysis, residual risks |
@@ -92,7 +98,7 @@ How it works, and what it does not protect against:
 
 Working on it:
 
-| | |
+| Guide | What it covers |
 | --- | --- |
 | [Development](docs/development.md) | Building, testing, the checks CI runs |
 | [Releasing](docs/releasing.md) | Signing, provenance, and the trusted-publishing setup |
