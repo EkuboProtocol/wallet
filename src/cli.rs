@@ -20,18 +20,16 @@ use crate::{
     },
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
-    render::{OutputMode, described_time, emit, explorer_transaction_url, relative_time},
-    rpc::{ReceiptDetails, transaction_receipt_details, verify_chain_id},
+    render::{OutputMode, described_time, emit, relative_time},
+    rpc::verify_chain_id,
     simulation::{SimulationResult, simulate_execution},
+    tx_browser::status_label,
     typed_data::{
         PendingTypedData, TypedDataStatus, TypedDataStore, interpret_permit_approvals,
         parse_typed_data,
     },
 };
-use alloy::{
-    primitives::{Address, B256, U256, b256},
-    signers::SignerSync,
-};
+use alloy::{primitives::Address, signers::SignerSync};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -1131,7 +1129,7 @@ async fn run_transaction(
             // The full interactive browser needs stdin; without it, print the
             // one-line summaries instead.
             if io::stdin().is_terminal() {
-                browse_transactions(config, &transactions).await
+                crate::tx_browser::browse(config, &transactions).await
             } else {
                 for record in &transactions {
                     println!("{}", transaction_line(record));
@@ -1144,73 +1142,14 @@ async fn run_transaction(
             if mode == OutputMode::Json {
                 return print_json(&record);
             }
-            let detail = transaction_detail(config, &record).await;
+            let detail = crate::tx_browser::load_detail(config, &record).await;
             println!(
                 "{}",
-                colorize_detail(
-                    &crate::render::terminal_safe_multiline(&detail),
-                    record.status,
-                    crate::tui::paint_stdout,
-                )
+                crate::tx_browser::lines_to_text(&detail, crate::tui::paint_stdout)
             );
             Ok(())
         }
     }
-}
-
-/// keccak256("Transfer(address,address,uint256)"), for receipt log decoding.
-const TRANSFER_EVENT: B256 =
-    b256!("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
-
-fn status_label(status: PendingStatus) -> &'static str {
-    match status {
-        PendingStatus::AwaitingApproval => "awaiting approval",
-        PendingStatus::Rejected => "rejected",
-        PendingStatus::Signed => "approved, not submitted",
-        PendingStatus::Submitting => "submitting",
-        PendingStatus::Broadcast => "broadcast, awaiting receipt",
-        PendingStatus::Confirmed => "confirmed",
-        PendingStatus::Reverted => "reverted",
-        PendingStatus::Expired => "expired",
-        PendingStatus::Cancelled => "cancelled",
-    }
-}
-
-/// The semantic color of a lifecycle state: green once value moved as
-/// approved, yellow while something is still pending, red for every path
-/// where nothing will move.
-fn status_tone(status: PendingStatus) -> crate::tui::Tone {
-    match status {
-        PendingStatus::Confirmed | PendingStatus::Signed => crate::tui::Tone::Success,
-        PendingStatus::AwaitingApproval | PendingStatus::Submitting | PendingStatus::Broadcast => {
-            crate::tui::Tone::Warning
-        }
-        PendingStatus::Rejected
-        | PendingStatus::Reverted
-        | PendingStatus::Expired
-        | PendingStatus::Cancelled => crate::tui::Tone::Danger,
-    }
-}
-
-/// Colors the leading `Status:` line of an already-sanitized detail body.
-/// Applied only after `terminal_safe_multiline`, so the color codes added
-/// by `paint` are the only escape sequences in the text.
-fn colorize_detail(
-    safe_detail: &str,
-    status: PendingStatus,
-    paint: impl Fn(&str, crate::tui::Tone) -> String,
-) -> String {
-    safe_detail
-        .lines()
-        .map(|line| {
-            if line.starts_with("Status: ") {
-                paint(line, status_tone(status))
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn transaction_line(record: &PendingTransaction) -> String {
@@ -1226,28 +1165,6 @@ fn transaction_line(record: &PendingTransaction) -> String {
     )
 }
 
-/// The same record as [`transaction_line`], written to be scanned in a list
-/// rather than copied out of a pipe.
-///
-/// The short request ID leads, so a row stays identifiable even where a
-/// narrow terminal clips the tail, and the native total is left out: raw wei
-/// runs to twenty digits for an ordinary transfer, which is both unreadable
-/// at a glance and wide enough to push everything else off screen. The
-/// expanded view one keystroke away carries the full ID and the exact value
-/// of every call, and the non-interactive listing still prints
-/// [`transaction_line`] with the whole ID that `transaction show` takes.
-fn transaction_row(record: &PendingTransaction) -> String {
-    format!(
-        "{} · {} · {} · {} · chain {} · {} call(s)",
-        short_request_id(record.request_id),
-        relative_time(record.created_at),
-        status_label(record.status),
-        record.wallet_id,
-        record.chain_id,
-        record.execution_plan.ordered_steps.len(),
-    )
-}
-
 /// Native value the whole plan moves, in wei. Steps whose value does not
 /// parse contribute nothing rather than poisoning the total: this is a
 /// display summary, and every exact per-call value is in the expanded view.
@@ -1260,71 +1177,6 @@ fn plan_native_total(record: &PendingTransaction) -> BigUint {
         .sum()
 }
 
-/// A UUID's first group: enough to tell rows apart at a glance, while the
-/// commands that take an identifier keep getting the full ID elsewhere.
-fn short_request_id(request_id: Uuid) -> String {
-    request_id
-        .to_string()
-        .split('-')
-        .next()
-        .unwrap_or_default()
-        .to_owned()
-}
-
-/// Interactive loop: pick a transaction, see its expanded details (including
-/// live receipt lookups), return to the list.
-async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction]) -> Result<()> {
-    /// One row in the browser; `index` is `None` for the quit entry.
-    struct Row {
-        index: Option<usize>,
-        line: String,
-    }
-    impl std::fmt::Display for Row {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str(&self.line)
-        }
-    }
-    loop {
-        // Quitting is the first item, so it never requires scrolling to the
-        // end of a long history, while the cursor still starts on the newest
-        // record. inquire pages the list itself: PageUp/PageDown, Home/End,
-        // and type-to-filter all work, and only one page is drawn at a time
-        // so a long history cannot outgrow the screen. That page count is in
-        // rows, so each line is also clamped to one row: a wrapped line would
-        // make the body taller than the page the prompt sized for.
-        let mut rows = vec![Row {
-            index: None,
-            line: "Done (quit)".into(),
-        }];
-        rows.extend(records.iter().enumerate().map(|(index, record)| Row {
-            index: Some(index),
-            line: crate::render::interactive_list_label(&crate::render::terminal_safe_multiline(
-                &transaction_row(record),
-            )),
-        }));
-        let choice = crate::tui::optional(
-            inquire::Select::new(
-                &crate::tui::question(&format!("{} recorded transaction(s)", records.len())),
-                rows,
-            )
-            .with_page_size(interactive_list_rows())
-            .with_starting_cursor(usize::from(!records.is_empty()))
-            .prompt(),
-        )?;
-        let Some(index) = choice.and_then(|row| row.index) else {
-            return Ok(());
-        };
-        // The expanded view is paged rather than printed: a plan with many
-        // calls plus a receipt is taller than most terminals, and printing it
-        // would push the list it came from into the scrollback. The pager
-        // hands the screen back untouched, so the list redraws where it was.
-        let detail = crate::render::terminal_safe_multiline(
-            &transaction_detail(config, &records[index]).await,
-        );
-        crate::pager::read_fully(&format!("Request {}", records[index].request_id), &detail)?;
-    }
-}
-
 /// The visible page size for an interactive list in this CLI.
 ///
 /// The prompt draws a header, a footer, and a blank separator around the list,
@@ -1333,179 +1185,6 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
 fn interactive_list_rows() -> usize {
     const PROMPT_CHROME_ROWS: usize = 6;
     crate::render::interactive_list_rows(PROMPT_CHROME_ROWS)
-}
-
-/// The expanded human view of one lifecycle record. Chain lookups are
-/// best-effort display work: an unreachable RPC degrades to the stored data.
-async fn transaction_detail(config: &ConfigStore, record: &PendingTransaction) -> String {
-    let network = config.network_by_chain_id(&record.chain_id).ok();
-    let mut lines = Vec::new();
-    lines.push(format!("Status: {}", status_label(record.status)));
-    lines.push(format!("Wallet: {}", record.wallet_id));
-    lines.push(format!(
-        "Network: {} (chain {})",
-        network
-            .as_ref()
-            .map_or(record.network_name.as_str(), |network| network
-                .name
-                .as_str()),
-        record.chain_id,
-    ));
-    lines.push(format!("Created: {}", described_time(record.created_at)));
-    if record.updated_at != record.created_at {
-        lines.push(format!("Updated: {}", described_time(record.updated_at)));
-    }
-    if record.status == PendingStatus::AwaitingApproval {
-        lines.push(format!("Expires: {}", described_time(record.expires_at)));
-    }
-    if let Some(approved_at) = record.approved_at {
-        lines.push(format!("Approved: {}", described_time(approved_at)));
-    }
-    if let Some(rejected_at) = record.rejected_at {
-        lines.push(format!("Rejected: {}", described_time(rejected_at)));
-    }
-    lines.push(format!("Plan digest: {}", record.digest));
-    lines.push(format!(
-        "Policy revision: {}; approval {}",
-        record.policy_revision,
-        if record.approval_required {
-            "required"
-        } else {
-            "automatic"
-        }
-    ));
-
-    for step in &record.execution_plan.ordered_steps {
-        let calldata = step.transaction.data.as_ref();
-        let selector = if calldata.is_empty() {
-            "no calldata".into()
-        } else {
-            format!(
-                "selector 0x{}, {} bytes",
-                hex::encode(&calldata[..calldata.len().min(4)]),
-                calldata.len()
-            )
-        };
-        lines.push(format!(
-            "Call {}: to {:#x}; value {} wei; {selector}",
-            step.step, step.transaction.to, step.transaction.value,
-        ));
-    }
-
-    let transaction_hash = record
-        .broadcast_transaction_hash
-        .as_deref()
-        .or(record.signed_transaction_hash.as_deref());
-    if let Some(hash) = transaction_hash {
-        lines.push(format!("Transaction hash: {hash}"));
-        if let Some(url) = network
-            .as_ref()
-            .and_then(|network| explorer_transaction_url(network, hash))
-        {
-            lines.push(format!("Explorer: {url}"));
-        }
-    }
-    if let Some(block) = &record.block_number {
-        lines.push(format!("Block: {block}"));
-    }
-
-    // Live receipt enrichment for anything that reached the chain.
-    if let (Some(network), Some(hash)) = (network.as_ref(), transaction_hash)
-        && matches!(
-            record.status,
-            PendingStatus::Broadcast | PendingStatus::Confirmed | PendingStatus::Reverted
-        )
-    {
-        match transaction_receipt_details(network, hash).await {
-            Ok(Some(receipt)) => {
-                lines.extend(receipt_lines(network, record, &receipt).await);
-            }
-            Ok(None) => lines.push("Receipt: not yet available from the RPC".into()),
-            Err(error) => lines.push(format!("Receipt: lookup failed ({error:#})")),
-        }
-    }
-    lines.join("\n")
-}
-
-/// Receipt facts plus the wallet's decoded ERC-20 transfer balance changes.
-async fn receipt_lines(
-    network: &NetworkConfig,
-    record: &PendingTransaction,
-    receipt: &ReceiptDetails,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "Receipt: {} in block {}",
-        if receipt.succeeded {
-            "succeeded"
-        } else {
-            "reverted"
-        },
-        receipt.block_number,
-    ));
-    let fee_wei = u128::from(receipt.gas_used).saturating_mul(receipt.effective_gas_price);
-    let currency_symbol = network
-        .native_currency
-        .as_ref()
-        .map_or("native units", |currency| currency.symbol.as_str());
-    let currency_decimals = network
-        .native_currency
-        .as_ref()
-        .map_or(18, |currency| currency.decimals);
-    lines.push(format!(
-        "Fee paid: {} {currency_symbol} ({fee_wei} wei; {} gas)",
-        crate::approval_summary::format_fixed_point(&fee_wei.to_string(), currency_decimals),
-        receipt.gas_used,
-    ));
-
-    // Net standard Transfer activity for the sender, from the receipt logs.
-    let wallet = record.execution_plan.sender;
-    let mut activity: std::collections::BTreeMap<Address, (U256, U256)> =
-        std::collections::BTreeMap::new();
-    for log in &receipt.logs {
-        if log.topics.len() != 3 || log.topics[0] != TRANSFER_EVENT || log.data.len() != 32 {
-            continue;
-        }
-        let from = Address::from_slice(&log.topics[1].as_slice()[12..]);
-        let to = Address::from_slice(&log.topics[2].as_slice()[12..]);
-        let amount = U256::from_be_slice(&log.data);
-        let entry = activity.entry(log.address).or_default();
-        if to == wallet {
-            entry.0 = entry.0.saturating_add(amount);
-        }
-        if from == wallet {
-            entry.1 = entry.1.saturating_add(amount);
-        }
-    }
-    let activity: Vec<(Address, (U256, U256))> = activity
-        .into_iter()
-        .filter(|(_, (incoming, outgoing))| !incoming.is_zero() || !outgoing.is_zero())
-        .collect();
-    if activity.is_empty() {
-        lines.push("Token balance changes: none for this wallet in the receipt logs".into());
-        return lines;
-    }
-    let tokens: Vec<Address> = activity.iter().map(|(token, _)| *token).collect();
-    let metadata = crate::approval_summary::load_token_metadata(network, &tokens).await;
-    lines.push("Token balance changes (from receipt Transfer logs):".into());
-    for (token, (incoming, outgoing)) in activity {
-        let display = metadata.get(&token).cloned().unwrap_or_default();
-        let mut parts = Vec::new();
-        if !incoming.is_zero() {
-            parts.push(format!(
-                "+{}",
-                crate::approval_summary::format_token_amount(incoming, token, &display)
-            ));
-        }
-        if !outgoing.is_zero() {
-            parts.push(format!(
-                "-{}",
-                crate::approval_summary::format_token_amount(outgoing, token, &display)
-            ));
-        }
-        lines.push(format!("  {}", parts.join(", ")));
-    }
-    lines
 }
 
 fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> {
@@ -3711,35 +3390,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_status_line_of_a_sanitized_detail_is_colored() {
-        let body = "Status: confirmed\nWallet: main\nBad Status: not first";
-        let colored = colorize_detail(body, PendingStatus::Confirmed, |text, tone| {
-            assert_eq!(tone, crate::tui::Tone::Success);
-            format!("[{text}]")
-        });
-        assert_eq!(
-            colored,
-            "[Status: confirmed]\nWallet: main\nBad Status: not first"
-        );
-    }
-
-    #[test]
-    fn status_tones_separate_final_pending_and_failed_states() {
-        use crate::tui::Tone;
-        assert_eq!(status_tone(PendingStatus::Confirmed), Tone::Success);
-        assert_eq!(status_tone(PendingStatus::AwaitingApproval), Tone::Warning);
-        assert_eq!(status_tone(PendingStatus::Broadcast), Tone::Warning);
-        for failed in [
-            PendingStatus::Rejected,
-            PendingStatus::Reverted,
-            PendingStatus::Expired,
-            PendingStatus::Cancelled,
-        ] {
-            assert_eq!(status_tone(failed), Tone::Danger);
-        }
-    }
-
-    #[test]
     fn a_new_wallet_never_starts_permissive_by_accident() {
         // The tests run without a terminal, which is exactly the case that
         // must not quietly enable automatic signing: with nobody to ask, the
@@ -3775,8 +3425,8 @@ mod tests {
         assert!(rows < 10_000);
     }
 
-    #[tokio::test]
-    async fn transaction_line_and_detail_render_offline() {
+    #[test]
+    fn transaction_lines_render_offline() {
         let plan = crate::core::execution_plan::ExecutionPlan::parse(serde_json::json!({
             "schema_version": "1",
             "chain_id": "1",
@@ -3827,38 +3477,6 @@ mod tests {
         // The piped listing keeps the whole request ID, because that is what
         // `transaction show` takes as an identifier.
         assert!(line.contains(&Uuid::nil().to_string()));
-
-        // The browser row leads with the short ID, drops the unbounded wei
-        // total, and fits an 80-column terminal without wrapping — a wrapped
-        // row is what makes the whole list scroll instead of the cursor.
-        let row = transaction_row(&record);
-        assert!(row.starts_with(&short_request_id(Uuid::nil())));
-        assert!(row.contains("7 minutes ago"));
-        assert!(row.contains("chain 1"));
-        assert!(!row.contains("wei"));
-        assert!(
-            row.chars().count() <= 78,
-            "{row:?} fits an 80-column terminal"
-        );
-
-        // An awaiting record renders entirely from stored data: no RPC.
-        let directory = tempfile::tempdir().unwrap();
-        let config = ConfigStore::new(directory.path());
-        let detail = transaction_detail(&config, &record).await;
-        assert!(detail.contains("Status: awaiting approval"));
-        assert!(detail.contains("Network: ethereum (chain 1)"));
-        assert!(detail.contains("Expires: in 3 minutes"));
-        assert!(detail.contains("Call 1: to 0x2222222222222222222222222222222222222222"));
-        assert!(detail.contains("selector 0xa9059cbb"));
-        assert!(detail.contains("Policy revision: 3; approval required"));
-
-        // A broadcast hash yields an explorer link from the configured network.
-        let mut broadcast = record;
-        broadcast.status = PendingStatus::Signed;
-        broadcast.serialized_transaction = Some("0x0102".into());
-        broadcast.signed_transaction_hash = Some(format!("0x{}", "aa".repeat(32)));
-        let detail = transaction_detail(&config, &broadcast).await;
-        assert!(detail.contains(&format!("https://etherscan.io/tx/0x{}", "aa".repeat(32))));
     }
 
     #[test]

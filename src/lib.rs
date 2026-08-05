@@ -24,6 +24,7 @@ pub mod simulation;
 pub mod simulation_store;
 pub mod token_store;
 pub mod tui;
+pub mod tx_browser;
 pub mod typed_data;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
