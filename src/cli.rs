@@ -12,7 +12,7 @@ use crate::{
     core::policy::{FindingSeverity, WalletPolicy},
     custody::{CustodyService, KeyStore, OsKeyStore, PrivateKeyMaterial},
     execution::{PreparedExecution, SigningOverrides, prepare_execution, sign_prepared_execution},
-    human_presence::{HumanPresence, PlatformHumanPresence, PresenceAction, PresenceRequest},
+    human_presence::{HumanPresence, PlatformHumanPresence, PresenceRequest},
     legal::{self, LegalDocument, LegalStore},
     message::{
         MessageStatus, MessageStore, PendingMessage, describe_message, message_digest, parse_siwe,
@@ -153,12 +153,12 @@ struct PolicyArgs {
 enum PolicyCommand {
     /// Print the active encrypted policy and revision.
     Show { wallet_id: String },
-    /// Replace a wallet policy from a JSON file after owner authentication.
+    /// Replace a wallet policy from a JSON file after terminal confirmation.
     Set {
         wallet_id: String,
         policy_file: PathBuf,
     },
-    /// Install the wildcard automatic policy after owner authentication.
+    /// Install the wildcard automatic policy after terminal confirmation.
     AllowAll { wallet_id: String },
     /// Install the policy that queues every transaction for explicit approval.
     RequireApproval { wallet_id: String },
@@ -259,7 +259,7 @@ enum AddressBookCommand {
         #[arg(long, default_value_t = 0)]
         offset: usize,
     },
-    /// Add or update one alias after owner authentication.
+    /// Add or update one alias after terminal confirmation.
     Add {
         /// Network name, alias, or decimal chain ID.
         network: String,
@@ -268,7 +268,7 @@ enum AddressBookCommand {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Remove one alias after owner authentication.
+    /// Remove one alias after terminal confirmation.
     #[command(alias = "delete")]
     Remove {
         /// Network name, alias, or decimal chain ID.
@@ -398,10 +398,10 @@ impl Cli {
             }
             Command::Wallet(args) => run_wallet(config, args.command, mode).await,
             Command::Network(args) => run_network(&config, args.command, mode).await,
-            Command::Policy(args) => run_policy(config, args.command, mode).await,
+            Command::Policy(args) => run_policy(&config, args.command, mode),
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
             Command::Token(args) => run_token(&config, &args.command, mode),
-            Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
+            Command::AddressBook(args) => run_address_book(&config, args.command, mode),
             Command::Legal(args) => run_legal(&config, &args.command, mode),
             Command::Review {
                 request_id,
@@ -477,7 +477,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
         WalletCommand::Import { wallet_id } => {
             require_interactive("wallet import")?;
             crate::tui::intro("Import an existing wallet");
-            let mut input = inquire::Password::new("Private key")
+            let mut input = inquire::Password::new(&crate::tui::question("Private key"))
                 .with_display_mode(inquire::PasswordDisplayMode::Masked)
                 .without_confirmation()
                 .prompt()
@@ -659,7 +659,7 @@ fn resolve_network(config: &ConfigStore, requested: &str) -> Result<NetworkConfi
     }
 }
 
-async fn run_address_book(
+fn run_address_book(
     config: &ConfigStore,
     command: AddressBookCommand,
     mode: OutputMode,
@@ -717,15 +717,10 @@ async fn run_address_book(
                 Address::from_str(&address).context("address must be a 20-byte EVM address")?;
             let existing =
                 AddressBookStore::production(config.data_dir())?.get(network.chain_id, &alias)?;
-            let digest = configuration_digest(&serde_json::json!({
-                "operation": "upsert",
-                "chain_id": network.chain_id.to_string(),
-                "alias": alias,
-                "address": format!("{address:#x}"),
-                "note": note,
-            }))?;
-            let mut request = ApprovalRequest::new(
-                ApprovalKind::AddressBookChange,
+            // An alias is a lookup table for agents, not a key or a
+            // permission: nothing here can sign, and a wrong entry is fixed
+            // by typing the command again. So it is confirmed, not approved.
+            let mut question = crate::tui::Confirmation::new(
                 "Add address book entry",
                 "Store this alias for agent lookups. Aliases carry no signing authority, but an \
                  agent will resolve payments to this address when the user names the alias.",
@@ -733,25 +728,20 @@ async fn run_address_book(
             .fact("Network", &network.name)
             .fact("Chain ID", network.chain_id.to_string())
             .fact("Alias", &alias)
-            .fact("Address", address.to_checksum(None))
-            .digest(&digest);
+            .fact("Address", address.to_checksum(None));
             if let Some(note) = &note {
-                request = request.fact("Note", note);
+                question = question.fact("Note", note);
             }
             if let Some(existing) = &existing {
-                request = request.warning(format!(
+                question = question.warning(format!(
                     "This replaces the existing entry for {alias}, currently {}.",
                     existing.address
                 ));
             }
-            require_approval(request).await?;
-            PlatformHumanPresence
-                .confirm(&PresenceRequest {
-                    action: PresenceAction::ModifyAddressBook,
-                    wallet_id: format!("alias {alias} on chain {}", network.chain_id),
-                    operation_digest: Some(digest),
-                })
-                .await?;
+            if !question.ask("Save this alias?")? {
+                crate::tui::outro_cancel("Address book unchanged.");
+                return Ok(());
+            }
             let entry = AddressBookStore::production(config.data_dir())?.upsert(
                 network.chain_id,
                 &alias,
@@ -776,32 +766,19 @@ async fn run_address_book(
                         network.chain_id
                     )
                 })?;
-            let digest = configuration_digest(&serde_json::json!({
-                "operation": "remove",
-                "chain_id": network.chain_id.to_string(),
-                "alias": alias,
-                "address": existing.address,
-            }))?;
-            require_approval(
-                ApprovalRequest::new(
-                    ApprovalKind::AddressBookChange,
-                    "Remove address book entry",
-                    "Remove this alias from agent lookups.",
-                )
-                .fact("Network", &network.name)
-                .fact("Chain ID", network.chain_id.to_string())
-                .fact("Alias", &alias)
-                .fact("Address", &existing.address)
-                .digest(&digest),
+            if !crate::tui::Confirmation::new(
+                "Remove address book entry",
+                "Remove this alias from agent lookups.",
             )
-            .await?;
-            PlatformHumanPresence
-                .confirm(&PresenceRequest {
-                    action: PresenceAction::ModifyAddressBook,
-                    wallet_id: format!("alias {alias} on chain {}", network.chain_id),
-                    operation_digest: Some(digest),
-                })
-                .await?;
+            .fact("Network", &network.name)
+            .fact("Chain ID", network.chain_id.to_string())
+            .fact("Alias", &alias)
+            .fact("Address", &existing.address)
+            .ask("Remove this alias?")?
+            {
+                crate::tui::outro_cancel("Address book unchanged.");
+                return Ok(());
+            }
             let removed = AddressBookStore::production(config.data_dir())?
                 .remove(network.chain_id, &alias)?;
             emit(mode, &serde_json::json!({ "removed": removed }), || {
@@ -887,10 +864,7 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
                     return Ok(false);
                 }
                 crate::tui::info(format!("Document digest: {digest}"));
-                let accepted = crate::tui::optional(
-                    inquire::Confirm::new(prompt).with_default(false).prompt(),
-                )?
-                .unwrap_or(false);
+                let accepted = crate::tui::confirm(prompt)?;
                 if accepted {
                     store.record_acceptance(document, &digest)?;
                 }
@@ -932,7 +906,7 @@ fn terminal_note_safe(text: &str) -> String {
         .collect()
 }
 
-async fn run_policy(config: ConfigStore, command: PolicyCommand, mode: OutputMode) -> Result<()> {
+fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMode) -> Result<()> {
     match command {
         PolicyCommand::Show { wallet_id } => {
             config.wallet(&wallet_id)?;
@@ -969,28 +943,22 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand, mode: OutputMod
             let value = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", policy_file.display()))?;
             let policy = WalletPolicy::parse(value)?;
-            replace_policy(&config, &wallet_id, policy, Some(&policy_file), mode).await
+            replace_policy(config, &wallet_id, &policy, Some(&policy_file), mode)
         }
-        PolicyCommand::AllowAll { wallet_id } => {
-            replace_policy(
-                &config,
-                &wallet_id,
-                WalletPolicy::allow_all_with_approval(),
-                None,
-                mode,
-            )
-            .await
-        }
-        PolicyCommand::RequireApproval { wallet_id } => {
-            replace_policy(
-                &config,
-                &wallet_id,
-                WalletPolicy::require_approval_for_everything(),
-                None,
-                mode,
-            )
-            .await
-        }
+        PolicyCommand::AllowAll { wallet_id } => replace_policy(
+            config,
+            &wallet_id,
+            &WalletPolicy::allow_all_with_approval(),
+            None,
+            mode,
+        ),
+        PolicyCommand::RequireApproval { wallet_id } => replace_policy(
+            config,
+            &wallet_id,
+            &WalletPolicy::require_approval_for_everything(),
+            None,
+            mode,
+        ),
         // Validation reads a file and writes nothing, so it needs neither a
         // configured wallet, the encrypted database, nor owner authentication.
         PolicyCommand::Validate { policy_file } => {
@@ -1026,21 +994,16 @@ async fn run_policy(config: ConfigStore, command: PolicyCommand, mode: OutputMod
         }
         // The schema is itself a JSON document; there is no human form.
         PolicyCommand::Schema => print_json(&policy_json_schema()),
-        PolicyCommand::Review { wallet_id } => {
-            review_policy_proposal(&config, &wallet_id, mode).await
-        }
+        PolicyCommand::Review { wallet_id } => review_policy_proposal(config, &wallet_id, mode),
     }
 }
 
 /// Review and apply the single pending agent-proposed policy for a wallet.
 /// The reviewer sees a minimized permission diff and the agent's rationale,
-/// never a raw JSON comparison; application requires terminal approval plus
-/// OS owner authentication and is revision-guarded end to end.
-async fn review_policy_proposal(
-    config: &ConfigStore,
-    wallet_id: &str,
-    mode: OutputMode,
-) -> Result<()> {
+/// never a raw JSON comparison; application is confirmed in the terminal and
+/// is revision-guarded end to end. No key material is read, so there is no
+/// platform authentication step.
+fn review_policy_proposal(config: &ConfigStore, wallet_id: &str, mode: OutputMode) -> Result<()> {
     let wallet = config.wallet(wallet_id)?;
     require_interactive("policy changes")?;
     let mut policies = PolicyStore::production(config.data_dir())?;
@@ -1068,8 +1031,7 @@ async fn review_policy_proposal(
     let diff = crate::core::policy::diff_policies(&current.policy, &proposal.policy);
     let policy_bytes = serde_json::to_vec(&proposal.policy)?;
     let digest = format!("0x{}", hex::encode(Keccak256::digest(&policy_bytes)));
-    let mut request = ApprovalRequest::new(
-        ApprovalKind::PolicyChange,
+    let mut question = crate::tui::Confirmation::new(
         "Apply proposed wallet policy",
         "An agent proposed this replacement policy. The permission diff below is authoritative; \
          the rationale is the agent's own explanation.",
@@ -1078,13 +1040,11 @@ async fn review_policy_proposal(
     .fact("Address", format!("{:#x}", wallet.address))
     .fact("Current revision", current.revision.to_string())
     .fact("Proposed", described_time(proposal.created_at))
-    .fact("Proposed policy digest", &digest)
     .fact("Agent rationale (untrusted)", &proposal.rationale);
     for (index, line) in diff.iter().enumerate() {
-        request = request.fact(format!("Change {}", index + 1), line);
+        question = question.fact(format!("Change {}", index + 1), line);
     }
-    request = request
-        .digest(&digest)
+    question = question
         .warning(
             "A more permissive policy can authorize transactions without an exceptional approval.",
         )
@@ -1092,14 +1052,10 @@ async fn review_policy_proposal(
             "The rationale is agent-authored text. Judge the change by the diff lines, not the \
              story.",
         );
-    require_approval(request).await?;
-    PlatformHumanPresence
-        .confirm(&PresenceRequest {
-            action: PresenceAction::ChangePolicy,
-            wallet_id: wallet_id.into(),
-            operation_digest: Some(digest.clone()),
-        })
-        .await?;
+    if !question.ask("Apply this policy?")? {
+        crate::tui::outro_cancel("Policy unchanged. The proposal is still pending.");
+        return Ok(());
+    }
 
     // put() enforces the expected revision atomically, so a policy change
     // during the human review fails closed rather than applying stale rules.
@@ -1330,10 +1286,13 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
             )),
         }));
         let choice = crate::tui::optional(
-            inquire::Select::new(&format!("{} recorded transaction(s)", records.len()), rows)
-                .with_page_size(interactive_list_rows())
-                .with_starting_cursor(usize::from(!records.is_empty()))
-                .prompt(),
+            inquire::Select::new(
+                &crate::tui::question(&format!("{} recorded transaction(s)", records.len())),
+                rows,
+            )
+            .with_page_size(interactive_list_rows())
+            .with_starting_cursor(usize::from(!records.is_empty()))
+            .prompt(),
         )?;
         let Some(index) = choice.and_then(|row| row.index) else {
             return Ok(());
@@ -1812,10 +1771,8 @@ async fn run_approve(
 
     let review_digest = prepared.review_digest();
     PlatformHumanPresence
-        .confirm(&PresenceRequest {
-            action: PresenceAction::ApprovePolicyException,
-            wallet_id: wallet.id.clone(),
-            operation_digest: Some(review_digest.clone()),
+        .confirm(&PresenceRequest::SignTransaction {
+            wallet: wallet.id.clone(),
         })
         .await?;
 
@@ -2006,10 +1963,8 @@ async fn approve_typed_data(
     }
 
     PlatformHumanPresence
-        .confirm(&PresenceRequest {
-            action: PresenceAction::SignTypedData,
-            wallet_id: wallet.id.clone(),
-            operation_digest: Some(request.digest.clone()),
+        .confirm(&PresenceRequest::SignTypedData {
+            wallet: wallet.id.clone(),
         })
         .await?;
 
@@ -2211,10 +2166,8 @@ async fn approve_message(
     }
 
     PlatformHumanPresence
-        .confirm(&PresenceRequest {
-            action: PresenceAction::SignMessage,
-            wallet_id: wallet.id.clone(),
-            operation_digest: Some(request.digest.clone()),
+        .confirm(&PresenceRequest::SignMessage {
+            wallet: wallet.id.clone(),
         })
         .await?;
 
@@ -2440,10 +2393,10 @@ fn print_approval_review(approval: &ApprovalRequest, simulation: &SimulationResu
     Ok(())
 }
 
-async fn replace_policy(
+fn replace_policy(
     config: &ConfigStore,
     wallet_id: &str,
-    policy: WalletPolicy,
+    policy: &WalletPolicy,
     source: Option<&std::path::Path>,
     mode: OutputMode,
 ) -> Result<()> {
@@ -2451,10 +2404,9 @@ async fn replace_policy(
     require_interactive("policy changes")?;
     let mut policies = PolicyStore::production(config.data_dir())?;
     let current = policies.get(wallet_id)?;
-    let policy_bytes = serde_json::to_vec(&policy)?;
+    let policy_bytes = serde_json::to_vec(policy)?;
     let digest = format!("0x{}", hex::encode(Keccak256::digest(&policy_bytes)));
-    let mut request = ApprovalRequest::new(
-        ApprovalKind::PolicyChange,
+    let mut question = crate::tui::Confirmation::new(
         "Replace wallet policy",
         "Replace the complete policy enforced before this wallet signs.",
     )
@@ -2467,30 +2419,24 @@ async fn replace_policy(
             |value| value.revision.to_string(),
         ),
     )
-    .fact("New policy digest", &digest)
-    .digest(&digest)
     .warning(
         "A more permissive policy can authorize transactions without an exceptional approval.",
     );
     if let Some(source) = source {
-        request = request.fact("Policy file", source.display().to_string());
+        question = question.fact("Policy file", source.display().to_string());
     }
     if current.is_none() {
-        request = request.warning(
-            "This wallet currently has no policy, so server startup and signing fail closed. Approval will initialize revision 1.",
+        question = question.warning(
+            "This wallet currently has no policy, so server startup and signing fail closed. Saying yes will initialize revision 1.",
         );
     }
-    require_approval(request).await?;
-    PlatformHumanPresence
-        .confirm(&PresenceRequest {
-            action: PresenceAction::ChangePolicy,
-            wallet_id: wallet_id.into(),
-            operation_digest: Some(digest.clone()),
-        })
-        .await?;
+    if !question.ask("Replace the policy?")? {
+        crate::tui::outro_cancel("Policy unchanged.");
+        return Ok(());
+    }
     let stored = policies.put(
         wallet_id,
-        &policy,
+        policy,
         current.as_ref().map(|value| value.revision),
     )?;
     emit(
@@ -2578,10 +2524,6 @@ async fn run_network(
         }
         NetworkCommand::Reset => {
             let networks = default_networks();
-            // Not an approval: nothing is signed, and the result is fixed
-            // before the question is asked — the built-in presets, exactly as
-            // shipped. The only thing at stake is the local RPC configuration
-            // this discards, so the prompt names that and takes a yes or no.
             require_interactive("network reset")?;
             let configured = config.load()?.networks;
             let discarded: Vec<&str> = configured
@@ -2589,26 +2531,26 @@ async fn run_network(
                 .filter(|network| !networks.contains(network))
                 .map(|network| network.name.as_str())
                 .collect();
-            crate::tui::intro("Reset network configuration");
-            crate::tui::info(format!(
-                "Replaces the configured networks with fresh copies of the {} built-in presets. Wallets, policies, and pending requests are untouched.",
-                networks.len()
-            ));
+            let mut question = crate::tui::Confirmation::new(
+                "Reset network configuration",
+                format!(
+                    "Replaces the configured networks with fresh copies of the {} built-in \
+                     presets. Wallets, policies, and pending requests are untouched.",
+                    networks.len()
+                ),
+            );
             if discarded.is_empty() {
-                crate::tui::info("No configured network differs from its preset.");
+                question = question.fact(
+                    "Losing custom settings",
+                    "nothing — every network matches its preset".to_owned(),
+                );
             } else {
-                crate::tui::warning(format!(
+                question = question.warning(format!(
                     "Custom settings, including RPC URLs, are discarded for: {}",
                     discarded.join(", ")
                 ));
             }
-            let confirmed = crate::tui::optional(
-                inquire::Confirm::new("Reset the network configuration?")
-                    .with_default(false)
-                    .prompt(),
-            )?
-            .unwrap_or(false);
-            if !confirmed {
+            if !question.ask("Reset every network?")? {
                 crate::tui::outro_cancel("Networks unchanged.");
                 return Ok(());
             }
@@ -2644,22 +2586,23 @@ async fn run_network(
             };
             let candidate = network_candidate(name, *args, &prospective)?;
             replace_configured_network(&mut prospective, candidate.clone())?;
-            let digest = configuration_digest(&candidate)?;
             // The complete URL is shown, not just its origin. This is the
             // one moment the user can catch a typo or the wrong endpoint, and
             // `network list` already prints configured URLs in full; an RPC
             // URL is configuration this human owns, not a signing credential.
-            authorize_network_change(
+            if !confirm_network_change(
                 "Add or update network",
-                "Trust this RPC to supply chain state and eth_simulateV1 execution for signing decisions.",
-                &digest,
+                "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
+                "Use this network?",
                 vec![
                     ("Network", candidate.name.clone()),
                     ("Chain ID", candidate.chain_id.to_string()),
                     ("RPC URL", candidate.rpc_url.to_string()),
                 ],
-            )
-            .await?;
+            )? {
+                crate::tui::outro_cancel("No network added.");
+                return Ok(());
+            }
             verify_chain_id(&candidate).await?;
             config.update(|state| {
                 replace_configured_network(&mut state.networks, candidate.clone())
@@ -2682,20 +2625,18 @@ async fn run_network(
         NetworkCommand::Remove { name } => {
             let mut prospective = config.load()?.networks;
             let removed = remove_configured_network(&mut prospective, &name)?;
-            let digest = configuration_digest(&serde_json::json!({
-                "operation": "remove",
-                "network": &removed,
-            }))?;
-            authorize_network_change(
+            if !confirm_network_change(
                 "Remove network",
-                "Remove this network and RPC endpoint from the signing configuration.",
-                &digest,
+                "The wallet will forget this network and the endpoint it was reached through.",
+                "Remove this network?",
                 vec![
                     ("Network", removed.name.clone()),
                     ("Chain ID", removed.chain_id.to_string()),
                 ],
-            )
-            .await?;
+            )? {
+                crate::tui::outro_cancel("Networks unchanged.");
+                return Ok(());
+            }
             let removed =
                 config.update(|state| remove_configured_network(&mut state.networks, &name))?;
             emit(
@@ -2818,7 +2759,7 @@ fn prompt_network_choice(
         chain_id
     } else {
         let answer = crate::tui::optional(
-            inquire::Text::new("Chain ID")
+            inquire::Text::new(&crate::tui::question("Chain ID"))
                 .with_placeholder("8453")
                 .with_validator(|value: &str| {
                     Ok(match value.trim().parse::<u64>() {
@@ -2856,14 +2797,23 @@ fn prompt_network_choice(
     crate::tui::info(format!(
         "Nothing configured and no built-in preset uses chain {chain_id}, so it needs a name and a full profile."
     ));
+    // Two different names are wanted here and only one of them is being
+    // asked for. This is the identifier typed after `--network` and completed
+    // by the shell, so it is one word; the readable name ("BNB Smart Chain")
+    // is the separate display-name field further down the profile. Asking for
+    // a "network name" and then rejecting a space is the prompt's mistake,
+    // not the answer's.
     let name = crate::tui::optional(
-        inquire::Text::new("Network name")
+        inquire::Text::new(&crate::tui::question("Network identifier"))
             .with_placeholder("base")
+            .with_help_message(
+                "One word, used on the command line — the readable name is asked for next",
+            )
             .with_validator(|value: &str| {
                 Ok(
                     if value.trim().is_empty() || value.trim().contains(char::is_whitespace) {
                         inquire::validator::Validation::Invalid(
-                            "a single word names the network".into(),
+                            "one word only — spaces belong in the display name".into(),
                         )
                     } else {
                         inquire::validator::Validation::Valid
@@ -3006,18 +2956,19 @@ async fn run_network_edit(
         return Ok(());
     }
 
-    let digest = configuration_digest(&draft)?;
-    authorize_network_change(
-        "Edit network",
-        "Trust this RPC to supply chain state and eth_simulateV1 execution for signing decisions.",
-        &digest,
+    if !confirm_network_change(
+        "Save network changes",
+        "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
+        "Save these changes?",
         vec![
             ("Network", draft.name.clone()),
             ("Chain ID", draft.chain_id.to_string()),
             ("RPC URL", draft.rpc_url.to_string()),
         ],
-    )
-    .await?;
+    )? {
+        crate::tui::outro_cancel("Nothing saved.");
+        return Ok(());
+    }
     verify_chain_id(&draft).await?;
     config.update(|state| replace_configured_network(&mut state.networks, draft.clone()))?;
     emit(
@@ -3420,7 +3371,8 @@ Run the same command in a terminal to be prompted for them one at a time, or see
 /// keeps any embedded key out of shell history.
 fn prompt_network_field(field: &RequiredField, current: Option<&str>) -> Result<String> {
     let flag = field.flag;
-    let mut input = inquire::Text::new(field.prompt)
+    let label = crate::tui::question(field.prompt);
+    let mut input = inquire::Text::new(&label)
         .with_placeholder(field.example)
         .with_validator(move |value: &str| {
             Ok(match validate_network_field(flag, value) {
@@ -3483,37 +3435,28 @@ fn normalize_aliases(aliases: Vec<String>) -> Result<Vec<String>> {
     Ok(aliases)
 }
 
-fn configuration_digest(value: &impl serde::Serialize) -> Result<String> {
-    Ok(format!(
-        "0x{}",
-        hex::encode(Keccak256::digest(serde_json::to_vec(value)?))
-    ))
-}
-
-async fn authorize_network_change(
+/// Ask before rewriting which networks the wallet knows and which endpoints
+/// it reads them through.
+///
+/// This is configuration, not custody. No key is touched, nothing is signed,
+/// and the change is undone by running the command again — so it is a yes or
+/// no with the endpoint spelled out, not the signing review. `Ok(false)`
+/// means leave the configuration alone.
+fn confirm_network_change(
     title: &str,
     summary: &str,
-    digest: &str,
+    prompt: &str,
     facts: Vec<(&str, String)>,
-) -> Result<()> {
+) -> Result<bool> {
     require_interactive("network configuration changes")?;
-    let mut request = ApprovalRequest::new(ApprovalKind::NetworkChange, title, summary)
-        .digest(digest)
-        .warning(
-            "The configured RPC supplies state and eth_simulateV1 results used by automatic signing policy.",
-        );
+    let mut question = crate::tui::Confirmation::new(title, summary).warning(
+        "The configured RPC supplies the chain state and eth_simulateV1 results that automatic \
+         signing decisions are made from.",
+    );
     for (label, value) in facts {
-        request = request.fact(label, value);
+        question = question.fact(label, value);
     }
-    require_approval(request).await?;
-    PlatformHumanPresence
-        .confirm(&PresenceRequest {
-            action: PresenceAction::ChangeNetworkConfiguration,
-            wallet_id: "network-configuration".into(),
-            operation_digest: Some(digest.into()),
-        })
-        .await?;
-    Ok(())
+    question.ask(prompt)
 }
 
 fn print_completion_values(config: &ConfigStore, requested: &str) -> Result<()> {

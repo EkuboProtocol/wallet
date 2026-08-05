@@ -3,7 +3,7 @@
 | Tool | Purpose |
 | --- | --- |
 | `wallet_list` | Public wallet metadata plus configured network names and chain IDs. Never key material or RPC URLs. |
-| `wallet_add_network` | The only MCP configuration mutation. Requires a complete profile and OS owner authentication, and never replaces an existing chain ID. |
+| `wallet_add_network` | The only MCP configuration mutation. Requires a complete profile, verifies the chain ID against the proposed RPC, and never replaces an existing network, name, or alias. |
 | `wallet_get_status` | Address, native balance, transaction count, and current EIP-7702 delegation. |
 | `wallet_get_policy` | The active policy and its revision. |
 | `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. Accepts a `fork_id` to read simulated state. |
@@ -25,7 +25,7 @@
 | `wallet_wait_for_typed_data` | Poll a pending typed-data request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
 | `wallet_sign_message` | Sign an exact EIP-191 `personal_sign` message — dapp logins (ERC-4361), ownership proofs, off-chain attestations. Always queues for CLI approval; no policy path. Raw `eth_sign` over a bare 32-byte digest is refused. |
 | `wallet_wait_for_message` | Poll a pending message request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
-| `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only with owner authentication. |
+| `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only and confirmed in the terminal. |
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. The only tool available before acceptance. |
 | `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
 
@@ -53,7 +53,7 @@ tool for freshly prepared calldata.
 
 The wallet keeps a local token database in a **separate, unencrypted SQLite
 file** (`tokens.db`) beside the encrypted policy database. Token metadata is
-public display data: MCP tools may write it without owner authentication, and
+public display data: MCP tools may write it without a prompt of any kind, and
 nothing in the signing or policy path ever reads it.
 
 Its integrity rules are structural rather than procedural. The

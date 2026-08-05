@@ -1,51 +1,76 @@
 use async_trait::async_trait;
-use std::fmt;
 use thiserror::Error;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PresenceAction {
-    ExportPrivateKey,
-    ChangePolicy,
-    ChangeNetworkConfiguration,
-    ApprovePolicyException,
-    RemoveWallet,
-    SignTypedData,
-    SignMessage,
-    ModifyAddressBook,
+/// What the owner is being asked to authorize at the platform prompt.
+///
+/// Every variant is a moment the private key comes out of the credential
+/// store, or leaves it for good. Nothing else belongs here. Changing a
+/// network, saving an alias, importing a token list, editing a policy — none
+/// of those read a byte of key material, and asking for a fingerprint before
+/// each one only teaches the owner to give it without reading. Those are
+/// confirmed in the terminal instead; see [`crate::tui::Confirmation`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PresenceRequest {
+    SignTransaction { wallet: String },
+    SignTypedData { wallet: String },
+    SignMessage { wallet: String },
+    ExportPrivateKey { wallet: String },
+    RemoveWallet { wallet: String },
 }
 
-impl fmt::Display for PresenceAction {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::ExportPrivateKey => "export the private key",
-            Self::ChangePolicy => "change the wallet policy",
-            Self::ChangeNetworkConfiguration => "change the wallet network configuration",
-            Self::ApprovePolicyException => "approve a policy exception",
-            Self::RemoveWallet => "remove the wallet and its private key",
-            Self::SignTypedData => "sign EIP-712 typed data",
-            Self::SignMessage => "sign an EIP-191 message",
-            Self::ModifyAddressBook => "modify the address book",
-        })
+/// How much of a name the platform dialog will carry. The dialog is a single
+/// line of prose in a window someone else draws.
+const SUBJECT_LIMIT: usize = 48;
+
+impl PresenceRequest {
+    /// The sentence the platform dialog completes.
+    ///
+    /// macOS renders this as "Ekubo Wallet is trying to <reason>", so each
+    /// one is a lowercase verb phrase that finishes that sentence, and reads
+    /// on its own under Windows Hello and polkit. It says which wallet and
+    /// what will happen to it — nothing else. A digest here told the reader
+    /// nothing they could check and buried the one clause they could.
+    #[must_use]
+    pub fn reason(&self) -> String {
+        match self {
+            Self::SignTransaction { wallet } => {
+                format!("sign a transaction from wallet {}", subject(wallet))
+            }
+            Self::SignTypedData { wallet } => {
+                format!("sign a typed-data request with wallet {}", subject(wallet))
+            }
+            Self::SignMessage { wallet } => {
+                format!("sign a message with wallet {}", subject(wallet))
+            }
+            Self::ExportPrivateKey { wallet } => {
+                format!("reveal the private key for wallet {}", subject(wallet))
+            }
+            Self::RemoveWallet { wallet } => {
+                format!("delete wallet {} and its private key", subject(wallet))
+            }
+        }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PresenceRequest {
-    pub action: PresenceAction,
-    pub wallet_id: String,
-    pub operation_digest: Option<String>,
-}
-
-impl PresenceRequest {
-    #[must_use]
-    pub fn reason(&self) -> String {
-        match &self.operation_digest {
-            Some(digest) => format!(
-                "{} for Ekubo wallet {} (request {})",
-                self.action, self.wallet_id, digest
-            ),
-            None => format!("{} for Ekubo wallet {}", self.action, self.wallet_id),
-        }
+/// One name, fit for a dialog someone else draws: no control characters, no
+/// newlines, and short enough not to push the verb off the end of the line.
+fn subject(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(SUBJECT_LIMIT)
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        "(unnamed)".to_owned()
+    } else {
+        cleaned.to_owned()
     }
 }
 
@@ -248,5 +273,48 @@ impl HumanPresence for TestHumanPresence {
         } else {
             Err(HumanPresenceError::Denied("test denial".into()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasons_read_as_one_sentence_and_carry_no_digest() {
+        let reason = PresenceRequest::SignTransaction {
+            wallet: "primary".into(),
+        }
+        .reason();
+        assert_eq!(reason, "sign a transaction from wallet primary");
+        assert!(!reason.contains("0x"));
+        assert_eq!(
+            PresenceRequest::RemoveWallet {
+                wallet: "primary".into()
+            }
+            .reason(),
+            "delete wallet primary and its private key"
+        );
+    }
+
+    #[test]
+    fn a_hostile_name_cannot_repaint_the_platform_dialog() {
+        let reason = PresenceRequest::SignMessage {
+            wallet: format!("evil\n\u{1b}[31m{}", "long".repeat(40)),
+        }
+        .reason();
+        assert!(!reason.contains('\n') && !reason.contains('\u{1b}'));
+        assert!(reason.len() < 100);
+    }
+
+    #[test]
+    fn an_empty_name_still_names_something() {
+        assert_eq!(
+            PresenceRequest::SignMessage {
+                wallet: "   ".into()
+            }
+            .reason(),
+            "sign a message with wallet (unnamed)"
+        );
     }
 }

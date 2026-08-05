@@ -6,18 +6,22 @@ use std::{fmt::Write as _, io::IsTerminal};
 use uuid::Uuid;
 
 /// The consequential operation presented to a human reviewer.
+///
+/// Every kind here is a moment the private key comes out of the credential
+/// store, or leaves it for good. That is the boundary this whole review
+/// exists to guard, and the reason it is worth reading: a prompt that also
+/// appears before a saved alias or an edited RPC URL is a prompt people
+/// learn to clear. Local configuration changes ask with
+/// [`crate::tui::Confirmation`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
     Transaction,
-    PolicyChange,
-    NetworkChange,
     PolicyException,
     ExportPrivateKey,
     RemoveWallet,
     TypedDataSignature,
     MessageSignature,
-    AddressBookChange,
 }
 
 /// One label/value pair in a human-readable approval summary.
@@ -163,18 +167,7 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
     }
 }
 
-fn terminal_safe(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
-}
+use crate::render::terminal_safe_line as terminal_safe;
 
 #[cfg(test)]
 mod tests {

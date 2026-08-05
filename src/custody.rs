@@ -1,6 +1,6 @@
 use crate::{
     config::{ConfigStore, WalletMetadata, WalletSource, validate_wallet_id},
-    human_presence::{HumanPresence, PresenceAction, PresenceRequest},
+    human_presence::{HumanPresence, PresenceRequest},
 };
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result, bail, ensure};
@@ -183,10 +183,8 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     pub async fn export(&self, wallet_id: &str) -> Result<Zeroizing<String>> {
         let metadata = self.config.wallet(wallet_id)?;
         self.presence
-            .confirm(&PresenceRequest {
-                action: PresenceAction::ExportPrivateKey,
-                wallet_id: wallet_id.into(),
-                operation_digest: None,
+            .confirm(&PresenceRequest::ExportPrivateKey {
+                wallet: wallet_id.into(),
             })
             .await?;
         let key = self.keys.load(wallet_id)?;
@@ -215,10 +213,8 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     pub async fn remove(&self, wallet_id: &str) -> Result<WalletMetadata> {
         let metadata = self.config.wallet(wallet_id)?;
         self.presence
-            .confirm(&PresenceRequest {
-                action: PresenceAction::RemoveWallet,
-                wallet_id: wallet_id.into(),
-                operation_digest: None,
+            .confirm(&PresenceRequest::RemoveWallet {
+                wallet: wallet_id.into(),
             })
             .await?;
 

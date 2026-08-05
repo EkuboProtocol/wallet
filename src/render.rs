@@ -56,6 +56,25 @@ pub fn print_json(value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+/// Every control character, newlines included, becomes a space.
+///
+/// For a value that has to stay on the one line it was given: a label, a
+/// fact, an alias. A newline here would let stored text draw what looks like
+/// an additional line of the wallet's own chrome.
+#[must_use]
+pub fn terminal_safe_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
 /// Newlines survive; every other control character becomes a space.
 #[must_use]
 pub fn terminal_safe_multiline(value: &str) -> String {

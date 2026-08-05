@@ -83,9 +83,12 @@ control-stripped and length-capped before display, nested calldata rendering
 is depth- and count-limited, and a descriptor can never change what is signed
 — only how it is described.
 
-After terminal confirmation, the CLI binds the native authentication prompt to
-the review digest. It then reloads the pending row, wallet/network
-configuration, and encrypted policy. Signing is synchronous from that point
+After terminal confirmation, the CLI asks the platform to authenticate the
+owner, naming the wallet about to sign. It then reloads the pending row,
+wallet/network configuration, and encrypted policy, and aborts if any of them
+moved during the human pause — that re-read, not the wording of the system
+dialog, is what keeps the signed fields the reviewed ones. Signing is
+synchronous from that point
 and performs no further RPC request, so the signed fields are exactly those
 reviewed. The process validates the resulting envelope and atomically stores
 the review digest, exact bytes, and transaction hash.
@@ -132,9 +135,9 @@ bare unprefixed 32-byte digest is refused outright: such a digest is
 indistinguishable from a transaction, permit, or EIP-7702 authorization hash,
 so no honest review can be drawn for it.
 
-Both flows require terminal confirmation plus OS owner authentication bound to
-the signing hash, re-check the stored request and wallet configuration after
-the human pause, and store the signature atomically. The waiting agent reads it
+Both flows require terminal confirmation plus OS owner authentication, re-check
+the stored request and wallet configuration after the human pause, and store the
+signature atomically. The waiting agent reads it
 through `wallet_wait_for_typed_data` or `wallet_wait_for_message`.
 
 ## Lifecycle
@@ -163,6 +166,22 @@ wallet may have at most 64 requests awaiting approval. These are queue safety
 controls, not spending limits.
 
 ## Platform owner authentication
+
+The platform prompt is asked for at exactly one boundary: the private key
+coming out of the credential store, or leaving it for good. That is
+transaction, typed-data, and message signing, `wallet export`, and
+`wallet remove`. Changing a policy, a network, the address book, or the token
+database reads no key material and is confirmed in the terminal instead —
+a plain yes-or-no under the same facts, defaulting to no. A prompt that also
+appears before every saved alias is a prompt people clear without reading, and
+that costs more than it buys at the one prompt that matters.
+
+The dialog says which wallet and what is about to happen to it: "sign a
+transaction from wallet primary", "reveal the private key for wallet primary".
+It carries no digest. A digest in an OS dialog is not something a reader can
+check against anything, and it pushed the one clause they could read off the
+end of the line. What the signature is bound to is established by the terminal
+review and by the re-reads after it, not by text in a system alert.
 
 - macOS uses Local Authentication with device-owner authentication.
 - Windows uses Windows Hello's user-consent verifier.

@@ -75,8 +75,13 @@ it is not a control against in-process execution.
 5. Exceptional review binds the exact prepared transaction fields. After OS
    authentication, mutable local configuration and policy are reloaded and no
    further RPC lookup occurs before signing.
-6. Policy exceptions, policy/network changes, key export, and wallet removal
-   require OS-backed owner authentication. The MCP has no approval operation.
+6. Every use of key material requires OS-backed owner authentication:
+   transaction, typed-data, and message signing at exceptional review, key
+   export, and wallet removal. Changes that touch no key material — policy,
+   networks, the address book, token lists — are confirmed in the local
+   terminal and are not authenticated against the OS, so an owner is never
+   asked to authenticate for something a signature does not depend on. The MCP
+   has no approval operation.
 7. Exact signed bytes and their hash are durably stored before first
    submission. An ambiguous submission can only rebroadcast those bytes.
 8. An export timestamp is committed before raw key material is returned, so a

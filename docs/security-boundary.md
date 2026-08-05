@@ -8,8 +8,8 @@ complete envelope, and durably stores the bytes and hash before broadcasting.
 
 Exceptional signing has an additional boundary: the CLI re-simulates, prepares
 the exact nonce/gas/fees/delegation without loading the key, shows those fields,
-binds OS authentication to their review digest, rechecks configuration and
-policy, and signs the prepared object without another RPC lookup.
+authenticates the owner against the OS, rechecks configuration and policy, and
+signs the prepared object without another RPC lookup.
 
 EIP-712 typed data follows the same shape. Recognized permits (ERC-2612 and
 canonical Permit2, matched by their complete type encodings) are evaluated
@@ -17,7 +17,7 @@ against the policy's approval-spender rules exactly like `approve()` calldata
 and sign automatically only when allowed. Every other payload — and every
 policy-denied permit — queues in the encrypted database for CLI review, which
 displays the complete payload, requires terminal approval plus OS owner
-authentication bound to the signing hash, and only then signs.
+authentication, and only then signs.
 
 EIP-191 `personal_sign` messages queue the same way, with no automatic path at
 all: no policy can score what a message signature authorizes. The CLI prints the
@@ -64,8 +64,11 @@ key custody. What bounds a compromised or misled agent is what the policy
 permits — the targets, the values, the call shapes — because once the policy
 allows an action, nothing further stands between the request and a signature.
 Owner authentication guards the exceptional path, where a human is present by
-definition, and configuration changes; it is an application-level check in the
-CLI, not an operating-system gate on the key. Choose a wallet's policy on that
+definition, along with key export and wallet removal. It is asked for nowhere
+else: a policy, network, address book, or token change reads no key material,
+so it is confirmed in the terminal rather than authenticated, and the one
+prompt that does gate a signature stays worth reading. It is in any case an
+application-level check in the CLI, not an operating-system gate on the key. Choose a wallet's policy on that
 basis, and keep autonomous wallets funded accordingly.
 
 SQLCipher protects confidentiality and page integrity, but there is no external

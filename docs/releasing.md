@@ -238,8 +238,8 @@ fails. Skip it and let `az trustedsigning create` report a name conflict.
 5. Verify the release is shown as immutable and independently verify at least
    one asset using the commands below.
 
-Linux users must install the packaged polkit action before policy exceptions,
-policy/network changes, key export, or wallet removal can authenticate:
+Linux users must install the packaged polkit action before signing, key
+export, or wallet removal can authenticate:
 
 ```sh
 sudo install -m 0644 contrib/polkit/com.ekubo.wallet.policy \

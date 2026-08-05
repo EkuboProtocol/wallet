@@ -29,8 +29,9 @@ daemon. There is one signing implementation and no generic digest-signing API.
   transaction lifecycle rows in one encrypted `policies.db` file.
 - `keyring` stores wallet keys and a distinct 256-bit SQLCipher key under
   separate service names.
-- `HumanPresence` uses Local Authentication, Windows Hello, or polkit for
-  consequential local operations.
+- `HumanPresence` uses Local Authentication, Windows Hello, or polkit, and is
+  reached only where key material is used or destroyed: signing, key export,
+  and wallet removal. Local configuration changes confirm in the terminal.
 
 The database deliberately contains no daily counters, rolling windows,
 allowance reservations, spend history, or consumption ledger. Policy limits

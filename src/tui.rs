@@ -119,6 +119,106 @@ pub fn optional<T>(result: Result<T, InquireError>) -> anyhow::Result<Option<T>>
     }
 }
 
+/// Punctuates a prompt message so the answer cannot read as part of the
+/// question.
+///
+/// inquire redraws an answered prompt as `message answer` with a single
+/// space between them, so a message ending in a word runs straight into what
+/// was typed — `Network identifier base` reads as a four-word question, not
+/// as a question and its answer. Every prompt message in the wallet goes
+/// through here, so the separator is the same one everywhere.
+#[must_use]
+pub fn question(message: &str) -> String {
+    let message = message.trim_end();
+    if message.ends_with(['?', ':']) {
+        message.to_owned()
+    } else {
+        format!("{message}:")
+    }
+}
+
+/// A yes-or-no question, defaulting to no.
+///
+/// `Ok(false)` covers an explicit no and backing out with Esc or Ctrl+C
+/// alike: neither is consent, and the caller has nothing to tell them apart
+/// for.
+pub fn confirm(message: &str) -> anyhow::Result<bool> {
+    Ok(optional(
+        inquire::Confirm::new(&question(message))
+            .with_default(false)
+            .prompt(),
+    )?
+    .unwrap_or(false))
+}
+
+/// A local change that needs a yes or no.
+///
+/// The wallet asks two different kinds of question, and they must not look
+/// alike. Anything that takes the private key out of the credential store —
+/// signing, exporting, deleting it — goes through [`crate::approval`]: two
+/// named outcomes, a cursor that starts on Reject, and platform owner
+/// authentication after. Everything else only rewrites local configuration:
+/// an address book entry, a policy file, which RPC a network is reached
+/// through. Those ask with this instead — the same facts and warnings, then a
+/// plain yes or no.
+///
+/// Reserving the heavier prompt for the operations that can actually sign is
+/// what keeps it worth reading. A user who is asked to "approve or reject"
+/// before every alias they save has been taught that the phrase means
+/// nothing.
+pub struct Confirmation {
+    title: String,
+    summary: String,
+    facts: Vec<(String, String)>,
+    warnings: Vec<String>,
+}
+
+impl Confirmation {
+    #[must_use]
+    pub fn new(title: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            summary: summary.into(),
+            facts: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// One labeled value. Both halves are clamped to a single line: a fact is
+    /// often stored or agent-supplied text, and a newline in it would draw
+    /// what looks like another fact.
+    #[must_use]
+    pub fn fact(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
+        self.facts.push((label.into(), value.into()));
+        self
+    }
+
+    #[must_use]
+    pub fn warning(mut self, warning: impl Into<String>) -> Self {
+        self.warnings.push(warning.into());
+        self
+    }
+
+    /// Print the change, then ask. `Ok(false)` means it must not happen.
+    pub fn ask(self, prompt: &str) -> anyhow::Result<bool> {
+        init_prompt_theme();
+        intro(crate::render::terminal_safe_line(&self.title));
+
+        let mut body = crate::render::terminal_safe_line(&self.summary);
+        for (label, value) in &self.facts {
+            body.push('\n');
+            body.push_str(&crate::render::terminal_safe_line(label));
+            body.push_str(": ");
+            body.push_str(&crate::render::terminal_safe_line(value));
+        }
+        detail(body);
+        for text in &self.warnings {
+            warning(crate::render::terminal_safe_line(text));
+        }
+        confirm(prompt)
+    }
+}
+
 /// One choice from a list of labels, by index. `Ok(None)` means the user
 /// backed out with Esc or Ctrl+C. PageUp/PageDown, Home/End, and
 /// type-to-filter all work inside the list.
@@ -145,7 +245,7 @@ pub fn pick(prompt: &str, labels: Vec<String>, page_size: usize) -> anyhow::Resu
         })
         .collect();
     Ok(optional(
-        inquire::Select::new(prompt, choices)
+        inquire::Select::new(&question(prompt), choices)
             .with_page_size(page_size.max(3))
             .prompt(),
     )?
@@ -197,6 +297,13 @@ pub fn note(title: impl Display, body: impl Display) {
         paint("│", Tone::Muted),
         paint(&title.to_string(), Tone::Emphasis)
     );
+    detail(body);
+}
+
+/// The indented body of a note, without a title of its own — for a block
+/// that hangs off an [`intro`] rather than starting its own section. The
+/// body must already be terminal-safe.
+pub fn detail(body: impl Display) {
     for line in body.to_string().lines() {
         eprintln!("{}    {line}", paint("│", Tone::Muted));
     }
@@ -254,6 +361,15 @@ mod tests {
         }
         let unique: std::collections::BTreeSet<_> = rendered.iter().collect();
         assert_eq!(unique.len(), rendered.len(), "every tone looks different");
+    }
+
+    #[test]
+    fn every_prompt_separates_its_question_from_the_answer() {
+        assert_eq!(question("Network identifier"), "Network identifier:");
+        assert_eq!(question("Chain ID  "), "Chain ID:");
+        // Already punctuated: a second mark would read as a typo.
+        assert_eq!(question("Save this alias?"), "Save this alias?");
+        assert_eq!(question("Private key:"), "Private key:");
     }
 
     #[test]
