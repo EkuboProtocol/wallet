@@ -437,13 +437,12 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                             wallet.address,
                             wallet.source,
                             described_time(wallet.created_at),
-                            // Say what this line actually knows. "Never" would
-                            // read as a custody guarantee the OS credential
-                            // store does not give.
-                            wallet.exported_at.map_or_else(
-                                || "not by this CLI".to_string(),
-                                described_time
-                            ),
+                            // Only this tool's own exports are recorded; the OS
+                            // credential store can hand the key out without
+                            // telling us, so this is not a custody guarantee.
+                            wallet
+                                .exported_at
+                                .map_or_else(|| "no".to_string(), described_time),
                         )
                     })
                     .collect::<Vec<_>>()
