@@ -1187,13 +1187,225 @@ fn interactive_list_rows() -> usize {
     crate::render::interactive_list_rows(PROMPT_CHROME_ROWS)
 }
 
-fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> {
-    let pending = PendingStore::production(config.data_dir())?;
-    let awaiting = pending.awaiting_approval(None)?;
-    let awaiting_typed_data =
-        TypedDataStore::production(config.data_dir())?.awaiting_approval(None)?;
-    let awaiting_messages = MessageStore::production(config.data_dir())?.awaiting_approval(None)?;
-    let proposals = PolicyStore::production(config.data_dir())?.list_proposals()?;
+/// Show what awaits review, and — on an interactive terminal — let the user
+/// pick an entry to review right there.
+///
+/// The browser is only ever navigation: choosing an entry leaves the
+/// alternate screen first, and the review itself runs in the ordinary
+/// scrollback flow, so the facts of what was approved stay in the terminal
+/// transcript exactly as `ekubo-wallet review <request-id>` would leave
+/// them. When that review finishes, the queues are reloaded and the browser
+/// returns, minus whatever was just resolved.
+async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> {
+    loop {
+        let awaiting = PendingStore::production(config.data_dir())?.awaiting_approval(None)?;
+        let awaiting_typed_data =
+            TypedDataStore::production(config.data_dir())?.awaiting_approval(None)?;
+        let awaiting_messages =
+            MessageStore::production(config.data_dir())?.awaiting_approval(None)?;
+        let proposals = PolicyStore::production(config.data_dir())?.list_proposals()?;
+        if mode == OutputMode::Json || !crate::tui::interactive() {
+            return print_pending_approvals(
+                mode,
+                &awaiting,
+                &awaiting_typed_data,
+                &awaiting_messages,
+                &proposals,
+            );
+        }
+        if awaiting.is_empty()
+            && awaiting_typed_data.is_empty()
+            && awaiting_messages.is_empty()
+            && proposals.is_empty()
+        {
+            crate::tui::info("Nothing is awaiting approval.");
+            return Ok(());
+        }
+        let (rows, choices) = pending_approval_rows(
+            config,
+            &awaiting,
+            &awaiting_typed_data,
+            &awaiting_messages,
+            &proposals,
+        );
+        let Some(index) =
+            crate::fullscreen::pick_table("Pending approvals", "review", approval_columns(), rows)?
+        else {
+            return Ok(());
+        };
+        let outcome = match &choices[index] {
+            PendingChoice::Request(request_id) => {
+                run_approve(config, *request_id, false, mode).await
+            }
+            PendingChoice::Proposal(wallet_id) => {
+                review_policy_proposal(config, wallet_id, mode).await
+            }
+        };
+        // A failed review (expired mid-browse, declined authentication)
+        // should not tear down the whole browser; report it and return to
+        // the refreshed list.
+        if let Err(error) = outcome {
+            crate::tui::warning(format!("Review did not complete: {error:#}"));
+        }
+    }
+}
+
+/// What Enter reviews for one row of the pending-approvals browser.
+enum PendingChoice {
+    /// A queued signing request, reviewable by request ID whichever queue
+    /// holds it.
+    Request(Uuid),
+    /// A policy proposal, reviewed per wallet.
+    Proposal(String),
+}
+
+fn approval_columns() -> Vec<crate::fullscreen::TableColumn> {
+    use crate::fullscreen::TableColumn;
+    use ratatui::layout::Constraint;
+    vec![
+        TableColumn::new("Id", Constraint::Length(8)),
+        TableColumn::new("Kind", Constraint::Length(11)),
+        TableColumn::new("Age", Constraint::Length(14)),
+        TableColumn::new("Wallet", Constraint::Fill(1)),
+        TableColumn::new("Network", Constraint::Fill(1)),
+        TableColumn::new("Expires", Constraint::Length(14)),
+    ]
+}
+
+/// The four pending queues flattened into browser rows, with the action each
+/// row's Enter takes alongside.
+fn pending_approval_rows(
+    config: &ConfigStore,
+    awaiting: &[PendingTransaction],
+    awaiting_typed_data: &[PendingTypedData],
+    awaiting_messages: &[PendingMessage],
+    proposals: &[crate::policy_store::PolicyProposal],
+) -> (Vec<crate::fullscreen::TableRow>, Vec<PendingChoice>) {
+    use crate::fullscreen::{Span, TableRow};
+    use crate::tui::Tone;
+    let networks: BTreeMap<String, String> = config
+        .load()
+        .map(|loaded| {
+            loaded
+                .networks
+                .into_iter()
+                .map(|network| (network.chain_id.to_string(), network.name))
+                .collect()
+        })
+        .unwrap_or_default();
+    let network_name = |chain: &str| {
+        networks
+            .get(chain)
+            .cloned()
+            .unwrap_or_else(|| format!("chain {chain}"))
+    };
+    let none = || Span::toned("—", Tone::Muted);
+    let short = |request_id: Uuid| {
+        Span::toned(
+            request_id
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or_default(),
+            Tone::Muted,
+        )
+    };
+
+    let mut rows = Vec::new();
+    let mut choices = Vec::new();
+    for record in awaiting {
+        let network = network_name(&record.chain_id);
+        rows.push(TableRow::new(
+            vec![
+                short(record.request_id),
+                Span::plain("transaction"),
+                Span::plain(relative_time(record.created_at)),
+                Span::plain(&record.wallet_id),
+                Span::plain(&network),
+                Span::toned(relative_time(record.expires_at), Tone::Warning),
+            ],
+            &[
+                &record.request_id.to_string(),
+                "transaction",
+                &record.wallet_id,
+                &network,
+                &record.chain_id,
+            ],
+        ));
+        choices.push(PendingChoice::Request(record.request_id));
+    }
+    for record in awaiting_typed_data {
+        let network = network_name(&record.chain_id);
+        rows.push(TableRow::new(
+            vec![
+                short(record.request_id),
+                Span::plain("typed data"),
+                Span::plain(relative_time(record.created_at)),
+                Span::plain(&record.wallet_id),
+                Span::plain(&network),
+                Span::toned(relative_time(record.expires_at), Tone::Warning),
+            ],
+            &[
+                &record.request_id.to_string(),
+                "typed data",
+                &record.wallet_id,
+                &network,
+                &record.chain_id,
+                &record.digest,
+            ],
+        ));
+        choices.push(PendingChoice::Request(record.request_id));
+    }
+    for record in awaiting_messages {
+        let network = record
+            .chain_id
+            .as_deref()
+            .map(|chain| format!("{} (claimed)", network_name(chain)));
+        rows.push(TableRow::new(
+            vec![
+                short(record.request_id),
+                Span::plain("message"),
+                Span::plain(relative_time(record.created_at)),
+                Span::plain(&record.wallet_id),
+                network.as_deref().map_or_else(none, Span::plain),
+                Span::toned(relative_time(record.expires_at), Tone::Warning),
+            ],
+            &[
+                &record.request_id.to_string(),
+                "message",
+                &record.wallet_id,
+                network.as_deref().unwrap_or(""),
+                &record.digest,
+            ],
+        ));
+        choices.push(PendingChoice::Request(record.request_id));
+    }
+    for proposal in proposals {
+        rows.push(TableRow::new(
+            vec![
+                none(),
+                Span::plain("policy"),
+                Span::plain(relative_time(proposal.created_at)),
+                Span::plain(&proposal.wallet_id),
+                none(),
+                none(),
+            ],
+            &["policy proposal", &proposal.wallet_id, &proposal.rationale],
+        ));
+        choices.push(PendingChoice::Proposal(proposal.wallet_id.clone()));
+    }
+    (rows, choices)
+}
+
+/// The non-interactive listing: a summary on stderr and the queues on
+/// stdout, exact JSON when the mode calls for it.
+fn print_pending_approvals(
+    mode: OutputMode,
+    awaiting: &[PendingTransaction],
+    awaiting_typed_data: &[PendingTypedData],
+    awaiting_messages: &[PendingMessage],
+    proposals: &[crate::policy_store::PolicyProposal],
+) -> Result<()> {
     if awaiting.is_empty()
         && awaiting_typed_data.is_empty()
         && awaiting_messages.is_empty()
@@ -1236,14 +1448,14 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
         }),
         || {
             let mut lines = Vec::new();
-            for record in &awaiting {
+            for record in awaiting {
                 lines.push(format!(
                     "{}\n    expires {}",
                     transaction_line(record),
                     relative_time(record.expires_at),
                 ));
             }
-            for record in &awaiting_typed_data {
+            for record in awaiting_typed_data {
                 lines.push(format!(
                     "{} · typed data for {} on chain {} · {}\n    expires {}",
                     relative_time(record.created_at),
@@ -1253,7 +1465,7 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
                     relative_time(record.expires_at),
                 ));
             }
-            for record in &awaiting_messages {
+            for record in awaiting_messages {
                 lines.push(format!(
                     "{} · message for {}{} · {}\n    expires {}",
                     relative_time(record.created_at),
@@ -1266,7 +1478,7 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
                     relative_time(record.expires_at),
                 ));
             }
-            for proposal in &proposals {
+            for proposal in proposals {
                 lines.push(format!(
                     "{} · policy proposal for {} (from revision {}) · review with `ekubo-wallet policy review {}`",
                     relative_time(proposal.created_at),
@@ -1359,7 +1571,7 @@ async fn run_review(
     mode: OutputMode,
 ) -> Result<()> {
     let Some(request_id) = request_id else {
-        return list_pending_approvals(config, mode);
+        return list_pending_approvals(config, mode).await;
     };
     // Rejecting needs no review and no terminal: it signs nothing, and a
     // scripted or remote session must always be able to say no.
@@ -3509,6 +3721,70 @@ mod tests {
         // The piped listing keeps the whole request ID, because that is what
         // `transaction show` takes as an identifier.
         assert!(line.contains(&Uuid::nil().to_string()));
+
+        // The approvals browser flattens every queue into rows whose Enter
+        // action carries the right identifier, and its network column names
+        // the chain rather than numbering it.
+        let now = chrono::Utc::now();
+        let typed = PendingTypedData {
+            request_id: Uuid::from_u128(2),
+            wallet_id: "primary".into(),
+            chain_id: "1".into(),
+            typed_data: serde_json::json!({}),
+            digest: format!("0x{}", "cd".repeat(32)),
+            status: TypedDataStatus::AwaitingApproval,
+            created_at: now,
+            expires_at: now + chrono::TimeDelta::minutes(5),
+            updated_at: now,
+            approved_at: None,
+            rejected_at: None,
+            signature: None,
+        };
+        let message = PendingMessage {
+            request_id: Uuid::from_u128(3),
+            wallet_id: "primary".into(),
+            chain_id: None,
+            message_hex: "0x68690a".into(),
+            encoding: crate::message::MessageEncoding::Text,
+            digest: format!("0x{}", "ef".repeat(32)),
+            status: MessageStatus::AwaitingApproval,
+            created_at: now,
+            expires_at: now + chrono::TimeDelta::minutes(5),
+            updated_at: now,
+            approved_at: None,
+            rejected_at: None,
+            signature: None,
+        };
+        let proposal = crate::policy_store::PolicyProposal {
+            wallet_id: "primary".into(),
+            source_revision: 4,
+            policy: WalletPolicy::require_approval_for_everything(),
+            rationale: "allow the weekly compounding plan".into(),
+            created_at: now,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let config = ConfigStore::new(directory.path());
+        let (rows, choices) = pending_approval_rows(
+            &config,
+            std::slice::from_ref(&record),
+            std::slice::from_ref(&typed),
+            std::slice::from_ref(&message),
+            std::slice::from_ref(&proposal),
+        );
+        assert_eq!(rows.len(), 4);
+        assert_eq!(choices.len(), 4);
+        // The default configuration names chain 1, so the row says
+        // "ethereum" — the chain ID lives in the haystack instead.
+        assert!(rows[0].haystack.contains("ethereum"));
+        assert!(rows[0].haystack.contains(&Uuid::nil().to_string()));
+        assert!(matches!(choices[0], PendingChoice::Request(id) if id == Uuid::nil()));
+        assert!(matches!(choices[1], PendingChoice::Request(id) if id == Uuid::from_u128(2)));
+        // A typed-data row is searchable by its EIP-712 digest.
+        assert!(rows[1].haystack.contains(&format!("0x{}", "cd".repeat(32))));
+        assert!(matches!(choices[2], PendingChoice::Request(id) if id == Uuid::from_u128(3)));
+        // A proposal reviews per wallet, and its rationale is searchable.
+        assert!(matches!(&choices[3], PendingChoice::Proposal(wallet) if wallet == "primary"));
+        assert!(rows[3].haystack.contains("weekly compounding"));
     }
 
     #[test]
