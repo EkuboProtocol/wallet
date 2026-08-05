@@ -122,7 +122,13 @@ enum WalletCommand {
     /// List wallet metadata. Never returns private keys.
     List,
     /// Generate a new key directly in the platform credential store.
-    Create { wallet_id: String },
+    Create {
+        wallet_id: String,
+        /// Starting policy. Asked for in a terminal when omitted; anywhere
+        /// else the safe choice is taken rather than guessed at.
+        #[arg(long, value_enum)]
+        policy: Option<StartingPolicy>,
+    },
     /// Import an existing private key from a hidden interactive prompt.
     Import { wallet_id: String },
     /// Export a private key after terminal confirmation and owner authentication.
@@ -293,6 +299,41 @@ impl LegalDocumentArg {
     }
 }
 
+/// The policy a brand-new wallet starts under.
+///
+/// A generated key holds nothing until it is funded, which is why creation
+/// used to install the permissive profile and print a line asking the user to
+/// replace it before funding. Printed advice cannot tell whether it was
+/// followed, and funding does not revisit the policy, so the window closed
+/// only for users who remembered. Asking once, here, is the same decision
+/// without the gap — and it lines up `create` with `import`, which has always
+/// started locked down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum StartingPolicy {
+    /// Nothing signs without an explicit CLI review.
+    RequireApproval,
+    /// Sign automatically; ask only when policy or simulation fails.
+    AllowAll,
+}
+
+impl StartingPolicy {
+    fn policy(self) -> WalletPolicy {
+        match self {
+            Self::RequireApproval => WalletPolicy::require_approval_for_everything(),
+            Self::AllowAll => WalletPolicy::allow_all_with_approval(),
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::RequireApproval => "the require-approval policy: nothing signs automatically",
+            Self::AllowAll => {
+                "the allow-all policy: signing is automatic until policy or simulation fails"
+            }
+        }
+    }
+}
+
 /// A decision supplied on the command line instead of at the prompt, so a
 /// script or a remote session can resolve a request without a terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -409,22 +450,27 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                     .join("\n"))
             })
         }
-        WalletCommand::Create { wallet_id } => {
-            // A freshly generated key holds nothing until the user funds it,
-            // so the automatic profile is a safe starting point; the README
-            // still directs replacing it before funding.
+        WalletCommand::Create { wallet_id, policy } => {
+            // Chosen before the key exists, so a wallet is never briefly
+            // permissive while the user is still deciding, and a cancelled
+            // prompt leaves nothing behind.
+            let Some(starting) = resolve_starting_policy(policy)? else {
+                crate::tui::outro_cancel("No wallet was created.");
+                return Ok(());
+            };
             let wallet = custody.create(&wallet_id)?;
-            initialize_wallet_policy(&config, &wallet.id, &WalletPolicy::allow_all_with_approval())
-                .with_context(|| {
-                    format!(
-                        "wallet {} was created but policy initialization failed; signing will fail closed",
-                        wallet.id
-                    )
-                })?;
+            initialize_wallet_policy(&config, &wallet.id, &starting.policy()).with_context(|| {
+                format!(
+                    "wallet {} was created but policy initialization failed; signing will fail closed",
+                    wallet.id
+                )
+            })?;
             emit(mode, &wallet, || {
                 Ok(format!(
-                    "Created wallet {} at {:#x} with the allow-all policy.\nReplace the policy before funding the address: `ekubo-wallet policy require-approval {}`.",
-                    wallet.id, wallet.address, wallet.id
+                    "Created wallet {} at {:#x} with {}.",
+                    wallet.id,
+                    wallet.address,
+                    starting.description()
                 ))
             })
         }
@@ -2464,6 +2510,34 @@ async fn replace_policy(
     )
 }
 
+/// Settle which policy a new wallet starts under.
+///
+/// An explicit `--policy` wins. In a terminal the user is asked, with the
+/// cursor on the locked-down choice so the permissive one takes a deliberate
+/// move. Everywhere else — a pipe, a script, `--json` — the locked-down
+/// choice is taken outright: a non-interactive run has nobody to ask, and
+/// guessing wrong in that direction is the expensive mistake.
+///
+/// `Ok(None)` means the user backed out and no wallet should be created.
+fn resolve_starting_policy(flag: Option<StartingPolicy>) -> Result<Option<StartingPolicy>> {
+    if let Some(chosen) = flag {
+        return Ok(Some(chosen));
+    }
+    if !crate::tui::interactive() {
+        return Ok(Some(StartingPolicy::RequireApproval));
+    }
+    let choices = [StartingPolicy::RequireApproval, StartingPolicy::AllowAll];
+    Ok(crate::tui::pick(
+        "How should this wallet start?",
+        vec![
+            "Require approval — every transaction needs a CLI review".to_owned(),
+            "Allow all — sign automatically, ask only when policy or simulation fails".to_owned(),
+        ],
+        choices.len(),
+    )?
+    .map(|index| choices[index]))
+}
+
 /// Ask for a decision and return it, for the queued requests where declining
 /// has somewhere to be written. Everything else uses [`require_approval`],
 /// which treats a decline as an abort because there is no queue entry to
@@ -3650,6 +3724,34 @@ mod tests {
         ] {
             assert_eq!(status_tone(failed), Tone::Danger);
         }
+    }
+
+    #[test]
+    fn a_new_wallet_never_starts_permissive_by_accident() {
+        // The tests run without a terminal, which is exactly the case that
+        // must not quietly enable automatic signing: with nobody to ask, the
+        // locked-down policy is taken rather than the convenient one.
+        assert_eq!(
+            resolve_starting_policy(None).unwrap(),
+            Some(StartingPolicy::RequireApproval)
+        );
+        // An explicit flag is obeyed either way, including the permissive one.
+        for chosen in [StartingPolicy::RequireApproval, StartingPolicy::AllowAll] {
+            assert_eq!(resolve_starting_policy(Some(chosen)).unwrap(), Some(chosen));
+        }
+    }
+
+    #[test]
+    fn the_two_starting_policies_are_the_profiles_they_name() {
+        // A wallet that asked to require approval must not be able to sign
+        // anything automatically, whatever the profile is called.
+        let locked = StartingPolicy::RequireApproval.policy();
+        assert_eq!(locked, WalletPolicy::require_approval_for_everything());
+        assert_eq!(
+            StartingPolicy::AllowAll.policy(),
+            WalletPolicy::allow_all_with_approval()
+        );
+        assert_ne!(locked, StartingPolicy::AllowAll.policy());
     }
 
     #[test]

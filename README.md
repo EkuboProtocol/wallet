@@ -155,15 +155,18 @@ document (including its generated list of default RPC endpoints) requires
 re-acceptance before the wallet works again. An agent can read the documents
 and acceptance state, but only the interactive CLI can accept them.
 
-Policy defaults differ by how the key arrived, because the risk differs:
+Every wallet starts under a policy, chosen when the key is created rather than
+assumed and corrected afterwards:
 
-- `wallet create` generates a fresh, unfunded key and installs the wildcard
-  allow-all policy: successfully simulated actions sign automatically, and
-  policy or simulation failures queue for explicit approval. Replace it with
-  an appropriately restrictive policy before funding the address.
+- `wallet create` asks which policy to start under, with the cursor on
+  require-approval, and installs the answer. `--policy require-approval` or
+  `--policy allow-all` answers it without the prompt; a non-interactive run
+  with no flag takes require-approval, because a run with nobody to ask is not
+  a run that should quietly enable automatic signing. The choice is made
+  before the key is generated, so backing out leaves no wallet behind.
 - `wallet import` brings in a key that usually already controls funds, so it
-  installs the require-approval policy: nothing signs automatically until you
-  deliberately choose otherwise.
+  installs the require-approval policy outright: nothing signs automatically
+  until you deliberately choose otherwise.
 
 Both profiles are one command to install at any time, and every transaction
 under the require-approval profile still runs the full simulation and decoded
