@@ -74,31 +74,37 @@ lifecycle records, not spending-accounting state.
 
 Using it:
 
-| Guide | What it covers |
-| --- | --- |
-| [Installation](docs/installation.md) | Release archives, manual install, registering the MCP server by hand |
-| [First use](docs/first-use.md) | Accepting the legal documents, creating a wallet, choosing its policy |
-| [Networks](docs/networks.md) | Built-in profiles, adding a chain, RPC requirements |
-| [Policies](docs/policies.md) | What a policy can express, the shipped templates, editing one |
-| [MCP tools](docs/mcp-tools.md) | Every tool, the token database, simulation forks, local read decoding |
-| [Approval flow](docs/approval-ux.md) | Reviewing and resolving an exceptional request in the terminal |
-| [Batching](docs/batching.md) | How multi-call plans execute atomically through EIP-7702 |
+- [Installation](docs/installation.md) — release archives, manual install,
+  registering the MCP server by hand
+- [First use](docs/first-use.md) — accepting the legal documents, creating a
+  wallet, choosing its policy
+- [Networks](docs/networks.md) — built-in profiles, adding a chain, RPC
+  requirements
+- [Policies](docs/policies.md) — what a policy can express, the shipped
+  templates, editing one
+- [MCP tools](docs/mcp-tools.md) — every tool, the token database, simulation
+  forks, local read decoding
+- [Approval flow](docs/approval-ux.md) — reviewing and resolving an exceptional
+  request in the terminal
+- [Batching](docs/batching.md) — how multi-call plans execute atomically through
+  EIP-7702
 
 How it works, and what it does not protect against:
 
-| Document | What it covers |
-| --- | --- |
-| [Security boundary](docs/security-boundary.md) | What is trusted, why keys sit outside the database, why nothing enforces presence |
-| [Threat model](docs/threat-model.md) | Signing invariants, attack analysis, residual risks |
-| [Architecture](docs/architecture.md) | Components, the signing pipeline, storage and lifecycle |
-| [Local storage](docs/storage.md) | Data directory, the encrypted database, credential-store entries |
+- [Security boundary](docs/security-boundary.md) — what is trusted, why keys sit
+  outside the database, why nothing enforces presence
+- [Threat model](docs/threat-model.md) — signing invariants, attack analysis,
+  residual risks
+- [Architecture](docs/architecture.md) — components, the signing pipeline,
+  storage and lifecycle
+- [Local storage](docs/storage.md) — data directory, the encrypted database,
+  credential-store entries
 
 Working on it:
 
-| Guide | What it covers |
-| --- | --- |
-| [Development](docs/development.md) | Building, testing, the checks CI runs |
-| [Releasing](docs/releasing.md) | Signing, provenance, and the trusted-publishing setup |
+- [Development](docs/development.md) — building, testing, the checks CI runs
+- [Releasing](docs/releasing.md) — signing, provenance, and the
+  trusted-publishing setup
 
 > **The policy is the security boundary.** Keys carry no biometric or presence
 > requirement, deliberately: this wallet exists so an agent can work unattended,
