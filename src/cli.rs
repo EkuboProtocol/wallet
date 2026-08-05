@@ -384,6 +384,13 @@ enum TransactionCommand {
     /// Attempt to cancel a broadcast but unmined transaction by outbidding it
     /// with a 0-value self-send at the same nonce. Fails if it already mined.
     Cancel { identifier: String },
+    /// Rebroadcast the exact already-signed bytes of a broadcast but unmined
+    /// transaction, for example after it fell out of mempools.
+    Rebroadcast { identifier: String },
+    /// Discard a signed but never-broadcast transaction, freeing its
+    /// wallet+chain in-flight slot. Anything that reached the network is
+    /// refused; cancel that on chain instead.
+    Discard { identifier: String },
 }
 
 impl Cli {
@@ -1191,6 +1198,49 @@ async fn run_transaction(
             }
             Ok(())
         }
+        TransactionCommand::Rebroadcast { identifier } => {
+            let record = pending.get_by_identifier(&identifier)?;
+            let wallet = config.wallet(&record.wallet_id)?;
+            let network = config.network_by_chain_id(&record.chain_id)?;
+            let pending = std::sync::Mutex::new(pending);
+            let record = crate::reconcile::reconcile_record(&pending, &network, record, true).await?;
+            ensure!(
+                record.status == PendingStatus::Broadcast,
+                "nothing to rebroadcast: the transaction is {}",
+                status_label(record.status)
+            );
+            let claimed = pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                .claim_broadcast_retry(record.request_id)?;
+            let (record, broadcast) =
+                crate::reconcile::submit_claimed(&pending, &wallet, &network, claimed).await?;
+            if mode == OutputMode::Json {
+                return print_json(&serde_json::json!({
+                    "transaction": record,
+                    "broadcast": broadcast,
+                }));
+            }
+            println!("{}", transaction_line(&record));
+            if let Some(error) = &broadcast.broadcast_error {
+                println!("Broadcast reported: {error}");
+            }
+            Ok(())
+        }
+        TransactionCommand::Discard { identifier } => {
+            let mut pending = pending;
+            let record = pending.get_by_identifier(&identifier)?;
+            let record = pending.discard_unsent(record.request_id)?;
+            if mode == OutputMode::Json {
+                return print_json(&record);
+            }
+            println!(
+                "Discarded {}: the signed bytes were never broadcast, so nothing can mine and \
+                 the wallet's in-flight slot is free again.",
+                record.request_id
+            );
+            Ok(())
+        }
     }
 }
 
@@ -1674,6 +1724,17 @@ async fn run_approve(
         stored_policy.revision == request.policy_revision,
         "active policy changed while approval was pending"
     );
+
+    // A predecessor that already mined, cancelled, or was replaced must never
+    // block storing this approval's signature: settle the wallet+chain
+    // in-flight slot against the chain before the human reads anything.
+    if let Some(previous) = pending.in_flight(&wallet.id, &request.chain_id)? {
+        let shared = std::sync::Mutex::new(pending);
+        crate::reconcile::reconcile_record(&shared, &network, previous, true).await?;
+        pending = shared
+            .into_inner()
+            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?;
+    }
 
     let simulation = simulate_execution(
         &wallet,

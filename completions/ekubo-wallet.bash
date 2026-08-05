@@ -20,7 +20,7 @@ _ekubo_wallet() {
         wallet) choices="list create import export remove" ;;
         network) choices="list presets reset add edit remove delete" ;;
         policy) choices="show set allow-all require-approval validate schema review" ;;
-        transaction|tx) choices="list show cancel" ;;
+        transaction|tx) choices="list show cancel rebroadcast discard" ;;
         token) choices="list" ;;
         address-book) choices="list add remove delete" ;;
         legal) choices="status show accept" ;;

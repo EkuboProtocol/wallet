@@ -18,13 +18,14 @@ use crate::{
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     custody::KeyStore,
     execution::{
-        BroadcastResult, ReceiptStatus as BroadcastReceiptStatus, broadcast_signed_cancellation,
-        sign_cancellation, signed_transaction_nonce,
+        BroadcastResult, ReceiptStatus as BroadcastReceiptStatus, SignedExecution,
+        broadcast_signed_cancellation, broadcast_signed_execution, sign_cancellation,
+        signed_transaction_nonce,
     },
     pending::{PendingStatus, PendingStore, PendingTransaction},
     rpc::{ReceiptStatus, mined_transaction_count, transaction_known, transaction_receipt},
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{TimeDelta, Utc};
 use std::sync::{Mutex, MutexGuard};
 
@@ -216,6 +217,61 @@ async fn reconcile_cancelling(
         );
     }
     lock(pending)?.mark_replaced(record.request_id)
+}
+
+/// Broadcast a claimed submission's exact persisted bytes and persist what
+/// the chain said: broadcast on acceptance, straight to confirmed or
+/// reverted when a receipt already exists. Releases the submission lease
+/// when the send itself fails, so the signed bytes stay retryable.
+pub async fn submit_claimed(
+    pending: &Mutex<PendingStore>,
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    claimed: PendingTransaction,
+) -> Result<(PendingTransaction, BroadcastResult)> {
+    ensure!(
+        claimed.status == PendingStatus::Submitting,
+        "pending transaction does not hold the submission lease"
+    );
+    let signed = SignedExecution {
+        digest: claimed.digest.clone(),
+        serialized_transaction: claimed
+            .serialized_transaction
+            .clone()
+            .context("pending transaction has no signed bytes")?,
+        transaction_hash: claimed
+            .signed_transaction_hash
+            .clone()
+            .context("pending transaction has no signed hash")?,
+    };
+    let broadcast =
+        match broadcast_signed_execution(&signed, wallet, network, &claimed.execution_plan).await {
+            Ok(broadcast) => broadcast,
+            Err(error) => {
+                lock(pending)?
+                    .release_submission(claimed.request_id)
+                    .context("failed to release transaction submission lease")?;
+                return Err(error);
+            }
+        };
+    let record = {
+        let mut pending = lock(pending)?;
+        let broadcast_record =
+            pending.mark_broadcast(claimed.request_id, &broadcast.transaction_hash)?;
+        match broadcast.receipt_status {
+            BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => pending
+                .finalize(
+                    broadcast_record.request_id,
+                    broadcast.receipt_status == BroadcastReceiptStatus::Success,
+                    broadcast
+                        .block_number
+                        .as_deref()
+                        .context("confirmed transaction is missing a block number")?,
+                )?,
+            BroadcastReceiptStatus::Pending => broadcast_record,
+        }
+    };
+    Ok((record, broadcast))
 }
 
 /// Attempt to cancel a broadcast but unmined transaction: reconcile it

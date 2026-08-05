@@ -261,8 +261,52 @@ impl PendingStore {
                     transaction_hash,
                 ],
             )
-            .context("another signed transaction is already in flight for this wallet and chain")?;
+            .context("another transaction is already in flight for this wallet and chain: reconcile it with wallet_get_execution_status, wait for it with wallet_wait_for_execution, or cancel it with wallet_attempt_cancel")?;
         transaction.commit()?;
+        self.get(request_id)
+    }
+
+    /// The one record occupying this wallet and chain's in-flight slot, if
+    /// any: the unique index allows at most one row in a signed, submitting,
+    /// broadcast, or cancelling state. Senders reconcile this record against
+    /// the chain before creating a new signature, so a predecessor that
+    /// already mined (or was replaced) never blocks the next transaction.
+    pub fn in_flight(
+        &self,
+        wallet_id: &str,
+        chain_id: &str,
+    ) -> Result<Option<PendingTransaction>> {
+        validate_wallet_id(wallet_id)?;
+        let request_id: Option<String> = self
+            .database
+            .connection
+            .query_row(
+                "SELECT request_id FROM pending_transactions
+                 WHERE wallet_id = ?1 AND chain_id = ?2
+                   AND status IN ('signed', 'submitting', 'broadcast', 'cancelling')",
+                params![wallet_id, chain_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        request_id
+            .map(|value| self.get(Uuid::parse_str(&value).context("stored request ID is invalid")?))
+            .transpose()
+    }
+
+    /// Discard a signed envelope that was never submitted: the bytes exist
+    /// nowhere but this database, so marking the record cancelled is honest
+    /// and frees the wallet+chain in-flight slot. Anything that may have
+    /// reached the network is refused — cancel that on chain instead.
+    pub fn discard_unsent(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
+        let changed = self.database.connection.execute(
+            "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2
+             WHERE request_id = ?1 AND status = 'signed'",
+            params![request_id.to_string(), Utc::now().to_rfc3339()],
+        )?;
+        ensure!(
+            changed == 1,
+            "only a signed but never-submitted transaction can be discarded locally"
+        );
         self.get(request_id)
     }
 
@@ -392,7 +436,7 @@ impl PendingStore {
                     review_digest,
                 ],
             )
-            .context("another signed transaction is already in flight for this wallet and chain")?;
+            .context("another transaction is already in flight for this wallet and chain: reconcile it with wallet_get_execution_status, wait for it with wallet_wait_for_execution, or cancel it with wallet_attempt_cancel")?;
         transaction.commit()?;
         self.get(request_id)
     }
@@ -1137,6 +1181,34 @@ mod tests {
 
         // Terminal: the wallet+chain in-flight slot is free again.
         broadcast_original(&mut store);
+    }
+
+    #[test]
+    fn the_in_flight_slot_is_queryable_and_unsent_signatures_can_be_discarded() {
+        let (_directory, mut store) = store();
+        assert!(store.in_flight("primary", "1").unwrap().is_none());
+
+        let signed = store
+            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", ORIGINAL_HASH)
+            .unwrap();
+        assert_eq!(
+            store
+                .in_flight("primary", "1")
+                .unwrap()
+                .expect("signed row holds the slot")
+                .request_id,
+            signed.request_id
+        );
+
+        // Never broadcast: discarding locally is honest and frees the slot.
+        let discarded = store.discard_unsent(signed.request_id).unwrap();
+        assert_eq!(discarded.status, PendingStatus::Cancelled);
+        assert!(store.in_flight("primary", "1").unwrap().is_none());
+
+        // Anything that may have reached the network is refused.
+        let request_id = broadcast_original(&mut store);
+        assert!(store.discard_unsent(request_id).is_err());
+        assert!(store.in_flight("primary", "1").unwrap().is_some());
     }
 
     #[test]
