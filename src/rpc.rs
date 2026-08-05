@@ -254,6 +254,26 @@ pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
     Ok(block_number)
 }
 
+/// The account's mined transaction count (the `latest` tag): the next nonce
+/// the chain itself has settled. Deliberately not the `pending` view —
+/// replacement detection must only trust nonces consumed by mined blocks,
+/// because a competing mempool transaction at the same nonce has not won yet.
+pub async fn mined_transaction_count(network: &NetworkConfig, address: Address) -> Result<u64> {
+    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let (chain_id, count) = tokio::try_join!(
+        timeout_call(network, provider.get_chain_id()),
+        timeout_call(network, async {
+            provider.get_transaction_count(address).latest().await
+        }),
+    )?;
+    ensure!(
+        chain_id == network.chain_id,
+        "RPC reports chain {chain_id}, not {}",
+        network.chain_id
+    );
+    Ok(count)
+}
+
 /// Return whether the configured RPC already knows the exact transaction
 /// hash. This is used only to recover a persisted submission lease; callers
 /// must still rebroadcast the already-signed bytes rather than prepare a new

@@ -15,7 +15,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs, fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.policy-database-key.v1";
@@ -367,6 +367,96 @@ impl PolicyStore {
                 ],
             )?;
             version = 8;
+        }
+        if version == 8 {
+            // Two lifecycle additions that SQLite cannot express as ALTERs
+            // because the status list lives in a CHECK constraint, so the
+            // table is rebuilt once:
+            //
+            // - 'replaced': the envelope's nonce was consumed by a different
+            //   transaction (for example the same key imported on another
+            //   device), so these exact bytes can never mine.
+            // - 'cancelling' plus the cancel_* columns: an owner-requested
+            //   0-value self-send racing the stuck envelope at its own nonce.
+            //   The cancel lives on the same row and the in-flight unique
+            //   index keeps counting the pair as one slot, so one wallet and
+            //   chain still never has two logical transactions in flight.
+            run_transaction(
+                &connection,
+                &[
+                    "CREATE TABLE pending_transactions_v9 (
+                         request_id TEXT PRIMARY KEY NOT NULL,
+                         wallet_id TEXT NOT NULL,
+                         network_name TEXT NOT NULL,
+                         chain_id TEXT NOT NULL,
+                         plan_json TEXT NOT NULL,
+                         plan_digest TEXT NOT NULL,
+                         policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+                         status TEXT NOT NULL CHECK (status IN (
+                             'awaiting_approval', 'rejected', 'signed', 'submitting',
+                             'broadcast', 'confirmed', 'reverted', 'expired', 'cancelled',
+                             'replaced', 'cancelling'
+                         )),
+                         created_at TEXT NOT NULL,
+                         expires_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL,
+                         approved_at TEXT,
+                         rejected_at TEXT,
+                         serialized_transaction TEXT,
+                         signed_transaction_hash TEXT,
+                         broadcast_transaction_hash TEXT,
+                         block_number TEXT,
+                         approval_required INTEGER NOT NULL DEFAULT 1
+                             CHECK (approval_required IN (0, 1)),
+                         review_digest TEXT,
+                         cancel_serialized_transaction TEXT,
+                         cancel_transaction_hashes TEXT,
+                         CHECK (
+                             (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
+                                 AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                             OR status <> 'awaiting_approval'
+                         ),
+                         CHECK (
+                             (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
+                             OR (serialized_transaction IS NOT NULL AND signed_transaction_hash IS NOT NULL)
+                         ),
+                         CHECK (
+                             (cancel_serialized_transaction IS NULL AND cancel_transaction_hashes IS NULL)
+                             OR (cancel_serialized_transaction IS NOT NULL
+                                 AND cancel_transaction_hashes IS NOT NULL
+                                 AND serialized_transaction IS NOT NULL)
+                         )
+                     ) STRICT",
+                    "INSERT INTO pending_transactions_v9 (
+                         request_id, wallet_id, network_name, chain_id, plan_json,
+                         plan_digest, policy_revision, status, created_at, expires_at,
+                         updated_at, approved_at, rejected_at, serialized_transaction,
+                         signed_transaction_hash, broadcast_transaction_hash,
+                         block_number, approval_required, review_digest
+                     )
+                     SELECT request_id, wallet_id, network_name, chain_id, plan_json,
+                            plan_digest, policy_revision, status, created_at, expires_at,
+                            updated_at, approved_at, rejected_at, serialized_transaction,
+                            signed_transaction_hash, broadcast_transaction_hash,
+                            block_number, approval_required, review_digest
+                     FROM pending_transactions",
+                    "DROP TABLE pending_transactions",
+                    "ALTER TABLE pending_transactions_v9 RENAME TO pending_transactions",
+                    "CREATE INDEX pending_transactions_wallet_created
+                         ON pending_transactions(wallet_id, created_at DESC)",
+                    "CREATE INDEX pending_transactions_signed_hash
+                         ON pending_transactions(signed_transaction_hash)
+                         WHERE signed_transaction_hash IS NOT NULL",
+                    "CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
+                         ON pending_transactions(wallet_id, chain_id)
+                         WHERE status IN ('signed', 'submitting', 'broadcast', 'cancelling')",
+                    "CREATE UNIQUE INDEX pending_transactions_unique_pending_plan
+                         ON pending_transactions(wallet_id, chain_id, plan_digest)
+                         WHERE status = 'awaiting_approval'",
+                    "UPDATE schema_metadata SET version = 9 WHERE singleton = 1",
+                ],
+            )?;
+            version = 9;
         }
         ensure!(
             version == SCHEMA_VERSION,

@@ -54,6 +54,7 @@ pub fn status_label(status: PendingStatus) -> &'static str {
         PendingStatus::Reverted => "reverted",
         PendingStatus::Expired => "expired",
         PendingStatus::Cancelled => "cancelled",
+        PendingStatus::Replaced => "replaced on chain",
     }
 }
 
@@ -70,7 +71,8 @@ pub fn status_tone(status: PendingStatus) -> Tone {
         PendingStatus::Rejected
         | PendingStatus::Reverted
         | PendingStatus::Expired
-        | PendingStatus::Cancelled => Tone::Danger,
+        | PendingStatus::Cancelled
+        | PendingStatus::Replaced => Tone::Danger,
     }
 }
 

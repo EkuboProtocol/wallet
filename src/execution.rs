@@ -564,6 +564,13 @@ fn validate_signed_preparation(
     Ok(())
 }
 
+/// The nonce inside an exact stored signed envelope. Reconciliation compares
+/// it against the chain's mined account nonce to detect replacement.
+pub fn signed_transaction_nonce(serialized_transaction: &str) -> Result<u64> {
+    let bytes = decode_serialized(serialized_transaction)?;
+    Ok(decode_envelope(&bytes)?.nonce())
+}
+
 pub async fn broadcast_signed_execution(
     signed: &SignedExecution,
     wallet: &WalletMetadata,

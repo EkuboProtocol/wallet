@@ -1108,6 +1108,11 @@ async fn run_transaction(
                 config.wallet(wallet_id)?;
             }
             let transactions = pending.list(wallet_id.as_deref(), limit)?;
+            // Settle in-flight rows against the chain before display. The
+            // in-flight unique index bounds this at one row per wallet and
+            // chain, so a long listing still costs at most a couple of RPCs.
+            let pending = std::sync::Mutex::new(pending);
+            let transactions = crate::reconcile::reconcile_all(config, &pending, transactions).await;
             if mode == OutputMode::Json {
                 return print_json(&serde_json::json!({ "transactions": transactions }));
             }
@@ -1128,6 +1133,11 @@ async fn run_transaction(
         }
         TransactionCommand::Show { identifier } => {
             let record = pending.get_by_identifier(&identifier)?;
+            let pending = std::sync::Mutex::new(pending);
+            let record = crate::reconcile::reconcile_all(config, &pending, vec![record])
+                .await
+                .pop()
+                .expect("reconciled listing keeps its single record");
             if mode == OutputMode::Json {
                 return print_json(&record);
             }

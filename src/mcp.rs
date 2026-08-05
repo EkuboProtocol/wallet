@@ -25,7 +25,7 @@ use crate::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     plan_fetch::{FetchPolicy, resolve_execution_plan},
     policy_store::PolicyStore,
-    rpc::{WalletStatus, transaction_known, transaction_receipt, verify_chain_id, wallet_status},
+    rpc::{WalletStatus, transaction_known, verify_chain_id, wallet_status},
     simulation::{SimulationResult, simulate_execution},
     simulation_store::SimulationStore,
     token_store::{StoredToken, TokenStore},
@@ -36,7 +36,7 @@ use crate::{
 };
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::wrapper::{Json, Parameters},
@@ -671,6 +671,9 @@ enum ExecutionStatus {
     Reverted,
     Expired,
     Cancelled,
+    /// The envelope's nonce was consumed by a different mined transaction, so
+    /// the exact signed bytes can never mine.
+    Replaced,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -701,8 +704,6 @@ struct ExecutionStatusOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     instruction: Option<String>,
 }
-
-const SUBMISSION_LEASE_SECONDS: i64 = 120;
 
 #[tool_router]
 impl WalletMcpServer {
@@ -2345,51 +2346,11 @@ impl WalletMcpServer {
     async fn reconcile_record(
         &self,
         network: &NetworkConfig,
-        mut record: PendingTransaction,
+        record: PendingTransaction,
         recover_stale_submission: bool,
     ) -> Result<PendingTransaction> {
-        if matches!(
-            record.status,
-            PendingStatus::Broadcast | PendingStatus::Submitting
-        ) {
-            let transaction_hash = record
-                .broadcast_transaction_hash
-                .as_ref()
-                .or(record.signed_transaction_hash.as_ref())
-                .cloned()
-                .context("submitted transaction is missing its hash")?;
-            if let Some(receipt) = transaction_receipt(network, &transaction_hash).await? {
-                let mut pending = self
-                    .pending
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?;
-                if record.status == PendingStatus::Submitting {
-                    record = pending.mark_broadcast(record.request_id, &transaction_hash)?;
-                }
-                return pending.finalize(
-                    record.request_id,
-                    receipt.succeeded,
-                    &receipt.block_number.to_string(),
-                );
-            }
-
-            if record.status == PendingStatus::Submitting
-                && recover_stale_submission
-                && Utc::now() - record.updated_at >= TimeDelta::seconds(SUBMISSION_LEASE_SECONDS)
-            {
-                let known = transaction_known(network, &transaction_hash).await?;
-                let mut pending = self
-                    .pending
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?;
-                record = if known {
-                    pending.mark_broadcast(record.request_id, &transaction_hash)?
-                } else {
-                    pending.release_submission(record.request_id)?
-                };
-            }
-        }
-        Ok(record)
+        crate::reconcile::reconcile_record(&self.pending, network, record, recover_stale_submission)
+            .await
     }
 }
 
@@ -2724,6 +2685,7 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         PendingStatus::Reverted => ExecutionStatus::Reverted,
         PendingStatus::Expired => ExecutionStatus::Expired,
         PendingStatus::Cancelled => ExecutionStatus::Cancelled,
+        PendingStatus::Replaced => ExecutionStatus::Replaced,
     };
     let receipt_status = match record.status {
         PendingStatus::Submitting | PendingStatus::Broadcast => Some(ReceiptStatus::Pending),
@@ -2755,6 +2717,9 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         ),
         ExecutionStatus::Cancelled => Some(
             "The signed request was cancelled because its policy revision changed before initial submission.".into(),
+        ),
+        ExecutionStatus::Replaced => Some(
+            "The signed transaction's nonce was consumed by a different mined transaction (for example one sent from the same key on another device), so these exact bytes can never mine and nothing was executed. Prepare a fresh plan only if the user still wants the action.".into(),
         ),
         ExecutionStatus::Submitted | ExecutionStatus::Reverted => None,
     };

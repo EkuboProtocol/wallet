@@ -29,6 +29,10 @@ pub enum PendingStatus {
     Reverted,
     Expired,
     Cancelled,
+    /// The envelope's nonce was consumed on chain by a different transaction
+    /// (for example one sent from the same key imported on another device),
+    /// so these exact signed bytes can never mine.
+    Replaced,
 }
 
 impl PendingStatus {
@@ -43,6 +47,7 @@ impl PendingStatus {
             "reverted" => Ok(Self::Reverted),
             "expired" => Ok(Self::Expired),
             "cancelled" => Ok(Self::Cancelled),
+            "replaced" => Ok(Self::Replaced),
             _ => anyhow::bail!("stored pending transaction has invalid status {value}"),
         }
     }
@@ -469,6 +474,21 @@ impl PendingStore {
         self.get(request_id)
     }
 
+    /// Record that this envelope's nonce was consumed by a different mined
+    /// transaction: the exact signed bytes can never mine, so the record
+    /// leaves the in-flight slot without ever getting a receipt. Callers must
+    /// have verified against the chain that the mined account nonce passed the
+    /// envelope's nonce while no receipt exists for its hash.
+    pub fn mark_replaced(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
+        let changed = self.database.connection.execute(
+            "UPDATE pending_transactions SET status = 'replaced', updated_at = ?2
+             WHERE request_id = ?1 AND status IN ('submitting', 'broadcast', 'cancelling')",
+            params![request_id.to_string(), Utc::now().to_rfc3339()],
+        )?;
+        ensure!(changed == 1, "pending transaction is not in flight");
+        self.get(request_id)
+    }
+
     pub fn finalize(
         &mut self,
         request_id: Uuid,
@@ -868,6 +888,37 @@ mod tests {
         assert_eq!(reclaimed.serialized_transaction.as_deref(), Some("0x0102"));
         assert_eq!(reclaimed.signed_transaction_hash.as_deref(), Some(hash));
         assert!(store.claim_broadcast_retry(signed.request_id).is_err());
+    }
+
+    #[test]
+    fn replacement_is_terminal_and_frees_the_in_flight_slot() {
+        let (_directory, mut store) = store();
+        let first_hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
+        let second_hash = "0x5555555555555555555555555555555555555555555555555555555555555555";
+        let first = store
+            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", first_hash)
+            .unwrap();
+
+        // Not yet in flight: a signed-but-never-submitted envelope cannot have
+        // been replaced on chain.
+        assert!(store.mark_replaced(first.request_id).is_err());
+
+        store.claim_for_submission(first.request_id).unwrap();
+        store.mark_broadcast(first.request_id, first_hash).unwrap();
+        let replaced = store.mark_replaced(first.request_id).unwrap();
+        assert_eq!(replaced.status, PendingStatus::Replaced);
+
+        // Terminal: no rebroadcast, no receipt, no second replacement.
+        assert!(store.claim_broadcast_retry(first.request_id).is_err());
+        assert!(store.finalize(first.request_id, true, "123").is_err());
+        assert!(store.mark_replaced(first.request_id).is_err());
+
+        // The wallet+chain in-flight slot is free for the next transaction.
+        assert!(
+            store
+                .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0304", second_hash,)
+                .is_ok()
+        );
     }
 
     #[test]
