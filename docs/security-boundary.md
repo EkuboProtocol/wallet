@@ -11,16 +11,23 @@ the exact nonce/gas/fees/delegation without loading the key, shows those fields,
 authenticates the owner against the OS, rechecks configuration and policy, and
 signs the prepared object without another RPC lookup.
 
-EIP-712 typed data follows the same shape. Recognized permits (ERC-2612 and
-canonical Permit2, matched by their complete type encodings) are evaluated
-against the policy's approval-spender rules exactly like `approve()` calldata
-and sign automatically only when allowed. Every other payload — and every
-policy-denied permit — queues in the encrypted database for CLI review, which
+EIP-712 typed data never reaches the policy at all. Every payload, including a
+recognized permit, queues in the encrypted database for CLI review, which
 displays the complete payload, requires terminal approval plus OS owner
-authentication, and only then signs.
+authentication, and only then signs. Recognized permits (ERC-2612, DAI, and
+canonical Permit2, matched by their complete type encodings) are still decoded
+into the token approvals signing would grant, but only so the reviewer can read
+them.
 
-EIP-191 `personal_sign` messages queue the same way, with no automatic path at
-all: no policy can score what a message signature authorizes. The CLI prints the
+A policy cannot bound a signature the way it bounds a transaction. A permit is
+consumed once, so a rule that authorizes one permit under a limit authorizes an
+unbounded series of them under that same limit, each individually within
+policy, and the spender chooses when to redeem each one. There is no
+per-transaction ceiling to apply, and the wallet holds no counters to apply one
+with. That is why signing has no automatic path.
+
+EIP-191 `personal_sign` messages queue the same way, for the additional reason
+that no policy could even score what a message signature authorizes. The CLI prints the
 exact bytes as hex beside their text, escapes control characters, terminal
 escape sequences, and Unicode bidirectional overrides so the message cannot
 repaint or reorder the screen reviewing it, and parses recognized ERC-4361

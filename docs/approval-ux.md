@@ -105,13 +105,15 @@ binding a signature to another.
 EIP-712 typed data prints the complete payload above the summary, with the
 primary type, domain, and signing hash as facts. A recognized permit (ERC-2612,
 DAI, or canonical Permit2, matched by its complete type encoding) lists the
-token approvals signing would grant along with any policy findings; anything
-unrecognized carries a blanket warning that a typed-data signature can
-authorize transfers, orders, or delegations.
+token approvals signing would grant, and warns that nothing limits how many
+more of them the same holder can collect; anything unrecognized carries a
+blanket warning that a typed-data signature can authorize transfers, orders, or
+delegations. No typed-data payload is ever policy-checked, so every one of them
+queues here.
 
 EIP-191 `personal_sign` messages print their exact bytes as hex beside the
-decoded text. Nothing about a message is policy-evaluable, so every message
-queues — there is no automatic path, not even for logins. The review:
+decoded text. Nothing about a message is policy-evaluable either, so every
+message queues too — there is no automatic path, not even for logins. The review:
 
 - escapes control characters, terminal escape sequences, and Unicode
   bidirectional overrides, and warns when any are present, so a message cannot

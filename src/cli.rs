@@ -1912,25 +1912,10 @@ async fn approve_typed_data(
             );
         }
         approval = approval.warning(
-            "Signing grants the token approvals listed above; the active policy did not authorize \
-             them automatically.",
+            "Signing grants the token approvals listed above. No policy limits what a signature \
+             authorizes, and nothing stops the holder collecting more of them, so approve this \
+             only if you expected exactly these approvals now.",
         );
-        let stored_policy = PolicyStore::production(config.data_dir())?
-            .get(&wallet.id)?
-            .with_context(|| format!("wallet {} has no local policy", wallet.id))?;
-        let tuples = approvals
-            .iter()
-            .map(crate::typed_data::PermitApproval::tuple)
-            .collect::<Result<Vec<_>>>()?;
-        for finding in crate::core::policy::evaluate_permit_approvals(
-            &stored_policy.policy,
-            &request.chain_id,
-            &tuples,
-        ) {
-            if finding.severity != FindingSeverity::Info {
-                approval = approval.warning(format!("{}: {}", finding.code, finding.message));
-            }
-        }
     } else {
         approval = approval.warning(
             "This payload is not a recognized permit. A typed-data signature can authorize \

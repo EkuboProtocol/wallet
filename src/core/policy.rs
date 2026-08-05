@@ -442,39 +442,6 @@ pub fn policy_allows(findings: &[PolicyFinding]) -> bool {
         .all(|finding| finding.severity != FindingSeverity::Error)
 }
 
-/// Evaluate token approvals extracted from recognized EIP-712 permit typed
-/// data against the same approval-spender rules that govern `approve()`
-/// calldata. A permit is an approval as far as policy is concerned.
-#[must_use]
-pub fn evaluate_permit_approvals(
-    policy: &WalletPolicy,
-    chain_id: &str,
-    approvals: &[(Address, Address, U256)],
-) -> Vec<PolicyFinding> {
-    let mut findings = Vec::new();
-    let Some(chain) = policy.chain(chain_id) else {
-        findings.push(error(
-            "chain_not_allowed",
-            format!("chain {chain_id} has no policy"),
-            None,
-        ));
-        return findings;
-    };
-    for (index, (token, spender, amount)) in approvals.iter().enumerate() {
-        let step = u32::try_from(index + 1).ok();
-        evaluate_approval(
-            chain,
-            *token,
-            *spender,
-            *amount,
-            chain_id,
-            step,
-            &mut findings,
-        );
-    }
-    findings
-}
-
 fn evaluate_approval(
     chain: &ChainPolicy,
     token: Address,

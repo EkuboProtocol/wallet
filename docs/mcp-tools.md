@@ -21,7 +21,7 @@
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_wait_for_execution` | Wait for the plan to be executed: bounded polling for the receipt, plus an optional number of confirmations before resolving. |
-| `wallet_sign_typed_data` | Sign an exact EIP-712 payload. Recognized permits (ERC-2612, canonical Permit2) are policy-checked like `approve()` calls and sign automatically when allowed; everything else queues for CLI approval. |
+| `wallet_sign_typed_data` | Queue an exact EIP-712 payload for CLI approval. Always queues; no policy path, not even for recognized permits (ERC-2612, canonical Permit2), which are decoded into the approvals they grant as review information only. |
 | `wallet_wait_for_typed_data` | Poll a pending typed-data request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
 | `wallet_sign_message` | Sign an exact EIP-191 `personal_sign` message — dapp logins (ERC-4361), ownership proofs, off-chain attestations. Always queues for CLI approval; no policy path. Raw `eth_sign` over a bare 32-byte digest is refused. |
 | `wallet_wait_for_message` | Poll a pending message request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |

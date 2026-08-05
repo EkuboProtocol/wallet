@@ -70,11 +70,6 @@ pub struct PendingTypedData {
     /// The EIP-712 signing hash of the exact payload.
     pub digest: String,
     pub status: TypedDataStatus,
-    /// False only for permits the active policy authorized automatically.
-    pub approval_required: bool,
-    /// The policy revision that authorized an automatic signature.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_revision: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -394,59 +389,6 @@ impl TypedDataStore {
         self.get(request_id)
     }
 
-    /// Persist a signature the active policy authorized automatically for a
-    /// recognized permit. The insert re-checks the policy revision inside the
-    /// transaction, so a policy change between evaluation and persistence
-    /// fails closed. It is recorded in the same lifecycle table but never
-    /// appears in the approval queue.
-    pub fn record_automatic_signed(
-        &mut self,
-        wallet_id: &str,
-        chain_id: u64,
-        typed_data: &serde_json::Value,
-        digest: B256,
-        policy_revision: u64,
-        signature: &str,
-    ) -> Result<PendingTypedData> {
-        crate::config::validate_wallet_id(wallet_id)?;
-        validate_signature_hex(signature)?;
-        let policy_revision =
-            i64::try_from(policy_revision).context("policy revision is too large")?;
-        let transaction = self.database.connection.transaction()?;
-        let active_revision: Option<i64> = transaction
-            .query_row(
-                "SELECT revision FROM wallet_policies WHERE wallet_id = ?1",
-                [wallet_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        ensure!(
-            active_revision == Some(policy_revision),
-            "active policy revision changed before signed typed data persistence"
-        );
-        let request_id = Uuid::new_v4();
-        let created_at = Utc::now();
-        transaction.execute(
-            "INSERT INTO pending_typed_data(
-                request_id, wallet_id, chain_id, typed_data_json, digest,
-                status, approval_required, policy_revision,
-                created_at, expires_at, updated_at, signature
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'signed', 0, ?6, ?7, ?7, ?7, ?8)",
-            params![
-                request_id.to_string(),
-                wallet_id,
-                chain_id.to_string(),
-                serde_json::to_string(typed_data)?,
-                format!("{digest:#x}"),
-                policy_revision,
-                created_at.to_rfc3339(),
-                signature,
-            ],
-        )?;
-        transaction.commit()?;
-        self.get(request_id)
-    }
-
     pub fn get(&self, request_id: Uuid) -> Result<PendingTypedData> {
         let mut record = self.read(request_id)?;
         if record.status == TypedDataStatus::AwaitingApproval && record.expires_at <= Utc::now() {
@@ -545,6 +487,10 @@ impl TypedDataStore {
             .collect()
     }
 
+    /// Read one request. The `approval_required` and `policy_revision` columns
+    /// are deliberately not selected: they exist only for rows a previous
+    /// version signed automatically, and nothing signs typed data without a
+    /// human any more.
     fn read(&self, request_id: Uuid) -> Result<PendingTypedData> {
         let row = self
             .database
@@ -552,7 +498,7 @@ impl TypedDataStore {
             .query_row(
                 "SELECT wallet_id, chain_id, typed_data_json, digest, status,
                         created_at, expires_at, updated_at, approved_at, rejected_at,
-                        signature, approval_required, policy_revision
+                        signature
                  FROM pending_typed_data WHERE request_id = ?1",
                 [request_id.to_string()],
                 |row| {
@@ -568,8 +514,6 @@ impl TypedDataStore {
                         row.get::<_, Option<String>>(8)?,
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<String>>(10)?,
-                        row.get::<_, i64>(11)?,
-                        row.get::<_, Option<i64>>(12)?,
                     ))
                 },
             )
@@ -586,8 +530,6 @@ impl TypedDataStore {
             approved_at,
             rejected_at,
             signature,
-            approval_required,
-            policy_revision,
         ) = row;
         crate::config::validate_wallet_id(&wallet_id)?;
         let typed_data: serde_json::Value =
@@ -606,15 +548,6 @@ impl TypedDataStore {
         if let Some(signature) = &signature {
             validate_signature_hex(signature)?;
         }
-        let approval_required = match approval_required {
-            0 => false,
-            1 => true,
-            _ => anyhow::bail!("stored approval requirement is invalid"),
-        };
-        ensure!(
-            approval_required || policy_revision.is_some(),
-            "automatic typed-data signature has no policy revision"
-        );
         Ok(PendingTypedData {
             request_id,
             wallet_id,
@@ -622,10 +555,6 @@ impl TypedDataStore {
             typed_data,
             digest,
             status: TypedDataStatus::parse(&status)?,
-            approval_required,
-            policy_revision: policy_revision
-                .map(|value| u64::try_from(value).context("stored policy revision is invalid"))
-                .transpose()?,
             created_at: parse_time(&created_at)?,
             expires_at: parse_time(&expires_at)?,
             updated_at: parse_time(&updated_at)?,
@@ -860,39 +789,24 @@ mod tests {
     }
 
     #[test]
-    fn automatic_permit_signature_binds_the_policy_revision() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut database = PolicyStore::open(
-            &directory.path().join("policies.db"),
-            &DatabaseKey::new([9; 32]),
-        )
-        .unwrap();
-        database
-            .put(
-                "primary",
-                &crate::core::policy::WalletPolicy::allow_all_with_approval(),
-                None,
-            )
-            .unwrap();
-        let mut store = TypedDataStore::new(database);
+    fn a_signature_can_only_come_from_an_approved_request() {
+        // The store offers exactly one way to attach a signature, and it works
+        // only on a request that is awaiting approval. There is no path that
+        // records a signed payload without a human having approved it.
+        let (_directory, mut store) = store();
         let payload = permit_payload();
         let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
-        let signature = format!("0x{}", "33".repeat(65));
-
-        // A stale revision fails closed.
+        let request = store.create("primary", chain_id, &payload, digest).unwrap();
+        store.reject(request.request_id).unwrap();
         assert!(
             store
-                .record_automatic_signed("primary", chain_id, &payload, digest, 2, &signature)
+                .store_signature(
+                    request.request_id,
+                    &request.digest,
+                    &format!("0x{}", "33".repeat(65)),
+                )
                 .is_err()
         );
-        let signed = store
-            .record_automatic_signed("primary", chain_id, &payload, digest, 1, &signature)
-            .unwrap();
-        assert_eq!(signed.status, TypedDataStatus::Signed);
-        assert!(!signed.approval_required);
-        assert_eq!(signed.policy_revision, Some(1));
-        assert!(signed.approved_at.is_none());
-        assert!(store.awaiting_approval(None).unwrap().is_empty());
     }
 
     #[test]
