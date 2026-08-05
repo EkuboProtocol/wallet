@@ -1,6 +1,7 @@
 /target
 /.idea
 /.vscode
+/.claude/worktrees
 *.profraw
 *.profdata
 .DS_Store
