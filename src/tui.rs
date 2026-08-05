@@ -160,15 +160,16 @@ pub fn confirm(message: &str) -> anyhow::Result<bool> {
 /// authentication after. Everything else only rewrites local configuration:
 /// an address book entry, a policy file, which RPC a network is reached
 /// through. Those ask with this instead — the same facts and warnings, then a
-/// plain yes or no. One of them, replacing a policy, follows the yes with the
-/// platform prompt as well: the policy decides what may be signed with nobody
-/// watching, so rewriting it is authenticated like signing — see
+/// plain yes or no. Two of them follow the yes with the platform prompt as
+/// well: replacing a policy, because the policy decides what may be signed
+/// with nobody watching, and saving or removing an address book entry,
+/// because an alias decides where an agent-resolved payment goes — see
 /// [`crate::human_presence::PresenceRequest`].
 ///
-/// Reserving the heavier prompt for the operations that grant signing
-/// authority is what keeps it worth reading. A user who is asked to "approve
-/// or reject" before every alias they save has been taught that the phrase
-/// means nothing.
+/// Reserving the heavier prompt for the operations that grant or redirect
+/// signing authority is what keeps it worth reading. A user who is asked to
+/// "approve or reject" before every network they rename has been taught that
+/// the phrase means nothing.
 pub struct Confirmation {
     title: String,
     summary: String,

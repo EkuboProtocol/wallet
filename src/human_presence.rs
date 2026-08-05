@@ -4,12 +4,16 @@ use thiserror::Error;
 /// What the owner is being asked to authorize at the platform prompt.
 ///
 /// Every variant is a moment the private key comes out of the credential
-/// store or leaves it for good — plus one that never touches the key:
-/// replacing a wallet's policy. The policy is what decides what an agent may
-/// sign with nobody watching, so rewriting it grants signing authority even
-/// though it reads no key material, and it is authenticated like signing.
-/// Nothing else belongs here. Changing a network, saving an alias, importing
-/// a token list — none of those grant signing authority, and asking for a
+/// store or leaves it for good — plus the ones that never touch the key but
+/// still decide where value goes with nobody watching. Replacing a wallet's
+/// policy is one: the policy decides what an agent may sign unattended, so
+/// rewriting it grants signing authority even though it reads no key
+/// material. Editing the address book is the other: an alias is what an
+/// agent resolves "pay alice" to, so retargeting one redirects every future
+/// payment made by that name — the approval screen will show the new address,
+/// but it is the alias the user trusts. Both are authenticated like signing.
+/// Nothing else belongs here. Changing a network or importing a token list
+/// grants no signing authority and redirects no payment, and asking for a
 /// fingerprint before each one only teaches the owner to give it without
 /// reading. Those are confirmed in the terminal instead; see
 /// [`crate::tui::Confirmation`].
@@ -21,6 +25,8 @@ pub enum PresenceRequest {
     ExportPrivateKey { wallet: String },
     RemoveWallet { wallet: String },
     ReplacePolicy { wallet: String },
+    SaveAddressBookEntry { alias: String },
+    RemoveAddressBookEntry { alias: String },
 }
 
 /// How much of a name the platform dialog will carry. The dialog is a single
@@ -55,6 +61,12 @@ impl PresenceRequest {
             }
             Self::ReplacePolicy { wallet } => {
                 format!("replace the signing policy for wallet {}", subject(wallet))
+            }
+            Self::SaveAddressBookEntry { alias } => {
+                format!("save the address book alias {}", subject(alias))
+            }
+            Self::RemoveAddressBookEntry { alias } => {
+                format!("remove the address book alias {}", subject(alias))
             }
         }
     }
@@ -309,6 +321,20 @@ mod tests {
             }
             .reason(),
             "replace the signing policy for wallet primary"
+        );
+        assert_eq!(
+            PresenceRequest::SaveAddressBookEntry {
+                alias: "alice".into()
+            }
+            .reason(),
+            "save the address book alias alice"
+        );
+        assert_eq!(
+            PresenceRequest::RemoveAddressBookEntry {
+                alias: "alice".into()
+            }
+            .reason(),
+            "remove the address book alias alice"
         );
     }
 
