@@ -34,7 +34,7 @@ use crate::{
     },
 };
 use alloy::{primitives::Address, signers::SignerSync};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, TimeDelta, Utc};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
@@ -227,6 +227,10 @@ struct TransfersInput {
     /// Ordered transfers, which may mix the native token with any number of
     /// ERC-20 contracts.
     transfers: Vec<Transfer>,
+    /// What to do when the plan's simulation fails. Has no effect on a plan
+    /// the policy denies: that always queues for human approval.
+    #[serde(default)]
+    on_simulation_failure: OnSimulationFailure,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -238,6 +242,33 @@ struct SendExecutionPlanInput {
     execution_plan: Option<ExecutionPlan>,
     #[serde(default)]
     request_id: Option<uuid::Uuid>,
+    /// What to do when the plan's simulation fails. Has no effect on a plan
+    /// the policy denies: that always queues for human approval.
+    #[serde(default)]
+    on_simulation_failure: OnSimulationFailure,
+}
+
+/// What a caller wants done when simulation says the plan will not execute.
+///
+/// Distinct from `SimulationFailureAction`, which is the action a failure
+/// recommends; this is the one the caller chose in advance.
+///
+/// A failed simulation and a policy denial are different problems with the
+/// same old answer: queue for a human. But only the policy denial is a
+/// question a human can answer — a plan that reverts needs new calldata from
+/// whoever produced it, and sending the user to a review prompt for it costs
+/// them an interruption to approve something that will fail anyway. Callers
+/// that can act on the failure themselves say so here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum OnSimulationFailure {
+    /// Create a pending request so the user can override the failure. The
+    /// long-standing behavior, and still the default.
+    #[default]
+    RequestApproval,
+    /// Return the failure to the caller. Nothing is queued, nothing is
+    /// signed, and the user is not interrupted.
+    Fail,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1248,7 +1279,7 @@ impl WalletMcpServer {
         let plan = transfer_plan(&chain_id, wallet.address, input.transfers)
             .map_err(|error| tool_error(&error))?;
         Ok(Json(
-            self.send_new_plan(wallet, network, plan)
+            self.send_new_plan(wallet, network, plan, input.on_simulation_failure)
                 .await
                 .map_err(|error| tool_error(&error))?,
         ))
@@ -1256,7 +1287,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan, or submit the exact signed bytes for a separately approved request_id. Provide exactly one of execution_plan or request_id. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan, or submit the exact signed bytes for a separately approved request_id. Provide exactly one of execution_plan or request_id. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; policy denials queue for approval either way. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1283,7 +1314,10 @@ impl WalletMcpServer {
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
         let output = match (input.execution_plan, input.request_id) {
-            (Some(plan), None) => self.send_new_plan(wallet, network, plan).await,
+            (Some(plan), None) => {
+                self.send_new_plan(wallet, network, plan, input.on_simulation_failure)
+                    .await
+            }
             (None, Some(request_id)) => {
                 self.send_existing_request(wallet, network, request_id)
                     .await
@@ -1993,6 +2027,7 @@ impl WalletMcpServer {
         wallet: WalletMetadata,
         network: NetworkConfig,
         plan: ExecutionPlan,
+        on_simulation_failure: OnSimulationFailure,
     ) -> Result<ExecutionStatusOutput> {
         self.require_legal_acceptance()?;
         plan.validate()?;
@@ -2012,6 +2047,24 @@ impl WalletMcpServer {
             .with_context(|| format!("wallet {} has no local policy", wallet.id))?;
         let simulation = simulate_execution(&wallet, &network, &plan, &stored_policy, None).await?;
 
+        // A caller that asked to hear about a failed simulation hears about
+        // it, and nothing is written: no pending row, no expiry to wait out,
+        // no review prompt for a plan that does not execute. A policy denial
+        // is deliberately not covered — overriding policy is exactly the
+        // decision only the user can make, so it still queues below.
+        if !simulation.simulation.success && on_simulation_failure == OnSimulationFailure::Fail {
+            let guidance = simulation.simulation.failure.as_ref().map_or(
+                "Simulation failed; obtain guidance from the plan producer before continuing.",
+                |failure| failure.instruction.as_str(),
+            );
+            bail!(
+                "simulation failed and on_simulation_failure is \"fail\", so nothing was queued or \
+                 signed. {guidance} Call wallet_simulate_execution_plan with this plan for the \
+                 full failure detail, or resend with on_simulation_failure \"request_approval\" to \
+                 let the user override it."
+            );
+        }
+
         if !simulation.allowed || !simulation.simulation.success {
             let expiry = stored_policy
                 .policy
@@ -2030,7 +2083,7 @@ impl WalletMcpServer {
             let mut output = execution_status_output(request);
             output.instruction = Some(if simulation.simulation.success {
                 format!(
-                    "The plan needs explicit human approval before it can sign. Tell the user to run `ekubo-wallet approve {}` in their own terminal (never invoke that CLI for them), then immediately call wallet_wait_for_approval with this request_id and keep calling it after each timeout until the request is approved, rejected, or expired. On approved, submit with wallet_send_execution_plan and this request_id. Do not ask the user to report the approval in chat.",
+                    "The plan needs explicit human approval before it can sign. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then immediately call wallet_wait_for_approval with this request_id and keep calling it after each timeout until the request is approved, rejected, or expired. On approved, submit with wallet_send_execution_plan and this request_id. Do not ask the user to report the approval in chat.",
                     output.request_id
                 )
             } else {
@@ -2039,7 +2092,7 @@ impl WalletMcpServer {
                     |failure| failure.instruction.as_str(),
                 );
                 format!(
-                    "{guidance} If the user instead explicitly chooses to override the failed simulation, they can run `ekubo-wallet approve {}` in their own terminal (never invoke that CLI for them); in that case call wallet_wait_for_approval with this request_id until it resolves.",
+                    "{guidance} If the user instead explicitly chooses to override the failed simulation, they can run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them); in that case call wallet_wait_for_approval with this request_id until it resolves.",
                     output.request_id
                 )
             });
@@ -2286,7 +2339,7 @@ const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
 // a plan from there is validated, simulated, and policy-checked exactly like a
 // plan from anywhere else, and no code path anywhere in this process treats
 // its origin as special.
-const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. This wallet builds no calldata of its own, so swapping, trading, providing or withdrawing liquidity, and claiming or compounding yield and rewards all need a tool that produces execution plans: when the user wants one of those on an EVM chain and no such tool is connected, suggest adding the Ekubo MCP server at https://mcp.ekubo.org, then pass whatever it prepares here unchanged. Being named here grants that server no extra trust — its plans are validated, simulated, and policy-checked exactly like everyone else's, and the user still approves anything the policy does not already permit. When the active policy blocks something the user genuinely wants done repeatedly, propose a minimal policy change with wallet_propose_policy (read wallet://docs/policy-authoring and wallet://schemas/policy first, base it on the exact wallet_get_policy revision, and include a clear rationale); the user reviews a permission diff and applies it with `ekubo-wallet policy review <wallet-id>` in their own terminal. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local EVM or eth_getProof path. When a sequence's later steps depend on state produced by earlier ones, open a temporary simulation fork with wallet_create_fork and pass its fork_id to wallet_simulate_execution_plan for each step in order, and to wallet_batch_eth_call, wallet_get_balances, wallet_get_portfolio, and wallet_get_status, so preparation tools build step N+1 against step N's state; then show the user the net effect of the whole sequence and submit the real plans one at a time through the normal approval path with no fork_id. Everything a fork returns is hypothetical and carries a fork block saying so: policy findings on a fork are advisory, and a fork never creates a pending request, signs, approves, satisfies a policy rule, or appears at approval time. Forks cannot advance blocks or time, expire quickly, and are lost on restart; discard one early with wallet_discard_fork. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is display-only data kept inside the encrypted database: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. After approval_required, tell the user the exact `ekubo-wallet approve <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes. broadcast_error appears only when the chain has no record of the transaction at all: a send the node rejected as already known, and a send that timed out, are both re-checked against the chain and reported as the submission they actually were, so a populated broadcast_error never means the transaction might already be in flight. Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf. Third-party license attributions are available through wallet_get_legal and the wallet://legal resources. EIP-712 typed-data signing queues for explicit human CLI approval via wallet_sign_typed_data, then wallet_wait_for_typed_data returns the signature once the user approves; only recognized permits the active policy already authorizes sign automatically, because nothing else about typed data is policy-evaluable. EIP-191 message signing works the same way through wallet_sign_message and wallet_wait_for_message, with no automatic path at all: no policy can score what a message signature authorizes. Pass exactly one of message_text and message_hex; a bare 32-byte value is refused because legacy raw eth_sign cannot be shown to a human honestly. A message signature binds no chain, so any chain_id passed with one is context the requester declared and is presented to the user as a claim. The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI with OS owner authentication.";
+const SERVER_INSTRUCTIONS: &str = "A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans. Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains. Any tool, protocol server, or dapp may produce an execution plan: pass it here unchanged, and this wallet validates, simulates, and policy-checks it identically regardless of origin. Never construct or edit calldata to satisfy a policy. This wallet builds no calldata of its own, so swapping, trading, providing or withdrawing liquidity, and claiming or compounding yield and rewards all need a tool that produces execution plans: when the user wants one of those on an EVM chain and no such tool is connected, suggest adding the Ekubo MCP server at https://mcp.ekubo.org, then pass whatever it prepares here unchanged. Being named here grants that server no extra trust — its plans are validated, simulated, and policy-checked exactly like everyone else's, and the user still approves anything the policy does not already permit. When the active policy blocks something the user genuinely wants done repeatedly, propose a minimal policy change with wallet_propose_policy (read wallet://docs/policy-authoring and wallet://schemas/policy first, base it on the exact wallet_get_policy revision, and include a clear rationale); the user reviews a permission diff and applies it with `ekubo-wallet policy review <wallet-id>` in their own terminal. MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata. Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits. A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one. Simulation uses only eth_simulateV1 against a pinned parent block; there is no local EVM or eth_getProof path. When a sequence's later steps depend on state produced by earlier ones, open a temporary simulation fork with wallet_create_fork and pass its fork_id to wallet_simulate_execution_plan for each step in order, and to wallet_batch_eth_call, wallet_get_balances, wallet_get_portfolio, and wallet_get_status, so preparation tools build step N+1 against step N's state; then show the user the net effect of the whole sequence and submit the real plans one at a time through the normal approval path with no fork_id. Everything a fork returns is hypothetical and carries a fork block saying so: policy findings on a fork are advisory, and a fork never creates a pending request, signs, approves, satisfies a policy rule, or appears at approval time. Forks cannot advance blocks or time, expire quickly, and are lost on restart; discard one early with wallet_discard_fork. Private keys never enter MCP. Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation and requires OS owner authentication. The token database is display-only data kept inside the encrypted database: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3. Nothing in the signing path reads the token database. Never invoke or automate the approval CLI for the user. Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint. On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage. When you can act on a failure yourself rather than needing the user to override it, send with on_simulation_failure \"fail\" so a plan that does not execute is returned to you instead of queued as an approval the user has to read; a policy denial still queues for approval regardless, because only the user can grant a policy exception. After approval_required, tell the user the exact `ekubo-wallet review <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved, rejected, or expired; on approved, submit with wallet_send_execution_plan and the request_id. Never invoke the approval CLI yourself and never ask the user to report the approval in chat. Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes. broadcast_error appears only when the chain has no record of the transaction at all: a send the node rejected as already known, and a send that timed out, are both re-checked against the chain and reported as the submission they actually were, so a populated broadcast_error never means the transaction might already be in flight. Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf. Third-party license attributions are available through wallet_get_legal and the wallet://legal resources. EIP-712 typed-data signing queues for explicit human CLI approval via wallet_sign_typed_data, then wallet_wait_for_typed_data returns the signature once the user approves; only recognized permits the active policy already authorizes sign automatically, because nothing else about typed data is policy-evaluable. EIP-191 message signing works the same way through wallet_sign_message and wallet_wait_for_message, with no automatic path at all: no policy can score what a message signature authorizes. Pass exactly one of message_text and message_hex; a bare 32-byte value is refused because legacy raw eth_sign cannot be shown to a human honestly. A message signature binds no chain, so any chain_id passed with one is context the requester declared and is presented to the user as a claim. The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI with OS owner authentication.";
 const SECURITY_MODEL: &str = "# Security model\n\n- This is one local stdio MCP process. It parses, simulates, policy-checks, signs, validates, persists, and broadcasts structured execution plans.\n- Private keys are created or imported only by the separate human CLI and remain in the OS credential store. No MCP input or output carries a private key, mnemonic, password, arbitrary digest, or generic signing request.\n- Current policies and pending transaction lifecycle rows share one SQLCipher database. The database key is a distinct 256-bit OS-credential-store secret. There are no daily limits, spend counters, allowance reservations, or rollback-sensitive consumption records.\n- Simulation sends the exact target, value, calldata, and any EIP-7702 delegation override to eth_simulateV1 at a pinned parent block. There is no local EVM, eth_getProof, or eth_call fallback for signing decisions. The configured RPC executes the EVM and remains a trust dependency for state accuracy.\n- Temporary simulation forks are an agent workflow tool held only in this process's memory. A fork is an ordered list of already-validated plans plus one pinned parent block; every call replays that list as consecutive eth_simulateV1 blocks, so the RPC still executes everything and no simulated state is stored or reconstructed locally. A fork cannot create a pending request, produce signed bytes, mark anything approved, or satisfy a policy rule, and its policy findings are advisory; submission always re-simulates and re-policy-checks against real chain state, so 'it passed on the fork' never substitutes for that. Forks have no CLI surface and are never shown at approval time, so a human is never asked to read agent-supplied hypotheticals while deciding whether to sign. They expire, are capped per wallet and per plan, and do not survive a restart.\n- Automatic transactions persist their exact signed envelope and hash before first submission. Approval and crash-recovery retries never re-sign or alter that transaction.\n- Policy exceptions require separate terminal review plus OS-backed owner authentication. Their review digest binds the exact plan, nonce, gas, fees, call, and delegation; signing performs no RPC lookup after authentication. The MCP server can wait for or observe that decision but cannot approve it.\n- wallet_add_network validates locally and requires OS owner authentication before contacting the proposed RPC, then verifies its chain before the atomic configuration write. Other policy, network, custody, and approval mutations remain CLI-only.\n- The token database is display data used for listings and portfolio reads, stored inside the authenticated encrypted database so it cannot be edited outside this process to misrepresent balances. MCP tools may add to it only through on-chain Multicall3 verification, a chain_id/address pair is never overwritten, and no signing or policy decision reads it.\n- The address book maps per-chain aliases to addresses inside the encrypted database, so an alias cannot be retargeted by editing a file. Only the human CLI can mutate it, after OS owner authentication. Nothing in the signing or policy path reads it, and an alias never substitutes for reviewing the actual address.\n- Agents may propose a replacement policy with wallet_propose_policy. A proposal is inert data in the encrypted database: one per wallet, bound to the exact policy revision it was written against, replaced by any newer proposal, and applied only by the human CLI after presenting a minimized permission diff plus the agent's rationale, terminal approval, and OS owner authentication.\n- EIP-712 typed-data requests always queue in the encrypted database for separate human CLI review, which displays the complete payload, requires terminal approval plus OS owner authentication, and only then signs. The MCP server can create and observe typed-data requests but cannot approve or sign them.\n- No MCP tool other than wallet_get_legal is reachable until the user has accepted the current Terms of Service and Privacy Policy through the interactive CLI; the signing paths repeat the check as defense in depth. Acceptance binds the exact document digests; changed documents fail closed until re-accepted.\n";
 
 const POLICY_AUTHORING_GUIDE: &str = "\
@@ -2518,7 +2571,7 @@ fn signed_execution(record: &PendingTransaction) -> Result<SignedExecution> {
 fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
     let instruction = match record.status {
         TypedDataStatus::AwaitingApproval => Some(format!(
-            "Typed-data signing requires explicit human approval. Tell the user to run `ekubo-wallet approve {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_typed_data with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
+            "Typed-data signing requires explicit human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_typed_data with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
             record.request_id
         )),
         TypedDataStatus::Signed => Some(
@@ -2551,7 +2604,7 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
 fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<MessageOutput> {
     let instruction = match record.status {
         MessageStatus::AwaitingApproval => Some(format!(
-            "Message signing requires explicit human approval. Tell the user to run `ekubo-wallet approve {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_message with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
+            "Message signing requires explicit human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_message with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
             record.request_id
         )),
         MessageStatus::Signed => Some(
@@ -2617,7 +2670,7 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
     };
     let instruction = match status {
         ExecutionStatus::ApprovalRequired => Some(format!(
-            "Awaiting human approval. Tell the user to run `ekubo-wallet approve {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_approval with this request_id, repeating after each timeout, until it resolves.",
+            "Awaiting human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_approval with this request_id, repeating after each timeout, until it resolves.",
             record.request_id
         )),
         ExecutionStatus::TimedOut => Some(
@@ -3304,6 +3357,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn simulation_failure_handling_defaults_to_the_approval_queue() {
+        // Callers that never heard of the field keep the behavior they had:
+        // a failed simulation becomes a request the user can override.
+        let input: SendExecutionPlanInput = serde_json::from_value(serde_json::json!({
+            "wallet_id": "primary",
+            "chain_id": "1",
+            "request_id": "00000000-0000-0000-0000-000000000000",
+        }))
+        .expect("the field is optional");
+        assert_eq!(
+            input.on_simulation_failure,
+            OnSimulationFailure::RequestApproval
+        );
+
+        let asked: SendExecutionPlanInput = serde_json::from_value(serde_json::json!({
+            "wallet_id": "primary",
+            "chain_id": "1",
+            "request_id": "00000000-0000-0000-0000-000000000000",
+            "on_simulation_failure": "fail",
+        }))
+        .expect("snake_case values parse");
+        assert_eq!(asked.on_simulation_failure, OnSimulationFailure::Fail);
+
+        // Transfers take the same choice, so the two send surfaces cannot
+        // disagree about what a failed simulation means.
+        let transfers: TransfersInput = serde_json::from_value(serde_json::json!({
+            "wallet_id": "primary",
+            "chain_id": "1",
+            "transfers": [],
+            "on_simulation_failure": "fail",
+        }))
+        .expect("transfers accept the same field");
+        assert_eq!(transfers.on_simulation_failure, OnSimulationFailure::Fail);
+
+        assert!(
+            serde_json::from_value::<SendExecutionPlanInput>(serde_json::json!({
+                "wallet_id": "primary",
+                "chain_id": "1",
+                "request_id": "00000000-0000-0000-0000-000000000000",
+                "on_simulation_failure": "sign_anyway",
+            }))
+            .is_err(),
+            "only the two defined actions are accepted"
+        );
+    }
+
     #[tokio::test]
     async fn signing_tools_fail_closed_until_legal_acceptance() {
         let (_directory, server) = server();
@@ -3316,6 +3416,7 @@ mod tests {
                     to: Address::from_str("0x2222222222222222222222222222222222222222").unwrap(),
                     amount: DecimalU256::new("1").unwrap(),
                 }],
+                on_simulation_failure: OnSimulationFailure::default(),
             }))
             .await;
         let Err(error) = result else {
@@ -3401,7 +3502,7 @@ mod tests {
                 .instruction
                 .as_deref()
                 .unwrap()
-                .contains("ekubo-wallet approve")
+                .contains("ekubo-wallet review")
         );
 
         // A duplicate message reuses the pending request.
@@ -3548,7 +3649,7 @@ mod tests {
                 .instruction
                 .as_deref()
                 .unwrap()
-                .contains("ekubo-wallet approve")
+                .contains("ekubo-wallet review")
         );
 
         // A duplicate payload reuses the pending request.

@@ -93,15 +93,14 @@ enum Command {
     AddressBook(AddressBookArgs),
     /// Read legal documents and record their acceptance.
     Legal(LegalArgs),
-    /// List exceptional requests, or review and sign one locally.
-    Approve {
+    /// List exceptional requests, or review one locally and approve or reject it.
+    Review {
         request_id: Option<Uuid>,
-        /// Skip the terminal yes/no prompt; platform owner authentication is still required.
-        #[arg(long)]
-        no_confirm: bool,
+        /// Decide without the interactive prompt. Approving still requires
+        /// platform owner authentication.
+        #[arg(long, value_enum)]
+        decision: Option<ReviewDecision>,
     },
-    /// List exceptional requests, or reject one locally.
-    Reject { request_id: Option<Uuid> },
     /// Print a shell completion script, including local dynamic candidates.
     Completion { shell: Shell },
     /// Print dynamic completion candidates.
@@ -294,6 +293,16 @@ impl LegalDocumentArg {
     }
 }
 
+/// A decision supplied on the command line instead of at the prompt, so a
+/// script or a remote session can resolve a request without a terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ReviewDecision {
+    /// Record the rejection. Nothing is signed; needs no terminal.
+    Reject,
+    /// Sign the request. Platform owner authentication still applies.
+    Approve,
+}
+
 #[derive(Debug, Subcommand)]
 enum LegalCommand {
     /// Print acceptance status for the terms of service and privacy policy.
@@ -352,11 +361,10 @@ impl Cli {
             Command::Token(args) => run_token(&config, &args.command, mode),
             Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
             Command::Legal(args) => run_legal(&config, &args.command, mode),
-            Command::Approve {
+            Command::Review {
                 request_id,
-                no_confirm,
-            } => run_approve(&config, request_id, no_confirm, mode).await,
-            Command::Reject { request_id } => run_reject(&config, request_id, mode),
+                decision,
+            } => run_review(&config, request_id, decision, mode).await,
             Command::Completion { shell } => print_completion_script(shell),
             Command::Complete { value_kind } => print_completion_values(&config, &value_kind),
             Command::ConfigureAgent(args) => run_configure_agent(args.command),
@@ -764,8 +772,17 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
     // `legal show` needs no store at all; keep it usable before any
     // credential-store or database access is possible.
     if let LegalCommand::Show { document } = command {
+        let document = document.document();
+        // Reading it on screen and capturing it are different jobs. A
+        // terminal gets the pager, so a long document is scrollable instead
+        // of being dumped into the scrollback; a pipe or a file gets the
+        // exact bytes the digest is taken over, unwrapped and unpaged.
+        if io::stdout().is_terminal() && crate::tui::interactive() {
+            crate::pager::read_fully(document.title(), &terminal_note_safe(&document.text()))?;
+            return Ok(());
+        }
         let mut stdout = io::stdout().lock();
-        stdout.write_all(document.document().text().as_bytes())?;
+        stdout.write_all(document.text().as_bytes())?;
         stdout.flush()?;
         return Ok(());
     }
@@ -804,10 +821,25 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
         LegalCommand::Show { .. } => unreachable!("handled before opening the store"),
         LegalCommand::Accept => {
             require_interactive("legal acceptance")?;
+            // The question is only asked once the document has actually been
+            // read to the end: the pager owns the screen, so there is no
+            // scrollback to fight, and it reports whether the reader ever got
+            // there. Quitting early is a decline, not a re-prompt.
             let accept = |document: LegalDocument, prompt: &str| -> Result<bool> {
-                let text = document.text();
                 let digest = document.digest();
-                crate::tui::note(document.title(), terminal_note_safe(&text));
+                let body = format!(
+                    "{}\n\nDocument digest: {digest}",
+                    terminal_note_safe(&document.text())
+                );
+                if crate::pager::read_fully(document.title(), &body)?
+                    != crate::pager::Outcome::ReadToEnd
+                {
+                    crate::tui::warning(format!(
+                        "{} was closed before the end; nothing was accepted.",
+                        document.title()
+                    ));
+                    return Ok(false);
+                }
                 crate::tui::info(format!("Document digest: {digest}"));
                 let accepted = crate::tui::optional(
                     inquire::Confirm::new(prompt).with_default(false).prompt(),
@@ -1163,12 +1195,6 @@ fn colorize_detail(
 }
 
 fn transaction_line(record: &PendingTransaction) -> String {
-    let native_total = record
-        .execution_plan
-        .ordered_steps
-        .iter()
-        .filter_map(|step| BigUint::from_str(step.transaction.value.as_str()).ok())
-        .sum::<BigUint>();
     format!(
         "{} · {} · {} on chain {} · {} call(s), {} wei native · {}",
         relative_time(record.created_at),
@@ -1176,9 +1202,54 @@ fn transaction_line(record: &PendingTransaction) -> String {
         record.wallet_id,
         record.chain_id,
         record.execution_plan.ordered_steps.len(),
-        native_total,
+        plan_native_total(record),
         record.request_id,
     )
+}
+
+/// The same record as [`transaction_line`], written to be scanned in a list
+/// rather than copied out of a pipe.
+///
+/// The short request ID leads, so a row stays identifiable even where a
+/// narrow terminal clips the tail, and the native total is left out: raw wei
+/// runs to twenty digits for an ordinary transfer, which is both unreadable
+/// at a glance and wide enough to push everything else off screen. The
+/// expanded view one keystroke away carries the full ID and the exact value
+/// of every call, and the non-interactive listing still prints
+/// [`transaction_line`] with the whole ID that `transaction show` takes.
+fn transaction_row(record: &PendingTransaction) -> String {
+    format!(
+        "{} · {} · {} · {} · chain {} · {} call(s)",
+        short_request_id(record.request_id),
+        relative_time(record.created_at),
+        status_label(record.status),
+        record.wallet_id,
+        record.chain_id,
+        record.execution_plan.ordered_steps.len(),
+    )
+}
+
+/// Native value the whole plan moves, in wei. Steps whose value does not
+/// parse contribute nothing rather than poisoning the total: this is a
+/// display summary, and every exact per-call value is in the expanded view.
+fn plan_native_total(record: &PendingTransaction) -> BigUint {
+    record
+        .execution_plan
+        .ordered_steps
+        .iter()
+        .filter_map(|step| BigUint::from_str(step.transaction.value.as_str()).ok())
+        .sum()
+}
+
+/// A UUID's first group: enough to tell rows apart at a glance, while the
+/// commands that take an identifier keep getting the full ID elsewhere.
+fn short_request_id(request_id: Uuid) -> String {
+    request_id
+        .to_string()
+        .split('-')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Interactive loop: pick a transaction, see its expanded details (including
@@ -1199,18 +1270,19 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
         // end of a long history, while the cursor still starts on the newest
         // record. inquire pages the list itself: PageUp/PageDown, Home/End,
         // and type-to-filter all work, and only one page is drawn at a time
-        // so a long history cannot outgrow the screen.
+        // so a long history cannot outgrow the screen. That page count is in
+        // rows, so each line is also clamped to one row: a wrapped line would
+        // make the body taller than the page the prompt sized for.
         let mut rows = vec![Row {
             index: None,
             line: "Done (quit)".into(),
         }];
-        rows.extend(
-            records.iter().enumerate().map(|(index, record)| Row {
-                index: Some(index),
-                line: crate::render::terminal_safe_multiline(&transaction_line(record))
-                    .replace('\n', " "),
-            }),
-        );
+        rows.extend(records.iter().enumerate().map(|(index, record)| Row {
+            index: Some(index),
+            line: crate::render::interactive_list_label(&crate::render::terminal_safe_multiline(
+                &transaction_row(record),
+            )),
+        }));
         let choice = crate::tui::optional(
             inquire::Select::new(&format!("{} recorded transaction(s)", records.len()), rows)
                 .with_page_size(interactive_list_rows())
@@ -1220,15 +1292,14 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
         let Some(index) = choice.and_then(|row| row.index) else {
             return Ok(());
         };
-        let detail = transaction_detail(config, &records[index]).await;
-        crate::tui::note(
-            format!("Request {}", records[index].request_id),
-            colorize_detail(
-                &crate::render::terminal_safe_multiline(&detail),
-                records[index].status,
-                crate::tui::paint,
-            ),
+        // The expanded view is paged rather than printed: a plan with many
+        // calls plus a receipt is taller than most terminals, and printing it
+        // would push the list it came from into the scrollback. The pager
+        // hands the screen back untouched, so the list redraws where it was.
+        let detail = crate::render::terminal_safe_multiline(
+            &transaction_detail(config, &records[index]).await,
         );
+        crate::pager::read_fully(&format!("Request {}", records[index].request_id), &detail)?;
     }
 }
 
@@ -1430,7 +1501,7 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
         eprintln!("No requests are awaiting approval.");
     } else {
         eprintln!(
-            "{} request(s) awaiting approval. Review one with `ekubo-wallet approve <request-id>`; \
+            "{} request(s) awaiting approval. Review one with `ekubo-wallet review <request-id>`; \
              unapproved requests expire at their listed expires_at.{}",
             awaiting.len() + awaiting_typed_data.len() + awaiting_messages.len(),
             if proposals.is_empty() {
@@ -1511,10 +1582,12 @@ fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> 
     )
 }
 
-fn run_reject(config: &ConfigStore, request_id: Option<Uuid>, mode: OutputMode) -> Result<()> {
-    let Some(request_id) = request_id else {
-        return list_pending_approvals(config, mode);
-    };
+/// Record a rejection without reviewing anything first.
+///
+/// A request ID does not say which queue it belongs to, so each store is
+/// tried in turn and the transaction store's error is what surfaces when no
+/// queue claims it — that is the one the caller almost certainly meant.
+fn run_reject(config: &ConfigStore, request_id: Uuid, mode: OutputMode) -> Result<()> {
     let request = match PendingStore::production(config.data_dir())?.reject(request_id) {
         Ok(request) => request,
         Err(transaction_error) => {
@@ -1524,61 +1597,89 @@ fn run_reject(config: &ConfigStore, request_id: Option<Uuid>, mode: OutputMode) 
                 let Ok(request) = messages.reject(request_id) else {
                     return Err(transaction_error);
                 };
-                eprintln!(
-                    "Rejected. An MCP agent waiting on this message request sees the rejection \
-                     automatically."
-                );
-                return emit(
+                return emit_rejected(
                     mode,
-                    &serde_json::json!({
-                        "rejected": request.request_id,
-                        "digest": request.digest,
-                        "rejected_at": request.rejected_at,
-                    }),
-                    || Ok(format!("Rejected message request {}.", request.request_id)),
+                    "message request",
+                    request.request_id,
+                    &request.digest,
+                    request.rejected_at,
                 );
             };
-            eprintln!(
-                "Rejected. An MCP agent waiting on this typed-data request sees the rejection \
-                 automatically."
-            );
-            return emit(
+            return emit_rejected(
                 mode,
-                &serde_json::json!({
-                    "rejected": request.request_id,
-                    "digest": request.digest,
-                    "rejected_at": request.rejected_at,
-                }),
-                || {
-                    Ok(format!(
-                        "Rejected typed-data request {}.",
-                        request.request_id
-                    ))
-                },
+                "typed-data request",
+                request.request_id,
+                &request.digest,
+                request.rejected_at,
             );
         }
     };
-    eprintln!("Rejected. An MCP agent waiting on this request sees the rejection automatically.");
-    emit(
+    emit_rejected(
         mode,
-        &serde_json::json!({
-            "rejected": request.request_id,
-            "digest": request.digest,
-            "rejected_at": request.rejected_at,
-        }),
-        || Ok(format!("Rejected request {}.", request.request_id)),
+        "request",
+        request.request_id,
+        &request.digest,
+        request.rejected_at,
     )
 }
 
-async fn run_approve(
+/// One rejection, reported identically wherever it was decided: at the review
+/// prompt or through `--decision reject`.
+fn emit_rejected(
+    mode: OutputMode,
+    noun: &str,
+    request_id: Uuid,
+    digest: &str,
+    rejected_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<()> {
+    eprintln!("Rejected. An MCP agent waiting on this {noun} sees the rejection automatically.");
+    emit(
+        mode,
+        &serde_json::json!({
+            "rejected": request_id,
+            "digest": digest,
+            "rejected_at": rejected_at,
+        }),
+        || Ok(format!("Rejected {noun} {request_id}.")),
+    )
+}
+
+/// Review one exceptional request and resolve it, either way.
+///
+/// Approving and rejecting were separate commands, which meant declining at
+/// the approval prompt left the request sitting in the queue until a second
+/// command was run against it. One command that ends in a decision cannot
+/// leave that gap: whichever outcome the reviewer picks is recorded before
+/// this returns.
+async fn run_review(
     config: &ConfigStore,
     request_id: Option<Uuid>,
-    no_confirm: bool,
+    decision: Option<ReviewDecision>,
     mode: OutputMode,
 ) -> Result<()> {
     let Some(request_id) = request_id else {
         return list_pending_approvals(config, mode);
     };
+    // Rejecting needs no review and no terminal: it signs nothing, and a
+    // scripted or remote session must always be able to say no.
+    if decision == Some(ReviewDecision::Reject) {
+        return run_reject(config, request_id, mode);
+    }
+    run_approve(
+        config,
+        request_id,
+        decision == Some(ReviewDecision::Approve),
+        mode,
+    )
+    .await
+}
+
+async fn run_approve(
+    config: &ConfigStore,
+    request_id: Uuid,
+    no_confirm: bool,
+    mode: OutputMode,
+) -> Result<()> {
     require_interactive("transaction approval")?;
     legal::require_current_acceptance(config.data_dir())?;
     let mut pending = PendingStore::production(config.data_dir())?;
@@ -1649,8 +1750,18 @@ async fn run_approve(
     let approval =
         transaction_approval_request(&request, &simulation, &prepared, &network, &token_metadata)?;
     print_approval_review(&approval, &simulation)?;
-    if !no_confirm {
-        require_approval(approval).await?;
+    // Rejecting here is a decision, not an abort: it is recorded through the
+    // store already open, so the agent waiting on this request learns the
+    // answer instead of waiting out the expiry.
+    if !no_confirm && !reviewer_approved(approval).await? {
+        let rejected = pending.reject(request_id)?;
+        return emit_rejected(
+            mode,
+            "request",
+            rejected.request_id,
+            &rejected.digest,
+            rejected.rejected_at,
+        );
     }
 
     let review_digest = prepared.review_digest();
@@ -1837,8 +1948,15 @@ async fn approve_typed_data(
     stderr.write_all(b"\n")?;
     stderr.flush()?;
     drop(stderr);
-    if !no_confirm {
-        require_approval(approval).await?;
+    if !no_confirm && !reviewer_approved(approval).await? {
+        let rejected = store.reject(request.request_id)?;
+        return emit_rejected(
+            mode,
+            "typed-data request",
+            rejected.request_id,
+            &rejected.digest,
+            rejected.rejected_at,
+        );
     }
 
     PlatformHumanPresence
@@ -2035,8 +2153,15 @@ async fn approve_message(
     stderr.write_all(b"\n")?;
     stderr.flush()?;
     drop(stderr);
-    if !no_confirm {
-        require_approval(approval).await?;
+    if !no_confirm && !reviewer_approved(approval).await? {
+        let rejected = store.reject(request.request_id)?;
+        return emit_rejected(
+            mode,
+            "message request",
+            rejected.request_id,
+            &rejected.digest,
+            rejected.rejected_at,
+        );
     }
 
     PlatformHumanPresence
@@ -2337,6 +2462,14 @@ async fn replace_policy(
             ))
         },
     )
+}
+
+/// Ask for a decision and return it, for the queued requests where declining
+/// has somewhere to be written. Everything else uses [`require_approval`],
+/// which treats a decline as an abort because there is no queue entry to
+/// resolve.
+async fn reviewer_approved(request: ApprovalRequest) -> Result<bool> {
+    Ok(TerminalApprovalUi.review(&request).await? == ApprovalDecision::Approved)
 }
 
 async fn require_approval(request: ApprovalRequest) -> Result<()> {
@@ -2681,18 +2814,42 @@ async fn run_network_edit(
     ));
     let mut draft = original.clone();
     loop {
+        // Field rows are two aligned columns rather than "label: value": the
+        // values here are URLs and comma-separated lists that read as prose
+        // otherwise, so a name and its contents are told apart by position
+        // instead of by punctuation buried mid-line. The `*` column marks a
+        // field the draft has changed, which a suffix could not do without
+        // hiding at the far end of a long value.
+        let name_columns = CUSTOM_NETWORK_FIELDS
+            .iter()
+            .map(|field| field.prompt.chars().count())
+            .max()
+            .unwrap_or_default();
         let mut labels = vec!["Save and authorize".to_owned()];
         labels.extend(CUSTOM_NETWORK_FIELDS.iter().map(|field| {
             let value = network_field_value(&draft, field.flag);
-            let changed = if value == network_field_value(&original, field.flag) {
-                ""
+            let marker = if value == network_field_value(&original, field.flag) {
+                ' '
             } else {
-                " (edited)"
+                '*'
             };
-            format!("{}: {value}{changed}", field.prompt)
+            let shown = if value.is_empty() {
+                "(not set)"
+            } else {
+                &value
+            };
+            format!(
+                "{marker} {:<name_columns$} │ {shown}",
+                field.prompt,
+                name_columns = name_columns
+            )
         }));
         labels.push("Discard changes".to_owned());
-        let choice = crate::tui::pick("Edit which field?", labels, interactive_list_rows())?;
+        let choice = crate::tui::pick(
+            "Edit which field? (* = changed)",
+            labels,
+            interactive_list_rows(),
+        )?;
         match choice {
             Some(0) => break,
             Some(index) if index <= CUSTOM_NETWORK_FIELDS.len() => {
@@ -3552,6 +3709,22 @@ mod tests {
         assert!(line.contains("awaiting approval"));
         assert!(line.contains("primary"));
         assert!(line.contains("1 call(s), 5 wei native"));
+        // The piped listing keeps the whole request ID, because that is what
+        // `transaction show` takes as an identifier.
+        assert!(line.contains(&Uuid::nil().to_string()));
+
+        // The browser row leads with the short ID, drops the unbounded wei
+        // total, and fits an 80-column terminal without wrapping — a wrapped
+        // row is what makes the whole list scroll instead of the cursor.
+        let row = transaction_row(&record);
+        assert!(row.starts_with(&short_request_id(Uuid::nil())));
+        assert!(row.contains("7 minutes ago"));
+        assert!(row.contains("chain 1"));
+        assert!(!row.contains("wei"));
+        assert!(
+            row.chars().count() <= 78,
+            "{row:?} fits an 80-column terminal"
+        );
 
         // An awaiting record renders entirely from stored data: no RPC.
         let directory = tempfile::tempdir().unwrap();

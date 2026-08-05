@@ -356,7 +356,7 @@ not yet been signed.
 ## Reviewing an exceptional approval
 
 When policy rejects a plan or simulation fails, the wallet stores an owner-only
-pending record whose digest commits to every ordered call. `ekubo-wallet approve
+pending record whose digest commits to every ordered call. `ekubo-wallet review
 <request-id>` then re-simulates and prints the exact nonce, gas, fees, calls, and
 delegation alongside a decoded reading of each step:
 
@@ -414,8 +414,8 @@ An agent must never run the approval command for you.
 | `wallet_simulate_execution_plan` | Exact-plan simulation and policy evaluation without signing. With a `fork_id`, simulates on top of that fork and appends the plan on success. |
 | `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
 | `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
-| `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. |
-| `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; or submit an already-approved request ID. |
+| `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. Takes the same `on_simulation_failure` choice as `wallet_send_execution_plan`. |
+| `wallet_send_execution_plan` | Validate, simulate, policy-check, sign, and broadcast; or submit an already-approved request ID. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_wait_for_execution` | Wait for the plan to be executed: bounded polling for the receipt, plus an optional number of confirmations before resolving. |

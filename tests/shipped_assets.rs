@@ -174,8 +174,6 @@ fn packaged_completions_offer_every_subcommand() {
         "network",
         "policy",
         "transaction",
-        "approve",
-        "reject",
         "completion",
         "create",
         "import",

@@ -19,8 +19,7 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a tx -d 'Inspect signe
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a token -d 'Inspect the local token database'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a address-book -d 'Manage per-chain address aliases'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a legal -d 'Read and accept legal documents'
-complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a approve -d 'Approve a pending request locally'
-complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a reject -d 'Reject a pending request locally'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a review -d 'Review a pending request and approve or reject it'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a completion -d 'Print shell completions'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l data-dir -r -d 'Override the wallet data directory'
 complete -c ekubo-wallet -l json -d 'Print machine-readable JSON instead of the human view'
@@ -44,8 +43,8 @@ complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subco
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from remove delete; and __fish_seen_subcommand_from network' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show set allow-all require-approval review; and __fish_seen_subcommand_from policy' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from list; and __fish_seen_subcommand_from transaction tx' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
-complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from approve' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
-complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from reject' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from review' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from review' -l decision -r -a 'reject approve' -d 'Decide without the interactive prompt'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 4; and __fish_seen_subcommand_from set; and __fish_seen_subcommand_from policy' -F
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from validate; and __fish_seen_subcommand_from policy' -F
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from add' -l rpc-url -r -d 'Use an RPC URL instead of a preset or hidden prompt'

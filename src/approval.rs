@@ -139,13 +139,21 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
         crate::tui::warning(terminal_safe(warning));
     }
 
-    // Esc or Ctrl+C reads as a rejection: an approval must be explicit.
-    let approved = crate::tui::optional(
-        inquire::Confirm::new("Approve this action?")
-            .with_default(false)
-            .prompt(),
+    // Two named outcomes rather than a yes/no: at a `(y/N)` prompt the safe
+    // answer is the one you get by not reading, and the destructive one is a
+    // single character away. Here both outcomes are spelled out, the cursor
+    // starts on the one that signs nothing, and approving takes a deliberate
+    // move onto it. Esc and Ctrl+C read as rejection for the same reason: an
+    // approval must be explicit.
+    let approved = crate::tui::pick(
+        "Approve or reject this action?",
+        vec![
+            "Reject — nothing is signed or submitted".to_owned(),
+            "Approve — sign this exact action".to_owned(),
+        ],
+        2,
     )?
-    .unwrap_or(false);
+    .is_some_and(|choice| choice == 1);
     if approved {
         crate::tui::outro("Approved; owner authentication is still required.");
         Ok(ApprovalDecision::Approved)

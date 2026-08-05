@@ -122,6 +122,10 @@ pub fn optional<T>(result: Result<T, InquireError>) -> anyhow::Result<Option<T>>
 /// One choice from a list of labels, by index. `Ok(None)` means the user
 /// backed out with Esc or Ctrl+C. PageUp/PageDown, Home/End, and
 /// type-to-filter all work inside the list.
+///
+/// Labels are clamped to one terminal row each — see
+/// [`crate::render::interactive_list_label`] for why a wrapping label breaks
+/// the whole prompt rather than just its own line.
 pub fn pick(prompt: &str, labels: Vec<String>, page_size: usize) -> anyhow::Result<Option<usize>> {
     struct Choice {
         index: usize,
@@ -135,7 +139,10 @@ pub fn pick(prompt: &str, labels: Vec<String>, page_size: usize) -> anyhow::Resu
     let choices = labels
         .into_iter()
         .enumerate()
-        .map(|(index, label)| Choice { index, label })
+        .map(|(index, label)| Choice {
+            index,
+            label: crate::render::interactive_list_label(&label),
+        })
         .collect();
     Ok(optional(
         inquire::Select::new(prompt, choices)

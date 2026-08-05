@@ -6,10 +6,28 @@ for or observe the result. The user must independently run the local CLI in a
 real terminal:
 
 ```sh
-ekubo-wallet approve <request-id>
+ekubo-wallet review <request-id>
 ```
 
 There is no loopback browser or MCP App approval surface in this release.
+
+## Not every failure is worth a human's time
+
+A plan reaches this queue for one of two unrelated reasons: the policy denied
+it, or its simulation failed. Only the first is a question a human can answer.
+A plan that reverts needs fresh calldata from whoever produced it, so queuing
+it costs the user an interruption to approve something that will fail anyway.
+
+Callers that can act on a failure themselves send `on_simulation_failure:
+"fail"` to `wallet_send_execution_plan` or `wallet_send_transfers` and get the
+failure back instead: nothing is written, nothing is queued, and no expiry has
+to run out. The default stays `"request_approval"`, so a caller that never sets
+it behaves exactly as before.
+
+The choice controls only whether the user is asked, never whether the failure
+is enforced. `"fail"` means "return the error without queuing" — there is no
+value that signs a plan whose simulation failed, and a policy denial queues for
+approval regardless of what is passed here.
 
 ## What the user reviews
 
@@ -38,9 +56,12 @@ The review includes:
 - a review digest that commits to the plan digest plus the exact outer target,
   value, calldata, chain, nonce, gas, fees, transaction type, and delegation.
 
-The terminal confirmation defaults to rejection. `--no-confirm` skips only that
-yes/no prompt; it still prints the review and still requires platform owner
-authentication.
+The terminal decision is a two-way choice, Reject and Approve, with the cursor
+starting on Reject; Esc and Ctrl+C also reject. Whichever way it goes is
+recorded against the request before the command returns, so an agent waiting on
+it never has to wait out the expiry to learn the answer. `--decision approve`
+and `--decision reject` skip only that prompt; approving still prints the review
+and still requires platform owner authentication.
 
 Decoded readings and token metadata are decoration on top of the exact fields,
 never a substitute for them. Calldata is decoded locally and only when it is
@@ -71,7 +92,7 @@ the review digest, exact bytes, and transaction hash.
 
 ## Signature requests
 
-`ekubo-wallet approve <request-id>` also resolves queued signature requests,
+`ekubo-wallet review <request-id>` also resolves queued signature requests,
 which carry no transaction and are therefore never simulated. Both kinds are
 stored in the same encrypted database, expire after 15 minutes, deduplicate an
 identical repeated request, and re-derive their signing hash from the stored
