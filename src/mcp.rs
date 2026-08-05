@@ -695,9 +695,15 @@ struct ExecutionStatusOutput {
     block_number: Option<String>,
     /// What this transaction actually cost, read from its receipt: gas burned,
     /// the price the chain charged, and their product in wei. Present once the
-    /// record settles. This is the wallet's own record of a real price paid —
-    /// prefer it over an onchain gas-price read when judging whether gas is
-    /// currently cheap, and treat it as backward-looking either way.
+    /// record settles.
+    ///
+    /// This is the wallet's own record of a real price paid, so prefer it when
+    /// judging whether gas is currently cheap. Reading a base fee onchain
+    /// instead is a trap: a `wallet_batch_eth_call` to Multicall3's
+    /// `getBasefee()` returns 0 at both `latest` and `pending` through some
+    /// configured RPCs — a wrong answer rather than a failure. Treat this as
+    /// backward-looking either way: it prices the last transaction, not the
+    /// next one.
     #[serde(skip_serializing_if = "Option::is_none")]
     mined_fee: Option<crate::rpc::MinedFee>,
     /// How many blocks deep the mined receipt is (1 = head), when measured.
