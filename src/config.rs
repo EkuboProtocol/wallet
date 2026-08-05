@@ -640,39 +640,40 @@ pub fn add_configured_network(
     Ok(())
 }
 
-/// Replace a network with the same canonical name, while rejecting chain-ID
-/// or identifier collisions with every other configured network.
+/// Replace whatever already describes this network — the entry with the same
+/// name, and the entry holding the same chain ID — while rejecting identifier
+/// collisions with the networks that survive.
+///
+/// A chain ID identifies a network more firmly than a name does, and the
+/// configuration allows one profile per chain ID, so someone who names a chain
+/// ID that is already configured is saying which network they mean rather than
+/// asking to configure a second copy of it. Naming a preset's chain under a
+/// different name therefore takes that chain over instead of failing and
+/// sending the user off to `network remove` first.
 pub fn replace_configured_network(
     networks: &mut Vec<NetworkConfig>,
     next: NetworkConfig,
 ) -> Result<()> {
     validate_network(&next)?;
-    if let Some(existing) = networks
-        .iter()
-        .find(|network| network.name != next.name && network.chain_id == next.chain_id)
-    {
-        bail!(
-            "chain {} is already configured as {}; remove it before adding {}",
-            next.chain_id,
-            existing.name,
-            next.name
-        );
-    }
     let identifiers = std::iter::once(&next.name)
         .chain(next.aliases.iter())
         .collect::<BTreeSet<_>>();
+    // Anything this replaces is exempt from the identifier check: reusing the
+    // aliases of the network being taken over is not a collision with it.
     if let Some(existing) = networks.iter().find(|network| {
         network.name != next.name
+            && network.chain_id != next.chain_id
             && std::iter::once(&network.name)
                 .chain(network.aliases.iter())
                 .any(|identifier| identifiers.contains(identifier))
     }) {
         bail!(
-            "network name or alias conflicts with configured network {}",
-            existing.name
+            "network name or alias conflicts with configured network {} (chain {})",
+            existing.name,
+            existing.chain_id
         );
     }
-    networks.retain(|network| network.name != next.name);
+    networks.retain(|network| network.name != next.name && network.chain_id != next.chain_id);
     networks.push(next);
     Ok(())
 }
@@ -819,8 +820,9 @@ mod tests {
     }
 
     #[test]
-    fn cli_replacement_is_name_scoped_and_rejects_cross_network_collisions() {
+    fn cli_replacement_takes_over_the_name_or_the_chain_id() {
         let mut networks = default_networks();
+        let count = networks.len();
         let mut ethereum = networks
             .iter()
             .find(|network| network.name == "ethereum")
@@ -837,15 +839,34 @@ mod tests {
             ethereum.rpc_url
         );
 
-        let mut conflicting = ethereum;
-        conflicting.name = "custom".into();
-        assert!(replace_configured_network(&mut networks, conflicting).is_err());
+        // Chain 1 under a new name takes chain 1 over rather than failing:
+        // the configuration holds one profile per chain ID either way.
+        let mut renamed = ethereum;
+        renamed.name = "custom".into();
+        replace_configured_network(&mut networks, renamed).unwrap();
+        assert_eq!(networks.len(), count, "chain 1 was replaced, not added");
+        assert!(networks.iter().all(|network| network.name != "ethereum"));
         assert_eq!(
             remove_configured_network(&mut networks, "eth")
                 .unwrap()
                 .name,
-            "ethereum"
+            "custom",
+            "the aliases came along with the chain"
         );
+    }
+
+    #[test]
+    fn cli_replacement_still_rejects_an_identifier_taken_by_another_chain() {
+        let mut networks = default_networks();
+        let mut candidate = networks
+            .iter()
+            .find(|network| network.name == "base")
+            .unwrap()
+            .clone();
+        candidate.name = "unclaimed".into();
+        candidate.chain_id = 999_999;
+        candidate.aliases = vec!["eth".into()];
+        assert!(replace_configured_network(&mut networks, candidate).is_err());
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Networks
 
 These presets are configured on first run. `network presets` prints the built-in
-catalog, and `network reset` replaces the configured list with fresh copies of
-the presets while preserving wallets and policies. Configuration permits one RPC
+catalog, and `network reset` asks for a yes or no and then replaces the
+configured list with fresh copies of the presets, preserving wallets and
+policies. Configuration permits one RPC
 profile per chain ID so MCP calls remain unambiguous.
 
 `network list` prints each profile in full, including its complete RPC URL, so
@@ -45,6 +46,14 @@ dedicated endpoint, keeping everything else:
 ```sh
 ekubo-wallet network add base --rpc-url https://your-provider.example/base
 ```
+
+Run it with no arguments and the first question is the chain ID, because that
+is what says which network you mean. A chain that a preset or the
+configuration already describes keeps its own name and settings, and the only
+remaining question is the endpoint; a chain nothing here knows about is named
+and described from scratch. Naming a chain ID that is already configured
+replaces that profile rather than failing: one profile per chain ID is the
+rule, so there is nothing else the second definition could mean.
 
 Omitting `--rpc-url` makes the CLI prompt for it, which keeps an endpoint key
 out of shell history. The prompt shows what you type: an RPC URL is

@@ -190,7 +190,8 @@ enum NetworkCommand {
 
 #[derive(Debug, Args)]
 struct NetworkAddArgs {
-    /// Preset or custom network name; prompted for when omitted.
+    /// Preset or custom network name; taken from whatever already describes
+    /// the chain ID when omitted.
     name: Option<String>,
     chain_id: Option<u64>,
     #[arg(long)]
@@ -2577,14 +2578,40 @@ async fn run_network(
         }
         NetworkCommand::Reset => {
             let networks = default_networks();
-            let digest = configuration_digest(&networks)?;
-            authorize_network_change(
-                "Reset network configuration",
-                "Replace every configured RPC endpoint and network with the built-in public presets.",
-                &digest,
-                vec![("Networks", networks.len().to_string())],
-            )
-            .await?;
+            // Not an approval: nothing is signed, and the result is fixed
+            // before the question is asked — the built-in presets, exactly as
+            // shipped. The only thing at stake is the local RPC configuration
+            // this discards, so the prompt names that and takes a yes or no.
+            require_interactive("network reset")?;
+            let configured = config.load()?.networks;
+            let discarded: Vec<&str> = configured
+                .iter()
+                .filter(|network| !networks.contains(network))
+                .map(|network| network.name.as_str())
+                .collect();
+            crate::tui::intro("Reset network configuration");
+            crate::tui::info(format!(
+                "Replaces the configured networks with fresh copies of the {} built-in presets. Wallets, policies, and pending requests are untouched.",
+                networks.len()
+            ));
+            if discarded.is_empty() {
+                crate::tui::info("No configured network differs from its preset.");
+            } else {
+                crate::tui::warning(format!(
+                    "Custom settings, including RPC URLs, are discarded for: {}",
+                    discarded.join(", ")
+                ));
+            }
+            let confirmed = crate::tui::optional(
+                inquire::Confirm::new("Reset the network configuration?")
+                    .with_default(false)
+                    .prompt(),
+            )?
+            .unwrap_or(false);
+            if !confirmed {
+                crate::tui::outro_cancel("Networks unchanged.");
+                return Ok(());
+            }
             config.update(|state| {
                 state.networks.clone_from(&networks);
                 Ok(())
@@ -2609,7 +2636,7 @@ async fn run_network(
             let name = if let Some(name) = args.name.take() {
                 name
             } else {
-                let Some(name) = prompt_network_choice(&mut args)? else {
+                let Some(name) = prompt_network_choice(&mut args, &prospective)? else {
                     crate::tui::outro_cancel("No network added.");
                     return Ok(());
                 };
@@ -2772,34 +2799,63 @@ fn network_candidate(
     build_custom_network(name, &args)
 }
 
-/// Pick what `network add` should configure when no name was given: one of
-/// the built-in presets, or a fully custom network described on the spot.
+/// Work out what `network add` should configure when no name was given.
+///
+/// The chain ID is the first question because it, rather than a name, is what
+/// says which network this is. A chain that a preset or the configuration
+/// already describes needs no naming at all: it keeps its own name and its own
+/// settings, and the only question left is which endpoint to reach it through.
+/// Only a chain nothing here has heard of has to be named and described.
+///
 /// `Ok(None)` means the user backed out.
-fn prompt_network_choice(args: &mut NetworkAddArgs) -> Result<Option<String>> {
+fn prompt_network_choice(
+    args: &mut NetworkAddArgs,
+    configured: &[NetworkConfig],
+) -> Result<Option<String>> {
     require_interactive("network add")?;
     crate::tui::intro("Add a network");
-    let presets = default_networks();
-    let mut labels = presets
-        .iter()
-        .map(|network| {
-            format!(
-                "{} — {} (chain {})",
-                network.name,
-                network
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| network.name.clone()),
-                network.chain_id
-            )
-        })
-        .collect::<Vec<_>>();
-    labels.push("custom — define a new network from scratch".into());
-    let Some(index) = crate::tui::pick("Which network?", labels, interactive_list_rows())? else {
-        return Ok(None);
+    let chain_id = if let Some(chain_id) = args.chain_id {
+        chain_id
+    } else {
+        let answer = crate::tui::optional(
+            inquire::Text::new("Chain ID")
+                .with_placeholder("8453")
+                .with_validator(|value: &str| {
+                    Ok(match value.trim().parse::<u64>() {
+                        Ok(chain_id) if chain_id > 0 => inquire::validator::Validation::Valid,
+                        _ => inquire::validator::Validation::Invalid(
+                            "must be a positive whole number".into(),
+                        ),
+                    })
+                })
+                .prompt(),
+        )?;
+        let Some(answer) = answer else {
+            return Ok(None);
+        };
+        let chain_id = answer.trim().parse().expect("validated above");
+        args.chain_id = Some(chain_id);
+        chain_id
     };
-    if let Some(preset) = presets.get(index) {
-        return Ok(Some(preset.name.clone()));
+
+    if let Some((known, origin)) = network_for_chain(chain_id, configured) {
+        crate::tui::info(format!(
+            "Chain {chain_id} is {origin} {}; its settings are the starting point.",
+            known.name
+        ));
+        if args.rpc_url.is_none() {
+            let answer = prompt_network_field(
+                custom_network_field("--rpc-url"),
+                Some(known.rpc_url.as_str()),
+            )?;
+            args.rpc_url = Some(answer.trim().parse().context("RPC URL is invalid")?);
+        }
+        return Ok(Some(known.name));
     }
+
+    crate::tui::info(format!(
+        "Nothing configured and no built-in preset uses chain {chain_id}, so it needs a name and a full profile."
+    ));
     let name = crate::tui::optional(
         inquire::Text::new("Network name")
             .with_placeholder("base")
@@ -2817,26 +2873,34 @@ fn prompt_network_choice(args: &mut NetworkAddArgs) -> Result<Option<String>> {
             .prompt(),
     )?;
     let Some(name) = name else { return Ok(None) };
-    if args.chain_id.is_none() {
-        let chain_id = crate::tui::optional(
-            inquire::Text::new("Chain ID")
-                .with_placeholder("8453")
-                .with_validator(|value: &str| {
-                    Ok(match value.trim().parse::<u64>() {
-                        Ok(chain_id) if chain_id > 0 => inquire::validator::Validation::Valid,
-                        _ => inquire::validator::Validation::Invalid(
-                            "must be a positive whole number".into(),
-                        ),
-                    })
-                })
-                .prompt(),
-        )?;
-        let Some(chain_id) = chain_id else {
-            return Ok(None);
-        };
-        args.chain_id = Some(chain_id.trim().parse().expect("validated above"));
-    }
     Ok(Some(name.trim().to_owned()))
+}
+
+/// Whatever already describes this chain ID, and where it came from. A
+/// configured network wins over the preset it started from, so an endpoint
+/// someone already changed is not quietly described by the shipped default.
+fn network_for_chain(
+    chain_id: u64,
+    configured: &[NetworkConfig],
+) -> Option<(NetworkConfig, &'static str)> {
+    configured
+        .iter()
+        .find(|network| network.chain_id == chain_id)
+        .cloned()
+        .map(|network| (network, "configured as"))
+        .or_else(|| {
+            default_networks()
+                .into_iter()
+                .find(|network| network.chain_id == chain_id)
+                .map(|network| (network, "the built-in preset"))
+        })
+}
+
+fn custom_network_field(flag: &str) -> &'static RequiredField {
+    CUSTOM_NETWORK_FIELDS
+        .iter()
+        .find(|field| field.flag == flag)
+        .expect("every custom network field is listed")
 }
 
 /// Interactive field-by-field editing of one configured network. Every
@@ -3933,6 +3997,32 @@ mod tests {
         assert_eq!(candidate.max_gas_limit.as_deref(), Some("1234567"));
         assert_eq!(candidate.chain_id, 8453);
         assert!(!candidate.aliases.is_empty());
+    }
+
+    #[test]
+    fn a_chain_id_names_its_own_network_so_add_never_asks_for_one() {
+        // What `network add` asks first is the chain ID, and the answer is
+        // only turned back into a name when nothing already holds that chain.
+        let mut configured = default_networks();
+        let base = configured
+            .iter_mut()
+            .find(|network| network.name == "base")
+            .unwrap();
+        base.rpc_url = "https://rpc.example.invalid/base".parse().unwrap();
+        let configured = configured;
+
+        let (known, origin) = network_for_chain(8453, &configured).unwrap();
+        assert_eq!(known.name, "base");
+        assert_eq!(origin, "configured as");
+        // The configured endpoint is what the RPC prompt offers back, not the
+        // shipped default it was changed away from.
+        assert_eq!(known.rpc_url.as_str(), "https://rpc.example.invalid/base");
+
+        let (preset, origin) = network_for_chain(8453, &[]).unwrap();
+        assert_eq!(preset.name, "base");
+        assert_eq!(origin, "the built-in preset");
+
+        assert!(network_for_chain(987_654, &configured).is_none());
     }
 
     #[test]
