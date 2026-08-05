@@ -16,6 +16,7 @@ path = "src/main.rs"
 alloy = { version = "=2.1.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 alloy-dyn-abi = { version = "=1.6.1", features = ["eip712"] }
 anyhow = "1.0.100"
+base64 = "0.22.1"
 async-trait = "0.1.89"
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.51", features = ["derive", "env"] }
@@ -28,7 +29,9 @@ hex = "0.4.3"
 inquire = "0.9.4"
 keyring = "4.1.6"
 num-bigint = "0.5.1"
+percent-encoding = "2.3.2"
 rand = "0.10.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
 rmcp = { version = "3.1.0", features = ["transport-io"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "chrono", "serde_json", "uuid"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }

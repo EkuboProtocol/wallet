@@ -8,7 +8,7 @@ use std::{fmt, str::FromStr};
 
 const MAX_EXECUTION_STEPS: usize = 4_096;
 const MAX_TOTAL_CALLDATA_BYTES: usize = 8 * 1024 * 1024;
-const MAX_SERIALIZED_PLAN_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_SERIALIZED_PLAN_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, JsonSchema)]
 #[schemars(transparent)]

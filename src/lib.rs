@@ -16,6 +16,7 @@ pub mod mcp;
 pub mod message;
 pub mod pager;
 pub mod pending;
+pub mod plan_fetch;
 pub mod policy_store;
 pub mod render;
 pub mod rpc;
