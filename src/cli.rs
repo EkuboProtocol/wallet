@@ -174,7 +174,10 @@ enum NetworkCommand {
     /// Replace configured networks with the built-in presets.
     Reset,
     /// Add or update a preset, or configure a complete custom network.
+    /// Without arguments, every choice is prompted for interactively.
     Add(Box<NetworkAddArgs>),
+    /// Interactively edit one configured network field by field.
+    Edit { name: Option<String> },
     /// Remove a configured network by name or alias.
     #[command(alias = "delete")]
     Remove { name: String },
@@ -182,7 +185,8 @@ enum NetworkCommand {
 
 #[derive(Debug, Args)]
 struct NetworkAddArgs {
-    name: String,
+    /// Preset or custom network name; prompted for when omitted.
+    name: Option<String>,
     chain_id: Option<u64>,
     #[arg(long)]
     rpc_url: Option<Url>,
@@ -329,6 +333,7 @@ enum TransactionCommand {
 
 impl Cli {
     pub async fn run(self) -> Result<()> {
+        crate::tui::init_prompt_theme();
         let config = match self.data_dir {
             Some(path) => ConfigStore::new(path),
             None => ConfigStore::production()?,
@@ -417,16 +422,17 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
         }
         WalletCommand::Import { wallet_id } => {
             require_interactive("wallet import")?;
-            cliclack::intro("Import an existing wallet")?;
-            let mut input = cliclack::password("Private key")
-                .mask('•')
-                .interact()
+            crate::tui::intro("Import an existing wallet");
+            let mut input = inquire::Password::new("Private key")
+                .with_display_mode(inquire::PasswordDisplayMode::Masked)
+                .without_confirmation()
+                .prompt()
                 .context("failed to read private key")?;
             let key = PrivateKeyMaterial::from_hex(&input)?;
             input.zeroize();
 
-            let progress = cliclack::spinner();
-            progress.start("Saving the key in the platform credential store");
+            let progress =
+                crate::tui::Progress::start("Saving the key in the platform credential store");
             let result = custody.import(&wallet_id, key);
             match result {
                 Ok(wallet) => {
@@ -445,10 +451,10 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                         )
                     })?;
                     progress.stop("Wallet imported");
-                    cliclack::outro(
+                    crate::tui::outro(
                         "Imported wallets start with the require-approval policy: nothing signs \
                          automatically until you install a more permissive policy.",
-                    )?;
+                    );
                     emit(mode, &wallet, || {
                         Ok(format!(
                             "Imported wallet {} at {:#x}.",
@@ -478,8 +484,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
             )
             .await?;
 
-            let progress = cliclack::spinner();
-            progress.start("Waiting for owner authentication");
+            let progress = crate::tui::Progress::start("Waiting for owner authentication");
             let result = custody.export(&wallet_id).await;
             let key = match result {
                 Ok(key) => {
@@ -511,8 +516,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
             )
             .await?;
 
-            let progress = cliclack::spinner();
-            progress.start("Waiting for owner authentication");
+            let progress = crate::tui::Progress::start("Waiting for owner authentication");
             let result = custody.remove(&wallet_id).await;
             match result {
                 Ok(wallet) => {
@@ -803,15 +807,18 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
             let accept = |document: LegalDocument, prompt: &str| -> Result<bool> {
                 let text = document.text();
                 let digest = document.digest();
-                cliclack::note(document.title(), terminal_note_safe(&text))?;
-                cliclack::log::info(format!("Document digest: {digest}"))?;
-                let accepted = cliclack::confirm(prompt).initial_value(false).interact()?;
+                crate::tui::note(document.title(), terminal_note_safe(&text));
+                crate::tui::info(format!("Document digest: {digest}"));
+                let accepted = crate::tui::optional(
+                    inquire::Confirm::new(prompt).with_default(false).prompt(),
+                )?
+                .unwrap_or(false);
                 if accepted {
                     store.record_acceptance(document, &digest)?;
                 }
                 Ok(accepted)
             };
-            cliclack::intro("Ekubo Wallet legal acceptance")?;
+            crate::tui::intro("Ekubo Wallet legal acceptance");
             ensure!(
                 accept(
                     LegalDocument::TermsOfService,
@@ -826,7 +833,7 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
                 )?,
                 "the Privacy Policy was not acknowledged; signing stays disabled"
             );
-            cliclack::outro("Recorded. Signing is now enabled for this installation.")?;
+            crate::tui::outro("Recorded. Signing is now enabled for this installation.");
             let status = store.status()?;
             emit(mode, &status, || Ok(render_status(&status)))
         }
@@ -1087,7 +1094,14 @@ async fn run_transaction(
                 return print_json(&record);
             }
             let detail = transaction_detail(config, &record).await;
-            println!("{}", crate::render::terminal_safe_multiline(&detail));
+            println!(
+                "{}",
+                colorize_detail(
+                    &crate::render::terminal_safe_multiline(&detail),
+                    record.status,
+                    crate::tui::paint_stdout,
+                )
+            );
             Ok(())
         }
     }
@@ -1109,6 +1123,43 @@ fn status_label(status: PendingStatus) -> &'static str {
         PendingStatus::Expired => "expired",
         PendingStatus::Cancelled => "cancelled",
     }
+}
+
+/// The semantic color of a lifecycle state: green once value moved as
+/// approved, yellow while something is still pending, red for every path
+/// where nothing will move.
+fn status_tone(status: PendingStatus) -> crate::tui::Tone {
+    match status {
+        PendingStatus::Confirmed | PendingStatus::Signed => crate::tui::Tone::Success,
+        PendingStatus::AwaitingApproval | PendingStatus::Submitting | PendingStatus::Broadcast => {
+            crate::tui::Tone::Warning
+        }
+        PendingStatus::Rejected
+        | PendingStatus::Reverted
+        | PendingStatus::Expired
+        | PendingStatus::Cancelled => crate::tui::Tone::Danger,
+    }
+}
+
+/// Colors the leading `Status:` line of an already-sanitized detail body.
+/// Applied only after `terminal_safe_multiline`, so the color codes added
+/// by `paint` are the only escape sequences in the text.
+fn colorize_detail(
+    safe_detail: &str,
+    status: PendingStatus,
+    paint: impl Fn(&str, crate::tui::Tone) -> String,
+) -> String {
+    safe_detail
+        .lines()
+        .map(|line| {
+            if line.starts_with("Status: ") {
+                paint(line, status_tone(status))
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn transaction_line(record: &PendingTransaction) -> String {
@@ -1133,41 +1184,51 @@ fn transaction_line(record: &PendingTransaction) -> String {
 /// Interactive loop: pick a transaction, see its expanded details (including
 /// live receipt lookups), return to the list.
 async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction]) -> Result<()> {
-    const DONE: usize = usize::MAX;
+    /// One row in the browser; `index` is `None` for the quit entry.
+    struct Row {
+        index: Option<usize>,
+        line: String,
+    }
+    impl std::fmt::Display for Row {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(&self.line)
+        }
+    }
     loop {
-        // Only one page of records is drawn at a time, so a long history
-        // cannot outgrow the screen and scroll it away on every keystroke.
-        // The page height is re-read on every keystroke, so resizing the
-        // terminal mid-prompt repages the list immediately.
-        let mut select = crate::paged_list::PagedSelect::new(format!(
-            "{} recorded transaction(s)",
-            records.len()
-        ))
-        .page_rows(interactive_list_rows)
         // Quitting is the first item, so it never requires scrolling to the
         // end of a long history, while the cursor still starts on the newest
-        // record.
-        .item(DONE, "Done", "quit")
-        .initial_value(0);
-        for (index, record) in records.iter().enumerate() {
-            select = select.item(
-                index,
-                crate::render::terminal_safe_multiline(&transaction_line(record))
+        // record. inquire pages the list itself: PageUp/PageDown, Home/End,
+        // and type-to-filter all work, and only one page is drawn at a time
+        // so a long history cannot outgrow the screen.
+        let mut rows = vec![Row {
+            index: None,
+            line: "Done (quit)".into(),
+        }];
+        rows.extend(
+            records.iter().enumerate().map(|(index, record)| Row {
+                index: Some(index),
+                line: crate::render::terminal_safe_multiline(&transaction_line(record))
                     .replace('\n', " "),
-                "",
-            );
-        }
-        let Some(choice) = interact_or_quit(&mut select)? else {
+            }),
+        );
+        let choice = crate::tui::optional(
+            inquire::Select::new(&format!("{} recorded transaction(s)", records.len()), rows)
+                .with_page_size(interactive_list_rows())
+                .with_starting_cursor(usize::from(!records.is_empty()))
+                .prompt(),
+        )?;
+        let Some(index) = choice.and_then(|row| row.index) else {
             return Ok(());
         };
-        if choice == DONE {
-            return Ok(());
-        }
-        let detail = transaction_detail(config, &records[choice]).await;
-        cliclack::note(
-            format!("Request {}", records[choice].request_id),
-            crate::render::terminal_safe_multiline(&detail),
-        )?;
+        let detail = transaction_detail(config, &records[index]).await;
+        crate::tui::note(
+            format!("Request {}", records[index].request_id),
+            colorize_detail(
+                &crate::render::terminal_safe_multiline(&detail),
+                records[index].status,
+                crate::tui::paint,
+            ),
+        );
     }
 }
 
@@ -1179,18 +1240,6 @@ async fn browse_transactions(config: &ConfigStore, records: &[PendingTransaction
 fn interactive_list_rows() -> usize {
     const PROMPT_CHROME_ROWS: usize = 6;
     crate::render::interactive_list_rows(PROMPT_CHROME_ROWS)
-}
-
-/// Run one selection prompt, treating Esc and Ctrl+C as "leave the list"
-/// rather than as an error.
-fn interact_or_quit<T: Clone + Eq>(
-    select: &mut crate::paged_list::PagedSelect<T>,
-) -> Result<Option<T>> {
-    match select.interact() {
-        Ok(choice) => Ok(Some(choice)),
-        Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
-        Err(error) => Err(error.into()),
-    }
 }
 
 /// The expanded human view of one lifecycle record. Chain lookups are
@@ -2349,9 +2398,18 @@ async fn run_network(
                 },
             )
         }
-        NetworkCommand::Add(args) => {
+        NetworkCommand::Add(mut args) => {
             let mut prospective = config.load()?.networks;
-            let candidate = network_candidate(*args, &prospective)?;
+            let name = if let Some(name) = args.name.take() {
+                name
+            } else {
+                let Some(name) = prompt_network_choice(&mut args)? else {
+                    crate::tui::outro_cancel("No network added.");
+                    return Ok(());
+                };
+                name
+            };
+            let candidate = network_candidate(name, *args, &prospective)?;
             replace_configured_network(&mut prospective, candidate.clone())?;
             let digest = configuration_digest(&candidate)?;
             // The complete URL is shown, not just its origin. This is the
@@ -2387,6 +2445,7 @@ async fn run_network(
                 },
             )
         }
+        NetworkCommand::Edit { name } => run_network_edit(config, name, mode).await,
         NetworkCommand::Remove { name } => {
             let mut prospective = config.load()?.networks;
             let removed = remove_configured_network(&mut prospective, &name)?;
@@ -2492,16 +2551,281 @@ fn describe_network(network: &NetworkConfig) -> serde_json::Value {
 /// other eight. Only a genuinely new custom chain has to supply everything,
 /// and that path collects what it needs interactively rather than rejecting
 /// one missing flag per attempt.
-fn network_candidate(args: NetworkAddArgs, configured: &[NetworkConfig]) -> Result<NetworkConfig> {
-    if let Some(base) = network_base(&args, configured) {
+fn network_candidate(
+    name: String,
+    args: NetworkAddArgs,
+    configured: &[NetworkConfig],
+) -> Result<NetworkConfig> {
+    if let Some(base) = network_base(&name, args.chain_id, configured) {
         return apply_network_overrides(base, args);
     }
     ensure!(
         args.chain_id.is_some(),
-        "unknown network {}; run `ekubo-wallet network presets` to see the built-in ones, `ekubo-wallet network list` to see the configured ones, or pass a chain ID to define a custom network",
-        args.name
+        "unknown network {name}; run `ekubo-wallet network presets` to see the built-in ones, `ekubo-wallet network list` to see the configured ones, or pass a chain ID to define a custom network",
     );
-    build_custom_network(args)
+    build_custom_network(name, &args)
+}
+
+/// Pick what `network add` should configure when no name was given: one of
+/// the built-in presets, or a fully custom network described on the spot.
+/// `Ok(None)` means the user backed out.
+fn prompt_network_choice(args: &mut NetworkAddArgs) -> Result<Option<String>> {
+    require_interactive("network add")?;
+    crate::tui::intro("Add a network");
+    let presets = default_networks();
+    let mut labels = presets
+        .iter()
+        .map(|network| {
+            format!(
+                "{} — {} (chain {})",
+                network.name,
+                network
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| network.name.clone()),
+                network.chain_id
+            )
+        })
+        .collect::<Vec<_>>();
+    labels.push("custom — define a new network from scratch".into());
+    let Some(index) = crate::tui::pick("Which network?", labels, interactive_list_rows())? else {
+        return Ok(None);
+    };
+    if let Some(preset) = presets.get(index) {
+        return Ok(Some(preset.name.clone()));
+    }
+    let name = crate::tui::optional(
+        inquire::Text::new("Network name")
+            .with_placeholder("base")
+            .with_validator(|value: &str| {
+                Ok(
+                    if value.trim().is_empty() || value.trim().contains(char::is_whitespace) {
+                        inquire::validator::Validation::Invalid(
+                            "a single word names the network".into(),
+                        )
+                    } else {
+                        inquire::validator::Validation::Valid
+                    },
+                )
+            })
+            .prompt(),
+    )?;
+    let Some(name) = name else { return Ok(None) };
+    if args.chain_id.is_none() {
+        let chain_id = crate::tui::optional(
+            inquire::Text::new("Chain ID")
+                .with_placeholder("8453")
+                .with_validator(|value: &str| {
+                    Ok(match value.trim().parse::<u64>() {
+                        Ok(chain_id) if chain_id > 0 => inquire::validator::Validation::Valid,
+                        _ => inquire::validator::Validation::Invalid(
+                            "must be a positive whole number".into(),
+                        ),
+                    })
+                })
+                .prompt(),
+        )?;
+        let Some(chain_id) = chain_id else {
+            return Ok(None);
+        };
+        args.chain_id = Some(chain_id.trim().parse().expect("validated above"));
+    }
+    Ok(Some(name.trim().to_owned()))
+}
+
+/// Interactive field-by-field editing of one configured network. Every
+/// change is drafted locally, shown in the menu, and only trusted after the
+/// same authorization and live chain-ID verification as `network add`.
+async fn run_network_edit(
+    config: &ConfigStore,
+    name: Option<String>,
+    mode: OutputMode,
+) -> Result<()> {
+    require_interactive("network edit")?;
+    let networks = config.load()?.networks;
+    ensure!(!networks.is_empty(), "no networks are configured");
+    let original = if let Some(name) = name {
+        network_base(&name, None, &networks)
+            .filter(|network| {
+                networks
+                    .iter()
+                    .any(|configured| configured.name == network.name)
+            })
+            .with_context(|| format!("{name} is not a configured network"))?
+    } else {
+        let labels = networks
+            .iter()
+            .map(|network| {
+                format!(
+                    "{} — {} (chain {})",
+                    network.name,
+                    network
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| network.name.clone()),
+                    network.chain_id
+                )
+            })
+            .collect();
+        let Some(index) = crate::tui::pick("Edit which network?", labels, interactive_list_rows())?
+        else {
+            crate::tui::outro_cancel("Nothing edited.");
+            return Ok(());
+        };
+        networks[index].clone()
+    };
+
+    crate::tui::intro(format!(
+        "Edit network {} (chain {})",
+        original.name, original.chain_id
+    ));
+    let mut draft = original.clone();
+    loop {
+        let mut labels = vec!["Save and authorize".to_owned()];
+        labels.extend(CUSTOM_NETWORK_FIELDS.iter().map(|field| {
+            let value = network_field_value(&draft, field.flag);
+            let changed = if value == network_field_value(&original, field.flag) {
+                ""
+            } else {
+                " (edited)"
+            };
+            format!("{}: {value}{changed}", field.prompt)
+        }));
+        labels.push("Discard changes".to_owned());
+        let choice = crate::tui::pick("Edit which field?", labels, interactive_list_rows())?;
+        match choice {
+            Some(0) => break,
+            Some(index) if index <= CUSTOM_NETWORK_FIELDS.len() => {
+                let field = &CUSTOM_NETWORK_FIELDS[index - 1];
+                let current = network_field_value(&draft, field.flag);
+                let value = prompt_network_field(field, Some(&current))?;
+                set_network_field(&mut draft, field.flag, &value)?;
+            }
+            _ => {
+                crate::tui::outro_cancel("Nothing edited.");
+                return Ok(());
+            }
+        }
+    }
+    if draft == original {
+        crate::tui::outro("No changes to save.");
+        return Ok(());
+    }
+
+    let digest = configuration_digest(&draft)?;
+    authorize_network_change(
+        "Edit network",
+        "Trust this RPC to supply chain state and eth_simulateV1 execution for signing decisions.",
+        &digest,
+        vec![
+            ("Network", draft.name.clone()),
+            ("Chain ID", draft.chain_id.to_string()),
+            ("RPC URL", draft.rpc_url.to_string()),
+        ],
+    )
+    .await?;
+    verify_chain_id(&draft).await?;
+    config.update(|state| replace_configured_network(&mut state.networks, draft.clone()))?;
+    emit(
+        mode,
+        &serde_json::json!({
+            "network": describe_network(&draft),
+            "rpc_verified": true,
+        }),
+        || {
+            Ok(format!(
+                "Updated {} (chain {}) via {}; the RPC verified its chain ID.",
+                draft.name, draft.chain_id, draft.rpc_url,
+            ))
+        },
+    )
+}
+
+/// The editable value of one `--flag` field on a network profile.
+fn network_field_value(network: &NetworkConfig, flag: &str) -> String {
+    let currency = network.native_currency.clone().unwrap_or(NativeCurrency {
+        name: "Ether".into(),
+        symbol: "ETH".into(),
+        decimals: 18,
+    });
+    match flag {
+        "--display-name" => network
+            .display_name
+            .clone()
+            .unwrap_or_else(|| network.name.clone()),
+        "--alias" => network.aliases.join(", "),
+        "--native-currency-name" => currency.name,
+        "--native-currency-symbol" => currency.symbol,
+        "--native-currency-decimals" => currency.decimals.to_string(),
+        "--max-gas-limit" => network.max_gas_limit.clone().unwrap_or_default(),
+        "--block-explorer-url" => network
+            .block_explorer_url
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        "--documentation-url" => network
+            .documentation_url
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        "--rpc-url" => network.rpc_url.to_string(),
+        _ => unreachable!("unknown network field {flag}"),
+    }
+}
+
+/// Writes one validated `--flag` answer back onto the draft profile.
+fn set_network_field(network: &mut NetworkConfig, flag: &str, value: &str) -> Result<()> {
+    match flag {
+        "--display-name" => network.display_name = Some(value.trim().to_owned()),
+        "--alias" => {
+            let aliases = normalize_aliases(
+                value
+                    .split([',', ' '])
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            )?;
+            ensure!(!aliases.is_empty(), "at least one alias is required");
+            network.aliases = aliases;
+        }
+        "--native-currency-name" | "--native-currency-symbol" | "--native-currency-decimals" => {
+            let mut currency = network.native_currency.take().unwrap_or(NativeCurrency {
+                name: "Ether".into(),
+                symbol: "ETH".into(),
+                decimals: 18,
+            });
+            match flag {
+                "--native-currency-name" => value.trim().clone_into(&mut currency.name),
+                "--native-currency-symbol" => value.trim().clone_into(&mut currency.symbol),
+                _ => {
+                    currency.decimals = value
+                        .trim()
+                        .parse()
+                        .context("native currency decimals must be 0-255")?;
+                }
+            }
+            network.native_currency = Some(currency);
+        }
+        "--max-gas-limit" => network.max_gas_limit = Some(value.trim().to_owned()),
+        "--block-explorer-url" => {
+            network.block_explorer_url = Some(
+                value
+                    .trim()
+                    .parse()
+                    .context("block explorer URL is invalid")?,
+            );
+        }
+        "--documentation-url" => {
+            network.documentation_url = Some(
+                value
+                    .trim()
+                    .parse()
+                    .context("documentation URL is invalid")?,
+            );
+        }
+        "--rpc-url" => network.rpc_url = value.trim().parse().context("RPC URL is invalid")?,
+        _ => unreachable!("unknown network field {flag}"),
+    }
+    Ok(())
 }
 
 /// The configured network or built-in preset this add/update starts from.
@@ -2510,12 +2834,14 @@ fn network_candidate(args: NetworkAddArgs, configured: &[NetworkConfig]) -> Resu
 /// customized network never silently reverts the rest of it to the preset. A
 /// declared chain ID must match, because repointing a name at a different
 /// chain is a redefinition rather than an edit.
-fn network_base(args: &NetworkAddArgs, configured: &[NetworkConfig]) -> Option<NetworkConfig> {
+fn network_base(
+    name: &str,
+    chain_id: Option<u64>,
+    configured: &[NetworkConfig],
+) -> Option<NetworkConfig> {
     let matches = |network: &NetworkConfig| {
-        (network.name == args.name || network.aliases.iter().any(|alias| alias == &args.name))
-            && args
-                .chain_id
-                .is_none_or(|chain_id| chain_id == network.chain_id)
+        (network.name == name || network.aliases.iter().any(|alias| alias == name))
+            && chain_id.is_none_or(|chain_id| chain_id == network.chain_id)
     };
     configured
         .iter()
@@ -2653,7 +2979,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
 /// prompted for in one session; otherwise a single error names every missing
 /// flag, so a scripted invocation is fixed in one edit rather than one per
 /// run.
-fn build_custom_network(args: NetworkAddArgs) -> Result<NetworkConfig> {
+fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkConfig> {
     let chain_id = args
         .chain_id
         .context("custom network requires a chain ID")?;
@@ -2685,7 +3011,7 @@ fn build_custom_network(args: NetworkAddArgs) -> Result<NetworkConfig> {
         ),
         ("--rpc-url", args.rpc_url.as_ref().map(ToString::to_string)),
     ]);
-    let answers = collect_custom_network_fields(&args.name, chain_id, &supplied)?;
+    let answers = collect_custom_network_fields(&name, chain_id, &supplied)?;
     let field = |flag: &str| answers[flag].clone();
 
     let aliases = normalize_aliases(
@@ -2699,7 +3025,7 @@ fn build_custom_network(args: NetworkAddArgs) -> Result<NetworkConfig> {
         "custom network requires at least one alias"
     );
     Ok(NetworkConfig {
-        name: args.name,
+        name,
         display_name: Some(field("--display-name")),
         aliases,
         chain_id,
@@ -2765,8 +3091,8 @@ Run the same command in a terminal to be prompted for them one at a time, or see
         );
     }
 
-    cliclack::intro(format!("Configure network {name} (chain {chain_id})"))?;
-    cliclack::log::info(format!(
+    crate::tui::intro(format!("Configure network {name} (chain {chain_id})"));
+    crate::tui::info(format!(
         "{} value(s) still needed: {}",
         missing.len(),
         missing
@@ -2774,40 +3100,53 @@ Run the same command in a terminal to be prompted for them one at a time, or see
             .map(|field| field.flag)
             .collect::<Vec<_>>()
             .join(", ")
-    ))?;
+    ));
     let mut answers = BTreeMap::new();
     for field in CUSTOM_NETWORK_FIELDS {
         if let Some(Some(value)) = supplied.get(field.flag) {
-            cliclack::log::info(format!("{}: {value}", field.prompt))?;
+            crate::tui::info(format!("{}: {value}", field.prompt));
             answers.insert(field.flag, value.clone());
             continue;
         }
-        // The RPC URL is shown rather than masked. It is configuration, not a
-        // signing credential, and masking it made a typo impossible to spot
-        // and forced a full re-entry on the next attempt. Prompting for it at
-        // all still keeps any embedded key out of shell history.
-        let mut input = cliclack::input(field.prompt)
-            .placeholder(field.example)
-            .validate(validator(field));
-        if let Some(default) = field.default {
-            input = input.default_input(default);
-        }
-        let value: String = input
-            .interact()
-            .with_context(|| format!("failed to read {} ({})", field.prompt, field.flag))?;
-        answers.insert(field.flag, value);
+        answers.insert(field.flag, prompt_network_field(field, None)?);
     }
-    cliclack::outro(format!(
+    crate::tui::outro(format!(
         "{name} is fully described. Authorize the change to start trusting this RPC."
-    ))?;
+    ));
     Ok(answers)
 }
 
-/// Reject a malformed answer while the prompt is still open, rather than
-/// after the whole profile has been typed out.
-fn validator(field: &RequiredField) -> impl Fn(&String) -> std::result::Result<(), String> {
+/// One inquire prompt for one network field, validated while the prompt is
+/// still open rather than after the whole profile has been typed out.
+/// `current` pre-fills the line when an existing value is being edited.
+///
+/// The RPC URL is shown rather than masked. It is configuration, not a
+/// signing credential, and masking it made a typo impossible to spot and
+/// forced a full re-entry on the next attempt. Prompting for it at all still
+/// keeps any embedded key out of shell history.
+fn prompt_network_field(field: &RequiredField, current: Option<&str>) -> Result<String> {
     let flag = field.flag;
-    move |input: &String| {
+    let mut input = inquire::Text::new(field.prompt)
+        .with_placeholder(field.example)
+        .with_validator(move |value: &str| {
+            Ok(match validate_network_field(flag, value) {
+                Ok(()) => inquire::validator::Validation::Valid,
+                Err(reason) => inquire::validator::Validation::Invalid(reason.into()),
+            })
+        });
+    if let Some(current) = current {
+        input = input.with_initial_value(current);
+    } else if let Some(default) = field.default {
+        input = input.with_default(default);
+    }
+    input
+        .prompt()
+        .with_context(|| format!("failed to read {} ({})", field.prompt, field.flag))
+}
+
+/// Reject a malformed answer for the named `--flag`.
+fn validate_network_field(flag: &str, input: &str) -> std::result::Result<(), String> {
+    {
         let value = input.trim();
         match flag {
             _ if value.is_empty() => Err("a value is required".into()),
@@ -3128,6 +3467,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_the_status_line_of_a_sanitized_detail_is_colored() {
+        let body = "Status: confirmed\nWallet: main\nBad Status: not first";
+        let colored = colorize_detail(body, PendingStatus::Confirmed, |text, tone| {
+            assert_eq!(tone, crate::tui::Tone::Success);
+            format!("[{text}]")
+        });
+        assert_eq!(
+            colored,
+            "[Status: confirmed]\nWallet: main\nBad Status: not first"
+        );
+    }
+
+    #[test]
+    fn status_tones_separate_final_pending_and_failed_states() {
+        use crate::tui::Tone;
+        assert_eq!(status_tone(PendingStatus::Confirmed), Tone::Success);
+        assert_eq!(status_tone(PendingStatus::AwaitingApproval), Tone::Warning);
+        assert_eq!(status_tone(PendingStatus::Broadcast), Tone::Warning);
+        for failed in [
+            PendingStatus::Rejected,
+            PendingStatus::Reverted,
+            PendingStatus::Expired,
+            PendingStatus::Cancelled,
+        ] {
+            assert_eq!(status_tone(failed), Tone::Danger);
+        }
+    }
+
+    #[test]
     fn interactive_lists_are_sized_to_the_terminal() {
         // The page is bounded and always leaves room for the prompt chrome.
         let rows = interactive_list_rows();
@@ -3239,7 +3607,7 @@ mod tests {
 
     fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
         NetworkAddArgs {
-            name: name.into(),
+            name: Some(name.into()),
             chain_id,
             rpc_url: None,
             display_name: None,
@@ -3251,6 +3619,19 @@ mod tests {
             block_explorer_url: None,
             documentation_url: None,
         }
+    }
+
+    /// Resolves the candidate exactly as the `network add` arm does: the
+    /// name is taken out of the parsed arguments first.
+    fn candidate_of(
+        mut args: NetworkAddArgs,
+        configured: &[NetworkConfig],
+    ) -> Result<NetworkConfig> {
+        let name = args
+            .name
+            .take()
+            .expect("test arguments always carry a name");
+        network_candidate(name, args, configured)
     }
 
     #[test]
@@ -3266,7 +3647,7 @@ mod tests {
 
         let mut args = add_args("base", None);
         args.rpc_url = Some("https://rpc.example.invalid/base".parse().unwrap());
-        let candidate = network_candidate(args, &configured).unwrap();
+        let candidate = candidate_of(args, &configured).unwrap();
 
         assert_eq!(
             candidate.rpc_url.as_str(),
@@ -3284,7 +3665,7 @@ mod tests {
     fn an_alias_and_a_matching_chain_id_both_resolve_the_same_base() {
         let configured = default_networks();
         for (name, chain_id) in [("base-mainnet", None), ("base", Some(8453))] {
-            let candidate = network_candidate(add_args(name, chain_id), &configured).unwrap();
+            let candidate = candidate_of(add_args(name, chain_id), &configured).unwrap();
             assert_eq!(candidate.name, "base");
             assert_eq!(candidate.chain_id, 8453);
         }
@@ -3292,7 +3673,7 @@ mod tests {
 
     #[test]
     fn preset_network_add_uses_complete_catalog_metadata() {
-        let candidate = network_candidate(add_args("eth", None), &[]).unwrap();
+        let candidate = candidate_of(add_args("eth", None), &[]).unwrap();
         assert_eq!(candidate.name, "ethereum");
         assert_eq!(candidate.chain_id, 1);
         assert!(candidate.native_currency.is_some());
@@ -3301,7 +3682,7 @@ mod tests {
 
     #[test]
     fn an_unknown_network_without_a_chain_id_says_where_to_look() {
-        let error = network_candidate(add_args("nowhere", None), &default_networks())
+        let error = candidate_of(add_args("nowhere", None), &default_networks())
             .expect_err("an unknown name is not a network");
         let message = error.to_string();
         assert!(message.contains("network presets"), "{message}");
@@ -3313,7 +3694,7 @@ mod tests {
     fn a_new_custom_network_reports_every_missing_value_at_once() {
         // Non-interactive, so this is the scripted path: one error has to
         // name the complete set, or fixing it takes one run per flag.
-        let error = network_candidate(add_args("custom", Some(987_654)), &default_networks())
+        let error = candidate_of(add_args("custom", Some(987_654)), &default_networks())
             .expect_err("an incomplete custom network is rejected");
         let message = error.to_string();
         for flag in CUSTOM_NETWORK_FIELDS.iter().map(|field| field.flag) {
@@ -3337,10 +3718,53 @@ mod tests {
         args.max_gas_limit = Some("16777216".into());
         args.block_explorer_url = Some("https://explorer.example.invalid".parse().unwrap());
         args.documentation_url = Some("https://docs.example.invalid".parse().unwrap());
-        let candidate = network_candidate(args, &default_networks()).unwrap();
+        let candidate = candidate_of(args, &default_networks()).unwrap();
         assert_eq!(candidate.chain_id, 987_654);
         assert_eq!(candidate.aliases, vec!["custom-chain".to_owned()]);
         assert_eq!(candidate.native_currency.unwrap().decimals, 18);
+    }
+
+    #[test]
+    fn every_editable_field_round_trips_through_its_own_validator() {
+        // The edit menu re-prompts with the current value pre-filled; that
+        // value must satisfy the field's validator and write back unchanged,
+        // or editing an untouched field would corrupt the profile.
+        let preset = || {
+            default_networks()
+                .into_iter()
+                .find(|network| network.name == "base")
+                .expect("base preset exists")
+        };
+        let mut network = preset();
+        for field in CUSTOM_NETWORK_FIELDS {
+            let current = network_field_value(&network, field.flag);
+            assert!(
+                validate_network_field(field.flag, &current).is_ok(),
+                "{} rejects its own current value {current:?}",
+                field.flag
+            );
+            set_network_field(&mut network, field.flag, &current).unwrap();
+        }
+        let untouched = preset();
+        assert_eq!(network.chain_id, untouched.chain_id);
+        assert_eq!(network.rpc_url, untouched.rpc_url);
+        assert_eq!(network.aliases, untouched.aliases);
+        assert_eq!(network.native_currency, untouched.native_currency);
+    }
+
+    #[test]
+    fn setting_network_fields_applies_each_typed_value() {
+        let mut network = default_networks().remove(0);
+        set_network_field(&mut network, "--rpc-url", "https://rpc.example.invalid").unwrap();
+        assert_eq!(network.rpc_url.as_str(), "https://rpc.example.invalid/");
+        set_network_field(&mut network, "--native-currency-decimals", "6").unwrap();
+        assert_eq!(network.native_currency.clone().unwrap().decimals, 6);
+        set_network_field(&mut network, "--alias", "one, two").unwrap();
+        assert_eq!(network.aliases, vec!["one".to_owned(), "two".to_owned()]);
+        set_network_field(&mut network, "--display-name", " Renamed ").unwrap();
+        assert_eq!(network.display_name.as_deref(), Some("Renamed"));
+        // A blank alias list cannot silently strand the network.
+        assert!(set_network_field(&mut network, "--alias", "  ").is_err());
     }
 
     #[test]
@@ -3351,25 +3775,25 @@ mod tests {
                 .find(|field| field.flag == flag)
                 .expect("declared field")
         };
-        let rpc = validator(field("--rpc-url"));
-        assert!(rpc(&"https://rpc.example.invalid".to_owned()).is_ok());
-        assert!(rpc(&"rpc.example.invalid".to_owned()).is_err());
-        assert!(rpc(&"ftp://rpc.example.invalid".to_owned()).is_err());
-        assert!(rpc(&String::new()).is_err());
+        let rpc = field("--rpc-url").flag;
+        assert!(validate_network_field(rpc, "https://rpc.example.invalid").is_ok());
+        assert!(validate_network_field(rpc, "rpc.example.invalid").is_err());
+        assert!(validate_network_field(rpc, "ftp://rpc.example.invalid").is_err());
+        assert!(validate_network_field(rpc, "").is_err());
 
-        let decimals = validator(field("--native-currency-decimals"));
-        assert!(decimals(&"18".to_owned()).is_ok());
-        assert!(decimals(&"18.5".to_owned()).is_err());
+        let decimals = field("--native-currency-decimals").flag;
+        assert!(validate_network_field(decimals, "18").is_ok());
+        assert!(validate_network_field(decimals, "18.5").is_err());
 
-        let gas = validator(field("--max-gas-limit"));
-        assert!(gas(&"16777216".to_owned()).is_ok());
-        assert!(gas(&"1000".to_owned()).is_err());
+        let gas = field("--max-gas-limit").flag;
+        assert!(validate_network_field(gas, "16777216").is_ok());
+        assert!(validate_network_field(gas, "1000").is_err());
 
         // Every declared default has to survive its own validator.
         for entry in CUSTOM_NETWORK_FIELDS {
             if let Some(default) = entry.default {
                 assert!(
-                    validator(entry)(&default.to_owned()).is_ok(),
+                    validate_network_field(entry.flag, default).is_ok(),
                     "{} offers a default its validator rejects",
                     entry.flag
                 );

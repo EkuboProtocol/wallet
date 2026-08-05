@@ -89,9 +89,9 @@ const FALLBACK_TERMINAL_ROWS: usize = 24;
 /// terminal resized between prompts is respected.
 #[must_use]
 pub fn interactive_list_rows(chrome_rows: usize) -> usize {
-    let rows = console::Term::stderr()
-        .size_checked()
-        .map_or(FALLBACK_TERMINAL_ROWS, |(rows, _)| rows as usize);
+    let rows = crossterm::terminal::size()
+        .map_or(FALLBACK_TERMINAL_ROWS, |(_, rows)| rows as usize)
+        .max(1);
     rows.saturating_sub(chrome_rows).max(MINIMUM_LIST_ROWS)
 }
 
