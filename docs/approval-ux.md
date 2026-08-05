@@ -29,6 +29,32 @@ is enforced. `"fail"` means "return the error without queuing" — there is no
 value that signs a plan whose simulation failed, and a policy denial queues for
 approval regardless of what is passed here.
 
+## What the agent does while the user reviews
+
+A policy denial is the ordinary way a user gets asked about something, so an
+agent that treats `allowed: false` as a blocker breaks the flow the policy
+exists to produce. The findings from `wallet_simulate_execution_plan` describe
+what the review will say; they are not a reason to stop and report, and they are
+not a reason to send the user off to widen their policy before the action they
+just asked for can proceed. Send the `simulation_id`, let the wallet queue the
+request, and carry on:
+
+1. `wallet_send_execution_plan` returns `approval_required` with a request ID.
+2. Tell the user the exact `ekubo-wallet review <request-id>` command.
+3. Call `wallet_wait_for_approval` immediately, and again after each timeout,
+   until the request is approved, rejected, or expired.
+4. On `approved`, call `wallet_send_execution_plan` with the same `request_id`
+   to submit the already-signed bytes, then `wallet_wait_for_execution`.
+
+`wallet_wait_for_execution` does not cover step 3. It polls a *broadcast*
+transaction and returns straight back for a request that is still awaiting
+approval, so only `wallet_wait_for_approval` blocks through the human pause.
+
+Handing back a request ID and ending the turn puts the user in the position of
+reporting their own approval in chat, which the wait tool exists to avoid.
+`wallet_propose_policy` is for an action the user wants to repeat without review
+in future — it is never a precondition for the request already queued.
+
 ## What the user reviews
 
 The CLI reloads the encrypted pending request and active policy, then runs a
