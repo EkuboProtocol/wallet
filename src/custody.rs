@@ -9,7 +9,7 @@ use keyring::{Entry, Error as KeyringError};
 use std::{fmt, sync::Arc};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const KEYRING_SERVICE: &str = "org.ekubo.secure-wallet-mcp.private-key.v1";
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.v1";
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKeyMaterial([u8; 32]);

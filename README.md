@@ -580,9 +580,9 @@ state.
 
 | Platform | Data directory | Encrypted database |
 | --- | --- | --- |
-| macOS | `~/Library/Application Support/org.ekubo.secure-wallet-mcp` | `policies.db` |
-| Linux | `${XDG_STATE_HOME}/ekubo-secure-wallet-mcp`, or `~/.local/state/ekubo-secure-wallet-mcp` | `policies.db` |
-| Windows | `%LOCALAPPDATA%\Ekubo\secure-wallet-mcp` | `policies.db` |
+| macOS | `~/Library/Application Support/org.ekubo.wallet` | `policies.db` |
+| Linux | `${XDG_STATE_HOME}/ekubo-wallet`, or `~/.local/state/ekubo-wallet` | `policies.db` |
+| Windows | `%LOCALAPPDATA%\Ekubo\wallet` | `policies.db` |
 
 The one SQLCipher file contains separate `wallet_policies`,
 `pending_transactions`, `pending_typed_data`, `pending_messages`, `tokens`,
@@ -609,8 +609,8 @@ entry and `Esc` also leaves the browser. Every reporting command prints exact JS
 always receive machine-readable output.
 
 The random 256-bit database key is stored separately under credential-service
-name `org.ekubo.secure-wallet-mcp.policy-database-key.v1`. Wallet private keys use
-`org.ekubo.secure-wallet-mcp.private-key.v1` and the wallet ID as their account. The
+name `org.ekubo.wallet.policy-database-key.v1`. Wallet private keys use
+`org.ekubo.wallet.private-key.v1` and the wallet ID as their account. The
 unencrypted `config.json` in the same data directory contains wallet metadata
 and network configuration, including RPC URLs; it contains no private key.
 
