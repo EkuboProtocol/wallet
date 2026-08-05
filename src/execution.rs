@@ -733,6 +733,54 @@ pub async fn broadcast_signed_execution(
     plan: &ExecutionPlan,
 ) -> Result<BroadcastResult> {
     validate_signed_execution(signed, wallet, network, plan)?;
+    send_exact_bytes(signed, network).await
+}
+
+/// Validate that exact signed bytes are a well-formed cancellation for this
+/// wallet — a 0-value self-send with empty calldata and no authorization
+/// list — then broadcast them. Cancellations have no execution plan to
+/// validate against, so the shape check here is the whole admission rule.
+pub async fn broadcast_signed_cancellation(
+    signed: &SignedExecution,
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+) -> Result<BroadcastResult> {
+    let expected_hash =
+        B256::from_str(&signed.transaction_hash).context("signed transaction hash is invalid")?;
+    let bytes = decode_serialized(&signed.serialized_transaction)?;
+    ensure!(
+        keccak256(&bytes) == expected_hash,
+        "signed transaction hash mismatch"
+    );
+    let envelope = decode_envelope(&bytes)?;
+    ensure!(
+        envelope
+            .recover_signer()
+            .context("failed to recover signed transaction sender")?
+            == wallet.address,
+        "cancellation sender does not match wallet"
+    );
+    ensure!(
+        envelope.chain_id() == Some(network.chain_id),
+        "cancellation chain does not match configured network"
+    );
+    ensure!(
+        matches!(envelope, TxEnvelope::Eip1559(_)),
+        "cancellation must not carry an authorization list"
+    );
+    ensure!(
+        envelope.kind() == TxKind::Call(wallet.address)
+            && envelope.value() == U256::ZERO
+            && envelope.input().is_empty(),
+        "cancellation must be a 0-value self-send with empty calldata"
+    );
+    send_exact_bytes(signed, network).await
+}
+
+async fn send_exact_bytes(
+    signed: &SignedExecution,
+    network: &NetworkConfig,
+) -> Result<BroadcastResult> {
     verify_chain_id(network).await?;
     if let Ok(Some(receipt)) = transaction_receipt(network, &signed.transaction_hash).await {
         return Ok(receipt_result(&signed.transaction_hash, receipt));

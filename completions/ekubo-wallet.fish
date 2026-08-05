@@ -29,7 +29,7 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print ve
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from list presets reset add edit remove delete' -a 'list presets reset add edit remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema review' -a 'show set allow-all require-approval validate schema review'
-complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show' -a 'list show'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show cancel' -a 'list show cancel'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from token; and not __fish_seen_subcommand_from list' -a 'list'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from address-book; and not __fish_seen_subcommand_from list add remove delete' -a 'list add remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from legal; and not __fish_seen_subcommand_from status show accept' -a 'status show accept'

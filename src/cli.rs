@@ -381,6 +381,9 @@ enum TransactionCommand {
     },
     /// Print one row, including exact signed bytes, by request ID or transaction hash.
     Show { identifier: String },
+    /// Attempt to cancel a broadcast but unmined transaction by outbidding it
+    /// with a 0-value self-send at the same nonce. Fails if it already mined.
+    Cancel { identifier: String },
 }
 
 impl Cli {
@@ -1123,7 +1126,7 @@ async fn run_transaction(
             // The full interactive browser needs stdin; without it, print the
             // one-line summaries instead.
             if io::stdin().is_terminal() {
-                crate::tx_browser::browse(config, &transactions).await
+                crate::tx_browser::browse(config, &pending, transactions).await
             } else {
                 for record in &transactions {
                     println!("{}", transaction_line(record));
@@ -1146,6 +1149,45 @@ async fn run_transaction(
                 "{}",
                 crate::fullscreen::lines_to_text(&detail, crate::tui::paint_stdout)
             );
+            Ok(())
+        }
+        TransactionCommand::Cancel { identifier } => {
+            let record = pending.get_by_identifier(&identifier)?;
+            let wallet = config.wallet(&record.wallet_id)?;
+            let network = config.network_by_chain_id(&record.chain_id)?;
+            let pending = std::sync::Mutex::new(pending);
+            let (record, broadcast) = crate::reconcile::attempt_cancellation(
+                &pending,
+                &wallet,
+                &network,
+                record,
+                &OsKeyStore,
+            )
+            .await?;
+            if mode == OutputMode::Json {
+                return print_json(&serde_json::json!({
+                    "transaction": record,
+                    "broadcast": broadcast,
+                }));
+            }
+            println!("{}", transaction_line(&record));
+            match record.status {
+                PendingStatus::Cancelled => println!(
+                    "Cancellation mined in block {}; the original plan will never execute.",
+                    record.block_number.as_deref().unwrap_or("unknown")
+                ),
+                PendingStatus::Cancelling => println!(
+                    "Cancellation {} broadcast; it races the original at the same nonce. \
+                     Run `ekubo-wallet transaction show {}` to watch the outcome.",
+                    broadcast.transaction_hash, record.request_id
+                ),
+                // attempt_cancellation reconciled a rejection into what it
+                // actually meant, for example the original mining first.
+                _ => {}
+            }
+            if let Some(error) = &broadcast.broadcast_error {
+                println!("Broadcast reported: {error}");
+            }
             Ok(())
         }
     }

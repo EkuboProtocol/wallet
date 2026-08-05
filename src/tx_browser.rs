@@ -606,6 +606,12 @@ struct DetailView {
     lines: Vec<Line>,
     explorer: Option<String>,
     offset: usize,
+    /// Position of this record in the browsed listing, so actions that
+    /// mutate the record can refresh the row they came from.
+    index: usize,
+    /// Whether the next `c` press broadcasts the cancellation: attempting to
+    /// cancel spends gas, so a single accidental keypress must never do it.
+    confirm_cancel: bool,
 }
 
 struct App {
@@ -618,9 +624,33 @@ struct App {
     viewport: usize,
 }
 
+/// Compose a fresh detail view for one record.
+async fn detail_view(config: &ConfigStore, record: &PendingTransaction, index: usize) -> DetailView {
+    let network = config.network_by_chain_id(&record.chain_id).ok();
+    let explorer = broadcast_hash(record).and_then(|hash| {
+        network
+            .as_ref()
+            .and_then(|network| crate::render::explorer_transaction_url(network, hash))
+    });
+    DetailView {
+        title: format!("Request {}", record.request_id),
+        lines: load_detail(config, record).await,
+        explorer,
+        offset: 0,
+        index,
+        confirm_cancel: false,
+    }
+}
+
 /// Interactive loop: pick a transaction, read its expanded details
-/// (including live receipt lookups), return to the list.
-pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Result<()> {
+/// (including live receipt lookups), return to the list. From the detail
+/// view, `c` (pressed twice) attempts an on-chain cancellation of an
+/// in-flight transaction.
+pub async fn browse(
+    config: &ConfigStore,
+    pending: &std::sync::Mutex<crate::pending::PendingStore>,
+    mut records: Vec<PendingTransaction>,
+) -> Result<()> {
     if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
         return Ok(());
     }
@@ -629,7 +659,7 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
         list: SearchableTable::new(
             "Transactions",
             list_columns(),
-            list_rows(&networks, records),
+            list_rows(&networks, &records),
         ),
         view: View::List,
         notice: None,
@@ -658,19 +688,7 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
                     app.notice = Some("Loading details…".into());
                     screen.terminal.draw(|frame| draw(frame, &mut app))?;
                     app.notice = None;
-                    let record = &records[index];
-                    let network = config.network_by_chain_id(&record.chain_id).ok();
-                    let explorer = broadcast_hash(record).and_then(|hash| {
-                        network.as_ref().and_then(|network| {
-                            crate::render::explorer_transaction_url(network, hash)
-                        })
-                    });
-                    app.view = View::Detail(DetailView {
-                        title: format!("Request {}", record.request_id),
-                        lines: load_detail(config, record).await,
-                        explorer,
-                        offset: 0,
-                    });
+                    app.view = View::Detail(detail_view(config, &records[index], index).await);
                 }
             },
             View::Detail(detail) => match handle_detail_key(detail, key, app.viewport) {
@@ -678,7 +696,7 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
                 DetailOutcome::Back => {
                     // The relative ages in the rows were formatted when the
                     // list was built; refresh them on the way back to it.
-                    app.list.set_rows(list_rows(&networks, records));
+                    app.list.set_rows(list_rows(&networks, &records));
                     app.view = View::List;
                 }
                 DetailOutcome::OpenExplorer => {
@@ -691,19 +709,98 @@ pub async fn browse(config: &ConfigStore, records: &[PendingTransaction]) -> Res
                         app.notice = Some("No explorer URL for this transaction.".into());
                     }
                 }
+                DetailOutcome::RequestCancel => {
+                    let record = &records[detail.index];
+                    if cancel_eligible(record.status) {
+                        detail.confirm_cancel = true;
+                        app.notice = Some(
+                            "Press c again to broadcast a cancellation (spends gas); any other key aborts."
+                                .into(),
+                        );
+                    } else {
+                        app.notice = Some("Nothing to cancel for this transaction.".into());
+                    }
+                }
+                DetailOutcome::ConfirmCancel => {
+                    let index = detail.index;
+                    detail.confirm_cancel = false;
+                    app.notice = Some("Broadcasting cancellation…".into());
+                    screen.terminal.draw(|frame| draw(frame, &mut app))?;
+                    let outcome = cancel_record(config, pending, records[index].clone()).await;
+                    app.notice = Some(match outcome {
+                        Ok((updated, notice)) => {
+                            records[index] = updated;
+                            app.view =
+                                View::Detail(detail_view(config, &records[index], index).await);
+                            notice
+                        }
+                        Err(error) => format!("Cancellation failed: {error:#}"),
+                    });
+                }
             },
         }
     }
+}
+
+const fn cancel_eligible(status: PendingStatus) -> bool {
+    matches!(status, PendingStatus::Broadcast | PendingStatus::Cancelling)
+}
+
+/// Attempt the on-chain cancellation of one record and describe the outcome
+/// in a footer-sized sentence.
+async fn cancel_record(
+    config: &ConfigStore,
+    pending: &std::sync::Mutex<crate::pending::PendingStore>,
+    record: PendingTransaction,
+) -> Result<(PendingTransaction, String)> {
+    let wallet = config.wallet(&record.wallet_id)?;
+    let network = config.network_by_chain_id(&record.chain_id)?;
+    let (updated, broadcast) = crate::reconcile::attempt_cancellation(
+        pending,
+        &wallet,
+        &network,
+        record,
+        &crate::custody::OsKeyStore,
+    )
+    .await?;
+    let notice = match updated.status {
+        PendingStatus::Cancelled => format!(
+            "Cancellation mined in block {}.",
+            updated.block_number.as_deref().unwrap_or("unknown")
+        ),
+        PendingStatus::Cancelling => format!(
+            "Cancellation {} broadcast; it races the original at the same nonce.",
+            broadcast.transaction_hash
+        ),
+        other => format!(
+            "The chain settled this transaction first: {}.",
+            status_label(other)
+        ),
+    };
+    Ok((updated, notice))
 }
 
 enum DetailOutcome {
     Stay,
     Back,
     OpenExplorer,
+    /// First `c`: ask for confirmation before spending gas.
+    RequestCancel,
+    /// Second consecutive `c`: broadcast the cancellation.
+    ConfirmCancel,
 }
 
 fn handle_detail_key(detail: &mut DetailView, key: KeyEvent, viewport: usize) -> DetailOutcome {
     let page = viewport.max(1);
+    if key.code == KeyCode::Char('c') {
+        return if detail.confirm_cancel {
+            DetailOutcome::ConfirmCancel
+        } else {
+            DetailOutcome::RequestCancel
+        };
+    }
+    // Any key other than the second `c` withdraws the pending confirmation.
+    detail.confirm_cancel = false;
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc | KeyCode::Enter => return DetailOutcome::Back,
         KeyCode::Char('o') => return DetailOutcome::OpenExplorer,
@@ -773,7 +870,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 .checked_div(max_offset)
                 .map_or_else(|| "all".to_owned(), |percent| format!("{percent}%"));
             let hints = format!(
-                "{position} · ↑↓ scroll · PgUp/PgDn page{} · Esc back · Ctrl+C quit",
+                "{position} · ↑↓ scroll · PgUp/PgDn page{} · c cancel · Esc back · Ctrl+C quit",
                 if detail.explorer.is_some() {
                     " · o open explorer"
                 } else {
@@ -1009,6 +1106,8 @@ mod tests {
             lines: Vec::new(),
             explorer: None,
             offset: 0,
+            index: 0,
+            confirm_cancel: false,
         };
         let press = |code| KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
         assert!(matches!(
@@ -1027,6 +1126,37 @@ mod tests {
         assert!(matches!(
             handle_detail_key(&mut detail, press(KeyCode::Char('o')), 10),
             DetailOutcome::OpenExplorer
+        ));
+    }
+
+    #[test]
+    fn cancellation_takes_two_presses_and_any_other_key_withdraws_it() {
+        let mut detail = DetailView {
+            title: "Request".into(),
+            lines: Vec::new(),
+            explorer: None,
+            offset: 0,
+            index: 0,
+            confirm_cancel: false,
+        };
+        let press = |code| KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+        assert!(matches!(
+            handle_detail_key(&mut detail, press(KeyCode::Char('c')), 10),
+            DetailOutcome::RequestCancel
+        ));
+        // The browser arms the confirmation only for an eligible record.
+        detail.confirm_cancel = true;
+        assert!(matches!(
+            handle_detail_key(&mut detail, press(KeyCode::Char('c')), 10),
+            DetailOutcome::ConfirmCancel
+        ));
+        // Any other key withdraws an armed confirmation.
+        detail.confirm_cancel = true;
+        handle_detail_key(&mut detail, press(KeyCode::Down), 10);
+        assert!(!detail.confirm_cancel);
+        assert!(matches!(
+            handle_detail_key(&mut detail, press(KeyCode::Char('c')), 10),
+            DetailOutcome::RequestCancel
         ));
     }
 }

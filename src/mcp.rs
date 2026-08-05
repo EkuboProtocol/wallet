@@ -1398,6 +1398,49 @@ impl WalletMcpServer {
     }
 
     #[tool(
+        name = "wallet_attempt_cancel",
+        description = "Attempt to cancel a broadcast but unmined transaction by outbidding it with a 0-value self-send at its own nonce. Reconciles against the chain first and fails if the transaction already mined, was already cancelled, or was already replaced. The cancellation derives every field from the stored envelope and the chain, cannot expand what was authorized, and therefore needs no policy check or approval; the original may still win the race, so reconcile afterwards with wallet_get_execution_status or wallet_wait_for_execution. Call again to outbid a cancellation that is itself stuck.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_attempt_cancel(
+        &self,
+        Parameters(input): Parameters<RequestInput>,
+    ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
+        // Cancellation signs, so it repeats the legal gate like every other
+        // signing path, as defense in depth.
+        self.require_legal_acceptance()
+            .map_err(|error| tool_error(&error))?;
+        let wallet = self
+            .config
+            .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        let network = self
+            .config
+            .network_by_chain_id(&input.chain_id)
+            .map_err(|error| tool_error(&error))?;
+        let record = self
+            .pending_record(&input.wallet_id, &input.chain_id, input.request_id)
+            .map_err(|error| tool_error(&error))?;
+        let (record, broadcast) = crate::reconcile::attempt_cancellation(
+            &self.pending,
+            &wallet,
+            &network,
+            record,
+            &OsKeyStore,
+        )
+        .await
+        .map_err(|error| tool_error(&error))?;
+        let mut output = execution_status_output(record);
+        output.broadcast_error = broadcast.broadcast_error;
+        Ok(Json(output))
+    }
+
+    #[tool(
         name = "wallet_add_network",
         description = "Verify and add one complete server-wide EVM network. Fails without writing if its chain ID, name, or alias is already configured, and never replaces an existing network. RPC URLs are stored locally and never returned by wallet_list.",
         annotations(
@@ -3179,6 +3222,7 @@ mod tests {
                 "wallet_add_network",
                 "wallet_add_token",
                 "wallet_address_book",
+                "wallet_attempt_cancel",
                 "wallet_batch_eth_call",
                 "wallet_create_fork",
                 "wallet_decode_abi_result",

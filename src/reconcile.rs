@@ -15,12 +15,16 @@
 //! chain.
 
 use crate::{
-    config::{ConfigStore, NetworkConfig},
-    execution::signed_transaction_nonce,
+    config::{ConfigStore, NetworkConfig, WalletMetadata},
+    custody::KeyStore,
+    execution::{
+        BroadcastResult, ReceiptStatus as BroadcastReceiptStatus, broadcast_signed_cancellation,
+        sign_cancellation, signed_transaction_nonce,
+    },
     pending::{PendingStatus, PendingStore, PendingTransaction},
     rpc::{ReceiptStatus, mined_transaction_count, transaction_known, transaction_receipt},
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{TimeDelta, Utc};
 use std::sync::{Mutex, MutexGuard};
 
@@ -212,6 +216,99 @@ async fn reconcile_cancelling(
         );
     }
     lock(pending)?.mark_replaced(record.request_id)
+}
+
+/// Attempt to cancel a broadcast but unmined transaction: reconcile it
+/// against the chain first — failing if the chain already settled it — then
+/// sign a 0-value self-send outbidding it at its own nonce, persist the exact
+/// cancellation envelope before submission, and broadcast it. Also the
+/// repricing path: called again while `cancelling`, it outbids the newest
+/// cancellation attempt too.
+///
+/// Cancellation consults no policy and queues no approval: every envelope
+/// field derives from the stored record and the chain, so like an exact-byte
+/// rebroadcast it cannot expand what was already authorized — it can only
+/// narrow an in-flight authorization to nothing, at the cost of gas.
+pub async fn attempt_cancellation<K: KeyStore>(
+    pending: &Mutex<PendingStore>,
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    record: PendingTransaction,
+    keys: &K,
+) -> Result<(PendingTransaction, BroadcastResult)> {
+    let record = reconcile_record(pending, network, record, true).await?;
+    let block = |record: &PendingTransaction| {
+        record
+            .block_number
+            .clone()
+            .unwrap_or_else(|| "unknown".into())
+    };
+    match record.status {
+        PendingStatus::Broadcast | PendingStatus::Cancelling => {}
+        PendingStatus::Confirmed => bail!(
+            "nothing to cancel: the transaction already mined in block {}",
+            block(&record)
+        ),
+        PendingStatus::Reverted => bail!(
+            "nothing to cancel: the transaction already mined (reverted) in block {}",
+            block(&record)
+        ),
+        PendingStatus::Cancelled => bail!(
+            "nothing to cancel: a cancellation already consumed the nonce in block {}",
+            block(&record)
+        ),
+        PendingStatus::Replaced => {
+            bail!("nothing to cancel: a different transaction already consumed this nonce on chain")
+        }
+        PendingStatus::Submitting => {
+            bail!("a submission attempt holds this transaction's lease; retry in a moment")
+        }
+        PendingStatus::Signed
+        | PendingStatus::AwaitingApproval
+        | PendingStatus::Rejected
+        | PendingStatus::Expired => {
+            bail!("nothing to cancel on chain: the request has no broadcast transaction")
+        }
+    }
+    let signed = sign_cancellation(
+        wallet,
+        network,
+        record
+            .serialized_transaction
+            .as_deref()
+            .context("broadcast transaction is missing its signed bytes")?,
+        record.cancel_serialized_transaction.as_deref(),
+        keys,
+    )
+    .await?;
+    // Persist the exact envelope before first submission, mirroring the
+    // automatic signing path: recovery must know every hash that may reach
+    // the chain.
+    let stored = lock(pending)?.store_cancellation(
+        record.request_id,
+        &signed.serialized_transaction,
+        &signed.transaction_hash,
+    )?;
+    let broadcast = broadcast_signed_cancellation(&signed, wallet, network).await?;
+    let record = match broadcast.receipt_status {
+        // The receipt belongs to the cancellation hash: it mined immediately.
+        BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => lock(pending)?
+            .mark_cancelled(
+                stored.request_id,
+                broadcast
+                    .block_number
+                    .as_deref()
+                    .context("mined cancellation is missing a block number")?,
+            )?,
+        // An outright rejection usually means the race is already over —
+        // "nonce too low" for a just-mined original — so ask the chain what
+        // the rejection actually meant instead of reporting limbo.
+        BroadcastReceiptStatus::Pending if broadcast.broadcast_error.is_some() => {
+            reconcile_record(pending, network, stored, false).await?
+        }
+        BroadcastReceiptStatus::Pending => stored,
+    };
+    Ok((record, broadcast))
 }
 
 /// Reconcile every in-flight record in a listing, returning the refreshed
