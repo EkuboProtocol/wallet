@@ -55,6 +55,7 @@ pub fn status_label(status: PendingStatus) -> &'static str {
         PendingStatus::Expired => "expired",
         PendingStatus::Cancelled => "cancelled",
         PendingStatus::Replaced => "replaced on chain",
+        PendingStatus::Cancelling => "cancelling, awaiting receipt",
     }
 }
 
@@ -65,7 +66,10 @@ pub fn status_label(status: PendingStatus) -> &'static str {
 pub fn status_tone(status: PendingStatus) -> Tone {
     match status {
         PendingStatus::Confirmed | PendingStatus::Signed => Tone::Success,
-        PendingStatus::AwaitingApproval | PendingStatus::Submitting | PendingStatus::Broadcast => {
+        PendingStatus::AwaitingApproval
+        | PendingStatus::Submitting
+        | PendingStatus::Broadcast
+        | PendingStatus::Cancelling => {
             Tone::Warning
         }
         PendingStatus::Rejected
@@ -195,25 +199,51 @@ async fn load_receipt(
     record: &PendingTransaction,
 ) -> Option<ReceiptSection> {
     let network = network?;
-    let hash = broadcast_hash(record)?;
-    if !matches!(
-        record.status,
-        PendingStatus::Broadcast | PendingStatus::Confirmed | PendingStatus::Reverted
-    ) {
+    let hashes = receipt_candidate_hashes(record);
+    if hashes.is_empty() {
         return None;
     }
-    Some(match transaction_receipt_details(network, hash).await {
-        Ok(Some(receipt)) => {
-            let tokens: Vec<Address> = transfer_activity(record.execution_plan.sender, &receipt)
-                .into_iter()
-                .map(|(token, _)| token)
-                .collect();
-            let metadata = load_token_metadata(network, &tokens).await;
-            ReceiptSection::Ready { receipt, metadata }
+    let mut section = ReceiptSection::NotYetAvailable;
+    for hash in hashes {
+        match transaction_receipt_details(network, hash).await {
+            Ok(Some(receipt)) => {
+                let tokens: Vec<Address> = transfer_activity(record.execution_plan.sender, &receipt)
+                    .into_iter()
+                    .map(|(token, _)| token)
+                    .collect();
+                let metadata = load_token_metadata(network, &tokens).await;
+                return Some(ReceiptSection::Ready { receipt, metadata });
+            }
+            Ok(None) => {}
+            Err(error) => section = ReceiptSection::Failed(format!("{error:#}")),
         }
-        Ok(None) => ReceiptSection::NotYetAvailable,
-        Err(error) => ReceiptSection::Failed(format!("{error:#}")),
-    })
+    }
+    Some(section)
+}
+
+/// The transaction hashes that may hold this record's receipt, most likely
+/// winner first. A cancelling record races its own cancellations against the
+/// original envelope; a cancelled one mined some cancellation attempt.
+fn receipt_candidate_hashes(record: &PendingTransaction) -> Vec<&str> {
+    match record.status {
+        PendingStatus::Broadcast | PendingStatus::Confirmed | PendingStatus::Reverted => {
+            broadcast_hash(record).into_iter().collect()
+        }
+        PendingStatus::Cancelling => record
+            .cancel_transaction_hashes
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .chain(broadcast_hash(record))
+            .collect(),
+        PendingStatus::Cancelled => record
+            .cancel_transaction_hashes
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn broadcast_hash(record: &PendingTransaction) -> Option<&str> {
@@ -803,6 +833,8 @@ mod tests {
             signed_transaction_hash: None,
             broadcast_transaction_hash: None,
             block_number: None,
+            cancel_serialized_transaction: None,
+            cancel_transaction_hashes: Vec::new(),
         }
     }
 

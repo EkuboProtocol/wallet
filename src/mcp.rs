@@ -674,6 +674,9 @@ enum ExecutionStatus {
     /// The envelope's nonce was consumed by a different mined transaction, so
     /// the exact signed bytes can never mine.
     Replaced,
+    /// An owner-requested cancellation is racing the broadcast envelope at
+    /// its own nonce; the chain has not yet settled which one mines.
+    CancellationPending,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2686,9 +2689,12 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         PendingStatus::Expired => ExecutionStatus::Expired,
         PendingStatus::Cancelled => ExecutionStatus::Cancelled,
         PendingStatus::Replaced => ExecutionStatus::Replaced,
+        PendingStatus::Cancelling => ExecutionStatus::CancellationPending,
     };
     let receipt_status = match record.status {
-        PendingStatus::Submitting | PendingStatus::Broadcast => Some(ReceiptStatus::Pending),
+        PendingStatus::Submitting | PendingStatus::Broadcast | PendingStatus::Cancelling => {
+            Some(ReceiptStatus::Pending)
+        }
         PendingStatus::Confirmed => Some(ReceiptStatus::Success),
         PendingStatus::Reverted => Some(ReceiptStatus::Reverted),
         _ => None,
@@ -2715,8 +2721,13 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
         ExecutionStatus::Expired => Some(
             "The approval request expired. Create a new request only if the user still wants to proceed.".into(),
         ),
-        ExecutionStatus::Cancelled => Some(
-            "The signed request was cancelled because its policy revision changed before initial submission.".into(),
+        ExecutionStatus::Cancelled => Some(if record.cancel_transaction_hashes.is_empty() {
+            "The signed request was cancelled because its policy revision changed before initial submission.".into()
+        } else {
+            "This wallet's own cancellation transaction consumed the nonce on chain: the original plan will never execute. Prepare a fresh plan only if the user still wants the action.".into()
+        }),
+        ExecutionStatus::CancellationPending => Some(
+            "A cancellation transaction is racing the original at the same nonce. Reconcile with wallet_get_execution_status or wallet_wait_for_execution until the chain settles which one mined.".into(),
         ),
         ExecutionStatus::Replaced => Some(
             "The signed transaction's nonce was consumed by a different mined transaction (for example one sent from the same key on another device), so these exact bytes can never mine and nothing was executed. Prepare a fresh plan only if the user still wants the action.".into(),

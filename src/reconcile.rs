@@ -10,8 +10,9 @@
 //! chain truth wherever it is observed.
 //!
 //! Reconciliation cost is bounded by construction, not by list length: only
-//! `submitting` and `broadcast` rows need chain lookups, and the in-flight
-//! unique index allows at most one such row per wallet and chain.
+//! `submitting`, `broadcast`, and `cancelling` rows need chain lookups, and
+//! the in-flight unique index allows at most one such row per wallet and
+//! chain.
 
 use crate::{
     config::{ConfigStore, NetworkConfig},
@@ -99,6 +100,9 @@ pub async fn reconcile_record(
     mut record: PendingTransaction,
     recover_stale_submission: bool,
 ) -> Result<PendingTransaction> {
+    if record.status == PendingStatus::Cancelling {
+        return reconcile_cancelling(pending, network, record).await;
+    }
     if !matches!(
         record.status,
         PendingStatus::Broadcast | PendingStatus::Submitting
@@ -156,6 +160,60 @@ fn submission_lease_expired(record: &PendingTransaction) -> bool {
     Utc::now() - record.updated_at >= TimeDelta::seconds(SUBMISSION_LEASE_SECONDS)
 }
 
+/// Settle the race between a broadcast envelope and its own cancellation
+/// attempts. Both sides sit at one nonce, so the mined account nonce says
+/// whether the race is over, and the receipts say who won: the original
+/// finalizes as confirmed or reverted, any of this wallet's cancellation
+/// hashes marks the record cancelled (a reverted cancellation still consumed
+/// the nonce), and an envelope this wallet never signed marks it replaced.
+async fn reconcile_cancelling(
+    pending: &Mutex<PendingStore>,
+    network: &NetworkConfig,
+    record: PendingTransaction,
+) -> Result<PendingTransaction> {
+    let original_hash = record
+        .broadcast_transaction_hash
+        .as_ref()
+        .or(record.signed_transaction_hash.as_ref())
+        .cloned()
+        .context("cancelling transaction is missing its hash")?;
+    if let Some(receipt) = transaction_receipt(network, &original_hash).await? {
+        return lock(pending)?.finalize(
+            record.request_id,
+            receipt.succeeded,
+            &receipt.block_number.to_string(),
+        );
+    }
+    let envelope_nonce = signed_transaction_nonce(
+        record
+            .serialized_transaction
+            .as_deref()
+            .context("cancelling transaction is missing its signed bytes")?,
+    )?;
+    let mined_nonce = mined_transaction_count(network, record.execution_plan.sender).await?;
+    if mined_nonce <= envelope_nonce {
+        return Ok(record);
+    }
+    // The nonce is consumed. Newest cancellation first: it is the most likely
+    // winner, and every hash in the history is equally "cancelled by us".
+    for cancel_hash in record.cancel_transaction_hashes.iter().rev() {
+        if let Some(receipt) = transaction_receipt(network, cancel_hash).await? {
+            return lock(pending)?
+                .mark_cancelled(record.request_id, &receipt.block_number.to_string());
+        }
+    }
+    // Close the race window: the original may have mined between the nonce
+    // read and here, exactly like the plain broadcast path.
+    if let Some(receipt) = transaction_receipt(network, &original_hash).await? {
+        return lock(pending)?.finalize(
+            record.request_id,
+            receipt.succeeded,
+            &receipt.block_number.to_string(),
+        );
+    }
+    lock(pending)?.mark_replaced(record.request_id)
+}
+
 /// Reconcile every in-flight record in a listing, returning the refreshed
 /// rows in their original order. Display-path work: an unreachable RPC or an
 /// unconfigured network degrades that row to its stored state rather than
@@ -169,7 +227,7 @@ pub async fn reconcile_all(
     for record in records {
         if !matches!(
             record.status,
-            PendingStatus::Broadcast | PendingStatus::Submitting
+            PendingStatus::Broadcast | PendingStatus::Submitting | PendingStatus::Cancelling
         ) {
             reconciled.push(record);
             continue;

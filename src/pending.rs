@@ -33,6 +33,11 @@ pub enum PendingStatus {
     /// (for example one sent from the same key imported on another device),
     /// so these exact signed bytes can never mine.
     Replaced,
+    /// An owner-requested 0-value self-send is racing the broadcast envelope
+    /// at its own nonce. The record still holds the wallet+chain in-flight
+    /// slot: the pair is one logical transaction until the chain settles the
+    /// race as `Cancelled`, `Confirmed`/`Reverted`, or `Replaced`.
+    Cancelling,
 }
 
 impl PendingStatus {
@@ -48,6 +53,7 @@ impl PendingStatus {
             "expired" => Ok(Self::Expired),
             "cancelled" => Ok(Self::Cancelled),
             "replaced" => Ok(Self::Replaced),
+            "cancelling" => Ok(Self::Cancelling),
             _ => anyhow::bail!("stored pending transaction has invalid status {value}"),
         }
     }
@@ -83,6 +89,15 @@ pub struct PendingTransaction {
     pub broadcast_transaction_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_number: Option<String>,
+    /// The exact bytes of the newest owner-requested cancellation envelope: a
+    /// 0-value self-send at the original envelope's nonce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_serialized_transaction: Option<String>,
+    /// Every cancellation hash ever broadcast for this record, oldest first.
+    /// Earlier attempts may still mine after a repricing, so reconciliation
+    /// recognizes all of them as "cancelled by this wallet".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cancel_transaction_hashes: Vec<String>,
 }
 
 pub struct PendingStore {
@@ -474,6 +489,88 @@ impl PendingStore {
         self.get(request_id)
     }
 
+    /// Record one broadcast owner-requested cancellation attempt: the exact
+    /// bytes and hash of a 0-value self-send racing the stuck envelope at its
+    /// own nonce. Repricing appends to the hash history — an earlier attempt
+    /// may still mine — while only the newest bytes stay rebroadcastable. The
+    /// record keeps its in-flight slot; the pair is one logical transaction.
+    pub fn store_cancellation(
+        &mut self,
+        request_id: Uuid,
+        cancel_serialized_transaction: &str,
+        cancel_transaction_hash: &str,
+    ) -> Result<PendingTransaction> {
+        validate_hex(cancel_serialized_transaction, None)?;
+        validate_hex(cancel_transaction_hash, Some(32))?;
+        let transaction = self.database.connection.transaction()?;
+        let (status, hashes): (String, Option<String>) = transaction
+            .query_row(
+                "SELECT status, cancel_transaction_hashes
+                 FROM pending_transactions WHERE request_id = ?1",
+                [request_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .with_context(|| format!("unknown pending request {request_id}"))?;
+        ensure!(
+            matches!(
+                PendingStatus::parse(&status)?,
+                PendingStatus::Broadcast | PendingStatus::Cancelling
+            ),
+            "pending transaction is not awaiting a receipt"
+        );
+        let mut hashes = hashes
+            .as_deref()
+            .map(parse_cancel_hashes)
+            .transpose()?
+            .unwrap_or_default();
+        ensure!(
+            !hashes.contains(&cancel_transaction_hash.to_owned()),
+            "this exact cancellation was already recorded"
+        );
+        ensure!(
+            hashes.len() < MAX_CANCELLATION_ATTEMPTS,
+            "too many cancellation attempts for this transaction"
+        );
+        hashes.push(cancel_transaction_hash.to_owned());
+        transaction.execute(
+            "UPDATE pending_transactions SET
+                status = 'cancelling', cancel_serialized_transaction = ?2,
+                cancel_transaction_hashes = ?3, updated_at = ?4
+             WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
+            params![
+                request_id.to_string(),
+                cancel_serialized_transaction,
+                serde_json::to_string(&hashes).expect("hash list serializes"),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        self.get(request_id)
+    }
+
+    /// Record that one of this wallet's own cancellation envelopes consumed
+    /// the nonce: the original plan will never execute. A reverted
+    /// cancellation still cancels — the nonce is consumed either way.
+    pub fn mark_cancelled(
+        &mut self,
+        request_id: Uuid,
+        block_number: &str,
+    ) -> Result<PendingTransaction> {
+        validate_block_number(block_number)?;
+        let changed = self.database.connection.execute(
+            "UPDATE pending_transactions SET
+                status = 'cancelled', block_number = ?2, updated_at = ?3
+             WHERE request_id = ?1 AND status = 'cancelling'",
+            params![
+                request_id.to_string(),
+                block_number,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        ensure!(changed == 1, "pending transaction is not being cancelled");
+        self.get(request_id)
+    }
+
     /// Record that this envelope's nonce was consumed by a different mined
     /// transaction: the exact signed bytes can never mine, so the record
     /// leaves the in-flight slot without ever getting a receipt. Callers must
@@ -489,22 +586,20 @@ impl PendingStore {
         self.get(request_id)
     }
 
+    /// Record the original envelope's mined receipt. Also reachable from
+    /// `cancelling`: the original winning the race against its own
+    /// cancellation is still simply the original executing.
     pub fn finalize(
         &mut self,
         request_id: Uuid,
         succeeded: bool,
         block_number: &str,
     ) -> Result<PendingTransaction> {
-        ensure!(
-            block_number == "0"
-                || (!block_number.starts_with('0')
-                    && block_number.bytes().all(|byte| byte.is_ascii_digit())),
-            "block number must be canonical decimal"
-        );
+        validate_block_number(block_number)?;
         let status = if succeeded { "confirmed" } else { "reverted" };
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = ?2, block_number = ?3, updated_at = ?4
-             WHERE request_id = ?1 AND status = 'broadcast'",
+             WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
             params![
                 request_id.to_string(),
                 status,
@@ -600,7 +695,8 @@ impl PendingStore {
                         policy_revision, status, created_at, expires_at, updated_at,
                         approved_at, rejected_at, serialized_transaction,
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
-                        approval_required, review_digest
+                        approval_required, review_digest, cancel_serialized_transaction,
+                        cancel_transaction_hashes
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id.to_string()],
                 |row| {
@@ -623,6 +719,8 @@ impl PendingStore {
                         block_number: row.get(15)?,
                         approval_required: row.get(16)?,
                         review_digest: row.get(17)?,
+                        cancel_serialized_transaction: row.get(18)?,
+                        cancel_transaction_hashes: row.get(19)?,
                     })
                 },
             )
@@ -650,6 +748,8 @@ struct PendingRow {
     block_number: Option<String>,
     approval_required: i64,
     review_digest: Option<String>,
+    cancel_serialized_transaction: Option<String>,
+    cancel_transaction_hashes: Option<String>,
 }
 
 impl PendingRow {
@@ -695,6 +795,27 @@ impl PendingRow {
             self.review_digest.is_none() || self.approved_at.is_some(),
             "stored review digest has no exceptional approval timestamp"
         );
+        if let Some(bytes) = &self.cancel_serialized_transaction {
+            validate_hex(bytes, None)?;
+        }
+        let cancel_transaction_hashes = self
+            .cancel_transaction_hashes
+            .as_deref()
+            .map(parse_cancel_hashes)
+            .transpose()?
+            .unwrap_or_default();
+        ensure!(
+            self.cancel_serialized_transaction.is_some() != cancel_transaction_hashes.is_empty(),
+            "stored cancellation is incomplete"
+        );
+        ensure!(
+            self.cancel_serialized_transaction.is_none() || self.serialized_transaction.is_some(),
+            "stored cancellation has no original signed transaction"
+        );
+        ensure!(
+            self.status != "cancelling" || self.cancel_serialized_transaction.is_some(),
+            "cancelling transaction has no cancellation envelope"
+        );
         Ok(PendingTransaction {
             request_id,
             wallet_id: self.wallet_id,
@@ -715,8 +836,35 @@ impl PendingRow {
             signed_transaction_hash: self.signed_transaction_hash,
             broadcast_transaction_hash: self.broadcast_transaction_hash,
             block_number: self.block_number,
+            cancel_serialized_transaction: self.cancel_serialized_transaction,
+            cancel_transaction_hashes,
         })
     }
+}
+
+const MAX_CANCELLATION_ATTEMPTS: usize = 8;
+
+fn parse_cancel_hashes(value: &str) -> Result<Vec<String>> {
+    let hashes: Vec<String> =
+        serde_json::from_str(value).context("stored cancellation hashes are invalid JSON")?;
+    ensure!(
+        !hashes.is_empty() && hashes.len() <= MAX_CANCELLATION_ATTEMPTS,
+        "stored cancellation hash list has an invalid length"
+    );
+    for hash in &hashes {
+        validate_hex(hash, Some(32))?;
+    }
+    Ok(hashes)
+}
+
+fn validate_block_number(block_number: &str) -> Result<()> {
+    ensure!(
+        block_number == "0"
+            || (!block_number.starts_with('0')
+                && block_number.bytes().all(|byte| byte.is_ascii_digit())),
+        "block number must be canonical decimal"
+    );
+    Ok(())
 }
 
 fn parse_time(value: &str) -> Result<DateTime<Utc>> {
@@ -918,6 +1066,102 @@ mod tests {
             store
                 .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0304", second_hash,)
                 .is_ok()
+        );
+    }
+
+    const ORIGINAL_HASH: &str =
+        "0x3333333333333333333333333333333333333333333333333333333333333333";
+    const CANCEL_HASH_ONE: &str =
+        "0x6666666666666666666666666666666666666666666666666666666666666666";
+    const CANCEL_HASH_TWO: &str =
+        "0x7777777777777777777777777777777777777777777777777777777777777777";
+
+    fn broadcast_original(store: &mut PendingStore) -> Uuid {
+        let signed = store
+            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", ORIGINAL_HASH)
+            .unwrap();
+        store.claim_for_submission(signed.request_id).unwrap();
+        store.mark_broadcast(signed.request_id, ORIGINAL_HASH).unwrap();
+        signed.request_id
+    }
+
+    #[test]
+    fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
+        let (_directory, mut store) = store();
+
+        // A cancellation may only race an envelope that reached the network.
+        let signed = store
+            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", ORIGINAL_HASH)
+            .unwrap();
+        assert!(
+            store
+                .store_cancellation(signed.request_id, "0x0304", CANCEL_HASH_ONE)
+                .is_err()
+        );
+        store.claim_for_submission(signed.request_id).unwrap();
+        store
+            .mark_broadcast(signed.request_id, ORIGINAL_HASH)
+            .unwrap();
+        let request_id = signed.request_id;
+
+        // Repricing appends to the hash history, keeps only the newest bytes,
+        // and refuses duplicates.
+        let cancelling = store
+            .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+            .unwrap();
+        assert_eq!(cancelling.status, PendingStatus::Cancelling);
+        assert!(
+            store
+                .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+                .is_err()
+        );
+        let repriced = store
+            .store_cancellation(request_id, "0x0506", CANCEL_HASH_TWO)
+            .unwrap();
+        assert_eq!(
+            repriced.cancel_serialized_transaction.as_deref(),
+            Some("0x0506")
+        );
+        assert_eq!(
+            repriced.cancel_transaction_hashes,
+            [CANCEL_HASH_ONE, CANCEL_HASH_TWO]
+        );
+
+        let cancelled = store.mark_cancelled(request_id, "123").unwrap();
+        assert_eq!(cancelled.status, PendingStatus::Cancelled);
+        assert_eq!(cancelled.block_number.as_deref(), Some("123"));
+        assert!(store.mark_cancelled(request_id, "124").is_err());
+        assert!(store.finalize(request_id, true, "124").is_err());
+
+        // Terminal: the wallet+chain in-flight slot is free again.
+        broadcast_original(&mut store);
+    }
+
+    #[test]
+    fn original_can_still_win_the_race_against_its_own_cancellation() {
+        let (_directory, mut store) = store();
+        let request_id = broadcast_original(&mut store);
+        store
+            .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+            .unwrap();
+        assert_eq!(
+            store.finalize(request_id, true, "123").unwrap().status,
+            PendingStatus::Confirmed
+        );
+    }
+
+    #[test]
+    fn foreign_replacement_can_win_the_race_against_a_cancellation() {
+        // An envelope this wallet never signed consumed the nonce, for
+        // example one sent from the same key imported on another device.
+        let (_directory, mut store) = store();
+        let request_id = broadcast_original(&mut store);
+        store
+            .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+            .unwrap();
+        assert_eq!(
+            store.mark_replaced(request_id).unwrap().status,
+            PendingStatus::Replaced
         );
     }
 

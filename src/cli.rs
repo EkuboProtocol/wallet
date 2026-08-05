@@ -3706,6 +3706,8 @@ mod tests {
             signed_transaction_hash: None,
             broadcast_transaction_hash: None,
             block_number: None,
+            cancel_serialized_transaction: None,
+            cancel_transaction_hashes: Vec::new(),
         };
 
         let line = transaction_line(&record);
