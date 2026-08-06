@@ -98,14 +98,21 @@ pub fn interactive_list_rows(chrome_rows: usize) -> usize {
 /// the highlighted option is nowhere to be seen. Clamping each label to the
 /// width the prompt leaves it keeps that from happening at any terminal size.
 ///
-/// Newlines collapse to spaces for the same reason; the trailing `…` marks
-/// what was cut, and the expanded view is where the full value lives.
+/// Every disallowed character collapses to a space for the same reason,
+/// newlines included; the trailing `…` marks what was cut, and the expanded
+/// view is where the full value lives.
+///
+/// Newlines alone were not enough. Bidirectional and zero-width controls
+/// report a display width of zero, so the clamp counted them as free and
+/// passed them through — which is exactly what a label needs not to do, since
+/// these labels carry network names, currency symbols, and URLs that arrived
+/// from outside.
 #[must_use]
 pub fn interactive_list_label(label: &str) -> String {
     let columns = crossterm::terminal::size()
         .map_or(FALLBACK_TERMINAL_COLUMNS, |(columns, _)| columns as usize)
         .saturating_sub(LIST_LABEL_CHROME_COLUMNS);
-    clamp_to_columns(&label.replace('\n', " "), columns)
+    clamp_to_columns(&terminal_safe_line(label), columns)
 }
 
 /// Display width of `text` in terminal columns, counting wide glyphs as the
@@ -218,6 +225,21 @@ pub fn explorer_transaction_url(
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+
+    #[test]
+    fn a_picker_label_carries_no_invisible_direction() {
+        // Zero-width by definition, which is how they survived a clamp that
+        // counts display columns: the label got shorter by no columns at all.
+        let label = interactive_list_label("mainnet\u{202e}drowssap\u{200b}\u{feff}");
+        assert!(
+            !label
+                .chars()
+                .any(ekubo_wallet_core::sanitize::is_disallowed),
+            "label still carries a disallowed character: {label:?}"
+        );
+        assert!(label.starts_with("mainnet"));
+        assert_eq!(interactive_list_label("plain"), "plain");
+    }
 
     #[test]
     fn relative_times_read_naturally_in_both_directions() {

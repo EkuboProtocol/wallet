@@ -663,22 +663,28 @@ pub(crate) fn validate_network(network: &NetworkConfig) -> Result<()> {
         ensure!(
             !display_name.trim().is_empty()
                 && display_name.len() <= 128
-                && !display_name.chars().any(char::is_control),
-            "network display name must contain 1-128 printable characters"
+                && !display_name.chars().any(crate::sanitize::is_disallowed),
+            "network display name must contain 1-128 characters and no control, \
+             bidirectional, or zero-width characters"
         );
     }
     if let Some(currency) = &network.native_currency {
         ensure!(
             !currency.name.trim().is_empty()
                 && currency.name.len() <= 64
-                && !currency.name.chars().any(char::is_control),
-            "native currency name must contain 1-64 printable characters"
+                && !currency.name.chars().any(crate::sanitize::is_disallowed),
+            "native currency name must contain 1-64 characters and no control, \
+             bidirectional, or zero-width characters"
         );
+        // The symbol sits beside an amount on the approval screen, which is
+        // the one place a right-to-left override buys something: it can move
+        // the digits it is next to.
         ensure!(
             !currency.symbol.trim().is_empty()
                 && currency.symbol.len() <= 32
-                && !currency.symbol.chars().any(char::is_control),
-            "native currency symbol must contain 1-32 printable characters"
+                && !currency.symbol.chars().any(crate::sanitize::is_disallowed),
+            "native currency symbol must contain 1-32 characters and no control, \
+             bidirectional, or zero-width characters"
         );
     }
     for (label, url) in [
@@ -1086,5 +1092,34 @@ mod tests {
         let mut candidate = default_networks().remove(0);
         candidate.aliases.push("bad\nvalue".into());
         assert!(validate_network(&candidate).is_err());
+    }
+
+    #[test]
+    fn network_display_fields_reject_invisible_and_bidirectional_characters() {
+        // `char::is_control` is false for every one of these, so the old
+        // predicate admitted them — into picker labels and, for the symbol,
+        // onto the line of the approval screen that names an amount.
+        for injected in ["\u{202e}", "\u{200b}", "\u{feff}", "\u{2066}"] {
+            let mut candidate = default_networks().remove(0);
+            candidate.display_name = Some(format!("Ethereum{injected}"));
+            assert!(
+                validate_network(&candidate).is_err(),
+                "display name accepted {injected:?}"
+            );
+
+            let mut candidate = default_networks().remove(0);
+            if let Some(currency) = candidate.native_currency.as_mut() {
+                currency.symbol = format!("ETH{injected}");
+            }
+            assert!(
+                validate_network(&candidate).is_err(),
+                "currency symbol accepted {injected:?}"
+            );
+        }
+
+        // Ordinary non-ASCII display text is still fine.
+        let mut candidate = default_networks().remove(0);
+        candidate.display_name = Some("Éthereum メインネット".into());
+        assert!(validate_network(&candidate).is_ok());
     }
 }

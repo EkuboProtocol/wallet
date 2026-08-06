@@ -418,7 +418,9 @@ async fn add_flow(
     if let Some(entry) = confirm_and_save(config, presence, &draft).await? {
         tui::outro(format!(
             "Stored {} → {} on chain {}.",
-            entry.alias, entry.address, entry.chain_id
+            crate::render::terminal_safe_line(&entry.alias),
+            entry.address,
+            entry.chain_id
         ));
     }
     Ok(())
@@ -432,7 +434,15 @@ async fn edit_flow(
     networks: &[NetworkConfig],
     entry: &AddressBookEntry,
 ) -> Result<()> {
-    tui::intro(format!("Edit address book entry {}", entry.alias));
+    // Stored text, and `intro`/`outro` do not sanitize — the table view does,
+    // through `Span::plain`. A row written before the current alias rules, or
+    // by anything else with write access to the database, reaches these lines
+    // as it was stored. `remove` deliberately accepts such a row so the owner
+    // can delete it, which is precisely when these lines print it.
+    tui::intro(format!(
+        "Edit address book entry {}",
+        crate::render::terminal_safe_line(&entry.alias)
+    ));
     let chain_id: u64 = entry
         .chain_id
         .parse()
@@ -482,7 +492,9 @@ async fn remove_flow(
     {
         tui::outro(format!(
             "Removed {} → {} from chain {}.",
-            removed.alias, removed.address, removed.chain_id
+            crate::render::terminal_safe_line(&removed.alias),
+            removed.address,
+            removed.chain_id
         ));
     }
     Ok(())
@@ -530,8 +542,16 @@ fn prompt_note(initial: Option<&str>) -> Result<NotePrompt> {
     let mut prompt = tui::text("Note")
         .help("Optional — leave empty for none")
         .validate(|value| {
-            if value.chars().any(char::is_control) {
-                Err("cannot contain control characters".into())
+            // The same predicate `AddressBookStore::sanitize_note` applies on
+            // the way in. When these two disagreed, a note carrying a
+            // bidirectional control passed the prompt and the confirmation
+            // screen and then failed at the write, which tells the owner they
+            // typed something wrong at the last possible moment.
+            if value
+                .chars()
+                .any(ekubo_wallet_core::sanitize::is_disallowed)
+            {
+                Err("cannot contain control, bidirectional, or zero-width characters".into())
             } else if value.len() > MAX_NOTE_LEN {
                 Err(format!("must be at most {MAX_NOTE_LEN} bytes"))
             } else {
