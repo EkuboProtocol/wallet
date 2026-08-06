@@ -377,55 +377,41 @@ struct TokenListOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct AddTokenInput {
-    chain_id: crate::token_store::ChainIdInput,
-    address: String,
-    /// The symbol the token list gives this address. This is what a reviewer
-    /// will read, so it comes from the list rather than from the contract.
-    symbol: String,
-    #[serde(default)]
-    name: Option<String>,
-    /// Must match what the contract reports; a disagreement is refused rather
-    /// than resolved, because decimals scales every displayed amount.
-    decimals: u8,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ImportTokenItem {
+struct ProposeTokenItem {
     /// Accepts a canonical decimal string or the bare number used by
     /// standard token-list files.
     #[serde(alias = "chainId")]
     chain_id: crate::token_store::ChainIdInput,
     address: String,
-    /// The list's symbol for this address, and the only name the wallet will
-    /// display for it.
+    /// The list's symbol for this address. If the owner accepts it, this is
+    /// the name they will read whenever a transaction moves the token, so it
+    /// must be the list's symbol and not the contract's.
     symbol: String,
     #[serde(default)]
     name: Option<String>,
+    /// The list's decimals. Checked against the contract when the owner
+    /// accepts, and refused there if the two disagree.
     decimals: u8,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ImportTokenListInput {
-    #[serde(default)]
-    list_name: Option<String>,
-    tokens: Vec<ImportTokenItem>,
+struct ProposeTokensInput {
+    /// Where these entries came from — the token list's own name, for
+    /// instance. The owner reviews suggestions grouped under it and usually
+    /// decides a whole list at once, so name the real source rather than
+    /// something generic.
+    list_name: String,
+    tokens: Vec<ProposeTokenItem>,
 }
 
-#[derive(Debug, Default, Serialize, JsonSchema)]
-struct ImportTokenListOutput {
-    added: u64,
-    /// Already present, in the database or repeated within the list.
-    skipped_existing: u64,
-    /// On chains this server has no configured network for.
-    skipped_unconfigured_chain: u64,
-    /// Contracts that answered neither `symbol()` nor `decimals()`.
-    skipped_unverifiable: u64,
-    /// Up to 32 chain:address identifiers of unverifiable entries.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    unverifiable: Vec<String>,
+#[derive(Debug, Serialize, JsonSchema)]
+struct ProposeTokensOutput {
+    #[serde(flatten)]
+    summary: crate::token_store::ProposalSummary,
+    /// Every suggestion now waiting for the owner, this call's included.
+    awaiting_review: u64,
+    next_step: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1114,88 +1100,28 @@ impl WalletMcpServer {
     }
 
     #[tool(
-        name = "wallet_add_token",
-        description = "Add one token to the local token database under the symbol, name, and decimals you supply from a token list. The symbol is what the owner will read when reviewing a transaction that moves this token, so it is taken from the list you pass and never from the contract, whose symbol() any address can answer with anything. The contract is still consulted to confirm a token lives at the address and that its decimals match the list; a decimals disagreement is refused rather than resolved. Fails if the chain_id/address pair already exists; existing entries are never overwritten.",
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true
-        )
-    )]
-    async fn wallet_add_token(
-        &self,
-        Parameters(input): Parameters<AddTokenInput>,
-    ) -> Result<Json<StoredToken>, ErrorData> {
-        let chain_id = input.chain_id.value().map_err(|error| tool_error(&error))?;
-        let network = self
-            .config
-            .network_by_chain_id(&chain_id.to_string())
-            .map_err(|error| tool_error(&error))?;
-        let address = Address::from_str(&input.address).map_err(|_| {
-            ErrorData::invalid_params("address must be a 20-byte EVM address", None)
-        })?;
-        let listed = crate::token_store::ListedToken {
-            chain_id,
-            address,
-            symbol: input.symbol,
-            name: input.name,
-            decimals: input.decimals,
-        };
-        let verified = crate::token_store::verify_listings(&network, &[listed])
-            .await
-            .map_err(|error| tool_error(&error))?;
-        let (listed, rejection) = verified
-            .into_iter()
-            .next()
-            .ok_or_else(|| ErrorData::internal_error("verification returned no result", None))?;
-        if let Some(rejection) = rejection {
-            return Err(tool_error(&anyhow::anyhow!(
-                "refusing to store {} on chain {chain_id} as a token: {rejection}",
-                address.to_checksum(None)
-            )));
-        }
-        let mut store = self
-            .tokens
-            .lock()
-            .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
-        Ok(Json(
-            store
-                .add(&listed, "mcp:add")
-                .map_err(|error| tool_error(&error))?,
-        ))
-    }
-
-    #[tool(
-        name = "wallet_import_token_list",
-        description = "Import up to 1000 tokens into the local token database under the symbols, names, and decimals carried by the list itself. Those symbols are what the owner reads when reviewing a transaction that moves these tokens, which is why they come from a curated list rather than from each contract's own symbol(), a string any address can answer with anything. Each new token's contract is still consulted to confirm a token exists there and that its decimals agree with the list; entries that fail either check are reported and skipped. Existing chain_id/address pairs are skipped, never overwritten; tokens on unconfigured chains are reported and skipped.",
+        name = "wallet_propose_tokens",
+        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet token review`, where they accept or reject them by list. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting is where contracts are checked, so a bad entry is caught then rather than here.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
-            open_world_hint = true
+            open_world_hint = false
         )
     )]
-    async fn wallet_import_token_list(
+    fn wallet_propose_tokens(
         &self,
-        Parameters(input): Parameters<ImportTokenListInput>,
-    ) -> Result<Json<ImportTokenListOutput>, ErrorData> {
+        Parameters(input): Parameters<ProposeTokensInput>,
+    ) -> Result<Json<ProposeTokensOutput>, ErrorData> {
         ensure_tool(
             !input.tokens.is_empty(),
-            "token list must contain at least one token",
+            "a proposal must contain at least one token",
         )?;
         ensure_tool(
             input.tokens.len() <= crate::token_store::MAX_IMPORT_TOKENS,
-            "token list exceeds the per-import maximum",
+            "proposal exceeds the per-call maximum",
         )?;
-        let source = format!(
-            "mcp:import:{}",
-            input.list_name.as_deref().unwrap_or("unnamed")
-        );
-
-        // Group by chain so each configured chain gets one verification pass.
-        let mut by_chain: std::collections::BTreeMap<u64, Vec<crate::token_store::ListedToken>> =
-            std::collections::BTreeMap::new();
+        let mut listed = Vec::with_capacity(input.tokens.len());
         for item in &input.tokens {
             let chain_id = item.chain_id.value().map_err(|error| tool_error(&error))?;
             let address = Address::from_str(&item.address).map_err(|_| {
@@ -1207,75 +1133,32 @@ impl WalletMcpServer {
                     None,
                 )
             })?;
-            by_chain
-                .entry(chain_id)
-                .or_default()
-                .push(crate::token_store::ListedToken {
-                    chain_id,
-                    address,
-                    symbol: item.symbol.clone(),
-                    name: item.name.clone(),
-                    decimals: item.decimals,
-                });
+            listed.push(crate::token_store::ListedToken {
+                chain_id,
+                address,
+                symbol: item.symbol.clone(),
+                name: item.name.clone(),
+                decimals: item.decimals,
+            });
         }
-
-        let mut output = ImportTokenListOutput::default();
-        for (chain_id, listed) in by_chain {
-            let Ok(network) = self.config.network_by_chain_id(&chain_id.to_string()) else {
-                output.skipped_unconfigured_chain += listed.len() as u64;
-                continue;
-            };
-            // Deduplicate within the list and against the database before the
-            // RPC pass so only genuinely new tokens are verified on-chain.
-            // The store lock is scoped per phase: it is never held across the
-            // Multicall3 verification await.
-            let mut new_tokens: Vec<crate::token_store::ListedToken> = Vec::new();
-            {
-                let store = self.tokens.lock().map_err(|_| {
-                    ErrorData::internal_error("token database lock was poisoned", None)
-                })?;
-                for token in listed {
-                    if new_tokens.iter().any(|seen| seen.address == token.address) {
-                        output.skipped_existing += 1;
-                        continue;
-                    }
-                    match store.get(chain_id, token.address) {
-                        Ok(Some(_)) => output.skipped_existing += 1,
-                        Ok(None) => new_tokens.push(token),
-                        Err(error) => return Err(tool_error(&error)),
-                    }
-                }
-            }
-            if new_tokens.is_empty() {
-                continue;
-            }
-            let verified = crate::token_store::verify_listings(&network, &new_tokens)
-                .await
-                .map_err(|error| tool_error(&error))?;
-            let mut store = self
-                .tokens
-                .lock()
-                .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
-            for (token, rejection) in verified {
-                if let Some(rejection) = rejection {
-                    output.skipped_unverifiable += 1;
-                    if output.unverifiable.len() < 32 {
-                        output.unverifiable.push(format!(
-                            "{chain_id}:{}: {rejection}",
-                            token.address.to_checksum(None)
-                        ));
-                    }
-                    continue;
-                }
-                match store.insert_if_absent(&token, &source) {
-                    Ok(true) => output.added += 1,
-                    Ok(false) => output.skipped_existing += 1,
-                    Err(error) => return Err(tool_error(&error)),
-                }
-            }
-            drop(store);
-        }
-        Ok(Json(output))
+        let mut store = self
+            .tokens
+            .lock()
+            .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
+        let summary = store
+            .propose(&listed, &input.list_name)
+            .map_err(|error| tool_error(&error))?;
+        let awaiting_review = store
+            .count_proposals()
+            .map_err(|error| tool_error(&error))?;
+        Ok(Json(ProposeTokensOutput {
+            summary,
+            awaiting_review,
+            next_step: "The owner reviews these with `ekubo-wallet token review`. \
+                        Until they accept one, the wallet keeps showing that token by \
+                        address alone."
+                .into(),
+        }))
     }
 
     #[tool(
@@ -3159,7 +3042,6 @@ mod tests {
             names,
             [
                 "wallet_add_network",
-                "wallet_add_token",
                 "wallet_address_book",
                 "wallet_attempt_cancel",
                 "wallet_batch_eth_call",
@@ -3172,10 +3054,10 @@ mod tests {
                 "wallet_get_portfolio",
                 "wallet_get_status",
                 "wallet_get_execution_status",
-                "wallet_import_token_list",
                 "wallet_list",
                 "wallet_list_tokens",
                 "wallet_propose_policy",
+                "wallet_propose_tokens",
                 "wallet_send_execution_plan",
                 "wallet_send_transfers",
                 "wallet_sign_message",

@@ -144,6 +144,26 @@ pub struct ListedToken {
     pub decimals: u8,
 }
 
+/// One token an agent has suggested, waiting for the owner to decide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenProposal {
+    pub token: ListedToken,
+    /// The list the suggestion came from, used to group the review screen.
+    pub source: String,
+    pub proposed_at: String,
+}
+
+/// What one call to [`TokenStore::propose`] did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ProposalSummary {
+    /// Now awaiting the owner's review.
+    pub pending: u64,
+    /// Already in the token database, so there is nothing to decide.
+    pub already_confirmed: u64,
+    /// Refused outright, currently only for an empty symbol.
+    pub rejected: u64,
+}
+
 /// Why a listed token was refused at import.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListingRejection {
@@ -296,6 +316,111 @@ impl TokenStore {
             )
             .optional()
             .context("failed to read token")
+    }
+
+    /// Record tokens an agent suggests, for the owner to review in the
+    /// terminal. Nothing here is a display name yet — a suggestion becomes one
+    /// only by being confirmed into `tokens`.
+    ///
+    /// Tokens already confirmed are skipped rather than re-proposed, so review
+    /// only ever shows genuinely new decisions. A repeated suggestion for the
+    /// same address replaces the previous one: the latest claim is the one the
+    /// owner will judge, and keeping stale variants around would mean showing
+    /// the same token twice under two different names.
+    pub fn propose(&mut self, tokens: &[ListedToken], source: &str) -> Result<ProposalSummary> {
+        let source = sanitize(source);
+        ensure!(!source.is_empty(), "a proposal needs a source list name");
+        let mut summary = ProposalSummary::default();
+        for token in tokens {
+            ensure!(token.chain_id > 0, "chain ID must be positive");
+            if self.get(token.chain_id, token.address)?.is_some() {
+                summary.already_confirmed += 1;
+                continue;
+            }
+            let symbol = sanitize(&token.symbol);
+            if symbol.is_empty() {
+                summary.rejected += 1;
+                continue;
+            }
+            self.database.connection.execute(
+                "INSERT INTO token_proposals(
+                     chain_id, address, symbol, name, decimals, source, proposed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(chain_id, address) DO UPDATE SET
+                     symbol = excluded.symbol,
+                     name = excluded.name,
+                     decimals = excluded.decimals,
+                     source = excluded.source,
+                     proposed_at = excluded.proposed_at",
+                params![
+                    i64::try_from(token.chain_id).context("chain ID out of range")?,
+                    format!("{:#x}", token.address),
+                    symbol,
+                    token.name.as_deref().map(sanitize),
+                    token.decimals,
+                    source,
+                    Utc::now().to_rfc3339(),
+                ],
+            )?;
+            summary.pending += 1;
+        }
+        Ok(summary)
+    }
+
+    /// Every suggestion awaiting the owner, oldest source first so the review
+    /// screen's grouping is stable between runs.
+    pub fn proposals(&self) -> Result<Vec<TokenProposal>> {
+        let mut statement = self.database.connection.prepare(
+            "SELECT chain_id, address, symbol, name, decimals, source, proposed_at
+             FROM token_proposals ORDER BY source, chain_id, symbol, address",
+        )?;
+        let mapped = statement.query_map([], |row| {
+            let chain_id: i64 = row.get(0)?;
+            let address: String = row.get(1)?;
+            let decimals: i64 = row.get(4)?;
+            Ok(TokenProposal {
+                token: ListedToken {
+                    chain_id: u64::try_from(chain_id).unwrap_or_default(),
+                    address: Address::from_str(&address).unwrap_or(Address::ZERO),
+                    symbol: row.get(2)?,
+                    name: row.get(3)?,
+                    decimals: u8::try_from(decimals).unwrap_or_default(),
+                },
+                source: row.get(5)?,
+                proposed_at: row.get(6)?,
+            })
+        })?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row?);
+        }
+        Ok(rows)
+    }
+
+    pub fn count_proposals(&self) -> Result<u64> {
+        let count: i64 = self.database.connection.query_row(
+            "SELECT COUNT(*) FROM token_proposals",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(count).unwrap_or_default())
+    }
+
+    /// Drop suggestions the owner has decided on, whether they accepted or
+    /// rejected them: either way the decision is made and re-asking would
+    /// train the owner to dismiss the screen.
+    pub fn discard_proposals(&mut self, tokens: &[(u64, Address)]) -> Result<u64> {
+        let mut removed = 0;
+        for (chain_id, address) in tokens {
+            removed += self.database.connection.execute(
+                "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+                params![
+                    i64::try_from(*chain_id).context("chain ID out of range")?,
+                    format!("{address:#x}")
+                ],
+            )?;
+        }
+        Ok(u64::try_from(removed).unwrap_or_default())
     }
 
     /// Display metadata for the tokens a plan names, drawn only from rows the
@@ -1071,6 +1196,72 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A suggestion is not a name. Until the owner confirms it, nothing an
+    /// agent proposed may reach the review screen's display metadata.
+    #[test]
+    fn a_proposal_names_nothing_until_it_is_confirmed() {
+        let (_directory, mut store) = store();
+        let token = Address::repeat_byte(0x77);
+        let summary = store
+            .propose(
+                &[ListedToken {
+                    symbol: "USDC".into(),
+                    ..usdc(1, token)
+                }],
+                "ekubo-default",
+            )
+            .unwrap();
+        assert_eq!(summary.pending, 1);
+
+        // Proposed, but the display path still refuses to name it.
+        assert_eq!(store.count(None).unwrap(), 0);
+        assert!(
+            !store
+                .display_metadata(1, &[token])
+                .unwrap()
+                .contains_key(&token)
+        );
+
+        // Confirming it is what turns it into a name.
+        let proposals = store.proposals().unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].source, "ekubo-default");
+        store.add(&proposals[0].token, "ekubo-default").unwrap();
+        assert_eq!(
+            store.display_metadata(1, &[token]).unwrap()[&token].symbol,
+            Some("USDC".into())
+        );
+
+        // And once confirmed it is no longer a pending decision.
+        assert_eq!(store.discard_proposals(&[(1, token)]).unwrap(), 1);
+        assert_eq!(store.count_proposals().unwrap(), 0);
+        let repeat = store.propose(&[usdc(1, token)], "another-list").unwrap();
+        assert_eq!(repeat.already_confirmed, 1);
+        assert_eq!(repeat.pending, 0);
+    }
+
+    /// Two lists suggesting the same address must not queue two decisions
+    /// showing the owner the same token under two different names.
+    #[test]
+    fn a_repeated_suggestion_replaces_the_earlier_one() {
+        let (_directory, mut store) = store();
+        let token = Address::repeat_byte(0x88);
+        store.propose(&[usdc(1, token)], "first-list").unwrap();
+        store
+            .propose(
+                &[ListedToken {
+                    symbol: "IMPOSTOR".into(),
+                    ..usdc(1, token)
+                }],
+                "second-list",
+            )
+            .unwrap();
+        let proposals = store.proposals().unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].token.symbol, "IMPOSTOR");
+        assert_eq!(proposals[0].source, "second-list");
     }
 
     #[test]

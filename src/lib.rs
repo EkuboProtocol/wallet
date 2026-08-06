@@ -16,6 +16,7 @@ pub mod fullscreen;
 pub mod mcp;
 pub mod pager;
 pub mod render;
+pub mod token_picker;
 pub mod tui;
 pub mod tx_browser;
 

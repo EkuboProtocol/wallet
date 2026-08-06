@@ -365,6 +365,25 @@ enum TokenCommand {
         #[arg(long, default_value_t = 0)]
         offset: usize,
     },
+    /// Review tokens an agent suggested, and confirm the ones to trust.
+    ///
+    /// Confirming a token is what lets the wallet show its symbol when
+    /// reviewing a transaction, so nothing an agent proposes is displayed as a
+    /// name until it is accepted here.
+    Review,
+    /// Import a token list file, confirming what to trust in the terminal.
+    ///
+    /// Reads the standard token-list shape: a `tokens` array of entries with
+    /// `chainId`, `address`, `symbol`, `name`, and `decimals`, or a bare array
+    /// of the same.
+    Import {
+        /// Path to the token list JSON file.
+        path: std::path::PathBuf,
+        /// Name recorded as the source of these tokens; defaults to the
+        /// list's own `name` field, then to the file name.
+        #[arg(long)]
+        list_name: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -406,7 +425,7 @@ impl Cli {
             Command::Network(args) => run_network(&config, args.command, mode).await,
             Command::Policy(args) => run_policy(&config, args.command, mode).await,
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
-            Command::Token(args) => run_token(&config, &args.command, mode),
+            Command::Token(args) => run_token(&config, &args.command, mode).await,
             Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
             Command::Legal(args) => run_legal(&config, &args.command, mode),
             Command::Review {
@@ -614,7 +633,7 @@ fn initialize_wallet_policy(
     Ok(())
 }
 
-fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMode) -> Result<()> {
+async fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMode) -> Result<()> {
     match command {
         TokenCommand::List {
             chain_id,
@@ -652,7 +671,236 @@ fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMode) -> 
                 },
             )
         }
+        TokenCommand::Review => run_token_review(config, mode).await,
+        TokenCommand::Import { path, list_name } => {
+            run_token_import(config, path, list_name.as_deref(), mode).await
+        }
     }
+}
+
+/// One entry of a standard token-list file. Field names follow the token-list
+/// convention so a published list parses unmodified.
+#[derive(Debug, serde::Deserialize)]
+struct TokenListEntry {
+    #[serde(rename = "chainId")]
+    chain_id: u64,
+    address: String,
+    symbol: String,
+    #[serde(default)]
+    name: Option<String>,
+    decimals: u8,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+enum TokenListFile {
+    Wrapped {
+        #[serde(default)]
+        name: Option<String>,
+        tokens: Vec<TokenListEntry>,
+    },
+    Bare(Vec<TokenListEntry>),
+}
+
+/// Import a token list the owner points at, confirming entries in the
+/// terminal. This is the trusted way names get into the database: the owner
+/// chose the file, and sees exactly what it would name before anything is
+/// written.
+async fn run_token_import(
+    config: &ConfigStore,
+    path: &std::path::Path,
+    list_name: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read token list {}", path.display()))?;
+    let parsed: TokenListFile = serde_json::from_str(&body)
+        .with_context(|| format!("{} is not a token list", path.display()))?;
+    let (declared_name, entries) = match parsed {
+        TokenListFile::Wrapped { name, tokens } => (name, tokens),
+        TokenListFile::Bare(tokens) => (None, tokens),
+    };
+    let source = list_name
+        .map(str::to_owned)
+        .or(declared_name)
+        .unwrap_or_else(|| {
+            path.file_name()
+                .map_or_else(|| "token list".into(), |name| name.to_string_lossy().into())
+        });
+    ensure!(!entries.is_empty(), "{} lists no tokens", path.display());
+
+    let mut listed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        listed.push(crate::token_store::ListedToken {
+            chain_id: entry.chain_id,
+            address: Address::from_str(&entry.address)
+                .with_context(|| format!("token address {} is not valid", entry.address))?,
+            symbol: entry.symbol,
+            name: entry.name,
+            decimals: entry.decimals,
+        });
+    }
+    confirm_and_store(config, vec![(source, listed)], mode, &[]).await
+}
+
+/// Review what agents have suggested. Accepting writes the names; rejecting
+/// forgets the suggestion so the same screen does not reappear unchanged.
+async fn run_token_review(config: &ConfigStore, mode: OutputMode) -> Result<()> {
+    let store = crate::token_store::TokenStore::production(config.data_dir())?;
+    let proposals = store.proposals()?;
+    drop(store);
+    if proposals.is_empty() {
+        return emit(mode, &serde_json::json!({ "awaiting_review": 0 }), || {
+            Ok("No tokens are waiting for review.".into())
+        });
+    }
+    if mode == OutputMode::Json || !crate::tui::interactive() {
+        return emit(
+            mode,
+            &serde_json::json!({
+                "awaiting_review": proposals.len(),
+                "tokens": proposals
+                    .iter()
+                    .map(|proposal| serde_json::json!({
+                        "chain_id": proposal.token.chain_id,
+                        "address": proposal.token.address.to_checksum(None),
+                        "symbol": proposal.token.symbol,
+                        "decimals": proposal.token.decimals,
+                        "source": proposal.source,
+                        "proposed_at": proposal.proposed_at,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+            || {
+                Ok(format!(
+                    "{} token(s) await review. Run `ekubo-wallet token review` in a \
+                     terminal to confirm them.",
+                    proposals.len()
+                ))
+            },
+        );
+    }
+
+    // Group by the list that vouched for them: that is the unit the owner
+    // actually decides, and it keeps a hundred suggestions to a few choices.
+    let mut grouped: std::collections::BTreeMap<String, Vec<crate::token_store::ListedToken>> =
+        std::collections::BTreeMap::new();
+    for proposal in proposals {
+        grouped
+            .entry(proposal.source)
+            .or_default()
+            .push(proposal.token);
+    }
+    let groups: Vec<(String, Vec<crate::token_store::ListedToken>)> = grouped.into_iter().collect();
+    let proposed: Vec<(u64, Address)> = groups
+        .iter()
+        .flat_map(|(_, tokens)| tokens.iter().map(|token| (token.chain_id, token.address)))
+        .collect();
+    confirm_and_store(config, groups, mode, &proposed).await
+}
+
+/// Show the picker, verify what the owner accepted against the chain, and
+/// write it. `clear_proposals` is the set to drop from the proposal queue once
+/// a decision is made, so a reviewed suggestion is not asked about twice.
+async fn confirm_and_store(
+    config: &ConfigStore,
+    groups: Vec<(String, Vec<crate::token_store::ListedToken>)>,
+    mode: OutputMode,
+    clear_proposals: &[(u64, Address)],
+) -> Result<()> {
+    let sources: std::collections::BTreeMap<(u64, Address), String> = groups
+        .iter()
+        .flat_map(|(source, tokens)| {
+            tokens
+                .iter()
+                .map(move |token| ((token.chain_id, token.address), source.clone()))
+        })
+        .collect();
+    let picker_groups = groups
+        .into_iter()
+        .map(|(source, tokens)| crate::token_picker::TokenGroup { source, tokens })
+        .collect();
+    let Some(decision) = crate::token_picker::review(picker_groups)? else {
+        return emit(mode, &serde_json::json!({ "confirmed": 0 }), || {
+            Ok("Nothing confirmed; the suggestions are still waiting.".into())
+        });
+    };
+
+    // Rejection needs no chain access: the owner has said no, and the only
+    // thing left is to stop asking.
+    let mut store = crate::token_store::TokenStore::production(config.data_dir())?;
+    if !decision.rejected.is_empty() {
+        let keys: Vec<(u64, Address)> = decision
+            .rejected
+            .iter()
+            .map(|token| (token.chain_id, token.address))
+            .collect();
+        let removed = store.discard_proposals(&keys)?;
+        return emit(
+            mode,
+            &serde_json::json!({ "confirmed": 0, "rejected": removed }),
+            || {
+                Ok(format!(
+                    "Rejected {removed} suggestion(s); nothing was named."
+                ))
+            },
+        );
+    }
+
+    // Accepting is where the chain finally gets its veto: confirm a token
+    // lives at each address and that decimals agree with what the owner just
+    // read, one Multicall3 pass per chain.
+    let mut by_chain: std::collections::BTreeMap<u64, Vec<crate::token_store::ListedToken>> =
+        std::collections::BTreeMap::new();
+    for token in decision.accepted {
+        by_chain.entry(token.chain_id).or_default().push(token);
+    }
+    let mut confirmed = 0_u64;
+    let mut refused: Vec<String> = Vec::new();
+    let mut decided: Vec<(u64, Address)> = Vec::new();
+    for (chain_id, tokens) in by_chain {
+        let Ok(network) = config.network_by_chain_id(&chain_id.to_string()) else {
+            refused.push(format!("chain {chain_id}: no configured network"));
+            continue;
+        };
+        for (token, rejection) in crate::token_store::verify_listings(&network, &tokens).await? {
+            let key = (token.chain_id, token.address);
+            if let Some(rejection) = rejection {
+                refused.push(format!(
+                    "{} ({}): {rejection}",
+                    token.symbol,
+                    token.address.to_checksum(None)
+                ));
+                continue;
+            }
+            let source = sources.get(&key).cloned().unwrap_or_else(|| "list".into());
+            if store.insert_if_absent(&token, &source)? {
+                confirmed += 1;
+            }
+            decided.push(key);
+        }
+    }
+    // Only forget suggestions that were actually decided. One refused by the
+    // chain stays queued, because the owner's answer was yes and the reason it
+    // did not land is worth showing again.
+    if !clear_proposals.is_empty() {
+        let clear: Vec<(u64, Address)> = decided
+            .into_iter()
+            .filter(|key| clear_proposals.contains(key))
+            .collect();
+        store.discard_proposals(&clear)?;
+    }
+    emit(
+        mode,
+        &serde_json::json!({ "confirmed": confirmed, "refused": refused }),
+        || {
+            let mut lines = vec![format!("Confirmed {confirmed} token name(s).")];
+            for entry in &refused {
+                lines.push(format!("  refused — {entry}"));
+            }
+            Ok(lines.join("\n"))
+        },
+    )
 }
 
 /// Resolve a network by name, alias, or canonical decimal chain ID.

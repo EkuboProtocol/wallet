@@ -18,7 +18,10 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
+/// The oldest schema this build can still upgrade. Anything below it belongs
+/// to the retired pre-release ladder and is refused with guidance instead.
+const RETIRED_SCHEMA_FLOOR: i64 = 11;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.policy-database-key.v1";
@@ -166,10 +169,14 @@ impl PolicyStore {
                 create_current_schema(&connection)?;
                 SCHEMA_VERSION
             }
-            Some(version) if version < SCHEMA_VERSION => bail!(
+            Some(version) if version < RETIRED_SCHEMA_FLOOR => bail!(
                 "policy database schema {version} predates this build; run ekubo-wallet \
                  v0.3.0-rc.0 once to upgrade it, then retry"
             ),
+            Some(version) if version < SCHEMA_VERSION => {
+                migrate(&connection, version)?;
+                SCHEMA_VERSION
+            }
             Some(version) => version,
         };
         ensure!(
@@ -690,9 +697,41 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  rationale TEXT NOT NULL,
                  created_at TEXT NOT NULL
              ) STRICT",
+            TOKEN_PROPOSALS_TABLE,
             record_version.as_str(),
         ],
     )
+}
+
+/// Tokens an agent has suggested, held apart from `tokens` until the owner
+/// confirms them. Nothing here is ever read as a display name: a row only
+/// becomes a name by being moved into `tokens` from the terminal.
+///
+/// `source` is the list the suggestion came from, so the review screen can
+/// group a hundred suggestions into the handful of decisions they really are.
+const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals (
+     chain_id INTEGER NOT NULL CHECK (chain_id > 0),
+     address TEXT NOT NULL
+         CHECK (address = lower(address) AND length(address) = 42),
+     symbol TEXT NOT NULL,
+     name TEXT,
+     decimals INTEGER NOT NULL CHECK (decimals >= 0 AND decimals <= 255),
+     source TEXT NOT NULL,
+     proposed_at TEXT NOT NULL,
+     PRIMARY KEY (chain_id, address)
+ ) STRICT";
+
+/// Upgrade an older database in place. Each step is idempotent and additive,
+/// so an interrupted upgrade re-runs harmlessly at the next open.
+fn migrate(connection: &Connection, from: i64) -> Result<()> {
+    let mut statements: Vec<&str> = Vec::new();
+    if from < 12 {
+        statements.push(TOKEN_PROPOSALS_TABLE);
+    }
+    let record =
+        format!("UPDATE schema_metadata SET version = {SCHEMA_VERSION} WHERE singleton = 1");
+    statements.push(record.as_str());
+    run_transaction(connection, &statements).context("policy database upgrade failed")
 }
 
 fn run_transaction(connection: &Connection, statements: &[&str]) -> Result<()> {
@@ -890,6 +929,45 @@ mod tests {
         assert!(error.contains("schema 9 predates"), "{error}");
         assert!(error.contains("v0.3.0-rc.0"), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    /// Schema 11 shipped without `token_proposals`. Opening such a database
+    /// must upgrade it in place — an existing wallet cannot be asked to
+    /// recreate its policies because a new table appeared — and must not
+    /// disturb the rows already there.
+    #[test]
+    fn a_schema_11_database_gains_token_proposals_in_place() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        {
+            let mut store = PolicyStore::open(&path, &key(12)).unwrap();
+            store
+                .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+                .unwrap();
+            store
+                .connection
+                .execute("DROP TABLE token_proposals", [])
+                .unwrap();
+            store
+                .connection
+                .execute("UPDATE schema_metadata SET version = 11", [])
+                .unwrap();
+        }
+
+        let store = PolicyStore::open(&path, &key(12)).unwrap();
+        assert_eq!(schema_version(&store.connection).unwrap(), Some(12));
+        let proposals: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM token_proposals", [], |row| row.get(0))
+            .expect("the upgrade must create the table");
+        assert_eq!(proposals, 0);
+        // The upgrade is additive: what was already stored survives it.
+        assert!(store.get("primary").unwrap().is_some());
+
+        // And it is idempotent — reopening an already-upgraded database is a
+        // no-op rather than a second CREATE that fails.
+        drop(store);
+        assert!(PolicyStore::open(&path, &key(12)).is_ok());
     }
 
     #[test]
