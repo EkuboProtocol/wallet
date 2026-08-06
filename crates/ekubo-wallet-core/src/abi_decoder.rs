@@ -494,23 +494,32 @@ fn decode_parameters(
     if input.len() > MAX_COLLECTION_ITEMS {
         return fail("resource_limit", "too many ABI parameters");
     }
-    let parameters: Vec<Param> = input
-        .iter()
-        .map(|parameter| {
-            serde_json::from_value(serde_json::to_value(parameter).map_err(|error| {
-                failure(
-                    "invalid_abi",
-                    format!("ABI parameter is malformed: {error}"),
-                )
-            })?)
-            .map_err(|error| {
-                failure(
-                    "invalid_abi",
-                    format!("ABI parameters are malformed: {error}"),
-                )
-            })
-        })
-        .collect::<Result<_, _>>()?;
+    // The same byte ceiling `decode_function` applies to a named ABI, and for
+    // the same reason: the count bounds how many parameters arrive and says
+    // nothing about how deeply each one nests, so a handful of entries could
+    // carry a descriptor of any size. Checked before the tree is built rather
+    // than after, since the point is not to build it.
+    let encoded = serde_json::to_vec(input).map_err(|error| {
+        failure(
+            "invalid_abi",
+            format!("ABI parameters are not valid JSON: {error}"),
+        )
+    })?;
+    if encoded.len() > MAX_ABI_BYTES {
+        return fail(
+            "resource_limit",
+            format!("serialized ABI parameters exceed {MAX_ABI_BYTES} bytes"),
+        );
+    }
+    // One deserialization of the whole list, not a to_value/from_value pair
+    // per entry: the round trip through `Value` was a second full copy of a
+    // tree the caller had already sent.
+    let parameters: Vec<Param> = serde_json::from_slice(&encoded).map_err(|error| {
+        failure(
+            "invalid_abi",
+            format!("ABI parameters are malformed: {error}"),
+        )
+    })?;
     validate_parameter_tree(&parameters, 0)?;
     let types = parameters
         .iter()
@@ -1381,10 +1390,11 @@ fn array_dimensions(ty: &str) -> Result<Vec<Option<usize>>, DecodeFailure> {
 }
 
 fn validate_return_data(value: &str) -> Result<String, DecodeFailure> {
-    if !value.starts_with("0x")
-        || !value.len().is_multiple_of(2)
-        || !value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    // Length first, then shape. The old order scanned every byte of an
+    // oversized string to decide it was hexadecimal, only to refuse it for its
+    // length — which the length alone settled without reading any of it. Same
+    // refusal, one comparison instead of a pass over a megabyte.
+    if !value.starts_with("0x") || !value.len().is_multiple_of(2) {
         return fail(
             "malformed_return_data",
             "return_data must be 0x-prefixed whole bytes",
@@ -1396,13 +1406,22 @@ fn validate_return_data(value: &str) -> Result<String, DecodeFailure> {
             format!("return_data exceeds {MAX_RETURN_DATA_BYTES} bytes"),
         );
     }
+    if !value[2..].bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return fail(
+            "malformed_return_data",
+            "return_data must be 0x-prefixed whole bytes",
+        );
+    }
     Ok(value.to_owned())
 }
 
 fn preservable_raw(value: &str) -> bool {
-    value.starts_with("0x")
+    // The length clause leads so `&&` short-circuits before the scan, for the
+    // same reason as above: this runs on the failure path, where the value is
+    // already known to be something the decoder would not take.
+    value.len().saturating_sub(2) / 2 <= MAX_RETURN_DATA_BYTES
+        && value.starts_with("0x")
         && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
-        && value.len().saturating_sub(2) / 2 <= MAX_RETURN_DATA_BYTES
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, DecodeFailure> {
@@ -1483,6 +1502,48 @@ mod tests {
             internal_type: None,
             components: None,
         }
+    }
+
+    #[test]
+    fn a_parameter_descriptor_is_bounded_by_bytes_as_well_as_count() {
+        // Few enough entries to pass MAX_COLLECTION_ITEMS, large enough to
+        // exceed MAX_ABI_BYTES: the count says nothing about how much each
+        // entry carries, which is the gap the named-ABI path already closed.
+        let bulky = AbiParameterInput {
+            name: Some("n".repeat(4_096)),
+            ty: "uint256".into(),
+            internal_type: None,
+            components: None,
+        };
+        let input = vec![bulky; 32];
+        assert!(serde_json::to_vec(&input).unwrap().len() > MAX_ABI_BYTES);
+        assert!(input.len() < MAX_COLLECTION_ITEMS);
+
+        let mut budget = DecodeBudget {
+            collection_items_remaining: MAX_COLLECTION_ITEMS,
+            decodes_remaining: MAX_TOTAL_DECODES,
+        };
+        let Err(failure) = decode_parameters("0x", &input, &mut budget) else {
+            panic!("an oversized parameter descriptor must be refused");
+        };
+        assert_eq!(failure.0.code, "resource_limit");
+    }
+
+    #[test]
+    fn oversized_return_data_is_refused_without_being_scanned() {
+        // Not hexadecimal past the prefix, so the old order would have run the
+        // whole scan first and reported malformed. The length settles it, and
+        // the answer is the ceiling that was actually exceeded.
+        let oversized = format!("0x{}", "z".repeat(MAX_RETURN_DATA_BYTES * 2 + 2));
+        let failure = validate_return_data(&oversized).unwrap_err();
+        assert_eq!(failure.0.code, "resource_limit");
+        assert!(!preservable_raw(&oversized));
+
+        // A short non-hex value is still reported as malformed, not as a limit.
+        assert_eq!(
+            validate_return_data("0xzz").unwrap_err().0.code,
+            "malformed_return_data"
+        );
     }
 
     fn encode(values: &[DynSolValue]) -> String {
