@@ -228,7 +228,14 @@ impl ConfigStore {
         Ok(config)
     }
 
-    pub fn save(&self, config: &WalletConfig) -> Result<()> {
+    /// Write the configuration, without taking the inter-process lock.
+    ///
+    /// Private on purpose. `update` is the only correct way to change a
+    /// configuration, because a read-modify-write that does not hold the lock
+    /// silently discards whatever another CLI or MCP process wrote in between.
+    /// That rule used to live in a doc comment while the compiler allowed
+    /// anything; now the only caller that can reach this is `update` itself.
+    fn save(&self, config: &WalletConfig) -> Result<()> {
         validate_config(config)?;
         create_private_dir(&self.data_dir)?;
         let mut temporary = NamedTempFile::new_in(&self.data_dir)

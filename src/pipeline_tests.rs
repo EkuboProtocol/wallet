@@ -273,10 +273,13 @@ fn pipeline_server(
         source: WalletSource::Created,
         exported_at: None,
     };
-    let mut state = config.load().unwrap();
-    state.wallets.push(wallet.clone());
-    state.networks.push(stub_network(address));
-    config.save(&state).unwrap();
+    config
+        .update(|state| {
+            state.wallets.push(wallet.clone());
+            state.networks.push(stub_network(address));
+            Ok(())
+        })
+        .unwrap();
     let open = || {
         PolicyStore::open(
             &directory.path().join("policies.db"),
