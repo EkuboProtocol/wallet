@@ -794,10 +794,28 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
                     ));
                 }
                 (Some(rule), None) => {
-                    lines.push(format!(
-                        "- chain {label}: {}",
-                        spender_grant(spender, token, rule)
-                    ));
+                    // A token entry can lose its own rule two ways: the `*`
+                    // token under the same spender takes over, or the spender
+                    // itself disappears and the `*` spender takes over. Both
+                    // resolve through `exact_or_wildcard`, so both widen.
+                    let successor = new_tokens
+                        .and_then(|tokens| wildcard_successor(tokens, token))
+                        .or_else(|| {
+                            wildcard_successor(&next.approval_spenders, spender)
+                                .and_then(|fallback| exact_or_wildcard(&fallback.tokens, token))
+                        });
+                    if let Some(fallback) = successor {
+                        lines.push(format!(
+                            "~ chain {label}: {} falls back to {}",
+                            spender_grant(spender, token, rule),
+                            spender_grant("*", "*", fallback)
+                        ));
+                    } else {
+                        lines.push(format!(
+                            "- chain {label}: {}",
+                            spender_grant(spender, token, rule)
+                        ));
+                    }
                 }
                 (Some(old), Some(new)) if old.max_amount != new.max_amount => {
                     lines.push(format!(
@@ -848,9 +866,18 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
                         (false, true) => lines.push(format!(
                             "+ chain {label}: token {token} may transfer to {recipient}"
                         )),
-                        (true, false) => lines.push(format!(
-                            "- chain {label}: token {token} may transfer to {recipient}"
-                        )),
+                        (true, false) => {
+                            if wildcard_successor(&new.transfer_recipients, recipient).is_some() {
+                                lines.push(format!(
+                                    "~ chain {label}: token {token} recipient {recipient} falls \
+                                     back to (*), which permits any recipient"
+                                ));
+                            } else {
+                                lines.push(format!(
+                                    "- chain {label}: token {token} may transfer to {recipient}"
+                                ));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1168,6 +1195,54 @@ mod tests {
             !diff
                 .iter()
                 .any(|line| line.starts_with("- chain 1: target 0x2222")),
+            "a widening was rendered as a removal: {diff:?}"
+        );
+    }
+
+    #[test]
+    fn every_level_that_falls_back_says_so() {
+        // Approval spenders, the tokens under them, and transfer recipients
+        // all resolve through the same wildcard fallback, so all three have
+        // to describe a removal that widens as a widening.
+        let current = WalletPolicy::parse(json!({
+            "chains": { "1": {
+                "approval_spenders": {
+                    "0x3333333333333333333333333333333333333333": {
+                        "tokens": { "0x4444444444444444444444444444444444444444": { "max_amount": "5" } }
+                    },
+                    "*": { "tokens": { "*": { "max_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935" } } }
+                },
+                "tokens": { "0x5555555555555555555555555555555555555555": {
+                    "max_spend_per_transaction": "10",
+                    "transfer_recipients": {
+                        "0x6666666666666666666666666666666666666666": {},
+                        "*": {}
+                    }
+                } }
+            } }
+        }))
+        .unwrap();
+        let proposed = WalletPolicy::parse(json!({
+            "chains": { "1": {
+                "approval_spenders": {
+                    "*": { "tokens": { "*": { "max_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935" } } }
+                },
+                "tokens": { "0x5555555555555555555555555555555555555555": {
+                    "max_spend_per_transaction": "10",
+                    "transfer_recipients": { "*": {} }
+                } }
+            } }
+        }))
+        .unwrap();
+
+        let diff = diff_policies(&current, &proposed);
+        let widenings = diff
+            .iter()
+            .filter(|line| line.contains("falls back"))
+            .count();
+        assert_eq!(widenings, 2, "{diff:?}");
+        assert!(
+            !diff.iter().any(|line| line.starts_with("- chain 1:")),
             "a widening was rendered as a removal: {diff:?}"
         );
     }
