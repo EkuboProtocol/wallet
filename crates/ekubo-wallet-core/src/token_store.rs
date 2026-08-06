@@ -30,6 +30,7 @@ use crate::{
     policy_store::PolicyStore,
 };
 use alloy::{
+    eips::BlockId,
     network::TransactionBuilder,
     primitives::{Address, U256, address},
     providers::{Provider, ProviderBuilder},
@@ -574,8 +575,11 @@ async fn responds_as_token(
             })
             .collect();
         // Checked against real chain state; a fork must never influence what
-        // the owner is allowed to confirm.
-        let results = aggregate(network, &provider, calls, None).await?;
+        // the owner is allowed to confirm. Deliberately unpinned: the question
+        // is only whether something answers, which no two blocks disagree
+        // about in a way that matters, and this read reports no block number
+        // that a later batch could contradict.
+        let results = aggregate(network, &provider, calls, None, None).await?;
         ensure!(
             results.len() == chunk.len() * 2,
             "Multicall3 returned an unexpected result count"
@@ -637,7 +641,10 @@ pub struct Portfolio {
     pub network: String,
     /// Native balance in wei.
     pub native_balance: String,
-    /// Block number of the first Multicall3 batch.
+    /// The block every balance here was read at. The first Multicall3 batch
+    /// reports it and each later batch is sent against it, so a portfolio that
+    /// needed several batches is still one consistent view rather than a
+    /// sequence of them.
     pub block_number: String,
     /// Tokens with a nonzero balance; zero balances are never included.
     pub tokens: Vec<PortfolioToken>,
@@ -667,6 +674,7 @@ pub async fn read_portfolio(
     // The first batch pins the block and reads the native balance alongside
     // the first token chunk; Multicall3 answers both natively.
     let mut block_number = None;
+    let mut pinned = None;
     let mut native_balance = U256::ZERO;
     let mut tokens = Vec::new();
     let mut start = 0_usize;
@@ -699,13 +707,14 @@ pub async fn read_portfolio(
                 balanceOfCall { account: address }.abi_encode(),
             ));
         }
-        let results = aggregate(network, &provider, calls, fork).await?;
+        let results = aggregate(network, &provider, calls, fork, pinned).await?;
         let mut results = results.into_iter();
         if start == 0 {
             let block = results.next().context("missing block number result")?;
             ensure!(block.success, "Multicall3 getBlockNumber failed");
-            block_number =
-                Some(getBlockNumberCall::abi_decode_returns(&block.returnData)?.to_string());
+            let number = getBlockNumberCall::abi_decode_returns(&block.returnData)?;
+            pinned = Some(pin(number)?);
+            block_number = Some(number.to_string());
             let native = results.next().context("missing native balance result")?;
             ensure!(native.success, "Multicall3 getEthBalance failed");
             native_balance = getEthBalanceCall::abi_decode_returns(&native.returnData)?;
@@ -759,7 +768,9 @@ pub struct TokenBalances {
     pub address: String,
     pub chain_id: String,
     pub network: String,
-    /// Block number reported in the same Multicall3 batch as the first read.
+    /// The block every balance here was read at. The first Multicall3 batch
+    /// reports it and each later batch — including every batch of the
+    /// `balanceOf` fallback — is sent against it.
     pub block_number: String,
     /// Only nonzero balances. Zero, nonexistent, and misbehaving tokens are
     /// omitted rather than aborting the batch.
@@ -800,6 +811,7 @@ pub async fn read_token_balances(
 
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let mut block_number: Option<String> = None;
+    let mut pinned = None;
     let mut balances = Vec::new();
     let mut fetcher_available = true;
     for (index, chunk) in tokens.chunks(FETCHER_CHUNK).enumerate() {
@@ -819,13 +831,14 @@ pub async fn read_token_balances(
             }
             .abi_encode(),
         ));
-        let results = aggregate(network, &provider, calls, fork).await?;
+        let results = aggregate(network, &provider, calls, fork, pinned).await?;
         let mut results = results.into_iter();
         if index == 0 {
             let block = results.next().context("missing block number result")?;
             ensure!(block.success, "Multicall3 getBlockNumber failed");
-            block_number =
-                Some(getBlockNumberCall::abi_decode_returns(&block.returnData)?.to_string());
+            let number = getBlockNumberCall::abi_decode_returns(&block.returnData)?;
+            pinned = Some(pin(number)?);
+            block_number = Some(number.to_string());
         }
         let result = results.next().context("missing TokenDataFetcher result")?;
         // The lens is absent on some chains, and the EVM does not treat that
@@ -888,7 +901,7 @@ pub async fn read_token_balances(
                     }
                 })
                 .collect();
-            let results = aggregate(network, &provider, calls, fork).await?;
+            let results = aggregate(network, &provider, calls, fork, pinned).await?;
             ensure!(
                 results.len() == chunk.len(),
                 "Multicall3 returned an unexpected result count"
@@ -922,6 +935,15 @@ pub async fn read_token_balances(
     })
 }
 
+/// The block every later batch of one read is sent against, from the number
+/// the first batch reported. A number that does not fit `u64` is not a block
+/// this chain has: refusing beats pinning to something else.
+fn pin(number: U256) -> Result<BlockId> {
+    Ok(BlockId::number(u64::try_from(number).context(
+        "Multicall3 reported a block number that does not fit u64",
+    )?))
+}
+
 fn call(target: Address, data: Vec<u8>) -> TokenCall3 {
     TokenCall3 {
         target,
@@ -933,11 +955,16 @@ fn call(target: Address, data: Vec<u8>) -> TokenCall3 {
 /// Run one Multicall3 `aggregate3` batch, either against real chain state or
 /// inside a temporary simulation fork. Both paths send the identical encoded
 /// call, so results decode the same way and per-call failures stay isolated.
+/// `block` pins the read. The first batch of a multi-batch read learns the
+/// block number and every later batch is sent against it, so the number
+/// reported beside the balances is the number they were all read at. A fork
+/// read ignores it: `execute_reads` is already pinned to the fork's parent.
 async fn aggregate<P: Provider>(
     network: &NetworkConfig,
     provider: &P,
     calls: Vec<TokenCall3>,
     fork: Option<&ForkPreface>,
+    block: Option<BlockId>,
 ) -> Result<Vec<TokenResult3>> {
     let request = TransactionRequest::default()
         .with_to(crate::rpc::MULTICALL3_ADDRESS)
@@ -956,7 +983,12 @@ async fn aggregate<P: Provider>(
         return aggregate3Call::abi_decode_returns(&result.return_data)
             .context("Multicall3 returned undecodable data");
     }
-    let bytes = tokio::time::timeout(RPC_TIMEOUT, provider.call(request))
+    let pending = provider.call(request);
+    let pending = match block {
+        Some(block) => pending.block(block),
+        None => pending,
+    };
+    let bytes = tokio::time::timeout(RPC_TIMEOUT, pending)
         .await
         .context("Multicall3 request timed out")?
         .map_err(|error| {
@@ -1017,6 +1049,18 @@ mod tests {
         TokenStore::new(
             PolicyStore::open(&directory.join("policies.db"), &DatabaseKey::new([8; 32])).unwrap(),
         )
+    }
+
+    #[test]
+    fn a_block_number_that_is_not_a_block_pins_nothing() {
+        assert_eq!(
+            pin(U256::from(21_000_000_u64)).unwrap(),
+            BlockId::number(21_000_000)
+        );
+        // An endpoint chooses this number, and every later batch of the read
+        // is sent against it. Truncating it would silently pin the balances to
+        // a block nobody named.
+        assert!(pin(U256::MAX).is_err());
     }
 
     fn store() -> (tempfile::TempDir, TokenStore) {
