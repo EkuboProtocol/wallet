@@ -8,11 +8,15 @@ repository = "https://github.com/EkuboProtocol/wallet-mcp-server"
 keywords = ["mcp", "ethereum", "wallet", "eip-7702"]
 categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
 
+[workspace]
+members = ["crates/ekubo-wallet-core"]
+
 [[bin]]
 name = "ekubo-wallet"
 path = "src/main.rs"
 
 [dependencies]
+ekubo-wallet-core = { path = "crates/ekubo-wallet-core" }
 alloy = { version = "=2.1.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 alloy-dyn-abi = { version = "=1.6.1", features = ["eip712"] }
 anyhow = "1.0.100"
@@ -23,20 +27,13 @@ clap = { version = "4.5.51", features = ["derive", "env"] }
 clap_complete = "4.5.61"
 crossterm = "0.29.0"
 directories = "6.0.0"
-fs2 = "0.4.3"
 futures = "0.3.31"
 hex = "0.4.3"
 inquire = "0.9.4"
-keyring = "4.1.6"
 num-bigint = "0.5.1"
-percent-encoding = "2.3.2"
-rand = "0.10.2"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
 rmcp = { version = "3.1.0", features = ["transport-io"] }
-rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "chrono", "serde_json", "uuid"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
-secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
 thiserror = "2.0.17"
@@ -44,25 +41,13 @@ tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = ["io-std", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 unicode-width = "0.2.2"
+zeroize = { version = "1.8.2", features = ["derive"] }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
-zeroize = { version = "1.8.2", features = ["derive"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6.2"
-objc2 = "0.6.3"
-objc2-foundation = { version = "0.3.1", features = ["NSError", "NSString"] }
-objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext", "LAPublicDefines", "block2"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = ["Foundation", "Security_Credentials_UI"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
-zbus_polkit = "5.0.0"
 
 [dev-dependencies]
 assert_cmd = "2.1.1"
+ekubo-wallet-core = { path = "crates/ekubo-wallet-core", features = ["test-hooks"] }
 predicates = "3.1.3"
 
 # Unoptimized MSVC frames for the deeply generic alloy, rmcp, and schemars call
@@ -79,10 +64,13 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 unsafe_code = "deny"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"

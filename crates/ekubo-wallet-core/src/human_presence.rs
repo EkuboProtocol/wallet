@@ -16,7 +16,7 @@ use thiserror::Error;
 /// grants no signing authority and redirects no payment, and asking for a
 /// fingerprint before each one only teaches the owner to give it without
 /// reading. Those are confirmed in the terminal instead; see
-/// [`crate::tui::Confirmation`].
+/// a terminal confirmation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceRequest {
     SignTransaction { wallet: String },
@@ -272,12 +272,12 @@ impl HumanPresence for PlatformHumanPresence {
     }
 }
 
-#[cfg(test)]
-pub(crate) struct TestHumanPresence {
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct TestHumanPresence {
     pub allow: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[async_trait]
 impl HumanPresence for TestHumanPresence {
     async fn confirm(&self, _request: &PresenceRequest) -> Result<(), HumanPresenceError> {

@@ -90,6 +90,11 @@ mod tests {
     }
 
     #[test]
+    fn strips_terminal_control_sequences() {
+        assert_eq!(terminal_safe_line("safe\u{1b}[31m\ntext"), "safe [31m text");
+    }
+
+    #[test]
     fn caps_count_characters_not_bytes() {
         assert_eq!(stripped_capped("éééé", 2), "éé");
     }

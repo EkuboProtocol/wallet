@@ -81,7 +81,6 @@ file follows in the appendix. Regenerate this document with
 - rfc6979 0.4.0 — RustCrypto Developers — https://github.com/RustCrypto/signatures/tree/master/rfc6979
 - rustc-hash 2.1.3 — The Rust Project Developers — https://github.com/rust-lang/rustc-hash
 - sec1 0.7.3 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/sec1
-- secrecy 0.10.3 — Tony Arcieri <tony@iqlusion.io> — https://github.com/iqlusioninc/crates/tree/main/secrecy
 - serdect 0.2.0 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/serdect
 - signal-hook 0.3.18 — Michal 'vorner' Vaner <vorner@vorner.cz>, Thomas Himmelstoss <thimm@posteo.de> — https://github.com/vorner/signal-hook
 - signature 2.2.0 — RustCrypto Developers — https://github.com/RustCrypto/traits/tree/master/signature
@@ -6774,32 +6773,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-```
-
-## License text for: secrecy 0.10.3
-
-```text
-MIT License
-
-Copyright (c) 2019-2024 iqlusion
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ## License text for: secret-service 5.1.0

@@ -31,7 +31,7 @@ const LEGACY_ACCEPTANCE_FILE: &str = "legal.json";
 /// Shipped attribution document for third-party dependencies. Regenerate with
 /// `contrib/generate-third-party-licenses.py`; `tests/shipped_assets.rs`
 /// fails when it no longer covers every locked dependency.
-pub const THIRD_PARTY_LICENSES: &str = include_str!("../THIRD_PARTY_LICENSES.md");
+pub const THIRD_PARTY_LICENSES: &str = include_str!("../../../THIRD_PARTY_LICENSES.md");
 
 pub const TERMS_OF_SERVICE: &str = "\
 # Ekubo Wallet Terms of Service
@@ -197,7 +197,7 @@ pub fn privacy_policy() -> String {
             "- {} (chain {}): {}",
             network.name,
             network.chain_id,
-            crate::mcp::rpc_origin(&network.rpc_url)
+            crate::rpc::rpc_origin(&network.rpc_url)
         );
     }
     text.push_str(PRIVACY_POLICY_CLOSING);
@@ -414,7 +414,7 @@ mod tests {
     fn privacy_policy_discloses_every_default_endpoint() {
         let policy = privacy_policy();
         for network in crate::config::default_networks() {
-            let origin = crate::mcp::rpc_origin(&network.rpc_url);
+            let origin = crate::rpc::rpc_origin(&network.rpc_url);
             assert!(
                 policy.contains(&origin),
                 "privacy policy does not disclose default endpoint {origin}"

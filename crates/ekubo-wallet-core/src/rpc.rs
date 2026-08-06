@@ -16,6 +16,10 @@ use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The canonical Multicall3 deployment, at the same address on every chain.
+pub const MULTICALL3_ADDRESS: Address =
+    alloy::primitives::address!("cA11bde05977b3631167028862bE2a173976CA11");
+
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct WalletStatus {
     pub wallet_id: String,
@@ -78,6 +82,18 @@ impl ReceiptStatus {
                 .to_string(),
         }
     }
+}
+
+/// The scheme, host, and port of an RPC URL, with any userinfo, path, and query
+/// removed. Provider credentials commonly live in the path or query, so this is
+/// the most that may be shown without disclosing them.
+#[must_use]
+pub fn rpc_origin(url: &url::Url) -> String {
+    let host = url.host_str().unwrap_or("<invalid-host>");
+    url.port().map_or_else(
+        || format!("{}://{host}", url.scheme()),
+        |port| format!("{}://{host}:{port}", url.scheme()),
+    )
 }
 
 pub async fn verify_chain_id(network: &NetworkConfig) -> Result<()> {

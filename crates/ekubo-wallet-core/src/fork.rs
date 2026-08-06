@@ -443,7 +443,7 @@ pub async fn native_balance(
     address: Address,
 ) -> Result<(U256, u64)> {
     let request = TransactionRequest::default()
-        .to(crate::batch_read::MULTICALL3_ADDRESS)
+        .to(crate::rpc::MULTICALL3_ADDRESS)
         .input(alloy::rpc::types::TransactionInput::new(
             getEthBalanceCall { addr: address }.abi_encode().into(),
         ));

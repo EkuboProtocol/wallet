@@ -1,7 +1,8 @@
+use crate::approve_tui::TerminalApprovalUi;
 use crate::{
     VERSION,
     address_book::AddressBookStore,
-    approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi, TerminalApprovalUi},
+    approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi},
     config::{
         ConfigStore, NativeCurrency, NetworkConfig, default_networks, remove_configured_network,
         replace_configured_network,

@@ -2550,18 +2550,6 @@ fn tool_error(error: &impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(error.to_string(), None)
 }
 
-/// The scheme, host, and port of an RPC URL, with any userinfo, path, and query
-/// removed. Provider credentials commonly live in the path or query, so this is
-/// the most that may be shown without disclosing them.
-#[must_use]
-pub fn rpc_origin(url: &Url) -> String {
-    let host = url.host_str().unwrap_or("<invalid-host>");
-    url.port().map_or_else(
-        || format!("{}://{host}", url.scheme()),
-        |port| format!("{}://{host}:{port}", url.scheme()),
-    )
-}
-
 const fn default_true() -> bool {
     true
 }

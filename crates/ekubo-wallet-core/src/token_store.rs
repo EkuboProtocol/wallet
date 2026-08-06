@@ -432,11 +432,11 @@ pub async fn read_portfolio(
         let mut calls = Vec::with_capacity(chunk.len() + 2);
         if start == 0 {
             calls.push(call(
-                crate::batch_read::MULTICALL3_ADDRESS,
+                crate::rpc::MULTICALL3_ADDRESS,
                 getBlockNumberCall {}.abi_encode(),
             ));
             calls.push(call(
-                crate::batch_read::MULTICALL3_ADDRESS,
+                crate::rpc::MULTICALL3_ADDRESS,
                 getEthBalanceCall { addr: address }.abi_encode(),
             ));
         }
@@ -555,7 +555,7 @@ pub async fn read_token_balances(
         let mut calls = Vec::with_capacity(2);
         if index == 0 {
             calls.push(call(
-                crate::batch_read::MULTICALL3_ADDRESS,
+                crate::rpc::MULTICALL3_ADDRESS,
                 getBlockNumberCall {}.abi_encode(),
             ));
         }
@@ -611,7 +611,7 @@ pub async fn read_token_balances(
                 .map(|token| {
                     if *token == Address::ZERO {
                         call(
-                            crate::batch_read::MULTICALL3_ADDRESS,
+                            crate::rpc::MULTICALL3_ADDRESS,
                             getEthBalanceCall { addr: owner }.abi_encode(),
                         )
                     } else {
@@ -671,7 +671,7 @@ async fn aggregate<P: Provider>(
     fork: Option<&ForkPreface>,
 ) -> Result<Vec<TokenResult3>> {
     let request = TransactionRequest::default()
-        .with_to(crate::batch_read::MULTICALL3_ADDRESS)
+        .with_to(crate::rpc::MULTICALL3_ADDRESS)
         .with_input(aggregate3Call { calls }.abi_encode());
     if let Some(preface) = fork {
         let outcome = execute_reads(network, preface, vec![request]).await?;

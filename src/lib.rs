@@ -1,38 +1,23 @@
-pub mod abi_decoder;
-pub mod address_book;
 pub mod address_book_browser;
-pub mod approval;
-pub mod approval_summary;
+// The security kernel. Re-exported under the old module paths so the
+// presentation layer reads unchanged; the crate boundary, not the paths, is
+// the audit boundary.
+pub use ekubo_wallet_core::{
+    abi_decoder, address_book, approval, approval_summary, clear_signing, config, core, custody,
+    execution, fork, human_presence, input_validation, legal, message, orchestrator, pending,
+    plan_fetch, policy_store, reconcile, rpc, sanitize, simulation, simulation_store, token_store,
+    typed_data,
+};
+
+pub mod approve_tui;
 pub mod batch_read;
-pub mod clear_signing;
 pub mod cli;
-pub mod config;
-pub mod core;
-pub mod custody;
-pub mod execution;
-pub mod fork;
 pub mod fullscreen;
-pub mod human_presence;
-pub mod input_validation;
-pub mod legal;
 pub mod mcp;
-pub mod message;
-pub mod orchestrator;
 pub mod pager;
-pub mod pending;
-pub mod plan_fetch;
-pub mod policy_store;
-pub mod reconcile;
 pub mod render;
-pub mod rpc;
-pub mod sanitize;
-pub(crate) mod signature_requests;
-pub mod simulation;
-pub mod simulation_store;
-pub mod token_store;
 pub mod tui;
 pub mod tx_browser;
-pub mod typed_data;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

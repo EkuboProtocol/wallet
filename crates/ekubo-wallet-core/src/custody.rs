@@ -264,11 +264,11 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 
 /// In-memory key store for tests: the same trait surface as the OS store,
 /// no credential-store side effects.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 #[derive(Default)]
-pub(crate) struct MemoryKeyStore(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+pub struct MemoryKeyStore(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-hooks"))]
 impl KeyStore for MemoryKeyStore {
     fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
         let mut keys = self.0.lock().unwrap();

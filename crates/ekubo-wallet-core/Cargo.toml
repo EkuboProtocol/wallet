@@ -1,0 +1,58 @@
+[package]
+name = "ekubo-wallet-core"
+version = "0.3.0-rc.0"
+edition = "2024"
+rust-version = "1.91"
+description = "The security kernel of the ekubo-wallet binary: policy, custody, signing, storage"
+repository = "https://github.com/EkuboProtocol/wallet-mcp-server"
+publish = false
+
+[features]
+# Exposes in-memory key storage, a scriptable presence backend, and a
+# terminal-free InteractiveProof so the workspace's tests can exercise the
+# signing paths. Never enabled by a release build: dev-dependencies do not
+# apply to `cargo build --release`, and the guard in lib.rs refuses the
+# combination outright.
+test-hooks = []
+
+[dependencies]
+alloy = { version = "=2.1.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
+alloy-dyn-abi = { version = "=1.6.1", features = ["eip712"] }
+anyhow = "1.0.100"
+async-trait = "0.1.89"
+base64 = "0.22.1"
+chrono = { version = "0.4.42", features = ["serde"] }
+directories = "6.0.0"
+fs2 = "0.4.3"
+hex = "0.4.3"
+keyring = "4.1.6"
+num-bigint = "0.5.1"
+percent-encoding = "2.3.2"
+rand = "0.10.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl", "chrono", "serde_json", "uuid"] }
+schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["preserve_order"] }
+tempfile = "3.23.0"
+thiserror = "2.0.17"
+tokio = { version = "1.48.0", features = ["io-std", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+url = { version = "2.5.7", features = ["serde"] }
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+zeroize = { version = "1.8.2", features = ["derive"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.3"
+objc2-foundation = { version = "0.3.1", features = ["NSError", "NSString"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["LAContext", "LAPublicDefines", "block2"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = ["Foundation", "Security_Credentials_UI"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
+zbus_polkit = "5.0.0"
+
+[lints]
+workspace = true

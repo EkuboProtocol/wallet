@@ -5,13 +5,13 @@ use crate::{
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
     plan_fetch::{FetchPolicy, READ_CALLS_SUBJECT, fetch_verified_bytes},
-    rpc::sanitized_rpc_error,
+    rpc::{MULTICALL3_ADDRESS, sanitized_rpc_error},
 };
 use alloy::{
     consensus::BlockHeader,
     eips::{BlockId, BlockNumberOrTag},
     network::{TransactionBuilder, primitives::BlockResponse},
-    primitives::{Address, Bytes, address},
+    primitives::{Address, Bytes},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     sol,
@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{str::FromStr, time::Duration};
 
-pub const MULTICALL3_ADDRESS: Address = address!("cA11bde05977b3631167028862bE2a173976CA11");
 const MAX_BATCH_CALLS: usize = 128;
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
