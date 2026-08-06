@@ -1038,6 +1038,24 @@ fn load_or_create_database_key(database_exists: bool) -> Result<DatabaseKey> {
             entry
                 .set_secret(&bytes)
                 .context("failed to save policy database key")?;
+            // Read it back before trusting it. `policies.lock` is locked by
+            // pathname, and the filesystem is untrusted — so two processes can
+            // hold locks on different inodes, both see no database, and both
+            // generate a key. The second `set_secret` wins, and the first
+            // process then creates a database encrypted under a key the
+            // credential store no longer holds, which nothing can open.
+            //
+            // The readback makes the credential store itself the arbiter,
+            // which does not depend on the lock file's identity.
+            let mut stored = entry
+                .get_secret()
+                .context("failed to confirm the saved policy database key")?;
+            let matches = stored == bytes;
+            stored.zeroize();
+            ensure!(
+                matches,
+                "another process initialized the policy database key at the same time;                  run this command again"
+            );
             Ok(DatabaseKey::new(bytes))
         }
         Err(error) => Err(error).context("failed to load policy database key"),
