@@ -187,6 +187,27 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             Ok(())
         });
         if let Err(error) = update {
+            // An error is not proof that nothing was written. The metadata
+            // write commits when the replacement file lands, and steps after
+            // that can still report failure — so rolling back on the error
+            // alone can delete the only copy of a key the wallet it belongs to
+            // is still listed under, which nothing can undo.
+            //
+            // Ask instead of assuming, and ask precisely: a row naming this
+            // wallet at this address can only be the row this call just wrote,
+            // because the update refuses a duplicate address. An id that is
+            // taken by some *other* address means the write never happened, so
+            // the credential inserted a moment ago is still garbage to clear.
+            if self
+                .config
+                .wallet(wallet_id)
+                .is_ok_and(|existing| existing.address == address)
+            {
+                return Err(error).context(format!(
+                    "wallet {wallet_id} was created and its key is stored, but the write reported \
+                     an error; verify with `ekubo-wallet wallet list` before retrying"
+                ));
+            }
             if let Err(rollback) = self.keys.delete(wallet_id) {
                 return Err(error).context(format!(
                     "configuration update failed and credential rollback also failed: {rollback:#}"
@@ -237,7 +258,11 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 
         // Remove metadata first. If key deletion fails, reinsert the metadata
         // so a reachable credential is not orphaned without an inventory row.
-        self.config.update(|config| {
+        // The mirror of `add`: an error here need not mean the row survived,
+        // and returning on it would leave a reachable credential with no
+        // inventory row naming it. Proceed to the deletion whenever the wallet
+        // is in fact gone from the configuration.
+        if let Err(error) = self.config.update(|config| {
             let index = config
                 .wallets
                 .iter()
@@ -245,7 +270,10 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 .with_context(|| format!("unknown wallet {wallet_id}"))?;
             config.wallets.remove(index);
             Ok(())
-        })?;
+        }) && self.config.wallet(wallet_id).is_ok()
+        {
+            return Err(error);
+        }
         if let Err(error) = self.keys.delete(wallet_id) {
             let rollback = self.config.update(|config| {
                 config.wallets.push(metadata.clone());
@@ -306,6 +334,41 @@ mod tests {
             Arc::new(TestHumanPresence { allow }),
         );
         (directory, service)
+    }
+
+    #[tokio::test]
+    async fn a_refused_creation_still_clears_the_key_it_inserted() {
+        // The rollback the post-commit guard must not swallow. The id is taken
+        // by a different address, so the metadata write never happened and the
+        // credential just inserted is garbage — deleting it is correct, and
+        // only a row naming *this* address may keep its key.
+        let (_directory, service) = service(true);
+        let first = service.create("primary").unwrap();
+        service
+            .config
+            .update(|config| {
+                config.wallets.retain(|wallet| wallet.id != "primary");
+                Ok(())
+            })
+            .unwrap();
+        service.keys.delete("primary").unwrap();
+        service
+            .config
+            .update(|config| {
+                config.wallets.push(WalletMetadata {
+                    id: "primary".into(),
+                    address: alloy::primitives::Address::repeat_byte(9),
+                    created_at: Utc::now(),
+                    source: WalletSource::Imported,
+                    exported_at: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+        assert_ne!(first.address, alloy::primitives::Address::repeat_byte(9));
+
+        assert!(service.create("primary").is_err());
+        assert!(service.keys.load("primary").is_err());
     }
 
     #[tokio::test]

@@ -270,8 +270,17 @@ impl ConfigStore {
             .persist(&self.file)
             .map_err(|error| error.error)
             .with_context(|| format!("failed to replace {}", self.file.display()))?;
-        set_private_file_permissions(&self.file)?;
-        sync_parent(&self.data_dir)?;
+        // Past this point the new configuration is the configuration, so
+        // nothing here may report failure: a caller that hears "the update
+        // failed" about a write that committed rolls back something that
+        // happened. `custody::add` deleting the only copy of a private key is
+        // that mistake in its worst form.
+        //
+        // Neither step is load-bearing on its own. `load` re-narrows an
+        // over-permissive file every time it reads one, and the durability
+        // `sync_parent` buys is bounded by what the platform offers anyway.
+        let _ = set_private_file_permissions(&self.file);
+        let _ = sync_parent(&self.data_dir);
         Ok(())
     }
 
@@ -301,14 +310,19 @@ impl ConfigStore {
             self.save(&config)?;
             Ok(value)
         })();
-        // The work's own error is the one worth reporting. Unlocking after a
-        // failure and propagating *that* replaces "the database key is wrong"
-        // or "the schema is unrecognized" with "failed to unlock a lock file",
-        // which tells the owner nothing about why their wallet did not open —
-        // and the lock is released either way when this process exits.
-        let unlocked = FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", lock_path.display()));
-        result.and_then(|value| unlocked.map(|()| value))
+        // The work's own answer is the only one reported, in both directions.
+        //
+        // Propagating an unlock failure over a *failure* replaces "the
+        // database key is wrong" with "failed to unlock a lock file", which
+        // tells the owner nothing about why their wallet did not open.
+        // Propagating it over a *success* is worse: the configuration has
+        // already been replaced, so the caller undoes a write that happened.
+        //
+        // Discarding it costs nothing. The lock is released when this process
+        // exits, and an unlock that fails while the process is alive leaves a
+        // lock this process still holds — which is what it held a moment ago.
+        let _ = FileExt::unlock(&lock);
+        result
     }
 
     pub fn wallet(&self, id: &str) -> Result<WalletMetadata> {
