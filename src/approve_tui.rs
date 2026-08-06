@@ -337,6 +337,26 @@ impl ReviewScreen {
     }
 }
 
+/// Wrap the document for the viewport with a hanging indent on fact lines: a
+/// value that wraps continues at its value column, one visual block beside
+/// its label, instead of snapping back under the label column. A fact line
+/// is recognized by its shape — a muted leading span with content after it —
+/// which is exactly how [`fact_block`] builds one.
+fn wrap_document(document: &[Line], columns: usize) -> Vec<Line> {
+    document
+        .iter()
+        .flat_map(|line| {
+            let indent = match line.as_slice() {
+                [label, _, ..] if label.tone == Some(Tone::Muted) => {
+                    crate::fullscreen::display_width(&label.text)
+                }
+                _ => 0,
+            };
+            fullscreen::wrap_line_hanging(line, columns, indent)
+        })
+        .collect()
+}
+
 fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
     let [header, body, decision, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -349,7 +369,7 @@ fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
     frame.render_widget(fullscreen::title_line(title), header);
 
     let columns = (body.width as usize).saturating_sub(2).max(10);
-    let wrapped = fullscreen::wrap_lines(&review.document, columns);
+    let wrapped = wrap_document(&review.document, columns);
     review.viewport = (body.height as usize).max(1);
     review.max_offset = wrapped.len().saturating_sub(review.viewport);
     review.offset = review.offset.min(review.max_offset);

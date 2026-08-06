@@ -163,3 +163,32 @@ fn sections_render_headings_aligned_facts_and_sign_toned_amounts() {
     // the calldata summary rather than at the label column.
     assert!(text.contains("   a9059cbb00000000"), "{text}");
 }
+
+#[test]
+fn wrapped_fact_values_hang_at_the_value_column() {
+    let label = Span::toned("  Reads as  ", Tone::Muted);
+    let line = vec![label, Span::plain("word ".repeat(12).trim_end())];
+    let wrapped = wrap_document(std::slice::from_ref(&line), 40);
+    assert!(wrapped.len() > 1, "the value is long enough to wrap");
+    for continuation in &wrapped[1..] {
+        assert_eq!(
+            continuation[0].text,
+            " ".repeat(12),
+            "continuations start at the value column, not the left edge"
+        );
+    }
+    // An indent that would starve the continuation of width is ignored.
+    let narrow = wrap_document(&[line], 14);
+    assert!(
+        narrow[1..]
+            .iter()
+            .all(|row| !row[0].text.starts_with("            ")),
+        "{narrow:?}"
+    );
+    // Lines without a leading muted label — headings, warnings, payload —
+    // wrap from the left edge as before.
+    let heading = vec![Span::toned("word ".repeat(12).trim_end(), Tone::Emphasis)];
+    let plain = wrap_document(&[heading], 40);
+    assert!(plain.len() > 1);
+    assert!(!plain[1][0].text.starts_with(' '), "{plain:?}");
+}

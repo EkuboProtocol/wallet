@@ -105,7 +105,21 @@ pub fn lines_to_text(lines: &[Line], paint: impl Fn(&str, Tone) -> String) -> St
 /// break: wrapping happens on a flattened `(char, tone)` stream and the
 /// pieces are reassembled into runs afterwards.
 pub(crate) fn wrap_line(line: &Line, columns: usize) -> Vec<Line> {
+    wrap_line_hanging(line, columns, 0)
+}
+
+/// [`wrap_line`] with a hanging indent: continuation rows start `indent`
+/// blank columns in, so a value that wraps stays one visual block beside its
+/// label instead of snapping back to the left edge. An indent that would
+/// leave the continuation almost no width is ignored rather than obeyed.
+pub(crate) fn wrap_line_hanging(line: &Line, columns: usize, indent: usize) -> Vec<Line> {
+    const MIN_CONTINUATION_COLUMNS: usize = 24;
     let columns = columns.max(1);
+    let indent = if columns.saturating_sub(indent) >= MIN_CONTINUATION_COLUMNS {
+        indent
+    } else {
+        0
+    };
     let flat: Vec<(char, Option<Tone>)> = line
         .iter()
         .flat_map(|span| span.text.chars().map(|character| (character, span.tone)))
@@ -113,15 +127,17 @@ pub(crate) fn wrap_line(line: &Line, columns: usize) -> Vec<Line> {
     if flat.is_empty() {
         return vec![Vec::new()];
     }
-    let mut lines = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
     let mut start = 0;
     while start < flat.len() {
+        let first = lines.is_empty();
+        let budget = if first { columns } else { columns - indent };
         let mut width = 0;
         let mut end = start;
         let mut last_space = None;
         while end < flat.len() {
             let advance = UnicodeWidthChar::width(flat[end].0).unwrap_or(0);
-            if width + advance > columns && end > start {
+            if width + advance > budget && end > start {
                 break;
             }
             if flat[end].0 == ' ' {
@@ -130,8 +146,18 @@ pub(crate) fn wrap_line(line: &Line, columns: usize) -> Vec<Line> {
             width += advance;
             end += 1;
         }
+        let assemble = |slice: &[(char, Option<Tone>)]| {
+            let row = reassemble(slice);
+            if first || indent == 0 {
+                row
+            } else {
+                let mut indented = vec![Span::plain(" ".repeat(indent))];
+                indented.extend(row);
+                indented
+            }
+        };
         if end == flat.len() {
-            lines.push(reassemble(&flat[start..end]));
+            lines.push(assemble(&flat[start..end]));
             break;
         }
         // The space a line breaks at is dropped; everything else survives.
@@ -139,7 +165,7 @@ pub(crate) fn wrap_line(line: &Line, columns: usize) -> Vec<Line> {
             Some(space) if space > start => (space, space + 1),
             _ => (end, end),
         };
-        lines.push(reassemble(&flat[start..line_end]));
+        lines.push(assemble(&flat[start..line_end]));
         start = next_start;
     }
     lines

@@ -295,14 +295,18 @@ pub fn render_balance_changes(
                 |delta| format_signed_amount(&delta, display.decimals, display.symbol.as_deref()),
             ),
         };
+        lines.push((label, delta_text));
         let incoming = &change.incoming_transfers;
         let outgoing = &change.outgoing_transfers;
-        let transfers = if incoming == "0" && outgoing == "0" {
-            String::new()
-        } else {
-            format!("; standard Transfer events: +{incoming} in, -{outgoing} out")
-        };
-        lines.push((label, format!("{delta_text}{transfers}")));
+        if incoming != "0" || outgoing != "0" {
+            // A continuation of the entry above (empty label), so the delta
+            // stays a short, sign-toned figure and the gross flows read as
+            // their own detail line.
+            lines.push((
+                String::new(),
+                format!("standard Transfer events: +{incoming} in, -{outgoing} out"),
+            ));
+        }
     }
     if total > MAX_DISPLAYED_BALANCE_CHANGES {
         lines.push((
