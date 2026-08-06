@@ -51,8 +51,21 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
+use tokio::sync::Semaphore;
+
+/// How many caller-proposed RPC endpoints this process probes at once.
+///
+/// `wallet_add_network` is the only tool that sends a request to a URL its
+/// caller named, and each probe holds a task for up to the RPC timeout. One at
+/// a time costs an honest operator nothing — a person adds a network once, and
+/// waits for it — while denying a caller the parallelism that would turn a
+/// chain-ID check into a sweep of the host's network.
+const MAX_CONCURRENT_NETWORK_PROBES: usize = 1;
+
+static NETWORK_PROBE_SLOTS: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_NETWORK_PROBES));
 use url::Url;
 
 #[derive(Clone)]
@@ -1477,6 +1490,14 @@ impl WalletMcpServer {
             .networks;
         add_configured_network(&mut prospective, candidate.clone())
             .map_err(|error| tool_error(&error))?;
+        // Taken before the admission check, not just before the probe: that
+        // check resolves a hostname the caller chose, which is outbound work
+        // on its own. Refused rather than queued, because waiting would let a
+        // caller build a backlog worth an RPC timeout each — the thing being
+        // prevented.
+        let _probe = NETWORK_PROBE_SLOTS.try_acquire().map_err(|_| {
+            tool_error(&"another network is already being verified; retry once it finishes")
+        })?;
         // `validate_network` admits http and loopback so an owner can point
         // their own terminal at a devnet. This caller is not the owner, and
         // the probe below is the only request this process makes to an address
@@ -3237,12 +3258,53 @@ mod tests {
         );
     }
 
+    fn add_network_input(rpc_url: &str) -> AddNetworkInput {
+        AddNetworkInput {
+            name: "untrusted".into(),
+            display_name: "Untrusted Test".into(),
+            aliases: vec![],
+            chain_id: "999999".into(),
+            rpc_url: rpc_url.parse().unwrap(),
+            max_gas_limit: "30000000".into(),
+            native_currency: NativeCurrency {
+                name: "Test Ether".into(),
+                symbol: "TETH".into(),
+                decimals: 18,
+            },
+            block_explorer_url: "https://explorer.example.invalid".parse().unwrap(),
+            documentation_url: "https://docs.example.invalid".parse().unwrap(),
+        }
+    }
+
+    /// Both halves of the admission on the one tool that contacts an address
+    /// its caller chose. They share a test because the probe permit is
+    /// process-global: as separate tests they would race each other for it.
     #[tokio::test]
-    async fn network_add_refuses_an_rpc_endpoint_that_is_not_public() {
-        // This is the only tool that sends a request to an address an MCP
-        // caller chose, so the address is admitted before the request, not by
-        // whether the request happens to succeed.
+    async fn network_add_admits_an_endpoint_before_contacting_it() {
         let (_directory, server) = server();
+
+        // One probe at a time. Held here, so the tool must refuse rather than
+        // queue behind it — and must refuse before resolving anything.
+        let held = NETWORK_PROBE_SLOTS
+            .try_acquire()
+            .expect("the only permit is free");
+        let result = server
+            .wallet_add_network(Parameters(add_network_input(
+                "https://rpc.example.invalid/",
+            )))
+            .await;
+        let Err(error) = result else {
+            panic!("a second probe ran while one was in flight");
+        };
+        assert!(
+            error.message.contains("already being verified"),
+            "refused for the wrong reason: {}",
+            error.message
+        );
+        drop(held);
+
+        // The address is admitted before the request, not judged by whether
+        // the request happens to succeed.
         for (rpc_url, reason) in [
             ("http://mainnet.example.invalid/rpc", "https"),
             ("https://127.0.0.1/rpc", "private or reserved"),
@@ -3256,21 +3318,7 @@ mod tests {
             ("https://key@mainnet.example.invalid/rpc", "credentials"),
         ] {
             let result = server
-                .wallet_add_network(Parameters(AddNetworkInput {
-                    name: "untrusted".into(),
-                    display_name: "Untrusted Test".into(),
-                    aliases: vec![],
-                    chain_id: "999999".into(),
-                    rpc_url: rpc_url.parse().unwrap(),
-                    max_gas_limit: "30000000".into(),
-                    native_currency: NativeCurrency {
-                        name: "Test Ether".into(),
-                        symbol: "TETH".into(),
-                        decimals: 18,
-                    },
-                    block_explorer_url: "https://explorer.example.invalid".parse().unwrap(),
-                    documentation_url: "https://docs.example.invalid".parse().unwrap(),
-                }))
+                .wallet_add_network(Parameters(add_network_input(rpc_url)))
                 .await;
             let Err(error) = result else {
                 panic!("{rpc_url} was accepted");
