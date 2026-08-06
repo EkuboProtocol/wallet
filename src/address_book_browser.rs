@@ -7,20 +7,31 @@
 //! itself (alias, full address, network, chain ID, note), with `a` to add,
 //! `e` or Enter to edit, and `d` to remove.
 //!
-//! The browser is only ever navigation. Choosing an action leaves the
-//! alternate screen first, and the change itself runs in the ordinary
-//! scrollback flow — prompts, a [`crate::tui::Confirmation`] of the exact
-//! values, and then platform owner authentication — so the facts of what was
-//! changed stay in the terminal transcript exactly as the `address-book`
-//! subcommands would leave them. Owner authentication is required because an
-//! alias decides where an agent-resolved payment goes; see
-//! [`crate::human_presence::PresenceRequest`].
+//! Every screen the editor shows is drawn in the one alternate screen it
+//! opens. It used to leave that screen for each change and run the whole
+//! sequence — an intro, a network pick, three prompts, a confirmation block,
+//! an outro — as inline viewports in the scrollback, then re-enter. Each of
+//! those prompts printed the line it had answered, so a session accumulated a
+//! transcript of half-finished forms that was still on the screen after the
+//! browser exited, and every step flipped the terminal between two modes.
+//!
+//! The list, the form, the network pick, and the confirmation are now views of
+//! one app. What still reaches the scrollback is one line per completed
+//! change, printed after the browser exits: the facts of what was changed
+//! belong in the terminal transcript exactly as the `address-book`
+//! subcommands would leave them, and a form that was abandoned is not a fact.
+//!
+//! The alternate screen is released around platform owner authentication and
+//! restored afterwards. That is the one unavoidable handover: a polkit text
+//! agent prompts on the terminal this app is drawing on. Owner authentication
+//! is required at all because an alias decides where an agent-resolved payment
+//! goes; see [`crate::human_presence::PresenceRequest`].
 
 use std::str::FromStr;
 
 use alloy::primitives::Address;
-use anyhow::{Context, Result, ensure};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use anyhow::{Context, Result};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Alignment, Constraint},
     text::{Line as UiLine, Span as UiSpan},
@@ -31,14 +42,19 @@ use crate::{
     address_book::{AddressBookEntry, AddressBookStore, MAX_NOTE_LEN, validate_alias},
     config::{ConfigStore, NetworkConfig},
     fullscreen::{
-        Screen, SearchableTable, Span, TableColumn, TableEvent, TableRow, chrome, footer_line,
-        is_interrupt, title_line, tone_style,
+        Screen, SearchableTable, Span, TableColumn, TableEvent, TableRow, TextField, chrome,
+        footer_line, is_interrupt, title_line, tone_style, ui_span, wrap_lines,
     },
     human_presence::{HumanPresence, PresenceRequest},
     tui::{self, Tone},
 };
+use ratatui::{
+    layout::Layout,
+    style::{Modifier, Style},
+};
 
 /// Everything a save needs, resolved before anything is shown or asked.
+#[derive(Debug)]
 pub struct EntryDraft {
     pub chain_id: u64,
     /// The configured network name, or `chain N` when the chain is no longer
@@ -47,6 +63,142 @@ pub struct EntryDraft {
     pub alias: String,
     pub address: Address,
     pub note: Option<String>,
+}
+
+/// Everything a reviewer is told before one address-book change.
+///
+/// Built once and rendered two ways — as a [`tui::Confirmation`] for the
+/// one-shot `address-book` subcommands, and as a view inside the browser's
+/// own screen. One producer per change, so the two surfaces cannot drift into
+/// describing the same write differently.
+struct Review {
+    title: &'static str,
+    summary: &'static str,
+    facts: Vec<(String, String)>,
+    warnings: Vec<String>,
+    question: &'static str,
+}
+
+impl Review {
+    /// The scrollback rendering: intro, facts, warnings, and a yes/no.
+    fn ask(&self) -> Result<bool> {
+        let mut question = tui::Confirmation::new(self.title, self.summary);
+        for (label, value) in &self.facts {
+            question = question.fact(label, value);
+        }
+        for warning in &self.warnings {
+            question = question.warning(warning);
+        }
+        question.ask(self.question)
+    }
+
+    /// The in-screen rendering: the same text as a scrollable document.
+    fn document(&self) -> Vec<crate::fullscreen::Line> {
+        let mut lines = vec![vec![Span::toned(self.summary, Tone::Muted)], Vec::new()];
+        for (label, value) in &self.facts {
+            lines.push(vec![
+                Span::toned(format!("{label}: "), Tone::Muted),
+                Span::plain(value),
+            ]);
+        }
+        for warning in &self.warnings {
+            lines.push(Vec::new());
+            lines.push(vec![Span::toned(format!("⚠ {warning}"), Tone::Warning)]);
+        }
+        lines
+    }
+}
+
+fn save_review(draft: &EntryDraft, existing: Option<&AddressBookEntry>) -> Review {
+    let checksummed = draft.address.to_checksum(None);
+    let mut facts = vec![
+        ("Network".to_owned(), draft.network_name.clone()),
+        ("Chain ID".to_owned(), draft.chain_id.to_string()),
+        ("Alias".to_owned(), draft.alias.clone()),
+        ("Address".to_owned(), checksummed.clone()),
+    ];
+    if let Some(note) = &draft.note {
+        facts.push(("Note".to_owned(), note.clone()));
+    }
+    let mut warnings = Vec::new();
+    if let Some(existing) = existing {
+        if existing.address == checksummed {
+            warnings.push(format!(
+                "This rewrites the existing entry for {}; the address is unchanged.",
+                draft.alias
+            ));
+        } else {
+            warnings.push(format!(
+                "This retargets {}: payments the user names by this alias will go to the address \
+                 above instead of {}.",
+                draft.alias, existing.address
+            ));
+        }
+    }
+    Review {
+        title: if existing.is_some() {
+            "Update address book entry"
+        } else {
+            "Add address book entry"
+        },
+        summary: "Store this alias for agent lookups. Aliases carry no signing authority, but an \
+                  agent resolves payments the user names by alias to this exact address, so a yes \
+                  here is followed by the platform owner prompt.",
+        facts,
+        warnings,
+        question: "Save this alias?",
+    }
+}
+
+fn remove_review(existing: &AddressBookEntry, network_name: &str, chain_id: u64) -> Review {
+    Review {
+        title: "Remove address book entry",
+        summary: "Remove this alias from agent lookups. A yes here is followed by the platform \
+                  owner prompt.",
+        facts: vec![
+            ("Network".to_owned(), network_name.to_owned()),
+            ("Chain ID".to_owned(), chain_id.to_string()),
+            ("Alias".to_owned(), existing.alias.clone()),
+            ("Address".to_owned(), existing.address.clone()),
+        ],
+        warnings: Vec::new(),
+        question: "Remove this alias?",
+    }
+}
+
+/// Authenticate the owner and write. The terminal confirmation happened
+/// before this — in the scrollback for the subcommands, in-screen for the
+/// browser — so this is only the part both paths share.
+async fn save_entry(
+    config: &ConfigStore,
+    presence: &dyn HumanPresence,
+    draft: &EntryDraft,
+) -> Result<AddressBookEntry> {
+    presence
+        .confirm(&PresenceRequest::SaveAddressBookEntry {
+            alias: draft.alias.clone(),
+        })
+        .await?;
+    AddressBookStore::production(config.data_dir())?.upsert(
+        draft.chain_id,
+        &draft.alias,
+        draft.address,
+        draft.note.as_deref(),
+    )
+}
+
+async fn remove_entry(
+    config: &ConfigStore,
+    presence: &dyn HumanPresence,
+    chain_id: u64,
+    alias: &str,
+) -> Result<AddressBookEntry> {
+    presence
+        .confirm(&PresenceRequest::RemoveAddressBookEntry {
+            alias: alias.to_owned(),
+        })
+        .await?;
+    AddressBookStore::production(config.data_dir())?.remove(chain_id, alias)
 }
 
 /// Confirm one alias save in the terminal, authenticate the owner, then
@@ -58,55 +210,13 @@ pub async fn confirm_and_save(
     presence: &dyn HumanPresence,
     draft: &EntryDraft,
 ) -> Result<Option<AddressBookEntry>> {
-    let mut store = AddressBookStore::production(config.data_dir())?;
-    let existing = store.get(draft.chain_id, &draft.alias)?;
-    let checksummed = draft.address.to_checksum(None);
-    let mut question = tui::Confirmation::new(
-        if existing.is_some() {
-            "Update address book entry"
-        } else {
-            "Add address book entry"
-        },
-        "Store this alias for agent lookups. Aliases carry no signing authority, but an agent \
-         resolves payments the user names by alias to this exact address, so a yes here is \
-         followed by the platform owner prompt.",
-    )
-    .fact("Network", &draft.network_name)
-    .fact("Chain ID", draft.chain_id.to_string())
-    .fact("Alias", &draft.alias)
-    .fact("Address", &checksummed);
-    if let Some(note) = &draft.note {
-        question = question.fact("Note", note);
-    }
-    if let Some(existing) = &existing {
-        if existing.address == checksummed {
-            question = question.warning(format!(
-                "This rewrites the existing entry for {}; the address is unchanged.",
-                draft.alias
-            ));
-        } else {
-            question = question.warning(format!(
-                "This retargets {}: payments the user names by this alias will go to the address \
-                 above instead of {}.",
-                draft.alias, existing.address
-            ));
-        }
-    }
-    if !question.ask("Save this alias?")? {
+    let existing =
+        AddressBookStore::production(config.data_dir())?.get(draft.chain_id, &draft.alias)?;
+    if !save_review(draft, existing.as_ref()).ask()? {
         tui::outro_cancel("Address book unchanged.");
         return Ok(None);
     }
-    presence
-        .confirm(&PresenceRequest::SaveAddressBookEntry {
-            alias: draft.alias.clone(),
-        })
-        .await?;
-    Ok(Some(store.upsert(
-        draft.chain_id,
-        &draft.alias,
-        draft.address,
-        draft.note.as_deref(),
-    )?))
+    save_entry(config, presence, draft).await.map(Some)
 }
 
 /// Confirm one alias removal in the terminal, authenticate the owner, then
@@ -118,121 +228,673 @@ pub async fn confirm_and_remove(
     chain_id: u64,
     alias: &str,
 ) -> Result<Option<AddressBookEntry>> {
-    let mut store = AddressBookStore::production(config.data_dir())?;
-    let existing = store
+    let existing = AddressBookStore::production(config.data_dir())?
         .get(chain_id, alias)?
         .with_context(|| format!("no address book entry {alias} on chain {chain_id}"))?;
-    if !tui::Confirmation::new(
-        "Remove address book entry",
-        "Remove this alias from agent lookups. A yes here is followed by the platform owner \
-         prompt.",
-    )
-    .fact("Network", network_name)
-    .fact("Chain ID", chain_id.to_string())
-    .fact("Alias", alias)
-    .fact("Address", &existing.address)
-    .ask("Remove this alias?")?
-    {
+    if !remove_review(&existing, network_name, chain_id).ask()? {
         tui::outro_cancel("Address book unchanged.");
         return Ok(None);
     }
-    presence
-        .confirm(&PresenceRequest::RemoveAddressBookEntry {
-            alias: alias.to_owned(),
-        })
-        .await?;
-    Ok(Some(store.remove(chain_id, alias)?))
+    remove_entry(config, presence, chain_id, alias)
+        .await
+        .map(Some)
 }
 
-/// What the list screen resolved to, performed after the alternate screen is
-/// released.
+/// Which screen the editor is showing.
+///
+/// One app, four views. The form and the confirmation used to be scrollback
+/// prompts run after the screen was released, which is what left half-typed
+/// forms in the terminal after the browser exited.
+enum View {
+    List,
+    Form(Form),
+    /// The network pick, reached from the form's first row. A sub-view rather
+    /// than a nested call, so it draws in the same screen.
+    Networks(Box<SearchableTable>),
+    Confirm(Confirm),
+}
+
+/// A change the owner has confirmed in-screen and not yet authenticated.
+enum Pending {
+    Save(EntryDraft),
+    Remove { chain_id: u64, alias: String },
+}
+
+struct Confirm {
+    review: Review,
+    pending: Pending,
+    /// Which of the two options the cursor is on. Starts on the refusal: the
+    /// affirmative answer is always the one that has to be reached for.
+    accept: bool,
+    offset: usize,
+}
+
+/// Which value the form's cursor is on. An edit keeps the alias and the chain
+/// the entry already has — retargeting an alias is the change being reviewed,
+/// renaming one is a different entry — so those two rows are facts there and
+/// fields only when adding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Field {
+    Network,
+    Alias,
+    Address,
+    Note,
+}
+
+const ADD_FIELDS: &[Field] = &[Field::Network, Field::Alias, Field::Address, Field::Note];
+const EDIT_FIELDS: &[Field] = &[Field::Address, Field::Note];
+
+struct Form {
+    adding: bool,
+    chain_id: u64,
+    network_name: String,
+    alias: TextField,
+    address: TextField,
+    note: TextField,
+    focus: usize,
+    error: Option<String>,
+}
+
+impl Form {
+    fn add(network: &NetworkConfig) -> Self {
+        Self {
+            adding: true,
+            chain_id: network.chain_id,
+            network_name: network.name.clone(),
+            alias: TextField::new("Alias").placeholder("alice"),
+            address: TextField::new("Address").placeholder("0x…"),
+            note: TextField::new("Note").placeholder("optional"),
+            focus: 0,
+            error: None,
+        }
+    }
+
+    fn edit(entry: &AddressBookEntry, networks: &[NetworkConfig]) -> Result<Self> {
+        Ok(Self {
+            adding: false,
+            chain_id: entry
+                .chain_id
+                .parse()
+                .context("stored chain ID is invalid")?,
+            network_name: network_label(networks, &entry.chain_id),
+            alias: TextField::new("Alias").with_value(&entry.alias),
+            address: TextField::new("Address").with_value(&entry.address),
+            note: TextField::new("Note")
+                .placeholder("optional")
+                .with_value(entry.note.clone().unwrap_or_default()),
+            focus: 0,
+            error: None,
+        })
+    }
+
+    const fn fields(&self) -> &'static [Field] {
+        if self.adding { ADD_FIELDS } else { EDIT_FIELDS }
+    }
+
+    fn current(&self) -> Field {
+        self.fields()[self.focus.min(self.fields().len() - 1)]
+    }
+
+    fn field_mut(&mut self, field: Field) -> Option<&mut TextField> {
+        match field {
+            Field::Alias => Some(&mut self.alias),
+            Field::Address => Some(&mut self.address),
+            Field::Note => Some(&mut self.note),
+            Field::Network => None,
+        }
+    }
+
+    fn next_field(&mut self) {
+        self.focus = (self.focus + 1) % self.fields().len();
+    }
+
+    fn previous_field(&mut self) {
+        let count = self.fields().len();
+        self.focus = (self.focus + count - 1) % count;
+    }
+
+    /// Everything the store would refuse, checked here so the owner is told
+    /// which field is wrong while they are still looking at it — rather than
+    /// at the write, which is where the note rules used to surface.
+    fn draft(&self) -> std::result::Result<EntryDraft, (Field, String)> {
+        let alias = self.alias.value().trim().to_owned();
+        validate_alias(&alias).map_err(|error| (Field::Alias, error.to_string()))?;
+        let address = Address::from_str(self.address.value().trim())
+            .map_err(|_| (Field::Address, "must be a 20-byte EVM address".to_owned()))?;
+        let note = self.note.value().trim();
+        if note.chars().any(ekubo_wallet_core::sanitize::is_disallowed) {
+            return Err((
+                Field::Note,
+                "cannot contain control, bidirectional, or zero-width characters".to_owned(),
+            ));
+        }
+        if note.len() > MAX_NOTE_LEN {
+            return Err((Field::Note, format!("must be at most {MAX_NOTE_LEN} bytes")));
+        }
+        Ok(EntryDraft {
+            chain_id: self.chain_id,
+            network_name: self.network_name.clone(),
+            alias,
+            address,
+            note: (!note.is_empty()).then(|| note.to_owned()),
+        })
+    }
+
+    fn focus_on(&mut self, field: Field) {
+        if let Some(index) = self
+            .fields()
+            .iter()
+            .position(|candidate| *candidate == field)
+        {
+            self.focus = index;
+        }
+    }
+}
+
+/// Interactive loop: browse, add, edit, and remove without ever leaving the
+/// screen, except to hand the terminal to platform owner authentication.
+pub async fn browse(config: &ConfigStore, presence: &dyn HumanPresence) -> Result<()> {
+    if !tui::interactive() {
+        return Ok(());
+    }
+    let mut networks = config.load()?.networks;
+    let mut entries = AddressBookStore::production(config.data_dir())?.list(None, 10_000, 0)?;
+    let mut list = build_list(&networks, &entries);
+    let mut view = View::List;
+    let mut compact = false;
+    // Printed after the screen is gone. A completed change is a fact worth
+    // keeping in the transcript; a form the owner backed out of is not.
+    let mut transcript: Vec<String> = Vec::new();
+    // Shown in the list footer until the next keystroke: a change that did not
+    // complete has to be visible without printing onto the screen it happened
+    // on, which is the defect this module fixed.
+    let mut notice: Option<String> = None;
+    let mut screen = Screen::enter()?;
+
+    let outcome = loop {
+        let wants_compact =
+            screen.terminal.size()?.width < full_layout_min_width(alias_column_width(&entries));
+        if wants_compact != compact {
+            compact = wants_compact;
+            let alias_width = alias_column_width(&entries);
+            list.set_columns(columns(alias_width, compact));
+            list.set_rows(rows(&networks, &entries, compact));
+        }
+        if let Err(error) = screen.terminal.draw(|frame| match &mut view {
+            View::List => draw_list(frame, &mut list, &entries, notice.as_deref()),
+            View::Form(form) => draw_form(frame, form),
+            View::Networks(picker) => draw_networks(frame, picker),
+            View::Confirm(confirm) => draw_confirm(frame, confirm),
+        }) {
+            break Err(error.into());
+        }
+        let key = match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => key,
+            // A resize above all: redraw against the new size.
+            Ok(_) => continue,
+            Err(error) => break Err(error.into()),
+        };
+        if is_interrupt(key) {
+            break Ok(());
+        }
+
+        match &mut view {
+            View::List => {
+                // Any keystroke acknowledges whatever the footer was showing.
+                notice = None;
+                match handle_list_key(&mut list, key) {
+                    Some(Action::Quit) => break Ok(()),
+                    Some(Action::Add) => {
+                        if let Some(network) = networks.first() {
+                            view = View::Form(Form::add(network));
+                        } else {
+                            notice = Some("No networks are configured.".to_owned());
+                        }
+                    }
+                    Some(Action::Edit(index)) => match Form::edit(&entries[index], &networks) {
+                        Ok(form) => view = View::Form(form),
+                        Err(error) => break Err(error),
+                    },
+                    Some(Action::Remove(index)) => {
+                        let entry = &entries[index];
+                        match entry.chain_id.parse::<u64>() {
+                            Ok(chain_id) => {
+                                view = View::Confirm(Confirm {
+                                    review: remove_review(
+                                        entry,
+                                        &network_label(&networks, &entry.chain_id),
+                                        chain_id,
+                                    ),
+                                    pending: Pending::Remove {
+                                        chain_id,
+                                        alias: entry.alias.clone(),
+                                    },
+                                    accept: false,
+                                    offset: 0,
+                                });
+                            }
+                            Err(_) => break Err(anyhow::anyhow!("stored chain ID is invalid")),
+                        }
+                    }
+                    None => {}
+                }
+            }
+            View::Form(form) => {
+                if let Some(next) = handle_form_key(form, config, key)? {
+                    view = next;
+                }
+            }
+            View::Networks(picker) => match picker.handle_key(key) {
+                TableEvent::Stay => {}
+                TableEvent::Quit => view = View::List,
+                TableEvent::Picked(index) => {
+                    // The picker is only ever opened from an add form, and the
+                    // form is rebuilt around the chosen network so the chain
+                    // and its display name cannot disagree.
+                    let network = &networks[index];
+                    let mut form = Form::add(network);
+                    form.focus_on(Field::Alias);
+                    view = View::Form(form);
+                }
+            },
+            View::Confirm(confirm) => match handle_confirm_key(confirm, key) {
+                ConfirmOutcome::Stay => {}
+                ConfirmOutcome::Cancel => view = View::List,
+                ConfirmOutcome::Accept => {
+                    // The one handover: a polkit text agent prompts on this
+                    // terminal, so the alternate screen has to be released
+                    // around it and restored afterwards.
+                    let View::Confirm(confirm) = std::mem::replace(&mut view, View::List) else {
+                        unreachable!("matched above")
+                    };
+                    drop(screen);
+                    let applied = apply(config, presence, confirm.pending).await;
+                    screen = Screen::enter()?;
+                    match applied {
+                        Ok(line) => transcript.push(line),
+                        // A declined owner prompt is the ordinary case here,
+                        // not a reason to tear the browser down.
+                        Err(error) => {
+                            notice = Some(format!("Change did not complete: {error:#}"));
+                        }
+                    }
+                    networks = config.load()?.networks;
+                    entries =
+                        AddressBookStore::production(config.data_dir())?.list(None, 10_000, 0)?;
+                    list = build_list(&networks, &entries);
+                    compact = false;
+                }
+            },
+        }
+    };
+
+    drop(screen);
+    for line in transcript {
+        tui::outro(line);
+    }
+    outcome
+}
+
+fn build_list(networks: &[NetworkConfig], entries: &[AddressBookEntry]) -> SearchableTable {
+    let alias_width = alias_column_width(entries);
+    SearchableTable::new(
+        "Address book entries",
+        columns(alias_width, false),
+        rows(networks, entries, false),
+    )
+}
+
+async fn apply(
+    config: &ConfigStore,
+    presence: &dyn HumanPresence,
+    pending: Pending,
+) -> Result<String> {
+    match pending {
+        Pending::Save(draft) => {
+            let entry = save_entry(config, presence, &draft).await?;
+            Ok(format!(
+                "Stored {} → {} on chain {}.",
+                crate::render::terminal_safe_line(&entry.alias),
+                entry.address,
+                entry.chain_id
+            ))
+        }
+        Pending::Remove { chain_id, alias } => {
+            let removed = remove_entry(config, presence, chain_id, &alias).await?;
+            Ok(format!(
+                "Removed {} → {} from chain {}.",
+                crate::render::terminal_safe_line(&removed.alias),
+                removed.address,
+                removed.chain_id
+            ))
+        }
+    }
+}
+
+fn draw_list(
+    frame: &mut ratatui::Frame,
+    list: &mut SearchableTable,
+    entries: &[AddressBookEntry],
+    notice: Option<&str>,
+) {
+    let (header, body, footer) = chrome(frame.area());
+    frame.render_widget(title_line(&list.title()), header);
+    if entries.is_empty() {
+        // The table's own empty state says "no rows match the search"; an
+        // empty book deserves the invitation instead.
+        frame.render_widget(
+            Paragraph::new(UiLine::from(UiSpan::styled(
+                "The address book is empty — press a to add the first alias.",
+                tone_style(Tone::Muted),
+            )))
+            .alignment(Alignment::Center),
+            body,
+        );
+    } else {
+        list.draw(frame, body);
+    }
+    frame.render_widget(footer_line(notice, &hints(list)), footer);
+}
+
+fn draw_networks(frame: &mut ratatui::Frame, picker: &mut SearchableTable) {
+    let (header, body, footer) = chrome(frame.area());
+    frame.render_widget(title_line(&picker.title()), header);
+    picker.draw(frame, body);
+    frame.render_widget(footer_line(None, &picker.footer_hints("choose")), footer);
+}
+
+fn draw_form(frame: &mut ratatui::Frame, form: &Form) {
+    let (header, body, footer) = chrome(frame.area());
+    frame.render_widget(
+        title_line(if form.adding {
+            "Add address book entry"
+        } else {
+            "Edit address book entry"
+        }),
+        header,
+    );
+    let [pad, rows_area, rest] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(u16::try_from(form.fields().len() + 2).unwrap_or(6)),
+        Constraint::Fill(1),
+    ])
+    .areas(body);
+    let _ = pad;
+    let mut cursor = rows_area;
+    cursor.height = 1;
+    let mut next_row =
+        |frame: &mut ratatui::Frame,
+         render: &mut dyn FnMut(&mut ratatui::Frame, ratatui::layout::Rect)| {
+            render(frame, cursor);
+            cursor.y = cursor.y.saturating_add(1);
+        };
+    // The two values an edit cannot change are shown as facts, in the same
+    // place the add form has them as fields, so the screens read alike.
+    if !form.adding {
+        let network = form.network_name.clone();
+        let chain = form.chain_id;
+        let alias = form.alias.value().to_owned();
+        next_row(frame, &mut |frame, area| {
+            frame.render_widget(
+                Paragraph::new(UiLine::from(vec![
+                    UiSpan::styled("Network: ", tone_style(Tone::Muted)),
+                    UiSpan::raw(crate::render::terminal_safe_line(&network)),
+                    UiSpan::styled(format!(" (chain {chain})"), tone_style(Tone::Muted)),
+                ])),
+                area,
+            );
+        });
+        next_row(frame, &mut |frame, area| {
+            frame.render_widget(
+                Paragraph::new(UiLine::from(vec![
+                    UiSpan::styled("Alias: ", tone_style(Tone::Muted)),
+                    UiSpan::raw(crate::render::terminal_safe_line(&alias)),
+                ])),
+                area,
+            );
+        });
+    }
+    for (index, field) in form.fields().iter().enumerate() {
+        let focused = index == form.focus;
+        match field {
+            Field::Network => {
+                let network = form.network_name.clone();
+                let chain = form.chain_id;
+                next_row(frame, &mut |frame, area| {
+                    frame.render_widget(
+                        Paragraph::new(UiLine::from(vec![
+                            UiSpan::styled(
+                                "Network: ",
+                                if focused {
+                                    tone_style(Tone::Emphasis)
+                                } else {
+                                    tone_style(Tone::Muted)
+                                },
+                            ),
+                            UiSpan::raw(crate::render::terminal_safe_line(&network)),
+                            UiSpan::styled(
+                                format!(" (chain {chain}) — Enter to change"),
+                                tone_style(Tone::Muted),
+                            ),
+                        ])),
+                        area,
+                    );
+                });
+            }
+            Field::Alias => {
+                let text = &form.alias;
+                next_row(frame, &mut |frame, area| text.draw(frame, area, focused));
+            }
+            Field::Address => {
+                let text = &form.address;
+                next_row(frame, &mut |frame, area| text.draw(frame, area, focused));
+            }
+            Field::Note => {
+                let text = &form.note;
+                next_row(frame, &mut |frame, area| text.draw(frame, area, focused));
+            }
+        }
+    }
+    let status = form.error.as_ref().map_or_else(
+        || match form.current() {
+            Field::Network => "The chain this alias resolves on.".to_owned(),
+            Field::Alias => "1-64 letters, numbers, underscores, hyphens, or periods.".to_owned(),
+            Field::Address => "The 20-byte EVM address this alias resolves to.".to_owned(),
+            Field::Note => format!("Optional — at most {MAX_NOTE_LEN} bytes."),
+        },
+        Clone::clone,
+    );
+    let tone = if form.error.is_some() {
+        Tone::Warning
+    } else {
+        Tone::Muted
+    };
+    let mut status_area = rest;
+    status_area.height = status_area.height.min(1);
+    frame.render_widget(
+        Paragraph::new(UiLine::from(UiSpan::styled(
+            crate::render::terminal_safe_line(&status),
+            tone_style(tone),
+        ))),
+        status_area,
+    );
+    frame.render_widget(
+        footer_line(
+            None,
+            "Tab/↑↓ move · Ctrl+S review · Esc cancel · Ctrl+U clear field",
+        ),
+        footer,
+    );
+}
+
+fn draw_confirm(frame: &mut ratatui::Frame, confirm: &mut Confirm) {
+    let [header, body, decision, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    frame.render_widget(title_line(confirm.review.title), header);
+
+    let columns = (body.width as usize).saturating_sub(2).max(10);
+    let wrapped = wrap_lines(&confirm.review.document(), columns);
+    let viewport = (body.height as usize).max(1);
+    confirm.offset = confirm.offset.min(wrapped.len().saturating_sub(viewport));
+    let visible: Vec<UiLine> = wrapped
+        .iter()
+        .skip(confirm.offset)
+        .take(viewport)
+        .map(|line| {
+            let mut spans = vec![UiSpan::raw(" ")];
+            spans.extend(line.iter().map(ui_span));
+            UiLine::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(visible), body);
+
+    let option = |selected: bool, text: &str| {
+        let line = UiLine::from(UiSpan::raw(format!(
+            " {} {text} ",
+            if selected { "▸" } else { " " }
+        )));
+        if selected {
+            line.style(Style::new().add_modifier(Modifier::REVERSED))
+        } else {
+            line
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            UiLine::default(),
+            option(!confirm.accept, "Cancel — nothing is written"),
+            option(confirm.accept, confirm.review.question),
+        ]),
+        decision,
+    );
+    frame.render_widget(
+        footer_line(None, "↑↓/Tab choose · Enter confirm · Esc cancel"),
+        footer,
+    );
+}
+
+enum ConfirmOutcome {
+    Stay,
+    Cancel,
+    Accept,
+}
+
+fn handle_confirm_key(confirm: &mut Confirm, key: KeyEvent) -> ConfirmOutcome {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => ConfirmOutcome::Cancel,
+        KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+            confirm.accept = !confirm.accept;
+            ConfirmOutcome::Stay
+        }
+        KeyCode::PageDown => {
+            confirm.offset = confirm.offset.saturating_add(1);
+            ConfirmOutcome::Stay
+        }
+        KeyCode::PageUp => {
+            confirm.offset = confirm.offset.saturating_sub(1);
+            ConfirmOutcome::Stay
+        }
+        KeyCode::Enter => {
+            if confirm.accept {
+                ConfirmOutcome::Accept
+            } else {
+                ConfirmOutcome::Cancel
+            }
+        }
+        _ => ConfirmOutcome::Stay,
+    }
+}
+
+/// `Ok(Some(view))` switches screens; `Ok(None)` stays on the form.
+fn handle_form_key(form: &mut Form, config: &ConfigStore, key: KeyEvent) -> Result<Option<View>> {
+    // The field editor gets first refusal, so a typed character is never a
+    // navigation key. It declines Enter, Tab, Esc, Up, and Down, which is
+    // exactly the set the form needs.
+    if let Some(field) = form.field_mut(form.current())
+        && field.handle_key(key)
+    {
+        form.error = None;
+        return Ok(None);
+    }
+    match key.code {
+        KeyCode::Esc => return Ok(Some(View::List)),
+        KeyCode::Tab | KeyCode::Down => form.next_field(),
+        KeyCode::BackTab | KeyCode::Up => form.previous_field(),
+        KeyCode::Enter => {
+            if form.current() == Field::Network {
+                let networks = config.load()?.networks;
+                return Ok(Some(View::Networks(Box::new(network_picker(&networks)))));
+            }
+            if form.focus + 1 < form.fields().len() {
+                form.next_field();
+            } else {
+                return review_form(form, config);
+            }
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return review_form(form, config);
+        }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// Validate the form and move to the confirmation, or park the cursor on the
+/// field that is wrong and say why.
+fn review_form(form: &mut Form, config: &ConfigStore) -> Result<Option<View>> {
+    match form.draft() {
+        Ok(draft) => {
+            let existing = AddressBookStore::production(config.data_dir())?
+                .get(draft.chain_id, &draft.alias)?;
+            Ok(Some(View::Confirm(Confirm {
+                review: save_review(&draft, existing.as_ref()),
+                pending: Pending::Save(draft),
+                accept: false,
+                offset: 0,
+            })))
+        }
+        Err((field, reason)) => {
+            form.focus_on(field);
+            form.error = Some(reason);
+            Ok(None)
+        }
+    }
+}
+
+fn network_picker(networks: &[NetworkConfig]) -> SearchableTable {
+    SearchableTable::new(
+        "Networks",
+        vec![
+            TableColumn::new("Network", Constraint::Fill(1)),
+            TableColumn::new("Chain", Constraint::Length(10)).right_aligned(),
+        ],
+        networks
+            .iter()
+            .map(|network| {
+                TableRow::new(
+                    vec![
+                        Span::plain(&network.name),
+                        Span::plain(network.chain_id.to_string()),
+                    ],
+                    &[&network.name, &network.chain_id.to_string()],
+                )
+            })
+            .collect(),
+    )
+}
+
+/// What a list keystroke resolved to.
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Add,
     Edit(usize),
     Remove(usize),
     Quit,
-}
-
-/// Interactive loop: browse the entries, drop to the scrollback flow for
-/// each change, return to the refreshed list.
-pub async fn browse(config: &ConfigStore, presence: &dyn HumanPresence) -> Result<()> {
-    if !tui::interactive() {
-        return Ok(());
-    }
-    loop {
-        let networks = config.load()?.networks;
-        let entries = AddressBookStore::production(config.data_dir())?.list(None, 10_000, 0)?;
-        let outcome = match pick_action(&networks, &entries)? {
-            Action::Quit => return Ok(()),
-            Action::Add => add_flow(config, presence, &networks).await,
-            Action::Edit(index) => edit_flow(config, presence, &networks, &entries[index]).await,
-            Action::Remove(index) => {
-                remove_flow(config, presence, &networks, &entries[index]).await
-            }
-        };
-        // A failed change (declined owner authentication above all) should
-        // not tear down the browser; report it and return to the list.
-        if let Err(error) = outcome {
-            tui::warning(format!("Address book change did not complete: {error:#}"));
-        }
-    }
-}
-
-/// Run the list screen until the user chooses something to do. The
-/// [`Screen`] guard is released before this returns, so the caller's flows
-/// draw on the ordinary terminal.
-fn pick_action(networks: &[NetworkConfig], entries: &[AddressBookEntry]) -> Result<Action> {
-    let alias_width = alias_column_width(entries);
-    let mut list = SearchableTable::new(
-        "Address book entries",
-        columns(alias_width, false),
-        rows(networks, entries, false),
-    );
-    let mut compact = false;
-    let mut screen = Screen::enter()?;
-    loop {
-        // Lay out against the live width on every frame: when the full
-        // 42-column address stops fitting, it is the address that shortens
-        // and the muted Updated column that goes — never the alias.
-        let wants_compact = screen.terminal.size()?.width < full_layout_min_width(alias_width);
-        if wants_compact != compact {
-            compact = wants_compact;
-            list.set_columns(columns(alias_width, compact));
-            list.set_rows(rows(networks, entries, compact));
-        }
-        screen.terminal.draw(|frame| {
-            let (header, body, footer) = chrome(frame.area());
-            frame.render_widget(title_line(&list.title()), header);
-            if entries.is_empty() {
-                // The table's own empty state says "no rows match the
-                // search"; an empty book deserves the invitation instead.
-                frame.render_widget(
-                    Paragraph::new(UiLine::from(UiSpan::styled(
-                        "The address book is empty — press a to add the first alias.",
-                        tone_style(Tone::Muted),
-                    )))
-                    .alignment(Alignment::Center),
-                    body,
-                );
-            } else {
-                list.draw(frame, body);
-            }
-            frame.render_widget(footer_line(None, &hints(&list)), footer);
-        })?;
-        let key = match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => key,
-            // Anything else — a resize above all — just redraws against the
-            // new terminal size.
-            _ => continue,
-        };
-        if is_interrupt(key) {
-            return Ok(Action::Quit);
-        }
-        if let Some(action) = handle_list_key(&mut list, key) {
-            return Ok(action);
-        }
-    }
 }
 
 /// The editor's own bindings first — but never while the `/` search is being
@@ -378,195 +1040,6 @@ fn rows(networks: &[NetworkConfig], entries: &[AddressBookEntry], compact: bool)
         .collect()
 }
 
-/// The scrollback add flow: pick a network, name the alias, type the
-/// address, optionally note it, then confirm and authenticate.
-async fn add_flow(
-    config: &ConfigStore,
-    presence: &dyn HumanPresence,
-    networks: &[NetworkConfig],
-) -> Result<()> {
-    ensure!(!networks.is_empty(), "no networks are configured");
-    tui::intro("Add address book entry");
-    let labels = networks
-        .iter()
-        .map(|network| format!("{} (chain {})", network.name, network.chain_id))
-        .collect();
-    let Some(index) = tui::pick("Network", labels, crate::render::interactive_list_rows(6))? else {
-        cancelled();
-        return Ok(());
-    };
-    let network = &networks[index];
-    let Some(alias) = prompt_alias()? else {
-        cancelled();
-        return Ok(());
-    };
-    let Some(address) = prompt_address(None)? else {
-        cancelled();
-        return Ok(());
-    };
-    let NotePrompt::Value(note) = prompt_note(None)? else {
-        cancelled();
-        return Ok(());
-    };
-    let draft = EntryDraft {
-        chain_id: network.chain_id,
-        network_name: network.name.clone(),
-        alias,
-        address,
-        note,
-    };
-    if let Some(entry) = confirm_and_save(config, presence, &draft).await? {
-        tui::outro(format!(
-            "Stored {} → {} on chain {}.",
-            crate::render::terminal_safe_line(&entry.alias),
-            entry.address,
-            entry.chain_id
-        ));
-    }
-    Ok(())
-}
-
-/// The scrollback edit flow: the alias and chain stay what they are; the
-/// address and note are retyped starting from their current values.
-async fn edit_flow(
-    config: &ConfigStore,
-    presence: &dyn HumanPresence,
-    networks: &[NetworkConfig],
-    entry: &AddressBookEntry,
-) -> Result<()> {
-    // Stored text, and `intro`/`outro` do not sanitize — the table view does,
-    // through `Span::plain`. A row written before the current alias rules, or
-    // by anything else with write access to the database, reaches these lines
-    // as it was stored. `remove` deliberately accepts such a row so the owner
-    // can delete it, which is precisely when these lines print it.
-    tui::intro(format!(
-        "Edit address book entry {}",
-        crate::render::terminal_safe_line(&entry.alias)
-    ));
-    let chain_id: u64 = entry
-        .chain_id
-        .parse()
-        .context("stored chain ID is invalid")?;
-    let Some(address) = prompt_address(Some(&entry.address))? else {
-        cancelled();
-        return Ok(());
-    };
-    let NotePrompt::Value(note) = prompt_note(entry.note.as_deref())? else {
-        cancelled();
-        return Ok(());
-    };
-    let draft = EntryDraft {
-        chain_id,
-        network_name: network_label(networks, &entry.chain_id),
-        alias: entry.alias.clone(),
-        address,
-        note,
-    };
-    if let Some(entry) = confirm_and_save(config, presence, &draft).await? {
-        tui::outro(format!(
-            "Stored {} → {} on chain {}.",
-            entry.alias, entry.address, entry.chain_id
-        ));
-    }
-    Ok(())
-}
-
-async fn remove_flow(
-    config: &ConfigStore,
-    presence: &dyn HumanPresence,
-    networks: &[NetworkConfig],
-    entry: &AddressBookEntry,
-) -> Result<()> {
-    let chain_id: u64 = entry
-        .chain_id
-        .parse()
-        .context("stored chain ID is invalid")?;
-    if let Some(removed) = confirm_and_remove(
-        config,
-        presence,
-        &network_label(networks, &entry.chain_id),
-        chain_id,
-        &entry.alias,
-    )
-    .await?
-    {
-        tui::outro(format!(
-            "Removed {} → {} from chain {}.",
-            crate::render::terminal_safe_line(&removed.alias),
-            removed.address,
-            removed.chain_id
-        ));
-    }
-    Ok(())
-}
-
-/// A backed-out prompt: say so once and leave the flow without an error.
-fn cancelled() {
-    tui::outro_cancel("Address book unchanged.");
-}
-
-/// `Ok(None)` means the user backed out with Esc or Ctrl+C.
-fn prompt_alias() -> Result<Option<String>> {
-    Ok(tui::text("Alias")
-        .placeholder("alice")
-        .help("1-64 letters, numbers, underscores, hyphens, or periods")
-        .validate(|value| validate_alias(value.trim()).map_err(|error| error.to_string()))
-        .prompt()?
-        .map(|alias| alias.trim().to_owned()))
-}
-
-fn prompt_address(initial: Option<&str>) -> Result<Option<Address>> {
-    let mut prompt = tui::text("Address").placeholder("0x…").validate(|value| {
-        if Address::from_str(value.trim()).is_ok() {
-            Ok(())
-        } else {
-            Err("must be a 20-byte EVM address".into())
-        }
-    });
-    if let Some(initial) = initial {
-        prompt = prompt.initial(initial);
-    }
-    Ok(prompt
-        .prompt()?
-        .map(|address| Address::from_str(address.trim()).expect("validated above")))
-}
-
-/// A note prompt answered with nothing is an entry without a note; backing
-/// out with Esc is not an answer at all, and the two must not read alike.
-enum NotePrompt {
-    Cancelled,
-    Value(Option<String>),
-}
-
-fn prompt_note(initial: Option<&str>) -> Result<NotePrompt> {
-    let mut prompt = tui::text("Note")
-        .help("Optional — leave empty for none")
-        .validate(|value| {
-            // The same predicate `AddressBookStore::sanitize_note` applies on
-            // the way in. When these two disagreed, a note carrying a
-            // bidirectional control passed the prompt and the confirmation
-            // screen and then failed at the write, which tells the owner they
-            // typed something wrong at the last possible moment.
-            if value
-                .chars()
-                .any(ekubo_wallet_core::sanitize::is_disallowed)
-            {
-                Err("cannot contain control, bidirectional, or zero-width characters".into())
-            } else if value.len() > MAX_NOTE_LEN {
-                Err(format!("must be at most {MAX_NOTE_LEN} bytes"))
-            } else {
-                Ok(())
-            }
-        });
-    if let Some(initial) = initial {
-        prompt = prompt.initial(initial);
-    }
-    Ok(prompt.prompt()?.map_or(NotePrompt::Cancelled, |note| {
-        let note = note.trim();
-        NotePrompt::Value((!note.is_empty()).then(|| note.to_owned()))
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,6 +1062,77 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn add_form() -> Form {
+        Form::add(&networks()[0])
+    }
+
+    #[test]
+    fn the_form_reports_which_field_is_wrong_rather_than_failing_at_the_write() {
+        let mut form = add_form();
+        form.alias.set_value("not a valid alias!");
+        form.address
+            .set_value(Address::repeat_byte(0x11).to_checksum(None));
+        let (field, _) = form.draft().expect_err("an invalid alias must not draft");
+        assert_eq!(field, Field::Alias);
+
+        form.alias.set_value("alice");
+        form.address.set_value("0xnope");
+        let (field, reason) = form.draft().expect_err("an invalid address must not draft");
+        assert_eq!(field, Field::Address);
+        assert!(reason.contains("20-byte"));
+
+        // The note rules used to be enforced by the store, one screen later.
+        form.address
+            .set_value(Address::repeat_byte(0x11).to_checksum(None));
+        form.note.set_value("payroll\u{202e}");
+        let (field, _) = form.draft().expect_err("a bidi note must not draft");
+        assert_eq!(field, Field::Note);
+    }
+
+    #[test]
+    fn a_valid_form_drafts_with_the_note_trimmed_away_when_empty() {
+        let mut form = add_form();
+        form.alias.set_value("  alice  ");
+        form.address
+            .set_value(Address::repeat_byte(0x11).to_checksum(None));
+        form.note.set_value("   ");
+        let draft = form.draft().expect("a valid form drafts");
+        assert_eq!(draft.alias, "alice");
+        assert_eq!(draft.note, None);
+        assert_eq!(draft.chain_id, networks()[0].chain_id);
+
+        form.note.set_value("  paid weekly  ");
+        assert_eq!(
+            form.draft().expect("still valid").note.as_deref(),
+            Some("paid weekly")
+        );
+    }
+
+    #[test]
+    fn editing_keeps_the_alias_and_chain_it_was_opened_on() {
+        let networks = networks();
+        let entry = entry("alice", &networks[0].chain_id.to_string(), Some("hi"));
+        let form = Form::edit(&entry, &networks).expect("a stored entry opens");
+        // The two values an edit cannot change are not fields, so no keystroke
+        // can reach them: retargeting an alias is the reviewed change,
+        // renaming one would be a different entry.
+        assert_eq!(form.fields(), EDIT_FIELDS);
+        assert_eq!(form.chain_id, networks[0].chain_id);
+        let draft = form.draft().expect("the stored values are valid");
+        assert_eq!(draft.alias, "alice");
+        assert_eq!(draft.note.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn the_form_cycles_focus_in_both_directions() {
+        let mut form = add_form();
+        assert_eq!(form.current(), Field::Network);
+        form.previous_field();
+        assert_eq!(form.current(), Field::Note, "wraps backwards to the last");
+        form.next_field();
+        assert_eq!(form.current(), Field::Network, "and forwards to the first");
     }
 
     #[test]

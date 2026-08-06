@@ -505,6 +505,145 @@ impl SearchableTable {
     }
 }
 
+/// One editable line of text, drawn inside the alternate screen.
+///
+/// The pieces for a form already existed and were split across two worlds:
+/// [`SearchableTable`] captures keystrokes but only append-and-backspace, into
+/// a footer string with a painted caret; `crate::tui::TextPrompt` is a real
+/// line editor but opens an inline viewport at the cursor and prints an
+/// answered line to the scrollback when it closes. A full-screen form needs
+/// the editing of the second inside the screen of the first, which is this.
+///
+/// Deliberately not a `tui::TextPrompt` that can also draw here: that type
+/// owns an event loop and a terminal. This owns neither — the caller's app
+/// feeds it keys and gives it a rect — which is what lets several of them sit
+/// on one frame with one of them focused.
+pub(crate) struct TextField {
+    label: String,
+    value: String,
+    /// Caret position in characters, not bytes. Every edit goes through
+    /// [`char_boundary`], so a multi-byte character is never split.
+    cursor: usize,
+    placeholder: Option<String>,
+}
+
+impl TextField {
+    pub(crate) fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: String::new(),
+            cursor: 0,
+            placeholder: None,
+        }
+    }
+
+    /// Pre-fill the line, caret at the end, for editing an existing value.
+    pub(crate) fn with_value(mut self, value: impl Into<String>) -> Self {
+        self.set_value(value);
+        self
+    }
+
+    pub(crate) fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    pub(crate) fn set_value(&mut self, value: impl Into<String>) {
+        self.value = value.into();
+        self.cursor = self.value.chars().count();
+    }
+
+    pub(crate) fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Apply one keystroke. Returns whether it was consumed as editing — a key
+    /// this field does not use (Enter, Tab, Up, Down, Esc) is left for the
+    /// caller's own navigation, so the form decides what those mean.
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) -> bool {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Left if !control => self.cursor = self.cursor.saturating_sub(1),
+            KeyCode::Right if !control => {
+                self.cursor = (self.cursor + 1).min(self.value.chars().count());
+            }
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.value.chars().count(),
+            KeyCode::Backspace if self.cursor > 0 => {
+                let start = char_boundary(&self.value, self.cursor - 1);
+                let end = char_boundary(&self.value, self.cursor);
+                self.value.replace_range(start..end, "");
+                self.cursor -= 1;
+            }
+            KeyCode::Delete if self.cursor < self.value.chars().count() => {
+                let start = char_boundary(&self.value, self.cursor);
+                let end = char_boundary(&self.value, self.cursor + 1);
+                self.value.replace_range(start..end, "");
+            }
+            // The line-kill every readline-shaped editor has, and the fastest
+            // way to replace a pre-filled value rather than backspacing it.
+            KeyCode::Char('u') if control => {
+                self.value.clear();
+                self.cursor = 0;
+            }
+            KeyCode::Char(character) if !control && !character.is_control() => {
+                let at = char_boundary(&self.value, self.cursor);
+                self.value.insert(at, character);
+                self.cursor += 1;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Draw `label: value` into `area`, placing the terminal caret when
+    /// `focused`. The caret position is measured from the rendered prefix
+    /// rather than assumed from its character count, so a wide glyph in a
+    /// label cannot drift it.
+    pub(crate) fn draw(&self, frame: &mut ratatui::Frame, area: Rect, focused: bool) {
+        let prefix = format!("{}: ", self.label);
+        let shown = &self.value;
+        let mut spans = vec![UiSpan::styled(
+            prefix.clone(),
+            if focused {
+                tone_style(Tone::Emphasis)
+            } else {
+                tone_style(Tone::Muted)
+            },
+        )];
+        if shown.is_empty() {
+            if let Some(placeholder) = &self.placeholder {
+                spans.push(UiSpan::styled(
+                    terminal_safe_line(placeholder),
+                    tone_style(Tone::Muted),
+                ));
+            }
+        } else {
+            spans.push(UiSpan::raw(terminal_safe_line(shown)));
+        }
+        frame.render_widget(Paragraph::new(UiLine::from(spans)), area);
+        if focused {
+            let ahead: String = shown.chars().take(self.cursor).collect();
+            let column = display_width(&prefix) + display_width(&ahead);
+            // Clamped so a value wider than the pane cannot put the caret
+            // outside the frame, which some terminals render as a stray cell.
+            let x = area
+                .x
+                .saturating_add(u16::try_from(column).unwrap_or(u16::MAX))
+                .min(area.right().saturating_sub(1));
+            frame.set_cursor_position(ratatui::layout::Position { x, y: area.y });
+        }
+    }
+}
+
+/// The byte offset of character `index`, or the string's length past the end.
+fn char_boundary(value: &str, index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(index)
+        .map_or(value.len(), |(offset, _)| offset)
+}
+
 /// Whether `key` is the session-level interrupt every full-screen surface
 /// honors before its own bindings — raw mode suppresses the terminal's own
 /// Ctrl+C handling, so each event loop has to honor it itself.
@@ -583,6 +722,54 @@ impl Drop for Screen {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyModifiers;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_text_field_edits_at_the_caret_and_never_splits_a_character() {
+        let mut field = TextField::new("Note").with_value("h\u{e9}llo");
+        // `with_value` puts the caret at the end, counted in characters: the
+        // string is six bytes and five characters, and a byte-indexed caret
+        // would slice the accented character in half on the first backspace.
+        assert!(field.handle_key(press(KeyCode::Home)));
+        assert!(field.handle_key(press(KeyCode::Right)));
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(field.value(), "hx\u{e9}llo");
+        assert!(field.handle_key(press(KeyCode::Delete)));
+        assert_eq!(field.value(), "hxllo");
+        assert!(field.handle_key(press(KeyCode::End)));
+        assert!(field.handle_key(press(KeyCode::Backspace)));
+        assert_eq!(field.value(), "hxll");
+    }
+
+    #[test]
+    fn a_text_field_declines_the_keys_a_form_navigates_with() {
+        // The form gives the focused field first refusal, so anything it
+        // consumes can never also be navigation. These five must fall through
+        // or Tab would type a tab and Esc could not back out.
+        let mut field = TextField::new("Alias").with_value("alice");
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Esc,
+            KeyCode::Up,
+        ] {
+            assert!(!field.handle_key(press(code)), "{code:?} was consumed");
+        }
+        assert_eq!(field.value(), "alice");
+
+        // Ctrl+U is the field's own, and clears the whole line.
+        assert!(field.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)));
+        assert_eq!(field.value(), "");
+        // A control-modified character is never typed into the value.
+        assert!(!field.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+        assert_eq!(field.value(), "");
+    }
+
     use super::*;
 
     fn text_of(lines: &[Line]) -> String {
