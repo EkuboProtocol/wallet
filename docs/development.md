@@ -4,8 +4,8 @@ The repository tracks Rust `stable`. CI verifies Linux, macOS, and Windows.
 
 ```sh
 cargo fmt --all --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
 cargo build --locked --release
 ```
 

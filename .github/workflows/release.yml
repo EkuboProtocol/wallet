@@ -44,12 +44,12 @@ jobs:
         run: cargo check --locked --all-targets --all-features
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Test the tagged source
         env:
           RUST_MIN_STACK: 67108864
-        run: cargo test --locked --all-features
+        run: cargo test --locked --workspace --all-features
 
       - name: Install RustSec audit client
         run: cargo install cargo-audit --locked --version 0.22.2

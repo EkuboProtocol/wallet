@@ -4,9 +4,15 @@
 
 ```sh
 cargo fmt          # mandatory, never skip
-cargo clippy --all-targets
-cargo test
+cargo clippy --workspace --all-targets
+cargo test --workspace
 ```
+
+`--workspace` is load-bearing: this manifest is a package *and* the
+workspace root, so a bare `cargo test` runs only the `ekubo-wallet`
+package and silently skips every test in `ekubo-wallet-core` — the
+security kernel. Tests there once referenced functions that had already
+been deleted and the gate still reported success.
 
 Nothing reviews this downstream, so an unformatted or unbuilt commit is a
 defect that reaches `main` directly. Regenerate `THIRD_PARTY_LICENSES.md` with

@@ -46,7 +46,7 @@ jobs:
         # frames overflow that thread's smaller default stack.
         env:
           RUST_MIN_STACK: 67108864
-        run: cargo test --locked --all-features
+        run: cargo test --locked --workspace --all-features
 
   lint:
     name: Formatting and lints
@@ -62,7 +62,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       # install.sh is piped to a shell by users, so it is linted like source.
       - name: Lint the installer
