@@ -83,8 +83,8 @@ authorization and outer envelope are recovered and validated after signing.
 
 Private keys are not in this directory at all. Each is an OS credential-store
 entry under `org.ekubo.wallet.private-key.v1` keyed by wallet ID, and the
-SQLCipher key is a separate entry under
-`org.ekubo.wallet.policy-database-key.v1`. Keeping them apart is what lets the
+SQLCipher key is a separate entry under `org.ekubo.wallet.db`. Keeping them
+apart is what lets the
 data directory be copied — backed up, synced, attached to a bug report —
 without carrying key material, and it means the frequently handled secret (the
 database key, read by nearly every command) is not the same secret as the one

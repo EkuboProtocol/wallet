@@ -38,7 +38,9 @@ entry and `Esc` also leaves the browser. Every reporting command prints exact JS
 always receive machine-readable output.
 
 The random 256-bit database key is stored separately under credential-service
-name `org.ekubo.wallet.policy-database-key.v1`. Wallet private keys use
+name `org.ekubo.wallet.db` — named for the database rather than for policies,
+since the same file holds the pending signing queues, the address book, and
+the token names a reviewer reads. Wallet private keys use
 `org.ekubo.wallet.private-key.v1` and the wallet ID as their account. The
 unencrypted `config.json` in the same data directory contains wallet metadata
 and network configuration, including RPC URLs; it contains no private key.
