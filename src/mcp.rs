@@ -1537,29 +1537,24 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<ApprovalWaitInput>,
     ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
-        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
-        loop {
-            let record = self
-                .pending_record_by_id(input.request_id)
-                .map_err(|error| tool_error(&error))?;
-            if record.status != PendingStatus::AwaitingApproval
-                || tokio::time::Instant::now() >= deadline
-            {
-                let timed_out = record.status == PendingStatus::AwaitingApproval;
-                let mut output = execution_status_output(record);
-                if timed_out {
-                    output.status = ExecutionStatus::TimedOut;
-                    output.instruction = Some(format!(
-                        "Still awaiting human approval, which does not expire. Call wallet_wait_for_approval again with request_id {}; do not ask the user to report approval in chat.",
-                        output.request_id
-                    ));
-                }
-                return Ok(Json(output));
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        let (record, timed_out) = wait_for_decision(
+            input.timeout_seconds,
+            || {
+                self.pending_record_by_id(input.request_id)
+                    .map_err(|error| tool_error(&error))
+            },
+            |record| record.status == PendingStatus::AwaitingApproval,
+        )
+        .await?;
+        let mut output = execution_status_output(record);
+        if timed_out {
+            output.status = ExecutionStatus::TimedOut;
+            output.instruction = Some(still_awaiting_instruction(
+                "wallet_wait_for_approval",
+                output.request_id,
+            ));
         }
+        Ok(Json(output))
     }
 
     #[tool(
@@ -1845,33 +1840,28 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<TypedDataWaitInput>,
     ) -> Result<Json<TypedDataOutput>, ErrorData> {
-        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
-        loop {
-            let record = self
-                .typed_data
-                .lock()
-                .map_err(|_| {
-                    ErrorData::internal_error("typed-data database lock was poisoned", None)
-                })?
-                .get(input.request_id)
-                .map_err(|error| tool_error(&error))?;
-            if record.status != TypedDataStatus::AwaitingApproval
-                || tokio::time::Instant::now() >= deadline
-            {
-                let timed_out = record.status == TypedDataStatus::AwaitingApproval;
-                let mut output = typed_data_output(record);
-                if timed_out {
-                    output.instruction = Some(format!(
-                        "Still awaiting human approval, which does not expire. Call wallet_wait_for_typed_data again with request_id {}; do not ask the user to report approval in chat.",
-                        output.request_id
-                    ));
-                }
-                return Ok(Json(output));
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        let (record, timed_out) = wait_for_decision(
+            input.timeout_seconds,
+            || {
+                self.typed_data
+                    .lock()
+                    .map_err(|_| {
+                        ErrorData::internal_error("typed-data database lock was poisoned", None)
+                    })?
+                    .get(input.request_id)
+                    .map_err(|error| tool_error(&error))
+            },
+            |record| record.status == TypedDataStatus::AwaitingApproval,
+        )
+        .await?;
+        let mut output = typed_data_output(record);
+        if timed_out {
+            output.instruction = Some(still_awaiting_instruction(
+                "wallet_wait_for_typed_data",
+                output.request_id,
+            ));
         }
+        Ok(Json(output))
     }
 
     #[tool(
@@ -1938,32 +1928,29 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<MessageWaitInput>,
     ) -> Result<Json<MessageOutput>, ErrorData> {
-        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
-        loop {
-            let record = self
-                .messages
-                .lock()
-                .map_err(|_| ErrorData::internal_error("message database lock was poisoned", None))?
-                .get(input.request_id)
-                .map_err(|error| tool_error(&error))?;
-            if record.status != MessageStatus::AwaitingApproval
-                || tokio::time::Instant::now() >= deadline
-            {
-                let timed_out = record.status == MessageStatus::AwaitingApproval;
-                let mut output =
-                    message_output(record, &self.config).map_err(|error| tool_error(&error))?;
-                if timed_out {
-                    output.instruction = Some(format!(
-                        "Still awaiting human approval, which does not expire. Call wallet_wait_for_message again with request_id {}; do not ask the user to report approval in chat.",
-                        output.request_id
-                    ));
-                }
-                return Ok(Json(output));
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        let (record, timed_out) = wait_for_decision(
+            input.timeout_seconds,
+            || {
+                self.messages
+                    .lock()
+                    .map_err(|_| {
+                        ErrorData::internal_error("message database lock was poisoned", None)
+                    })?
+                    .get(input.request_id)
+                    .map_err(|error| tool_error(&error))
+            },
+            |record| record.status == MessageStatus::AwaitingApproval,
+        )
+        .await?;
+        let mut output =
+            message_output(record, &self.config).map_err(|error| tool_error(&error))?;
+        if timed_out {
+            output.instruction = Some(still_awaiting_instruction(
+                "wallet_wait_for_message",
+                output.request_id,
+            ));
         }
+        Ok(Json(output))
     }
 }
 
@@ -2572,6 +2559,36 @@ fn ensure_tool(condition: bool, message: &str) -> Result<(), ErrorData> {
     } else {
         Err(ErrorData::invalid_params(message.to_string(), None))
     }
+}
+
+/// Polls one queued request until it leaves awaiting-approval or the timeout
+/// lapses: the shared engine of the three wait tools. `fetch` reads the
+/// record, `awaiting` says whether it is still queued. Returns the final
+/// record and whether the wait timed out with the record still queued.
+async fn wait_for_decision<R>(
+    timeout_seconds: u8,
+    mut fetch: impl FnMut() -> Result<R, ErrorData>,
+    awaiting: impl Fn(&R) -> bool,
+) -> Result<(R, bool), ErrorData> {
+    validate_timeout_seconds(timeout_seconds).map_err(|error| tool_error(&error))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_seconds));
+    loop {
+        let record = fetch()?;
+        if !awaiting(&record) || tokio::time::Instant::now() >= deadline {
+            let timed_out = awaiting(&record);
+            return Ok((record, timed_out));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The instruction returned on a timed-out wait: approval never expires, so
+/// the agent calls the same wait tool again rather than involving the chat.
+fn still_awaiting_instruction(wait_tool: &str, request_id: impl std::fmt::Display) -> String {
+    format!(
+        "Still awaiting human approval, which does not expire. Call {wait_tool} again with \
+         request_id {request_id}; do not ask the user to report approval in chat."
+    )
 }
 
 fn tool_error(error: &impl std::fmt::Display) -> ErrorData {
