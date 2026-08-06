@@ -301,9 +301,14 @@ impl ConfigStore {
             self.save(&config)?;
             Ok(value)
         })();
-        FileExt::unlock(&lock)
-            .with_context(|| format!("failed to unlock {}", lock_path.display()))?;
-        result
+        // The work's own error is the one worth reporting. Unlocking after a
+        // failure and propagating *that* replaces "the database key is wrong"
+        // or "the schema is unrecognized" with "failed to unlock a lock file",
+        // which tells the owner nothing about why their wallet did not open —
+        // and the lock is released either way when this process exits.
+        let unlocked = FileExt::unlock(&lock)
+            .with_context(|| format!("failed to unlock {}", lock_path.display()));
+        result.and_then(|value| unlocked.map(|()| value))
     }
 
     pub fn wallet(&self, id: &str) -> Result<WalletMetadata> {

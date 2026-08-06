@@ -58,13 +58,20 @@ fn collect(root: &Path, directory: &Path, files: &mut Vec<String>) {
             .extension()
             .is_some_and(|extension| extension == "json")
         {
-            let relative = path
-                .strip_prefix(root)
-                .expect("path under clearsign root")
-                .to_str()
-                .expect("descriptor paths are UTF-8")
-                .replace('\\', "/");
-            files.push(relative);
+            let relative = path.strip_prefix(root).expect("path under clearsign root");
+            // A name that is not UTF-8 cannot be written into the generated
+            // `include_str!` path, so the build would fail either way. Failing
+            // here says which file and why; the `to_str().expect(...)` it
+            // replaces said "descriptor paths are UTF-8" and left whoever hit
+            // it to work out that the message was about a filename.
+            let Some(relative) = relative.to_str() else {
+                panic!(
+                    "clearsign/{} is not valid UTF-8; every vendored descriptor \
+                     path is embedded as a string, so it has to be nameable as one",
+                    relative.display()
+                );
+            };
+            files.push(relative.replace('\\', "/"));
         }
     }
 }
