@@ -101,14 +101,24 @@ token cannot forge additional review fields. Effectively unlimited allowances an
 blanket `setApprovalForAll` grants are surfaced as explicit warnings. The review
 digest binds the exact calldata, not this rendering.
 
-ERC-7730 descriptors are vendored in the repository (`clearsign/`), embedded
-at compile time, and never fetched from the network; updating the snapshot is
-a reviewed git commit. The test suite parses every vendored descriptor,
-recomputes each function selector, and validates every display path and
-reference, so a malformed descriptor fails CI. Descriptor-supplied text is
-control-stripped and length-capped before display, nested calldata rendering
-is depth- and count-limited, and a descriptor can never change what is signed
-— only how it is described.
+ERC-7730 descriptors are vendored in the repository
+(`crates/ekubo-wallet-core/clearsign/`) — the complete upstream registry
+snapshot, calldata and EIP-712 descriptors alike, plus the Ekubo descriptors
+— embedded at compile time and never fetched from the network; updating the
+snapshot is a reviewed git commit. Interpretation runs through the pinned
+`clear-signing` crate (the ERC-7730 v2 engine, exact-version pinned, with its
+network-fetching feature disabled). The test suite resolves and parses every
+vendored descriptor, including their `includes` chains, so a malformed
+descriptor fails CI. Descriptor-supplied text is control- and
+bidi-override-stripped and length-capped before display, the rendered field
+list is count-limited, and a descriptor can never change what is signed —
+only how it is described.
+
+EIP-712 typed-data reviews get the same treatment: when a vendored descriptor
+matches the payload's domain (chain and verifying contract) exactly, its
+reading appears as supplemental facts above the permit decode. The complete
+printed payload remains the authoritative review, and recognized-permit
+warnings are produced by the wallet's own decoder, never by a descriptor.
 
 After terminal confirmation, the CLI asks the platform to authenticate the
 owner, naming the wallet about to sign. It then reloads the pending row,

@@ -1795,6 +1795,16 @@ async fn approve_typed_data(
     .digest(&request.digest);
     approval.id = request.request_id;
 
+    // A vendored ERC-7730 descriptor reading, when the domain matches one
+    // exactly. Supplemental display only: the printed payload and the permit
+    // decode below stay authoritative.
+    if let Some(reading) = crate::clear_signing::interpret_typed_data(&request.typed_data).await {
+        approval = approval.fact("Reads as", reading.intent);
+        for line in reading.fields {
+            approval = approval.fact("·", line);
+        }
+    }
+
     if let Some(approvals) = &permit_approvals {
         for (index, permit) in approvals.iter().enumerate() {
             approval = approval.fact(

@@ -129,6 +129,7 @@ file follows in the appendix. Regenerate this document with
 - secp256k1 0.31.1 — Dawid Ciężarkiewicz <dpc@ucore.info>, Andrew Poelstra <apoelstra@wpsoftware.net> — https://github.com/rust-bitcoin/rust-secp256k1/
 - secp256k1-sys 0.10.1 — Dawid Ciężarkiewicz <dpc@ucore.info>, Andrew Poelstra <apoelstra@wpsoftware.net>, Steven Roose <steven@stevenroose.org> — https://github.com/rust-bitcoin/rust-secp256k1/
 - secp256k1-sys 0.11.0 — Dawid Ciężarkiewicz <dpc@ucore.info>, Andrew Poelstra <apoelstra@wpsoftware.net>, Steven Roose <steven@stevenroose.org> — https://github.com/rust-bitcoin/rust-secp256k1/
+- tiny-keccak 2.0.2 — debris <marek.kotewicz@gmail.com> — https://github.com/debris/tiny-keccak
 
 ## CC0-1.0 OR MIT-0 OR Apache-2.0
 
@@ -357,6 +358,7 @@ file follows in the appendix. Regenerate this document with
 - clap_complete 4.6.8 — https://github.com/clap-rs/clap
 - clap_derive 4.6.4 — https://github.com/clap-rs/clap
 - clap_lex 1.1.0 — https://github.com/clap-rs/clap
+- clear-signing 0.1.0 — Bartosz Rozwarski — https://github.com/llbartekll/clear-signing
 - cmake 0.1.58 — Alex Crichton <alex@alexcrichton.com> — https://github.com/rust-lang/cmake-rs
 - colorchoice 1.0.5 — https://github.com/rust-cli/anstyle.git
 - const-hex 1.19.1 — DaniPopes <57450786+DaniPopes@users.noreply.github.com> — https://github.com/danipopes/const-hex
@@ -2616,6 +2618,32 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+## License text for: clear-signing 0.1.0
+
+```text
+MIT License
+
+Copyright (c) 2026 Bartosz Rozwarski
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## License text for: combine 4.6.7
 
 ```text
@@ -3295,7 +3323,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: dunce 1.0.5, hex-conservative 0.2.2, hex-conservative 1.2.0, secp256k1 0.30.0, secp256k1 0.31.1, secp256k1-sys 0.10.1, secp256k1-sys 0.11.0
+## License text for: dunce 1.0.5, hex-conservative 0.2.2, hex-conservative 1.2.0, secp256k1 0.30.0, secp256k1 0.31.1, secp256k1-sys 0.10.1, secp256k1-sys 0.11.0, tiny-keccak 2.0.2
 
 ```text
 Creative Commons Legal Code

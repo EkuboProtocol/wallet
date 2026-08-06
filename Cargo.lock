@@ -1598,6 +1598,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "clear-signing"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7fdf03058b3abe74d75efd426fed38be6029e2ff41afbb25416a2c1d659ec25"
+dependencies = [
+ "hex",
+ "num-bigint 0.4.8",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "time",
+ "tiny-keccak",
+ "tokio",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2140,6 +2156,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "chrono",
+ "clear-signing",
  "directories",
  "fs2",
  "hex",
@@ -3410,6 +3427,7 @@ checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -5285,6 +5303,15 @@ checksum = "7e689342a48d2ea927c87ea50cabf8594854bf940e9310208848d680d668ed85"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "tiny-keccak"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9d3793400a45f954c52e73d068316d76b6f4e36977e3fcebb13a2721e80237"
+dependencies = [
+ "crunchy",
 ]
 
 [[package]]

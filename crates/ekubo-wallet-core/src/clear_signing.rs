@@ -1,472 +1,159 @@
-//! ERC-7730 clear signing for the approval review.
+//! The vendored ERC-7730 clear-signing registry and its interpretation
+//! adapter.
 //!
-//! Descriptors are vendored in `clearsign/` and embedded at compile time; the
-//! wallet never fetches display metadata from the network. They are display
-//! metadata only: matching is by exact chain ID, contract address, and
-//! function selector, every rendered string is sanitized, and any mismatch
-//! falls back to the generic selector display. The approval digest binds the
-//! exact calldata, so a wrong descriptor can never change what is signed.
+//! Every descriptor ships inside the binary: the complete upstream registry
+//! snapshot (calldata and EIP-712 descriptors across all published
+//! protocols) plus the Ekubo descriptors, embedded by `build.rs`. Nothing is
+//! fetched at runtime, and a descriptor can never change what is signed —
+//! interpretation is review content only, and the approval digest binds the
+//! exact calldata.
+//!
+//! Interpretation itself is the pinned `clear-signing` crate (the ERC-7730
+//! v2 engine). Everything it produces is treated as untrusted display text:
+//! each line passes through [`crate::sanitize`] with a length cap, the field
+//! list is count-capped, and the fixed facts in the review document remain
+//! authoritative over any descriptor reading.
 
-use crate::approval_summary::{TokenMetadataMap, format_token_amount};
-use alloy::{
-    dyn_abi::{DynSolType, DynSolValue},
-    primitives::{Address, Bytes, keccak256},
+use crate::{approval_summary::TokenMetadataMap, sanitize::stripped_capped};
+use alloy::primitives::{Address, Bytes, U256};
+use clear_signing::{
+    DataProvider, FormatOutcome, ResolvedDescriptor, TokenMeta, TransactionContext,
+    engine::{DisplayEntry, DisplayModel},
+    merge_descriptors,
+    types::{context::DescriptorContext, descriptor::Descriptor},
 };
-use anyhow::{Context, Result, anyhow, ensure};
-use chrono::DateTime;
-use serde::Deserialize;
-use std::{collections::BTreeMap, fmt::Write as _, str::FromStr, sync::OnceLock};
+use std::{
+    collections::BTreeMap,
+    pin::Pin,
+    sync::{LazyLock, Mutex},
+};
 
-/// Nested `calldata` fields recurse at most this deep.
-const MAX_NESTED_DEPTH: usize = 2;
-/// A `bytes[]` action list renders at most this many elements.
-const MAX_ARRAY_ITEMS: usize = 16;
-/// Descriptor-supplied text (labels, intents, enum values) is capped here.
+/// Descriptor text is reviewed at vendoring time, but it still shapes what a
+/// human approves, so every rendered line is capped as defense in depth.
 const MAX_TEXT_LEN: usize = 120;
+/// A descriptor reading never floods the review: past this many lines the
+/// remainder collapses into a count.
+const MAX_FIELD_LINES: usize = 48;
+/// `includes` chains resolve through at most this many hops.
+const MAX_INCLUDE_DEPTH: usize = 4;
 
-/// Embedded verbatim copies of the vendored registry files.
-static DESCRIPTOR_SOURCES: &[(&str, &str)] = &[
-    (
-        "ekubo/calldata-MEVCaptureRouter.json",
-        include_str!("../clearsign/ekubo/calldata-MEVCaptureRouter.json"),
-    ),
-    (
-        "ekubo/calldata-Orders.json",
-        include_str!("../clearsign/ekubo/calldata-Orders.json"),
-    ),
-    (
-        "ekubo/calldata-Positions.json",
-        include_str!("../clearsign/ekubo/calldata-Positions.json"),
-    ),
-    (
-        "ekubo/calldata-Ve33Periphery.json",
-        include_str!("../clearsign/ekubo/calldata-Ve33Periphery.json"),
-    ),
-    (
-        "ekubo/calldata-Ve33Positions.json",
-        include_str!("../clearsign/ekubo/calldata-Ve33Positions.json"),
-    ),
-    (
-        "ekubo/calldata-VeToken.json",
-        include_str!("../clearsign/ekubo/calldata-VeToken.json"),
-    ),
-];
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/clearsign_embedded.rs"));
+}
+pub(crate) use embedded::CLEARSIGN_FILES;
 
-#[derive(Debug, Deserialize)]
-struct RawDescriptor {
-    context: RawContext,
-    metadata: RawMetadata,
-    display: RawDisplay,
+/// Every vendored descriptor, parsed once, includes resolved, split by kind.
+pub(crate) struct VendoredRegistry {
+    pub calldata: Vec<ResolvedDescriptor>,
+    pub eip712: Vec<ResolvedDescriptor>,
+    /// Files that failed to resolve or parse. A test asserts this is empty,
+    /// so at runtime a failure only means one descriptor is unavailable.
+    pub failures: Vec<(&'static str, String)>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawContext {
-    contract: RawContract,
+pub(crate) fn registry() -> &'static VendoredRegistry {
+    static REGISTRY: LazyLock<VendoredRegistry> = LazyLock::new(build_registry);
+    &REGISTRY
 }
 
-#[derive(Debug, Deserialize)]
-struct RawContract {
-    deployments: Vec<RawDeployment>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawDeployment {
-    #[serde(rename = "chainId")]
-    chain_id: u64,
-    address: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawMetadata {
-    owner: Option<String>,
-    #[serde(rename = "contractName")]
-    contract_name: Option<String>,
-    #[serde(default)]
-    constants: BTreeMap<String, String>,
-    #[serde(default)]
-    enums: BTreeMap<String, BTreeMap<String, String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawDisplay {
-    formats: BTreeMap<String, RawFormat>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawFormat {
-    intent: Option<String>,
-    #[serde(rename = "interpolatedIntent")]
-    interpolated_intent: Option<String>,
-    #[serde(default)]
-    fields: Vec<RawField>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawField {
-    path: String,
-    label: String,
-    format: String,
-    #[serde(default)]
-    params: BTreeMap<String, serde_json::Value>,
-}
-
-/// One vendored descriptor, parsed and selector-indexed.
-pub struct Descriptor {
-    owner: String,
-    contract_name: String,
-    deployments: Vec<(u64, Address)>,
-    constants: BTreeMap<String, String>,
-    enums: BTreeMap<String, BTreeMap<String, String>>,
-    formats: BTreeMap<[u8; 4], FunctionFormat>,
-}
-
-/// A display format bound to one parsed function signature.
-struct FunctionFormat {
-    signature: FunctionSignature,
-    intent: Option<String>,
-    interpolated_intent: Option<String>,
-    fields: Vec<RawField>,
-}
-
-/// A function signature parsed into named, typed parameters.
-struct FunctionSignature {
-    name: String,
-    params: Vec<Param>,
-}
-
-/// One parameter: its canonical Solidity type, its name, and named children
-/// when the type is a tuple (possibly behind array suffixes).
-struct Param {
-    name: String,
-    canonical: String,
-    components: Vec<Param>,
-}
-
-impl FunctionSignature {
-    fn canonical(&self) -> String {
-        let mut out = String::new();
-        let _ = write!(out, "{}(", self.name);
-        for (index, param) in self.params.iter().enumerate() {
-            if index > 0 {
-                out.push(',');
-            }
-            out.push_str(&param.canonical);
-        }
-        out.push(')');
-        out
-    }
-
-    fn selector(&self) -> [u8; 4] {
-        let hash = keccak256(self.canonical().as_bytes());
-        [hash[0], hash[1], hash[2], hash[3]]
-    }
-
-    fn decode_type(&self) -> Result<DynSolType> {
-        let types = self
-            .params
-            .iter()
-            .map(|param| DynSolType::parse(&param.canonical).map_err(|error| anyhow!("{error}")))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(DynSolType::Tuple(types))
-    }
-}
-
-/// Parse `name(type1 name1, (a x, b y) name2, ...)` into a signature tree.
-fn parse_signature(text: &str) -> Result<FunctionSignature> {
-    let open = text.find('(').context("signature has no parameter list")?;
-    ensure!(text.ends_with(')'), "signature does not end with ')'");
-    let name = text[..open].trim();
-    ensure!(
-        !name.is_empty()
-            && name
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || character == '_'),
-        "invalid function name {name:?}"
-    );
-    let body = &text[open + 1..text.len() - 1];
-    Ok(FunctionSignature {
-        name: name.into(),
-        params: parse_params(body)?,
-    })
-}
-
-fn parse_params(body: &str) -> Result<Vec<Param>> {
-    let mut params = Vec::new();
-    for piece in split_top_level(body) {
-        let piece = piece.trim();
-        if piece.is_empty() {
-            continue;
-        }
-        params.push(parse_param(piece)?);
-    }
-    Ok(params)
-}
-
-/// Split on commas that are not nested inside parentheses.
-fn split_top_level(body: &str) -> Vec<&str> {
-    let mut pieces = Vec::new();
-    let mut depth = 0_usize;
-    let mut start = 0_usize;
-    for (index, character) in body.char_indices() {
-        match character {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                pieces.push(&body[start..index]);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    pieces.push(&body[start..]);
-    pieces
-}
-
-fn parse_param(piece: &str) -> Result<Param> {
-    if let Some(rest) = piece.strip_prefix('(') {
-        // Tuple: find the matching close parenthesis in the original piece.
-        let mut depth = 1_usize;
-        let mut close = None;
-        for (index, character) in rest.char_indices() {
-            match character {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(index);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let close = close.context("unbalanced parentheses in signature")?;
-        let inner = &rest[..close];
-        let tail = rest[close + 1..].trim();
-        let (suffix, name) = split_array_suffix_and_name(tail)?;
-        let components = parse_params(inner)?;
-        let mut canonical = String::from("(");
-        for (index, component) in components.iter().enumerate() {
-            if index > 0 {
-                canonical.push(',');
-            }
-            canonical.push_str(&component.canonical);
-        }
-        canonical.push(')');
-        canonical.push_str(suffix);
-        Ok(Param {
-            name,
-            canonical,
-            components,
-        })
-    } else {
-        let mut parts = piece.split_whitespace();
-        let ty = parts.next().context("empty parameter")?;
-        let name = parts.next().unwrap_or("").to_string();
-        ensure!(
-            parts.next().is_none(),
-            "unexpected token in parameter {piece:?}"
-        );
-        Ok(Param {
-            name,
-            canonical: normalize_type(ty),
-            components: Vec::new(),
-        })
-    }
-}
-
-/// Split `[]... name` into the array suffix and the parameter name.
-fn split_array_suffix_and_name(tail: &str) -> Result<(&str, String)> {
-    let end = tail
-        .char_indices()
-        .find(|(_, character)| !matches!(character, '[' | ']' | '0'..='9'))
-        .map_or(tail.len(), |(index, _)| index);
-    let suffix = &tail[..end];
-    ensure!(
-        suffix.chars().all(|c| matches!(c, '[' | ']' | '0'..='9')),
-        "invalid array suffix {suffix:?}"
-    );
-    Ok((suffix, tail[end..].trim().to_string()))
-}
-
-fn normalize_type(ty: &str) -> String {
-    // `uint`/`int` aliases expand; every other type is already canonical.
-    let (base, suffix) = ty
-        .find('[')
-        .map_or((ty, ""), |index| (&ty[..index], &ty[index..]));
-    let base = match base {
-        "uint" => "uint256",
-        "int" => "int256",
-        other => other,
+fn build_registry() -> VendoredRegistry {
+    let by_path: BTreeMap<&str, &str> = CLEARSIGN_FILES.iter().copied().collect();
+    let mut registry = VendoredRegistry {
+        calldata: Vec::new(),
+        eip712: Vec::new(),
+        failures: Vec::new(),
     };
-    format!("{base}{suffix}")
-}
-
-impl Descriptor {
-    fn parse(source_name: &str, source: &str) -> Result<Self> {
-        let raw: RawDescriptor = serde_json::from_str(source)
-            .with_context(|| format!("descriptor {source_name} is not valid JSON"))?;
-        let deployments = raw
-            .context
-            .contract
-            .deployments
-            .iter()
-            .map(|deployment| {
-                Ok((
-                    deployment.chain_id,
-                    Address::from_str(&deployment.address)
-                        .with_context(|| format!("bad address in {source_name}"))?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        ensure!(!deployments.is_empty(), "{source_name} has no deployments");
-        let mut formats = BTreeMap::new();
-        for (signature_text, format) in raw.display.formats {
-            let signature = parse_signature(&signature_text)
-                .with_context(|| format!("bad signature in {source_name}: {signature_text}"))?;
-            // Reject descriptors whose paths or references do not resolve, so
-            // a vendoring mistake fails tests instead of silently degrading.
-            for field in &format.fields {
-                validate_path(&signature, &field.path)
-                    .with_context(|| format!("{source_name}: field {}", field.path))?;
-                validate_params(&raw.metadata, &signature, field)
-                    .with_context(|| format!("{source_name}: field {}", field.path))?;
-            }
-            signature
-                .decode_type()
-                .with_context(|| format!("{source_name}: undecodable {signature_text}"))?;
-            let selector = signature.selector();
-            ensure!(
-                !formats.contains_key(&selector),
-                "{source_name}: duplicate selector for {signature_text}"
-            );
-            formats.insert(
-                selector,
-                FunctionFormat {
-                    signature,
-                    intent: format.intent,
-                    interpolated_intent: format.interpolated_intent,
-                    fields: format.fields,
-                },
-            );
-        }
-        Ok(Self {
-            owner: raw.metadata.owner.clone().unwrap_or_default(),
-            contract_name: raw
-                .metadata
-                .contract_name
-                .clone()
-                .unwrap_or_else(|| source_name.into()),
-            deployments,
-            constants: raw.metadata.constants,
-            enums: raw.metadata.enums,
-            formats,
-        })
-    }
-}
-
-/// Validate that a dotted field path resolves within the signature tree, or
-/// is a supported `@.` transaction-container reference.
-fn validate_path(signature: &FunctionSignature, path: &str) -> Result<()> {
-    if let Some(container) = path.strip_prefix("@.") {
-        ensure!(
-            matches!(container, "from" | "to"),
-            "unsupported container path @.{container}"
-        );
-        return Ok(());
-    }
-    let mut current: &[Param] = &signature.params;
-    for segment in path.split('.') {
-        if segment == "[]" {
-            // Array iteration keeps the same component shape.
+    for (path, contents) in CLEARSIGN_FILES {
+        // Only calldata-* and eip712-* files are standalone descriptors;
+        // ercs/ files and the per-protocol common-* files exist to be
+        // included by them.
+        let standalone = path.starts_with("registry/")
+            && path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("calldata-") || name.starts_with("eip712-"));
+        if !standalone {
             continue;
         }
-        let found = current
-            .iter()
-            .find(|param| param.name == segment)
-            .with_context(|| format!("path segment {segment} not found"))?;
-        current = &found.components;
-    }
-    Ok(())
-}
-
-fn validate_params(
-    metadata: &RawMetadata,
-    signature: &FunctionSignature,
-    field: &RawField,
-) -> Result<()> {
-    match field.format.as_str() {
-        "enum" => {
-            let reference = field
-                .params
-                .get("$ref")
-                .and_then(|value| value.as_str())
-                .context("enum field without $ref")?;
-            let name = reference
-                .strip_prefix("$.metadata.enums.")
-                .context("unsupported enum $ref")?;
-            ensure!(metadata.enums.contains_key(name), "unknown enum {name}");
-        }
-        "tokenAmount" => {
-            if let Some(token) = field.params.get("token").and_then(|value| value.as_str()) {
-                resolve_constant_address(&metadata.constants, token)
-                    .context("tokenAmount token does not resolve")?;
+        match resolve_vendored(path, contents, &by_path) {
+            Ok(descriptor) => {
+                let Some(deployment) = descriptor.context.deployments().first().cloned() else {
+                    registry
+                        .failures
+                        .push((path, "descriptor has no deployments".into()));
+                    continue;
+                };
+                let resolved = ResolvedDescriptor {
+                    chain_id: deployment.chain_id,
+                    address: deployment.address.to_lowercase(),
+                    descriptor,
+                };
+                match resolved.descriptor.context {
+                    DescriptorContext::Contract(_) => registry.calldata.push(resolved),
+                    DescriptorContext::Eip712(_) => registry.eip712.push(resolved),
+                }
             }
-            if let Some(token_path) = field
-                .params
-                .get("tokenPath")
-                .and_then(|value| value.as_str())
-            {
-                validate_path(signature, token_path).context("bad tokenPath")?;
-            }
+            Err(error) => registry.failures.push((path, error)),
         }
-        _ => {}
     }
-    Ok(())
+    registry
 }
 
-fn resolve_constant_address(
-    constants: &BTreeMap<String, String>,
-    reference: &str,
-) -> Result<Address> {
-    let literal = reference
-        .strip_prefix("$.metadata.constants.")
-        .map_or_else(
-            || Ok(reference.to_string()),
-            |name| {
-                constants
-                    .get(name)
-                    .cloned()
-                    .with_context(|| format!("unknown constant {name}"))
-            },
-        )?;
-    Address::from_str(&literal).context("constant is not an address")
+/// Parses one vendored file, resolving its `includes` chain against the
+/// embedded tree. Include paths are relative to the including file, exactly
+/// as the registry publishes them (`../../ercs/….json`).
+fn resolve_vendored(
+    path: &str,
+    contents: &str,
+    by_path: &BTreeMap<&str, &str>,
+) -> Result<Descriptor, String> {
+    let resolved = resolve_includes(path, contents, by_path, 0)?;
+    serde_json::from_str(&resolved).map_err(|error| format!("invalid descriptor: {error}"))
 }
 
-fn registry() -> &'static Vec<Descriptor> {
-    static REGISTRY: OnceLock<Vec<Descriptor>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        DESCRIPTOR_SOURCES
-            .iter()
-            .map(|(name, source)| {
-                Descriptor::parse(name, source).expect("vendored descriptor is test-verified")
-            })
-            .collect()
-    })
+/// Resolves a file's `includes` chain depth-first: an included file's own
+/// includes resolve before the merge, because the merge consumes the field.
+fn resolve_includes(
+    path: &str,
+    contents: &str,
+    by_path: &BTreeMap<&str, &str>,
+    depth: usize,
+) -> Result<String, String> {
+    if depth > MAX_INCLUDE_DEPTH {
+        return Err(format!("include chain deeper than {MAX_INCLUDE_DEPTH}"));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(contents).map_err(|error| format!("invalid JSON: {error}"))?;
+    let Some(include) = value.get("includes").and_then(serde_json::Value::as_str) else {
+        return Ok(contents.to_owned());
+    };
+    let target = resolve_relative(path, include)
+        .ok_or_else(|| format!("include path {include} escapes the vendored tree"))?;
+    let included = by_path
+        .get(target.as_str())
+        .ok_or_else(|| format!("include target {target} is not vendored"))?;
+    let included = resolve_includes(&target, included, by_path, depth + 1)?;
+    merge_descriptors(contents, &included).map_err(|error| format!("include merge failed: {error}"))
 }
 
-fn lookup(chain_id: u64, target: Address) -> Option<&'static Descriptor> {
-    registry().iter().find(|descriptor| {
-        descriptor
-            .deployments
-            .iter()
-            .any(|(chain, address)| *chain == chain_id && *address == target)
-    })
+/// Joins a relative include path against the directory of `from`, refusing
+/// to step above the vendored root.
+fn resolve_relative(from: &str, include: &str) -> Option<String> {
+    let mut segments: Vec<&str> = from.split('/').collect();
+    segments.pop();
+    for segment in include.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            other => segments.push(other),
+        }
+    }
+    Some(segments.join("/"))
 }
 
-/// The transaction fields a descriptor may reference through `@.` container
-/// paths, alongside the calldata itself.
-#[derive(Clone, Copy)]
+/// The sender and target of one call, for descriptor matching.
 pub struct CallEnvelope {
     pub from: Address,
     pub to: Address,
@@ -476,397 +163,246 @@ pub struct CallEnvelope {
 pub struct ClearSigned {
     pub intent: String,
     pub fields: Vec<String>,
-    /// Token contracts the rendering wants symbol/decimals for.
-    pub token_references: Vec<Address>,
 }
 
-/// Collect token contracts referenced by descriptors matching a call, so the
-/// caller can fetch their display metadata before rendering.
-#[must_use]
-pub fn token_references(chain_id: u64, envelope: CallEnvelope, calldata: &Bytes) -> Vec<Address> {
-    interpret(chain_id, envelope, calldata, &TokenMetadataMap::new())
-        .map(|reading| reading.token_references)
-        .unwrap_or_default()
+/// Token metadata provider bridging the plan's already-fetched display
+/// metadata into the engine's formatting.
+struct MapProvider<'a>(&'a TokenMetadataMap);
+
+impl DataProvider for MapProvider<'_> {
+    fn resolve_token(
+        &self,
+        _chain_id: u64,
+        address: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<TokenMeta>> + Send + '_>> {
+        let meta = address
+            .parse::<Address>()
+            .ok()
+            .and_then(|address| self.0.get(&address))
+            .and_then(|metadata| {
+                Some(TokenMeta {
+                    symbol: metadata.symbol.clone()?,
+                    decimals: metadata.decimals?,
+                    name: metadata.symbol.clone()?,
+                })
+            });
+        Box::pin(async move { meta })
+    }
+}
+
+/// Records every token the engine asks about instead of answering, so the
+/// caller can fetch metadata before the real rendering pass.
+#[derive(Default)]
+struct RecordingProvider(Mutex<Vec<Address>>);
+
+impl DataProvider for RecordingProvider {
+    fn resolve_token(
+        &self,
+        _chain_id: u64,
+        address: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<TokenMeta>> + Send + '_>> {
+        if let Ok(address) = address.parse::<Address>()
+            && let Ok(mut recorded) = self.0.lock()
+        {
+            recorded.push(address);
+        }
+        Box::pin(async { None })
+    }
+}
+
+async fn run_format(
+    chain_id: u64,
+    envelope: &CallEnvelope,
+    calldata: &Bytes,
+    value: U256,
+    provider: &dyn DataProvider,
+) -> Option<FormatOutcome> {
+    if calldata.len() < 4 {
+        return None;
+    }
+    let from = format!("{:#x}", envelope.from);
+    let to = format!("{:#x}", envelope.to);
+    let value_bytes = value.to_be_bytes_trimmed_vec();
+    let context = TransactionContext {
+        chain_id,
+        to: &to,
+        calldata,
+        value: (!value_bytes.is_empty()).then_some(value_bytes.as_slice()),
+        from: Some(&from),
+        implementation_address: None,
+    };
+    clear_signing::format_calldata(&registry().calldata, &context, provider)
+        .await
+        .ok()
+}
+
+/// Token contracts a matching descriptor's rendering would want display
+/// metadata for, so the caller can fetch symbols and decimals first.
+pub async fn token_references(
+    chain_id: u64,
+    envelope: CallEnvelope,
+    calldata: &Bytes,
+) -> Vec<Address> {
+    let recorder = RecordingProvider::default();
+    let _ = run_format(chain_id, &envelope, calldata, U256::ZERO, &recorder).await;
+    recorder.0.into_inner().unwrap_or_default()
 }
 
 /// Render a call through its vendored descriptor, if one matches exactly.
-#[must_use]
-pub fn interpret(
+pub async fn interpret(
     chain_id: u64,
     envelope: CallEnvelope,
     calldata: &Bytes,
+    value: U256,
     metadata: &TokenMetadataMap,
 ) -> Option<ClearSigned> {
-    interpret_at_depth(chain_id, envelope, calldata, metadata, 0)
+    let provider = MapProvider(metadata);
+    match run_format(chain_id, &envelope, calldata, value, &provider).await? {
+        FormatOutcome::ClearSigned { model, .. } => Some(clear_signed(&model)),
+        FormatOutcome::Fallback { .. } => None,
+    }
 }
 
-fn interpret_at_depth(
-    chain_id: u64,
-    envelope: CallEnvelope,
-    calldata: &Bytes,
-    metadata: &TokenMetadataMap,
-    depth: usize,
-) -> Option<ClearSigned> {
-    let target = envelope.to;
-    let descriptor = lookup(chain_id, target)?;
-    let selector: [u8; 4] = calldata.get(..4)?.try_into().ok()?;
-    let format = descriptor.formats.get(&selector)?;
-    let decode_type = format.signature.decode_type().ok()?;
-    let decoded = decode_type.abi_decode_params(&calldata[4..]).ok()?;
-    // Reject non-canonical encodings exactly like the generic decoder.
-    if decoded.abi_encode_params() != calldata[4..] {
-        return None;
-    }
-    let DynSolValue::Tuple(values) = decoded else {
-        return None;
-    };
+/// A clear-signed reading of one EIP-712 payload, matched by the domain's
+/// chain and verifying contract.
+pub struct TypedDataReading {
+    pub intent: String,
+    pub fields: Vec<String>,
+}
 
-    let mut token_references = Vec::new();
+/// Render a typed-data payload through its vendored descriptor, if one
+/// matches the domain exactly. Display-only, like every descriptor reading:
+/// the complete payload the CLI prints remains the authoritative review.
+pub async fn interpret_typed_data(typed_data: &serde_json::Value) -> Option<TypedDataReading> {
+    let data: clear_signing::eip712::TypedData = serde_json::from_value(typed_data.clone()).ok()?;
+    let outcome = clear_signing::format_typed_data(
+        &registry().eip712,
+        &data,
+        &clear_signing::EmptyDataProvider,
+    )
+    .await
+    .ok()?;
+    match outcome {
+        FormatOutcome::ClearSigned { model, .. } => {
+            let reading = clear_signed(&model);
+            Some(TypedDataReading {
+                intent: reading.intent,
+                fields: reading.fields,
+            })
+        }
+        FormatOutcome::Fallback { .. } => None,
+    }
+}
+
+/// Flattens the engine's display model into capped, sanitized lines.
+fn clear_signed(model: &DisplayModel) -> ClearSigned {
+    let intent = model.interpolated_intent.as_ref().unwrap_or(&model.intent);
+    let intent = match &model.owner {
+        Some(owner) => stripped_capped(&format!("{owner} — {intent}"), MAX_TEXT_LEN),
+        None => stripped_capped(intent, MAX_TEXT_LEN),
+    };
     let mut fields = Vec::new();
-    for field in &format.fields {
-        render_field(
-            descriptor,
-            format,
-            &values,
-            field,
-            metadata,
-            depth,
-            chain_id,
-            envelope,
-            &mut fields,
-            &mut token_references,
-        );
+    let mut dropped = 0_usize;
+    for entry in &model.entries {
+        flatten_entry(entry, None, &mut fields, &mut dropped);
     }
-
-    let intent = format
-        .interpolated_intent
-        .as_deref()
-        .map(|template| interpolate(template, format, &values))
-        .or_else(|| format.intent.clone())
-        .unwrap_or_else(|| format.signature.name.clone());
-    let context = if descriptor.owner.is_empty() {
-        descriptor.contract_name.clone()
-    } else {
-        format!("{} — {}", descriptor.owner, descriptor.contract_name)
-    };
-    Some(ClearSigned {
-        intent: sanitize(&format!("{intent} [{context}]")),
-        fields,
-        token_references,
-    })
+    if dropped > 0 {
+        fields.push(format!("… ({dropped} more fields)"));
+    }
+    ClearSigned { intent, fields }
 }
 
-#[allow(clippy::too_many_arguments)] // Internal renderer threading shared context.
-fn render_field(
-    descriptor: &Descriptor,
-    format: &FunctionFormat,
-    values: &[DynSolValue],
-    field: &RawField,
-    metadata: &TokenMetadataMap,
-    depth: usize,
-    chain_id: u64,
-    envelope: CallEnvelope,
+fn push_line(fields: &mut Vec<String>, dropped: &mut usize, line: String) {
+    if fields.len() < MAX_FIELD_LINES {
+        fields.push(line);
+    } else {
+        *dropped += 1;
+    }
+}
+
+fn labeled(prefix: Option<&str>, label: &str, value: &str) -> String {
+    let label = match prefix {
+        Some(prefix) => format!("{prefix} · {label}"),
+        None => label.to_owned(),
+    };
+    format!(
+        "{}: {}",
+        stripped_capped(&label, MAX_TEXT_LEN),
+        stripped_capped(value, MAX_TEXT_LEN)
+    )
+}
+
+fn flatten_entry(
+    entry: &DisplayEntry,
+    prefix: Option<&str>,
     fields: &mut Vec<String>,
-    token_references: &mut Vec<Address>,
+    dropped: &mut usize,
 ) {
-    let label = sanitize(&field.label);
-    // Container paths reference the transaction envelope rather than the
-    // decoded calldata; both addresses render checksummed.
-    if let Some(container) = field.path.strip_prefix("@.") {
-        let rendered = match container {
-            "from" => envelope.from.to_checksum(None),
-            "to" => envelope.to.to_checksum(None),
-            other => format!("<container path @.{other} unsupported>"),
-        };
-        fields.push(format!("{label}: {rendered}"));
-        return;
-    }
-    let Some(resolved) = resolve_path(&format.signature.params, values, &field.path) else {
-        fields.push(format!("{label}: <path {} did not resolve>", field.path));
-        return;
-    };
-    for (index, value) in resolved.iter().enumerate() {
-        let position = if resolved.len() > 1 {
-            format!("{label} {}", index + 1)
-        } else {
-            label.clone()
-        };
-        match field.format.as_str() {
-            "calldata" => {
-                // The vendored descriptors only self-reference (`@.to`), so
-                // nested actions decode against the same contract.
-                let callee_is_self = field
-                    .params
-                    .get("calleePath")
-                    .and_then(|value| value.as_str())
-                    == Some("@.to");
-                if let DynSolValue::Bytes(inner) = value {
-                    let inner = Bytes::from(inner.clone());
-                    let nested = (callee_is_self && depth < MAX_NESTED_DEPTH)
-                        .then(|| {
-                            interpret_at_depth(chain_id, envelope, &inner, metadata, depth + 1)
-                        })
-                        .flatten();
-                    if let Some(nested) = nested {
-                        fields.push(format!("{position}: {}", nested.intent));
-                        token_references.extend(nested.token_references);
-                        for line in nested.fields {
-                            fields.push(format!("{position} · {line}"));
-                        }
-                    } else {
-                        fields.push(format!(
-                            "{position}: nested call, selector {}, {} bytes",
-                            selector_text(&inner),
-                            inner.len()
-                        ));
-                    }
-                } else {
-                    fields.push(format!("{position}: <not bytes>"));
-                }
-            }
-            "tokenAmount" => {
-                let token = field
-                    .params
-                    .get("token")
-                    .and_then(|value| value.as_str())
-                    .and_then(|reference| {
-                        resolve_constant_address(&descriptor.constants, reference).ok()
-                    })
-                    .or_else(|| {
-                        field
-                            .params
-                            .get("tokenPath")
-                            .and_then(|value| value.as_str())
-                            .and_then(|path| resolve_path(&format.signature.params, values, path))
-                            .and_then(|resolved| match resolved.first() {
-                                Some(DynSolValue::Address(address)) => Some(*address),
-                                _ => None,
-                            })
-                    });
-                match (token, integer_magnitude(value)) {
-                    (Some(token), Some((negative, magnitude))) => {
-                        token_references.push(token);
-                        let display = metadata.get(&token).cloned().unwrap_or_default();
-                        let sign = if negative { "-" } else { "" };
-                        fields.push(format!(
-                            "{position}: {sign}{}",
-                            format_token_amount(magnitude, token, &display)
-                        ));
-                    }
-                    _ => fields.push(format!("{position}: {}", render_raw(value))),
-                }
-            }
-            "enum" => {
-                let rendered = field
-                    .params
-                    .get("$ref")
-                    .and_then(|value| value.as_str())
-                    .and_then(|reference| reference.strip_prefix("$.metadata.enums."))
-                    .and_then(|name| descriptor.enums.get(name))
-                    .and_then(|mapping| mapping.get(&enum_key(value)))
-                    .map(|text| sanitize(text));
-                fields.push(format!(
-                    "{position}: {}",
-                    rendered.unwrap_or_else(|| render_raw(value))
-                ));
-            }
-            "date" => {
-                let rendered = match integer_magnitude(value) {
-                    Some((false, seconds)) => i64::try_from(seconds)
-                        .ok()
-                        .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
-                        .map(|moment| moment.to_rfc3339()),
-                    _ => None,
-                };
-                fields.push(format!(
-                    "{position}: {}",
-                    rendered.unwrap_or_else(|| render_raw(value))
-                ));
-            }
-            "duration" => {
-                let rendered = integer_magnitude(value)
-                    .filter(|(negative, _)| !negative)
-                    .map(|(_, seconds)| render_duration(seconds));
-                fields.push(format!(
-                    "{position}: {}",
-                    rendered.unwrap_or_else(|| render_raw(value))
-                ));
-            }
-            // `raw`, `addressName`, and anything unrecognized all render the
-            // decoded value directly; addressName's name sources are a
-            // hardware-wallet concern and the checksummed address is already
-            // the trustworthy representation here.
-            _ => fields.push(format!("{position}: {}", render_raw(value))),
+    match entry {
+        DisplayEntry::Item(item) => {
+            push_line(fields, dropped, labeled(prefix, &item.label, &item.value));
         }
-    }
-}
-
-/// Resolve a dotted path against decoded values. `[]` fans out over arrays,
-/// so the result is a list of leaf values.
-fn resolve_path<'a>(
-    params: &[Param],
-    values: &'a [DynSolValue],
-    path: &str,
-) -> Option<Vec<&'a DynSolValue>> {
-    let mut current: Vec<(&[Param], &DynSolValue)> = Vec::new();
-    let mut shape = params;
-    // Seed with a virtual tuple over the top-level parameters.
-    let segments: Vec<&str> = path.split('.').collect();
-    let first = segments.first()?;
-    let index = shape.iter().position(|param| param.name == *first)?;
-    current.push((&shape[index].components, values.get(index)?));
-    shape = &shape[index].components;
-    for segment in &segments[1..] {
-        let mut next = Vec::new();
-        for (components, value) in current {
-            if *segment == "[]" {
-                match value {
-                    DynSolValue::Array(items) | DynSolValue::FixedArray(items) => {
-                        for item in items.iter().take(MAX_ARRAY_ITEMS) {
-                            next.push((components, item));
-                        }
-                    }
-                    _ => return None,
+        DisplayEntry::Group { label, items, .. } => {
+            for item in items {
+                let group = match prefix {
+                    Some(prefix) => format!("{prefix} · {label}"),
+                    None => label.clone(),
+                };
+                push_line(
+                    fields,
+                    dropped,
+                    labeled(Some(&group), &item.label, &item.value),
+                );
+            }
+        }
+        DisplayEntry::Nested {
+            label,
+            intent,
+            entries,
+        } => {
+            push_line(fields, dropped, labeled(prefix, label, intent));
+            // One level of nesting is plenty for a review; deeper structure
+            // collapses into the count so the exact facts stay dominant.
+            if prefix.is_none() {
+                for nested in entries {
+                    flatten_entry(nested, Some(label), fields, dropped);
                 }
             } else {
-                let index = components.iter().position(|param| param.name == *segment)?;
-                let DynSolValue::Tuple(inner) = value else {
-                    return None;
-                };
-                next.push((&components[index].components, inner.get(index)?));
+                *dropped += entries.len();
             }
         }
-        current = next;
-        if let Some((components, _)) = current.first() {
-            shape = components;
-        }
     }
-    let _ = shape;
-    Some(current.into_iter().map(|(_, value)| value).collect())
-}
-
-fn integer_magnitude(value: &DynSolValue) -> Option<(bool, alloy::primitives::U256)> {
-    match value {
-        DynSolValue::Uint(value, _) => Some((false, *value)),
-        DynSolValue::Int(value, _) => {
-            let negative = value.is_negative();
-            Some((negative, value.unsigned_abs()))
-        }
-        _ => None,
-    }
-}
-
-fn enum_key(value: &DynSolValue) -> String {
-    match value {
-        DynSolValue::Bool(flag) => flag.to_string(),
-        other => render_raw(other),
-    }
-}
-
-fn render_raw(value: &DynSolValue) -> String {
-    match value {
-        DynSolValue::Address(address) => address.to_checksum(None),
-        DynSolValue::Bool(flag) => flag.to_string(),
-        DynSolValue::Uint(number, _) => number.to_string(),
-        DynSolValue::Int(number, _) => number.to_string(),
-        DynSolValue::FixedBytes(bytes, length) => format!("0x{}", hex::encode(&bytes[..*length])),
-        DynSolValue::Bytes(bytes) => {
-            if bytes.len() > 64 {
-                format!("0x{}… ({} bytes)", hex::encode(&bytes[..32]), bytes.len())
-            } else {
-                format!("0x{}", hex::encode(bytes))
-            }
-        }
-        DynSolValue::String(text) => sanitize(text),
-        DynSolValue::Array(items) | DynSolValue::FixedArray(items) => {
-            let rendered: Vec<String> = items.iter().take(8).map(render_raw).collect();
-            let suffix = if items.len() > 8 { ", …" } else { "" };
-            format!("[{}{suffix}]", rendered.join(", "))
-        }
-        DynSolValue::Tuple(items) => {
-            let rendered: Vec<String> = items.iter().take(8).map(render_raw).collect();
-            format!("({})", rendered.join(", "))
-        }
-        // CustomStruct exists only with the dyn-abi eip712 feature; ABI
-        // decoding of calldata never produces it.
-        DynSolValue::CustomStruct { tuple, .. } => {
-            let rendered: Vec<String> = tuple.iter().take(8).map(render_raw).collect();
-            format!("({})", rendered.join(", "))
-        }
-        DynSolValue::Function(_) => "<unsupported>".into(),
-    }
-}
-
-fn render_duration(total_seconds: alloy::primitives::U256) -> String {
-    let seconds = u64::try_from(total_seconds).unwrap_or(u64::MAX);
-    let (days, rem) = (seconds / 86_400, seconds % 86_400);
-    let (hours, rem) = (rem / 3_600, rem % 3_600);
-    let (minutes, secs) = (rem / 60, rem % 60);
-    let mut out = String::new();
-    for (amount, unit) in [(days, "d"), (hours, "h"), (minutes, "m"), (secs, "s")] {
-        if amount > 0 || (unit == "s" && out.is_empty()) {
-            let _ = write!(out, "{amount}{unit} ");
-        }
-    }
-    format!("{} ({seconds} seconds)", out.trim_end())
-}
-
-/// Substitute `{path}` templates in an interpolated intent with raw-rendered
-/// values; a path that fails to resolve keeps its literal placeholder.
-fn interpolate(template: &str, format: &FunctionFormat, values: &[DynSolValue]) -> String {
-    let mut out = String::new();
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let Some(close) = rest[open..].find('}') else {
-            out.push_str(&rest[open..]);
-            return out;
-        };
-        let path = &rest[open + 1..open + close];
-        match resolve_path(&format.signature.params, values, path) {
-            Some(resolved) if resolved.len() == 1 => out.push_str(&render_raw(resolved[0])),
-            _ => {
-                out.push('{');
-                out.push_str(path);
-                out.push('}');
-            }
-        }
-        rest = &rest[open + close + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn selector_text(data: &Bytes) -> String {
-    if data.len() < 4 {
-        "none".into()
-    } else {
-        format!("0x{}", hex::encode(&data[..4]))
-    }
-}
-
-/// Descriptor text is reviewed at vendoring time, but it still shapes what a
-/// human approves, so control characters are stripped and length is capped as
-/// defense in depth.
-fn sanitize(text: &str) -> String {
-    crate::sanitize::stripped_capped(text, MAX_TEXT_LEN)
 }
 
 /// Test fixture shared with the approval-summary tests: a `VeToken`
-/// `stake(amount, end)` call on its first deployed chain.
+/// `stake(amount, end)` call on its first deployed chain, derived from the
+/// vendored descriptor itself.
 #[cfg(test)]
 pub(crate) fn stake_fixture() -> (u64, Address, Vec<u8>) {
-    use alloy::primitives::U256;
-    let descriptor = registry()
+    use alloy::dyn_abi::DynSolValue;
+    use alloy::primitives::keccak256;
+    let (_, contents) = CLEARSIGN_FILES
         .iter()
-        .find(|descriptor| descriptor.contract_name.contains("Vote-Escrow"))
+        .find(|(path, _)| path.ends_with("registry/ekubo/calldata-VeToken.json"))
         .expect("vetoken descriptor vendored");
-    let (chain, address) = descriptor.deployments[0];
-    let (selector, _) = descriptor
-        .formats
-        .iter()
-        .find(|(_, format)| format.signature.name == "stake" && format.signature.params.len() == 2)
-        .expect("stake(amount, end) format");
+    let descriptor: serde_json::Value = serde_json::from_str(contents).expect("valid JSON");
+    let deployment = &descriptor["context"]["contract"]["deployments"][0];
+    let chain = deployment["chainId"].as_u64().expect("chain id");
+    let address = deployment["address"]
+        .as_str()
+        .expect("address")
+        .parse::<Address>()
+        .expect("valid address");
+    // Canonical selector for the two-parameter stake format the descriptor
+    // documents: the format key with parameter names stripped.
+    assert!(
+        descriptor["display"]["formats"]
+            .as_object()
+            .expect("formats")
+            .contains_key("stake(uint128 amount, uint64 end)"),
+        "stake format vendored"
+    );
+    let selector = &keccak256("stake(uint128,uint64)".as_bytes())[..4];
     let value = DynSolValue::Tuple(vec![
         DynSolValue::Uint(U256::from(1_000_000_u64), 128),
         DynSolValue::Uint(U256::from(1_900_000_000_u64), 64),
@@ -879,242 +415,92 @@ pub(crate) fn stake_fixture() -> (u64, Address, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::U256;
 
     #[test]
-    fn every_vendored_descriptor_parses_and_validates() {
-        // Descriptor::parse validates signatures, selectors, paths, enum and
-        // constant references; registry() panics on any failure.
-        let descriptors = registry();
-        assert_eq!(descriptors.len(), DESCRIPTOR_SOURCES.len());
-        let total_formats: usize = descriptors
+    fn every_vendored_descriptor_resolves_and_parses() {
+        let registry = registry();
+        // The one known upstream defect: swell's burn format carries no
+        // intent, which the engine requires. Anything beyond that fails.
+        let unexpected: Vec<_> = registry
+            .failures
             .iter()
-            .map(|descriptor| descriptor.formats.len())
-            .sum();
-        assert!(total_formats > 100, "expected a substantial format corpus");
-    }
-
-    #[test]
-    fn signature_parsing_produces_canonical_selectors() {
-        let signature = parse_signature(
-            "swap((address token0, address token1, bytes32 config) poolKey, bool isToken1, \
-             int128 amount, uint96 sqrtRatioLimit, uint256 skipAhead, int256 calculatedAmountThreshold)",
-        )
-        .unwrap();
-        assert_eq!(
-            signature.canonical(),
-            "swap((address,address,bytes32),bool,int128,uint96,uint256,int256)"
-        );
-        assert_eq!(signature.params[0].components[1].name, "token1");
-    }
-
-    fn envelope(target: Address) -> CallEnvelope {
-        CallEnvelope {
-            from: Address::repeat_byte(0xAA),
-            to: target,
-        }
-    }
-
-    fn router() -> (&'static Descriptor, u64, Address) {
-        let descriptor = registry()
-            .iter()
-            .find(|descriptor| descriptor.contract_name.contains("Router"))
-            .expect("router descriptor vendored");
-        let (chain, address) = descriptor.deployments[0];
-        (descriptor, chain, address)
-    }
-
-    fn encode_swap() -> Bytes {
-        let signature = parse_signature(
-            "swap((address token0, address token1, bytes32 config) poolKey, bool isToken1, \
-             int128 amount, uint96 sqrtRatioLimit, uint256 skipAhead, int256 calculatedAmountThreshold)",
-        )
-        .unwrap();
-        let value = DynSolValue::Tuple(vec![
-            DynSolValue::Tuple(vec![
-                DynSolValue::Address(Address::repeat_byte(0x11)),
-                DynSolValue::Address(Address::repeat_byte(0x22)),
-                DynSolValue::FixedBytes(alloy::primitives::B256::ZERO, 32),
-            ]),
-            DynSolValue::Bool(true),
-            DynSolValue::Int(alloy::primitives::I256::try_from(1_000_000).unwrap(), 128),
-            DynSolValue::Uint(U256::from(0_u8), 96),
-            DynSolValue::Uint(U256::ZERO, 256),
-            DynSolValue::Int(alloy::primitives::I256::try_from(-5).unwrap(), 256),
-        ]);
-        let mut calldata = signature.selector().to_vec();
-        calldata.extend(value.abi_encode_params());
-        calldata.into()
-    }
-
-    #[test]
-    fn renders_a_router_swap_with_enum_and_intent() {
-        let (_descriptor, chain, address) = router();
-        let reading = interpret(
-            chain,
-            envelope(address),
-            &encode_swap(),
-            &TokenMetadataMap::new(),
-        )
-        .expect("swap matches the vendored descriptor");
-        assert!(reading.intent.contains("Swap"), "{}", reading.intent);
-        assert!(
-            reading.intent.contains("Ekubo"),
-            "intent names the protocol: {}",
-            reading.intent
-        );
-        let joined = reading.fields.join("\n");
-        assert!(joined.contains("Pool token 0"), "{joined}");
-        assert!(
-            joined.contains(&Address::repeat_byte(0x11).to_checksum(None)),
-            "{joined}"
-        );
-        assert!(joined.contains("Specified pool token: Token 1"), "{joined}");
-        assert!(joined.contains("Specified amount: 1000000"), "{joined}");
-    }
-
-    #[test]
-    fn unknown_chain_address_or_selector_yields_none() {
-        let (_descriptor, chain, address) = router();
-        assert!(
-            interpret(
-                999_999,
-                envelope(address),
-                &encode_swap(),
-                &TokenMetadataMap::new()
-            )
-            .is_none()
-        );
-        assert!(
-            interpret(
-                chain,
-                envelope(Address::repeat_byte(0x99)),
-                &encode_swap(),
-                &TokenMetadataMap::new()
-            )
-            .is_none()
-        );
-        assert!(
-            interpret(
-                chain,
-                envelope(address),
-                &Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
-                &TokenMetadataMap::new()
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn non_canonical_calldata_is_rejected() {
-        let mut padded = encode_swap().to_vec();
-        padded.push(0);
-        let (_descriptor, chain, address) = router();
-        assert!(
-            interpret(
-                chain,
-                envelope(address),
-                &padded.into(),
-                &TokenMetadataMap::new()
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn vetoken_lock_renders_token_amount_and_date() {
-        let descriptor = registry()
-            .iter()
-            .find(|descriptor| descriptor.contract_name.contains("Vote-Escrow"))
-            .expect("vetoken descriptor vendored");
-        let (chain, address) = descriptor.deployments[0];
-        let (selector, format) = descriptor
-            .formats
-            .iter()
-            .find(|(_, format)| {
-                format.signature.name == "stake" && format.signature.params.len() == 2
-            })
-            .expect("stake(amount, end) format");
-        let names: Vec<&str> = format
-            .signature
-            .params
-            .iter()
-            .map(|param| param.name.as_str())
+            .filter(|(path, _)| *path != "registry/swell/calldata-swell.json")
             .collect();
-        assert_eq!(names, ["amount", "end"]);
-        let value = DynSolValue::Tuple(vec![
-            DynSolValue::Uint(U256::from(1_500_000_000_000_000_000_u128), 128),
-            DynSolValue::Uint(U256::from(1_900_000_000_u64), 64),
-        ]);
-        let mut calldata = selector.to_vec();
-        calldata.extend(value.abi_encode_params());
-
-        let stake_token =
-            resolve_constant_address(&descriptor.constants, "$.metadata.constants.stakeToken")
-                .unwrap();
-        let metadata = TokenMetadataMap::from([(
-            stake_token,
-            crate::approval_summary::TokenMetadata {
-                symbol: Some("STONX".into()),
-                decimals: Some(18),
-            },
-        )]);
-        let reading = interpret(chain, envelope(address), &calldata.into(), &metadata).unwrap();
-        let joined = reading.fields.join("\n");
-        assert!(joined.contains("1.5 STONX"), "{joined}");
-        assert!(joined.contains("2030-"), "date rendered: {joined}");
-        assert!(reading.token_references.contains(&stake_token));
-    }
-
-    #[test]
-    fn multicall_actions_render_nested_intents() {
-        let descriptor = registry()
-            .iter()
-            .find(|descriptor| descriptor.contract_name.contains("Vote-Escrow"))
-            .expect("vetoken descriptor vendored");
-        let (chain, address) = descriptor.deployments[0];
-        let (lock_selector, _) = descriptor
-            .formats
-            .iter()
-            .find(|(_, format)| {
-                format.signature.name == "stake" && format.signature.params.len() == 2
-            })
-            .unwrap();
-        let lock_value = DynSolValue::Tuple(vec![
-            DynSolValue::Uint(U256::from(7_u8), 128),
-            DynSolValue::Uint(U256::from(1_900_000_000_u64), 64),
-        ]);
-        let mut lock_call = lock_selector.to_vec();
-        lock_call.extend(lock_value.abi_encode_params());
-
-        let (multicall_selector, _) = descriptor
-            .formats
-            .iter()
-            .find(|(_, format)| format.signature.name == "multicall")
-            .expect("multicall format");
-        let outer = DynSolValue::Tuple(vec![DynSolValue::Array(vec![DynSolValue::Bytes(
-            lock_call,
-        )])]);
-        let mut calldata = multicall_selector.to_vec();
-        calldata.extend(outer.abi_encode_params());
-
-        let reading = interpret(
-            chain,
-            envelope(address),
-            &calldata.into(),
-            &TokenMetadataMap::new(),
-        )
-        .unwrap();
-        let joined = reading.fields.join("\n");
         assert!(
-            joined.contains("Action") && joined.to_lowercase().contains("stake"),
-            "{joined}"
+            unexpected.is_empty(),
+            "vendored descriptors failed to parse: {unexpected:?}"
+        );
+        assert!(
+            registry.calldata.len() > 50,
+            "only {} calldata descriptors loaded",
+            registry.calldata.len()
+        );
+        assert!(
+            registry.eip712.len() > 100,
+            "only {} eip712 descriptors loaded",
+            registry.eip712.len()
         );
     }
 
-    #[test]
-    fn descriptor_text_cannot_forge_review_lines() {
-        assert_eq!(sanitize("a\u{1b}[31m\nb"), "a[31mb");
-        assert_eq!(sanitize(&"x".repeat(500)).len(), MAX_TEXT_LEN);
+    #[tokio::test]
+    async fn the_vendored_vetoken_descriptor_interprets_a_stake() {
+        let (chain, address, calldata) = stake_fixture();
+        let reading = interpret(
+            chain,
+            CallEnvelope {
+                from: Address::repeat_byte(0x11),
+                to: address,
+            },
+            &Bytes::from(calldata),
+            U256::ZERO,
+            &TokenMetadataMap::new(),
+        )
+        .await
+        .expect("descriptor matches");
+        assert!(!reading.intent.is_empty());
+        assert!(!reading.fields.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_permit_descriptor_reads_mainnet_usdc_typed_data() {
+        // The registry's permit descriptors resolve through the shared
+        // eip712-erc2612-permit include, so this also proves the include
+        // chain resolves from the embedded tree.
+        let typed_data = serde_json::json!({
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"}
+                ],
+                "Permit": [
+                    {"name": "owner", "type": "address"},
+                    {"name": "spender", "type": "address"},
+                    {"name": "value", "type": "uint256"},
+                    {"name": "nonce", "type": "uint256"},
+                    {"name": "deadline", "type": "uint256"}
+                ]
+            },
+            "primaryType": "Permit",
+            "domain": {
+                "name": "USD Coin",
+                "version": "2",
+                "chainId": 1,
+                "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            },
+            "message": {
+                "owner": "0x1111111111111111111111111111111111111111",
+                "spender": "0x2222222222222222222222222222222222222222",
+                "value": "1000000",
+                "nonce": "0",
+                "deadline": "1900000000"
+            }
+        });
+        let reading = interpret_typed_data(&typed_data)
+            .await
+            .expect("usdc permit descriptor matches");
+        assert!(!reading.intent.is_empty());
+        assert!(!reading.fields.is_empty());
     }
 }

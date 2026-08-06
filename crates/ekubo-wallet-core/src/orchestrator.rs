@@ -232,7 +232,8 @@ pub async fn approve_transaction(
     // to exact base units; it never blocks or alters the approval decision.
     let token_metadata = plan_token_metadata(&network, &request.execution_plan.ordered_steps).await;
     let approval =
-        transaction_approval_request(&request, &simulation, &prepared, &network, &token_metadata)?;
+        transaction_approval_request(&request, &simulation, &prepared, &network, &token_metadata)
+            .await?;
     // Rejecting here is a decision, not an abort: it is recorded, so the
     // agent waiting on this request learns the answer.
     if presenter.review_transaction(&approval, &simulation).await? != ApprovalDecision::Approved {
@@ -300,7 +301,7 @@ pub async fn approve_transaction(
 /// The complete server-authored review document for one queued transaction:
 /// every fact a reviewer decides on, none authored by the presenter.
 #[allow(clippy::too_many_lines)]
-fn transaction_approval_request(
+async fn transaction_approval_request(
     pending: &PendingTransaction,
     simulation: &SimulationResult,
     prepared: &PreparedExecution,
@@ -346,7 +347,8 @@ fn transaction_approval_request(
     .fact("Maximum transaction fee (wei)", prepared.maximum_fee_wei())
     .digest(prepared.review_digest());
     request.id = pending.request_id;
-    let interpretations = interpret_steps(&pending.execution_plan.ordered_steps, token_metadata);
+    let interpretations =
+        interpret_steps(&pending.execution_plan.ordered_steps, token_metadata).await;
     for (step, interpretation) in pending
         .execution_plan
         .ordered_steps

@@ -112,7 +112,7 @@ pub struct StepInterpretation {
 /// Collect the token contracts a plan names through standard token calldata
 /// or through the token references of a matching ERC-7730 descriptor.
 #[must_use]
-fn token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
+async fn token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
     let mut targets = BTreeSet::new();
     for step in steps {
         if matches!(
@@ -126,14 +126,17 @@ fn token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
             targets.insert(step.transaction.to);
         }
         if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>() {
-            targets.extend(crate::clear_signing::token_references(
-                chain_id,
-                crate::clear_signing::CallEnvelope {
-                    from: step.transaction.from,
-                    to: step.transaction.to,
-                },
-                &step.transaction.data,
-            ));
+            targets.extend(
+                crate::clear_signing::token_references(
+                    chain_id,
+                    crate::clear_signing::CallEnvelope {
+                        from: step.transaction.from,
+                        to: step.transaction.to,
+                    },
+                    &step.transaction.data,
+                )
+                .await,
+            );
         }
     }
     targets.into_iter().collect()
@@ -205,14 +208,15 @@ pub async fn load_token_metadata(network: &NetworkConfig, tokens: &[Address]) ->
 
 /// Interpret every step of an execution plan without contacting the network.
 #[must_use]
-pub fn interpret_steps(
+pub async fn interpret_steps(
     steps: &[ExecutionStep],
     metadata: &TokenMetadataMap,
 ) -> Vec<StepInterpretation> {
-    steps
-        .iter()
-        .map(|step| interpret_step(step, metadata))
-        .collect()
+    let mut interpretations = Vec::with_capacity(steps.len());
+    for step in steps {
+        interpretations.push(interpret_step(step, metadata).await);
+    }
+    interpretations
 }
 
 /// Collect the token contracts named by a plan and read their display metadata.
@@ -220,10 +224,19 @@ pub async fn plan_token_metadata(
     network: &NetworkConfig,
     steps: &[ExecutionStep],
 ) -> TokenMetadataMap {
-    load_token_metadata(network, &token_targets(steps)).await
+    load_token_metadata(network, &token_targets(steps).await).await
 }
 
-fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> StepInterpretation {
+/// The step's native value as a U256; display-only, zero on parse failure.
+fn step_value(step: &ExecutionStep) -> alloy::primitives::U256 {
+    step.transaction
+        .value
+        .as_str()
+        .parse::<alloy::primitives::U256>()
+        .unwrap_or_default()
+}
+
+async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> StepInterpretation {
     // A vendored ERC-7730 descriptor is the most specific reading available:
     // it matches on exact chain, address, and selector, and was reviewed when
     // the snapshot was committed. Standard token decoding remains the
@@ -236,8 +249,10 @@ fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> StepInte
                 to: step.transaction.to,
             },
             &step.transaction.data,
+            step_value(step),
             metadata,
         )
+        .await
     {
         return StepInterpretation {
             step: step.step,
@@ -685,8 +700,8 @@ mod tests {
         assert_eq!(decode_standard_call(&calldata.into()), None);
     }
 
-    #[test]
-    fn renders_token_amounts_with_symbol_and_exact_base_units() {
+    #[tokio::test]
+    async fn renders_token_amounts_with_symbol_and_exact_base_units() {
         let token = Address::repeat_byte(0x33);
         let spender = Address::repeat_byte(0x44);
         let interpretation = interpret_step(
@@ -696,15 +711,16 @@ mod tests {
                 approve_calldata(spender, U256::from(1_234_500_u64)),
             ),
             &usdc_metadata(token),
-        );
+        )
+        .await;
         let description = interpretation.description.unwrap();
         assert!(description.contains("1.2345 USDC"), "{description}");
         assert!(description.contains("1234500 base units"), "{description}");
         assert!(interpretation.warnings.is_empty());
     }
 
-    #[test]
-    fn falls_back_to_base_units_without_metadata() {
+    #[tokio::test]
+    async fn falls_back_to_base_units_without_metadata() {
         let token = Address::repeat_byte(0x33);
         let interpretation = interpret_step(
             &step(
@@ -713,13 +729,14 @@ mod tests {
                 approve_calldata(Address::repeat_byte(0x44), U256::from(7_u8)),
             ),
             &TokenMetadataMap::new(),
-        );
+        )
+        .await;
         let description = interpretation.description.unwrap();
         assert!(description.contains("7 base units"), "{description}");
     }
 
-    #[test]
-    fn warns_about_effectively_unlimited_allowances() {
+    #[tokio::test]
+    async fn warns_about_effectively_unlimited_allowances() {
         let token = Address::repeat_byte(0x33);
         let interpretation = interpret_step(
             &step(
@@ -728,7 +745,8 @@ mod tests {
                 approve_calldata(Address::repeat_byte(0x44), U256::MAX),
             ),
             &usdc_metadata(token),
-        );
+        )
+        .await;
         assert_eq!(interpretation.warnings.len(), 1);
         assert!(interpretation.warnings[0].contains("unlimited"));
     }
@@ -759,20 +777,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn warns_about_blanket_operator_approval() {
+    #[tokio::test]
+    async fn warns_about_blanket_operator_approval() {
         let token = Address::repeat_byte(0x33);
         let operator = Address::repeat_byte(0x55);
         let mut calldata = SET_APPROVAL_FOR_ALL_SELECTOR.to_vec();
         calldata.extend_from_slice(&operator.into_word().0);
         calldata.extend_from_slice(&U256::from(1_u8).to_be_bytes::<32>());
-        let interpretation = interpret_step(&step(2, token, calldata), &TokenMetadataMap::new());
+        let interpretation =
+            interpret_step(&step(2, token, calldata), &TokenMetadataMap::new()).await;
         assert_eq!(interpretation.warnings.len(), 1);
         assert!(interpretation.warnings[0].contains("blanket operator control"));
     }
 
-    #[test]
-    fn zero_approval_reads_as_a_revocation() {
+    #[tokio::test]
+    async fn zero_approval_reads_as_a_revocation() {
         let token = Address::repeat_byte(0x33);
         let interpretation = interpret_step(
             &step(
@@ -781,23 +800,25 @@ mod tests {
                 approve_calldata(Address::repeat_byte(0x44), U256::ZERO),
             ),
             &usdc_metadata(token),
-        );
+        )
+        .await;
         assert!(interpretation.description.unwrap().starts_with("revoke"));
         assert!(interpretation.warnings.is_empty());
     }
 
-    #[test]
-    fn unknown_calldata_has_no_interpretation() {
+    #[tokio::test]
+    async fn unknown_calldata_has_no_interpretation() {
         let interpretation = interpret_step(
             &step(1, Address::repeat_byte(0x33), vec![0xde, 0xad, 0xbe, 0xef]),
             &TokenMetadataMap::new(),
-        );
+        )
+        .await;
         assert_eq!(interpretation.description, None);
         assert!(interpretation.warnings.is_empty());
     }
 
-    #[test]
-    fn summarizes_nested_multicall_selectors() {
+    #[tokio::test]
+    async fn summarizes_nested_multicall_selectors() {
         let inner = DynSolValue::Array(vec![
             DynSolValue::Bytes(vec![0x11, 0x22, 0x33, 0x44]),
             DynSolValue::Bytes(vec![0x55, 0x66, 0x77, 0x88, 0x99]),
@@ -807,15 +828,16 @@ mod tests {
         let interpretation = interpret_step(
             &step(1, Address::repeat_byte(0x33), calldata),
             &TokenMetadataMap::new(),
-        );
+        )
+        .await;
         let description = interpretation.description.unwrap();
         assert!(description.contains("2 nested calls"), "{description}");
         assert!(description.contains("0x11223344"), "{description}");
         assert!(description.contains("0x55667788"), "{description}");
     }
 
-    #[test]
-    fn token_targets_only_include_standard_token_calls() {
+    #[tokio::test]
+    async fn token_targets_only_include_standard_token_calls() {
         let token = Address::repeat_byte(0x33);
         let other = Address::repeat_byte(0x66);
         let steps = vec![
@@ -826,18 +848,18 @@ mod tests {
             ),
             step(2, other, vec![0xde, 0xad, 0xbe, 0xef]),
         ];
-        assert_eq!(token_targets(&steps), vec![token]);
+        assert_eq!(token_targets(&steps).await, vec![token]);
     }
 
-    #[test]
-    fn clear_signed_steps_take_precedence_over_standard_decoding() {
+    #[tokio::test]
+    async fn clear_signed_steps_take_precedence_over_standard_decoding() {
         // A VeToken stake call on its deployed chain and address must render
         // through the vendored ERC-7730 descriptor: intent naming the
         // protocol plus labeled fields, and no standard-decode fallback.
         let (chain_id, target, calldata) = crate::clear_signing::stake_fixture();
         let mut staked = step(1, target, calldata);
         staked.transaction.chain_id = DecimalU256::new(chain_id.to_string()).unwrap();
-        let interpretations = interpret_steps(&[staked], &TokenMetadataMap::new());
+        let interpretations = interpret_steps(&[staked], &TokenMetadataMap::new()).await;
         let interpretation = &interpretations[0];
         let description = interpretation.description.as_deref().unwrap();
         assert!(description.contains("Ekubo"), "{description}");
@@ -849,7 +871,7 @@ mod tests {
         // the unrecognized-selector path rather than borrowing the reading.
         let (_, target, calldata) = crate::clear_signing::stake_fixture();
         let elsewhere = step(1, target, calldata);
-        let fallback = interpret_steps(&[elsewhere], &TokenMetadataMap::new());
+        let fallback = interpret_steps(&[elsewhere], &TokenMetadataMap::new()).await;
         assert_eq!(fallback[0].description, None);
         assert!(fallback[0].details.is_empty());
     }
