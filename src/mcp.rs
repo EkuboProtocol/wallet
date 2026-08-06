@@ -54,7 +54,7 @@ use tokio::sync::Semaphore;
 
 /// How many caller-proposed RPC endpoints this process probes at once.
 ///
-/// `wallet_add_network` is the only tool that sends a request to a URL its
+/// `wallet_propose_network` is the only tool that sends a request to a URL its
 /// caller named, and each probe holds a task for up to the RPC timeout. One at
 /// a time costs an honest operator nothing — a person adds a network once, and
 /// waits for it — while denying a caller the parallelism that would turn a
@@ -63,6 +63,29 @@ const MAX_CONCURRENT_NETWORK_PROBES: usize = 1;
 
 static NETWORK_PROBE_SLOTS: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_NETWORK_PROBES));
+
+/// Approval waits this process polls at once.
+///
+/// A wait is a 250 ms poll of a database row whose payload is re-parsed and,
+/// for typed data, whose EIP-712 digest is re-derived on every read — at up to
+/// `MAX_TYPED_DATA_BYTES` a time, roughly two hundred times over a full wait.
+/// One agent needs at most one wait per queued request, and the queues
+/// themselves are capped at 64 per wallet, so sixteen is far more than any
+/// real sequence holds open and far below the point where polling costs more
+/// than the approval it is waiting for.
+const MAX_CONCURRENT_WAITS: usize = 16;
+
+static WAIT_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_WAITS));
+
+/// How far past its own deadline a wait may run while one reconciliation
+/// finishes.
+///
+/// A reconciliation is up to four sequential RPC lookups at `RPC_TIMEOUT`
+/// each, and the loop only tests its deadline between passes — so an
+/// unresponsive endpoint turned a one-second wait into a minute of silence,
+/// against a tool that advertises at most 55. Five seconds covers a healthy
+/// endpoint's round trips and keeps the caller's own timeout meaningful.
+const WAIT_RECONCILE_GRACE: Duration = Duration::from_secs(5);
 use url::Url;
 
 #[derive(Clone)]
@@ -1622,10 +1645,27 @@ impl WalletMcpServer {
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(input.timeout_seconds));
         loop {
-            let mut status = self
-                .reconcile_pending(&request)
-                .await
-                .map_err(|error| tool_error(&error))?;
+            // The deadline bounds the loop; without this it bounded only the
+            // decision to iterate again, and one pass could outlast it by four
+            // RPC timeouts. A pass that runs out of grace returns the stored
+            // record, which is what this endpoint is documented to be — the
+            // last observation, not a live read.
+            let Ok(status) = tokio::time::timeout_at(
+                deadline + WAIT_RECONCILE_GRACE,
+                self.reconcile_pending(&request),
+            )
+            .await
+            else {
+                return self
+                    .pending_record(
+                        request.wallet_id.as_str(),
+                        request.chain_id.as_str(),
+                        request.request_id,
+                    )
+                    .map(|record| Json(execution_status_output(record)))
+                    .map_err(|error| tool_error(&error));
+            };
+            let mut status = status.map_err(|error| tool_error(&error))?;
             let mined = matches!(
                 status.status,
                 ExecutionStatus::Submitted | ExecutionStatus::Reverted
@@ -1638,9 +1678,15 @@ impl WalletMcpServer {
                 let Some(receipt_block) = receipt_block else {
                     return Ok(Json(status));
                 };
-                let latest = crate::rpc::latest_block_number(&network)
-                    .await
-                    .map_err(|error| tool_error(&error))?;
+                let Ok(latest) = tokio::time::timeout_at(
+                    deadline + WAIT_RECONCILE_GRACE,
+                    crate::rpc::latest_block_number(&network),
+                )
+                .await
+                else {
+                    return Ok(Json(status));
+                };
+                let latest = latest.map_err(|error| tool_error(&error))?;
                 // A lagging RPC can briefly report a head below the receipt
                 // block; the mined receipt still counts as one confirmation.
                 let observed = latest.saturating_sub(receipt_block).saturating_add(1);
@@ -2492,6 +2538,17 @@ async fn wait_for_decision<R>(
     awaiting: impl Fn(&R) -> bool,
 ) -> Result<(R, bool), ErrorData> {
     validate_timeout_seconds(timeout_seconds).map_err(|error| tool_error(&error))?;
+    // Refuse rather than queue: queueing more waits is the backlog this
+    // prevents, and a caller told to retry has lost nothing — approval does
+    // not expire, so the request it was waiting on is still there.
+    let _slot = WAIT_SLOTS.try_acquire().map_err(|_| {
+        ErrorData::invalid_request(
+            format!(
+                "this wallet is already polling {MAX_CONCURRENT_WAITS} approval waits; retry once                  one of them finishes"
+            ),
+            None,
+        )
+    })?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_seconds));
     loop {
         let record = fetch()?;
@@ -2500,6 +2557,14 @@ async fn wait_for_decision<R>(
             return Ok((record, timed_out));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
+        // Tested here as well as above, so a wait whose sleep carried it past
+        // the deadline does no further database work — one read per wait
+        // re-parses a payload of up to MAX_TYPED_DATA_BYTES.
+        if tokio::time::Instant::now() >= deadline {
+            let record = fetch()?;
+            let timed_out = awaiting(&record);
+            return Ok((record, timed_out));
+        }
     }
 }
 
