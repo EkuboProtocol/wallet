@@ -102,14 +102,31 @@ it is not a control against in-process execution.
    export, and wallet removal. Replacing a wallet's policy requires it too:
    the policy is what stands between an agent and a signature, so rewriting
    it grants signing authority even though it touches no key material.
-   Changes that grant no signing authority — networks, the address book,
-   token lists — are confirmed in the local terminal and are not
-   authenticated against the OS, so an owner is never asked to authenticate
-   for something no signature depends on. Token names are confirmed for a
-   different reason than they are not authenticated: naming a token steers
-   what the owner reads at approval time, so an agent may only propose one,
-   while no signature depends on the name, so the OS is not involved. The MCP
-   has no approval operation.
+
+   Stored metadata requires it as well, for a reason that took a while to
+   state plainly. Nothing an MCP client hands this wallet is trusted, and
+   that includes the data that never reaches a signature: token names and
+   decimals, address-book aliases and notes, network profiles. None of it is
+   an input to the policy engine, and all of it is an input to the person.
+   A transfer to `0x8f3c…21ab` reads one way and a transfer to
+   `Coinbase deposit` reads another; `1.0 USDC` and `1000000 units of
+   0xa0b8…eb48` are the same transaction described twice. An attacker who
+   cannot widen the policy can still change the sentence the owner is
+   deciding on, and that is the same outcome by a different route.
+
+   So metadata is security state and moves like it. An agent may **propose**
+   — that is the whole of what the MCP surface does for it, and the reason
+   those tools exist at all is that assembling a token list or an alias by
+   hand is tedious work an agent is good at. Promoting a proposal into the
+   database takes two separate human acts: confirmation in the local
+   terminal, which establishes intent and shows exactly what will be named,
+   and OS-backed presence, which establishes that a person is at the machine.
+   Neither substitutes for the other. Rejecting a proposal needs neither:
+   deleting a suggestion can mislead nobody, and asking someone to
+   authenticate in order to say no only teaches them to authenticate through
+   prompts.
+
+   The MCP has no approval operation.
 7. Exact signed bytes and their hash are durably stored before first
    submission. An ambiguous submission can only rebroadcast those bytes.
 8. An export timestamp is committed before raw key material is returned, so a
@@ -185,8 +202,15 @@ what it vetted the way a plan fetch does — the URL is stored and used later, s
 a resolver that answers differently afterwards is not caught — and the backstop
 is that the stored endpoint is visible to the owner in `network list`.
 
-Adding a network is not authenticated against the OS, consistent with invariant
-6 above: it grants no signing authority.
+**Known gap, being closed.** `wallet_add_network` still writes a network
+profile directly, with neither terminal confirmation nor OS presence. That
+predates invariant 6 as stated above and contradicts it: a network profile is
+metadata an MCP client supplies, and the RPC endpoint in it is the wallet's
+entire view of the chain — balances, gas, receipts, and every simulation the
+policy engine scores. The admission checks above bound *where* that endpoint
+may be, not *whether the owner agreed to it*. Until this moves to the
+propose-and-confirm path the other metadata uses, treat the set of configured
+networks as agent-writable and check it with `ekubo-wallet network list`.
 
 ## Rollback decision
 
@@ -219,6 +243,8 @@ replenish because no such accounting exists.
 | Malicious RPC fabricates state | Structural pin/link checks help, but a coherent lie remains possible. Trusted RPC is required. |
 | RPC or network fails after send | Bytes/hash were stored first; status remains reconcilable and only exact bytes can be retried. |
 | Same-user process accesses credential APIs | Platform isolation and prompts vary; OS compromise or process injection is out of scope. |
+| Agent forges a token name or alias to misdescribe a transfer | Both are proposals; becoming a stored name takes terminal confirmation plus OS presence. Symbols are re-sanitized at render time and refused if they contain `0x`. An unnamed token renders by address in base units — readable, not trusted. |
+| Agent points the wallet at an RPC it controls | Endpoint admission refuses non-public and credential-bearing URLs and verifies the chain ID before storage, but the write itself is still unconfirmed. Open gap; see the RPC boundary section. |
 
 Any future stateful allowance or daily accounting requires a new threat model
 and an external rollback defense. It must not be added under this design.

@@ -88,12 +88,23 @@ Owner authentication guards the exceptional path, where a human is present by
 definition, along with key export, wallet removal — and policy replacement,
 precisely because the policy is that boundary: rewriting it changes what an
 agent can sign unattended, so it is authenticated like signing even though it
-reads no key material. It is asked for nowhere else: a network, address book,
-or token change grants no signing authority, so it is confirmed in the
-terminal rather than authenticated, and the prompts that do gate signing
-authority stay worth reading. It is in any case an application-level check in
-the CLI, not an operating-system gate on the key. Choose a wallet's policy on
-that basis, and keep autonomous wallets funded accordingly.
+reads no key material.
+
+It is also asked for before stored metadata changes — address-book aliases and
+token names — which grant no signing authority at all. That looks like an
+exception to the rule and is really the rule read properly: those rows are what
+the owner reads when they decide, and an attacker who cannot widen the policy
+can still change the sentence being decided on. An alias turns an address into
+a familiar name; a token row turns base units into an amount. Both are supplied
+by an untrusted agent as a *proposal*, and both take a terminal confirmation
+and an OS presence check to become a name. Rejecting takes neither, so nobody
+is trained to authenticate their way past a prompt. The one path not yet moved
+onto this footing is `wallet_add_network`, which still writes directly; see
+[threat-model.md](threat-model.md).
+
+Owner authentication is in any case an application-level check in the CLI, not
+an operating-system gate on the key. Choose a wallet's policy on that basis,
+and keep autonomous wallets funded accordingly.
 
 SQLCipher protects confidentiality and page integrity, but there is no external
 anti-rollback anchor. Restoring an older valid encrypted database can restore
