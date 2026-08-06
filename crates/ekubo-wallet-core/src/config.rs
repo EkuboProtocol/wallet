@@ -592,6 +592,10 @@ pub fn validate_wallet_id(id: &str) -> Result<()> {
 /// command and the file it reads is not trusted.
 pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
+/// Gas every transaction costs before executing a single opcode. A configured
+/// ceiling below this describes a network on which nothing can be sent.
+pub const INTRINSIC_GAS: u64 = 21_000;
+
 /// Networks one configuration may hold. A wallet talks to a handful of chains;
 /// a list longer than this is an accident or an attempt, and either way every
 /// subsequent `load` pays for it.
@@ -628,7 +632,18 @@ pub(crate) fn validate_network(network: &NetworkConfig) -> Result<()> {
         let limit = limit
             .parse::<u64>()
             .context("max gas limit must fit uint64")?;
-        ensure!(limit > 0, "max gas limit must be positive");
+        // Intrinsic gas, not merely positive. A transaction costs 21,000 gas
+        // before it does anything at all, so a cap below that admits no
+        // transaction on this network — and the refusal surfaces later, from
+        // `effective_gas_limit` at simulation time, as "effective simulation
+        // gas limit is below intrinsic gas". Rejecting it where the number is
+        // entered says which number is wrong while the person still has it in
+        // front of them.
+        ensure!(
+            limit >= INTRINSIC_GAS,
+            "max gas limit must be at least {INTRINSIC_GAS}, the intrinsic cost of any \
+             transaction; a lower cap would refuse every transaction on this network"
+        );
     }
     if let Some(display_name) = &network.display_name {
         ensure!(

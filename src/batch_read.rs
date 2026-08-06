@@ -1,6 +1,7 @@
 use crate::{
     abi_decoder::{
-        AbiDecodePlan, AbiDecodeResult, DecodeStatus, StructuredDecodeError, decode_abi_result,
+        AbiDecodePlan, AbiDecodeResult, DecodeStatus, MAX_RETURN_DATA_BYTES, StructuredDecodeError,
+        decode_abi_result,
     },
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
@@ -25,6 +26,16 @@ use serde_json::Value;
 use std::{str::FromStr, time::Duration};
 
 const MAX_BATCH_CALLS: usize = 128;
+
+/// Calldata bytes one read may carry. A read is a function selector and its
+/// arguments; nothing legitimate approaches this, and the cap keeps a single
+/// entry from being the whole budget.
+const MAX_CALL_DATA_BYTES: usize = 128 * 1024;
+
+/// Calldata bytes one batch may carry across every read. Bounds the request as
+/// a whole, which the per-call cap multiplied by `MAX_BATCH_CALLS` would not
+/// do usefully on its own.
+const MAX_BATCH_CALL_DATA_BYTES: usize = 1024 * 1024;
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 sol! {
@@ -550,6 +561,28 @@ fn format_result(
     bytes: &Bytes,
     error: Option<String>,
 ) -> BatchCallResult {
+    // The endpoint chooses this length, and hex-encoding doubles it before it
+    // is handed back. `validate_return_data` applies the same ceiling on the
+    // decode path, but an undecoded or failed call never reaches it — which is
+    // the path an endpoint controls by simply failing.
+    if bytes.len() > MAX_RETURN_DATA_BYTES {
+        return BatchCallResult {
+            index,
+            id: call.id.clone(),
+            success: false,
+            error: Some(format!(
+                "return data is {} bytes and exceeds the {MAX_RETURN_DATA_BYTES}-byte maximum",
+                bytes.len()
+            )),
+            return_data: None,
+            decode_status: BatchDecodeStatus::NotRequested,
+            usable: None,
+            decoded: None,
+            decode_error: None,
+            decode_errors: None,
+            semantic_errors: None,
+        };
+    }
     let raw = format!("0x{}", hex::encode(bytes));
     if !success || call.decode.is_none() {
         return BatchCallResult {
@@ -616,6 +649,12 @@ fn validate_input(input: &BatchEthCallInput) -> Result<()> {
             "from must be a 20-byte EVM address"
         );
     }
+    // Bytes as well as count. `MAX_BATCH_CALLS` bounds how many calls arrive
+    // and says nothing about their size, and `MAX_TOTAL_CALLDATA_BYTES` guards
+    // execution plans rather than this path — so 128 calls of a megabyte each
+    // were admitted, hex-decoded, and sent. Checked on the encoded length,
+    // before `normalize_call` decodes anything, since hex only ever shrinks.
+    let mut total = 0_usize;
     for call in &input.calls {
         if let Some(id) = &call.id {
             ensure!(
@@ -628,6 +667,18 @@ fn validate_input(input: &BatchEthCallInput) -> Result<()> {
             "call target must be a 20-byte EVM address"
         );
         validate_hex_bytes(&call.data, "call data")?;
+        let bytes = call.data.len().saturating_sub(2) / 2;
+        ensure!(
+            bytes <= MAX_CALL_DATA_BYTES,
+            "call data is {bytes} bytes and exceeds the {MAX_CALL_DATA_BYTES}-byte maximum \
+             for one read"
+        );
+        total = total.saturating_add(bytes);
+        ensure!(
+            total <= MAX_BATCH_CALL_DATA_BYTES,
+            "batch calldata exceeds the {MAX_BATCH_CALL_DATA_BYTES}-byte maximum across \
+             all reads"
+        );
     }
     Ok(())
 }
