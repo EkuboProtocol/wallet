@@ -68,10 +68,24 @@ impl DatabaseKey {
         Ok(Self(key))
     }
 
-    fn sqlcipher_literal(&self) -> String {
+    /// Run `use_literal` with the `SQLCipher` `x'...'` form of this key, and
+    /// zeroize the rendering afterwards.
+    ///
+    /// The key itself is zeroized on drop, but hex-encoding it produced a
+    /// plain `String` that was not — a second copy of the database key, freed
+    /// without being cleared, left wherever the allocator put it. That copy
+    /// outlived every protection the `DatabaseKey` type provides, which is the
+    /// whole reason the type exists.
+    ///
+    /// A closure rather than a returned `String`, so there is no way to call
+    /// this and forget to clear the result.
+    fn with_sqlcipher_literal<T>(&self, use_literal: impl FnOnce(&str) -> T) -> T {
         // SQLCipher's x'...' form consumes the bytes directly rather than
         // applying a password KDF to a textual secret.
-        format!("x'{}'", hex::encode(self.0))
+        let mut literal = format!("x'{}'", hex::encode(self.0));
+        let outcome = use_literal(&literal);
+        literal.zeroize();
+        outcome
     }
 }
 
@@ -166,7 +180,7 @@ impl PolicyStore {
         // allocates, breaking the cycle while memory locking stays enabled;
         // see docs/windows-sqlcipher-overflow.md.
         connection.pragma_update(None, "cipher_log_level", "NONE")?;
-        connection.pragma_update(None, "key", key.sqlcipher_literal())?;
+        key.with_sqlcipher_literal(|literal| connection.pragma_update(None, "key", literal))?;
         connection.pragma_update(None, "cipher_memory_security", "ON")?;
         let cipher_version: String = connection
             .pragma_query_value(None, "cipher_version", |row| row.get(0))
@@ -981,8 +995,7 @@ mod tests {
     /// carries `expires_at`, and some rows are already terminally `expired`.
     fn write_schema_9_database(path: &Path, key: &DatabaseKey) {
         let connection = Connection::open(path).unwrap();
-        connection
-            .pragma_update(None, "key", key.sqlcipher_literal())
+        key.with_sqlcipher_literal(|literal| connection.pragma_update(None, "key", literal))
             .unwrap();
         let statements = [
             "CREATE TABLE schema_metadata (
