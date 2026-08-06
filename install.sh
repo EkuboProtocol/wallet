@@ -255,19 +255,29 @@ esac
 # Agent registration
 # ---------------------------------------------------------------------------
 
+# Detection and use must name the same file. `command -v` resolves through
+# PATH, and resolving a second time to run what was found leaves a window in
+# which the answer can change — and makes the check evidence about one file
+# while the work happens on another. Each agent's path is resolved once here
+# and every later reference goes through the captured value.
+CODEX_BIN=$(command -v codex 2>/dev/null || :)
+CLAUDE_BIN=$(command -v claude 2>/dev/null || :)
+GEMINI_BIN=$(command -v gemini 2>/dev/null || :)
+CURSOR_BIN=$(command -v cursor 2>/dev/null || command -v cursor-agent 2>/dev/null || :)
+
 register_codex() {
-  codex mcp remove "$SERVER_NAME" >/dev/null 2>&1 || :
-  codex mcp add "$SERVER_NAME" -- "$CLI_BIN" server
+  "$CODEX_BIN" mcp remove "$SERVER_NAME" >/dev/null 2>&1 || :
+  "$CODEX_BIN" mcp add "$SERVER_NAME" -- "$CLI_BIN" server
 }
 
 register_claude() {
-  claude mcp remove "$SERVER_NAME" --scope user >/dev/null 2>&1 || :
-  claude mcp add "$SERVER_NAME" --scope user -- "$CLI_BIN" server
+  "$CLAUDE_BIN" mcp remove "$SERVER_NAME" --scope user >/dev/null 2>&1 || :
+  "$CLAUDE_BIN" mcp add "$SERVER_NAME" --scope user -- "$CLI_BIN" server
 }
 
 register_gemini() {
-  gemini mcp remove "$SERVER_NAME" --scope user >/dev/null 2>&1 || :
-  gemini mcp add "$SERVER_NAME" "$CLI_BIN" server --scope user
+  "$GEMINI_BIN" mcp remove "$SERVER_NAME" --scope user >/dev/null 2>&1 || :
+  "$GEMINI_BIN" mcp add "$SERVER_NAME" "$CLI_BIN" server --scope user
 }
 
 register_cursor() {
@@ -276,19 +286,19 @@ register_cursor() {
 
 if [ "${EKUBO_WALLET_SKIP_AGENTS:-0}" != "1" ]; then
   AGENT_COUNT=0
-  if command -v codex >/dev/null 2>&1; then
+  if [ -n "$CODEX_BIN" ]; then
     AGENT_COUNT=$((AGENT_COUNT + 1))
     if register_codex >/dev/null; then log "configured Codex"; else warn "could not configure Codex"; fi
   fi
-  if command -v claude >/dev/null 2>&1; then
+  if [ -n "$CLAUDE_BIN" ]; then
     AGENT_COUNT=$((AGENT_COUNT + 1))
     if register_claude >/dev/null; then log "configured Claude Code at user scope"; else warn "could not configure Claude Code"; fi
   fi
-  if command -v gemini >/dev/null 2>&1; then
+  if [ -n "$GEMINI_BIN" ]; then
     AGENT_COUNT=$((AGENT_COUNT + 1))
     if register_gemini >/dev/null; then log "configured Gemini CLI at user scope"; else warn "could not configure Gemini CLI"; fi
   fi
-  if command -v cursor >/dev/null 2>&1 || command -v cursor-agent >/dev/null 2>&1 || [ -d "$HOME/.cursor" ]; then
+  if [ -n "$CURSOR_BIN" ] || [ -d "$HOME/.cursor" ]; then
     AGENT_COUNT=$((AGENT_COUNT + 1))
     if register_cursor >/dev/null; then log "configured Cursor globally"; else warn "could not configure Cursor"; fi
   fi
