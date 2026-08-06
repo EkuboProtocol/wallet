@@ -380,6 +380,14 @@ struct TokenListOutput {
 struct AddTokenInput {
     chain_id: crate::token_store::ChainIdInput,
     address: String,
+    /// The symbol the token list gives this address. This is what a reviewer
+    /// will read, so it comes from the list rather than from the contract.
+    symbol: String,
+    #[serde(default)]
+    name: Option<String>,
+    /// Must match what the contract reports; a disagreement is refused rather
+    /// than resolved, because decimals scales every displayed amount.
+    decimals: u8,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -390,6 +398,12 @@ struct ImportTokenItem {
     #[serde(alias = "chainId")]
     chain_id: crate::token_store::ChainIdInput,
     address: String,
+    /// The list's symbol for this address, and the only name the wallet will
+    /// display for it.
+    symbol: String,
+    #[serde(default)]
+    name: Option<String>,
+    decimals: u8,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1101,7 +1115,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_add_token",
-        description = "Verify one token on its configured chain through Multicall3 (symbol, name, decimals read from the contract itself) and add it to the local token database. Fails if the chain_id/address pair already exists; existing entries are never overwritten.",
+        description = "Add one token to the local token database under the symbol, name, and decimals you supply from a token list. The symbol is what the owner will read when reviewing a transaction that moves this token, so it is taken from the list you pass and never from the contract, whose symbol() any address can answer with anything. The contract is still consulted to confirm a token lives at the address and that its decimals match the list; a decimals disagreement is refused rather than resolved. Fails if the chain_id/address pair already exists; existing entries are never overwritten.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1121,13 +1135,23 @@ impl WalletMcpServer {
         let address = Address::from_str(&input.address).map_err(|_| {
             ErrorData::invalid_params("address must be a 20-byte EVM address", None)
         })?;
-        let metadata = crate::token_store::fetch_onchain_metadata(&network, &[address])
+        let listed = crate::token_store::ListedToken {
+            chain_id,
+            address,
+            symbol: input.symbol,
+            name: input.name,
+            decimals: input.decimals,
+        };
+        let verified = crate::token_store::verify_listings(&network, &[listed])
             .await
             .map_err(|error| tool_error(&error))?;
-        let metadata = metadata.get(&address).cloned().unwrap_or_default();
-        if metadata.decimals.is_none() && metadata.symbol.is_none() {
+        let (listed, rejection) = verified
+            .into_iter()
+            .next()
+            .ok_or_else(|| ErrorData::internal_error("verification returned no result", None))?;
+        if let Some(rejection) = rejection {
             return Err(tool_error(&anyhow::anyhow!(
-                "contract {} on chain {chain_id} answered neither symbol() nor decimals(); refusing to store it as a token",
+                "refusing to store {} on chain {chain_id} as a token: {rejection}",
                 address.to_checksum(None)
             )));
         }
@@ -1137,14 +1161,14 @@ impl WalletMcpServer {
             .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
         Ok(Json(
             store
-                .add(chain_id, address, &metadata, "mcp:add")
+                .add(&listed, "mcp:add")
                 .map_err(|error| tool_error(&error))?,
         ))
     }
 
     #[tool(
         name = "wallet_import_token_list",
-        description = "Import up to 1000 tokens into the local token database. Each new token's symbol, name, and decimals are read from its contract through Multicall3 on its configured chain rather than trusted from the list. Existing chain_id/address pairs are skipped, never overwritten; tokens on unconfigured chains are reported and skipped.",
+        description = "Import up to 1000 tokens into the local token database under the symbols, names, and decimals carried by the list itself. Those symbols are what the owner reads when reviewing a transaction that moves these tokens, which is why they come from a curated list rather than from each contract's own symbol(), a string any address can answer with anything. Each new token's contract is still consulted to confirm a token exists there and that its decimals agree with the list; entries that fail either check are reported and skipped. Existing chain_id/address pairs are skipped, never overwritten; tokens on unconfigured chains are reported and skipped.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1170,7 +1194,7 @@ impl WalletMcpServer {
         );
 
         // Group by chain so each configured chain gets one verification pass.
-        let mut by_chain: std::collections::BTreeMap<u64, Vec<Address>> =
+        let mut by_chain: std::collections::BTreeMap<u64, Vec<crate::token_store::ListedToken>> =
             std::collections::BTreeMap::new();
         for item in &input.tokens {
             let chain_id = item.chain_id.value().map_err(|error| tool_error(&error))?;
@@ -1183,32 +1207,41 @@ impl WalletMcpServer {
                     None,
                 )
             })?;
-            by_chain.entry(chain_id).or_default().push(address);
+            by_chain
+                .entry(chain_id)
+                .or_default()
+                .push(crate::token_store::ListedToken {
+                    chain_id,
+                    address,
+                    symbol: item.symbol.clone(),
+                    name: item.name.clone(),
+                    decimals: item.decimals,
+                });
         }
 
         let mut output = ImportTokenListOutput::default();
-        for (chain_id, addresses) in by_chain {
+        for (chain_id, listed) in by_chain {
             let Ok(network) = self.config.network_by_chain_id(&chain_id.to_string()) else {
-                output.skipped_unconfigured_chain += addresses.len() as u64;
+                output.skipped_unconfigured_chain += listed.len() as u64;
                 continue;
             };
             // Deduplicate within the list and against the database before the
             // RPC pass so only genuinely new tokens are verified on-chain.
             // The store lock is scoped per phase: it is never held across the
             // Multicall3 verification await.
-            let mut new_tokens = Vec::new();
+            let mut new_tokens: Vec<crate::token_store::ListedToken> = Vec::new();
             {
                 let store = self.tokens.lock().map_err(|_| {
                     ErrorData::internal_error("token database lock was poisoned", None)
                 })?;
-                for address in addresses {
-                    if new_tokens.contains(&address) {
+                for token in listed {
+                    if new_tokens.iter().any(|seen| seen.address == token.address) {
                         output.skipped_existing += 1;
                         continue;
                     }
-                    match store.get(chain_id, address) {
+                    match store.get(chain_id, token.address) {
                         Ok(Some(_)) => output.skipped_existing += 1,
-                        Ok(None) => new_tokens.push(address),
+                        Ok(None) => new_tokens.push(token),
                         Err(error) => return Err(tool_error(&error)),
                     }
                 }
@@ -1216,27 +1249,25 @@ impl WalletMcpServer {
             if new_tokens.is_empty() {
                 continue;
             }
-            let metadata = crate::token_store::fetch_onchain_metadata(&network, &new_tokens)
+            let verified = crate::token_store::verify_listings(&network, &new_tokens)
                 .await
                 .map_err(|error| tool_error(&error))?;
             let mut store = self
                 .tokens
                 .lock()
                 .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
-            for address in new_tokens {
-                let token_metadata = metadata.get(&address).cloned().unwrap_or_default();
-                if token_metadata.decimals.is_none() && token_metadata.symbol.is_none() {
+            for (token, rejection) in verified {
+                if let Some(rejection) = rejection {
                     output.skipped_unverifiable += 1;
                     if output.unverifiable.len() < 32 {
                         output.unverifiable.push(format!(
-                            "{}:{}",
-                            chain_id,
-                            address.to_checksum(None)
+                            "{chain_id}:{}: {rejection}",
+                            token.address.to_checksum(None)
                         ));
                     }
                     continue;
                 }
-                match store.insert_if_absent(chain_id, address, &token_metadata, &source) {
+                match store.insert_if_absent(&token, &source) {
                     Ok(true) => output.added += 1,
                     Ok(false) => output.skipped_existing += 1,
                     Err(error) => return Err(tool_error(&error)),

@@ -1,13 +1,23 @@
 //! Token display database and Multicall3-backed portfolio reads.
 //!
-//! Token metadata is display data: nothing in the signing or policy path
-//! consults it. It nevertheless lives inside the authenticated encrypted
-//! database, because a symbol, name, or decimals edited outside this process
-//! could misrepresent balances and amounts to the user. Metadata is verified
-//! against the token contracts themselves through Multicall3 at insert time,
-//! so the database stores what the configured chain reports rather than what
-//! a list claims, and MCP tools may still write it — writes go through that
-//! verification, never around it.
+//! This database is where a token's name comes from. Nothing in the signing or
+//! policy path consults it, but the review screen does, and a name a reviewer
+//! trusts is worth attacking — so the rows live inside the authenticated
+//! encrypted database, where a symbol, name, or decimals cannot be edited
+//! outside this process.
+//!
+//! Rows come from token lists, not from token contracts. This is the opposite
+//! of what it once was, and deliberately: `symbol()` returns whatever a
+//! contract's author wrote, so trusting it let any deployed address call
+//! itself `USDC` on the screen where the owner decides. A curated list is a
+//! claim by someone the owner chose to trust; a contract's own answer is a
+//! claim by the counterparty they are being protected from.
+//!
+//! The chain still gets a vote, but only a veto. [`verify_listings`] confirms
+//! a token-like contract exists at the address and that its `decimals` agrees
+//! with the list — `decimals` scales every amount ever displayed for the
+//! token, so a disagreement is refused rather than resolved. Neither check can
+//! put a contract-chosen string in front of a reviewer.
 
 use crate::{
     config::NetworkConfig,
@@ -107,11 +117,58 @@ pub struct StoredToken {
 }
 
 /// Metadata read from the token contract through Multicall3.
+///
+/// This is never what gets stored as a token's name. A contract's `symbol()`
+/// answers with whatever its author wrote, so it is evidence about the
+/// contract, not about the token's identity — see [`ListedToken`].
 #[derive(Clone, Debug, Default)]
 pub struct OnchainTokenMetadata {
     pub symbol: Option<String>,
     pub name: Option<String>,
     pub decimals: Option<u8>,
+}
+
+/// What a token list says about one token, and the only thing the wallet will
+/// ever display as a token's name.
+///
+/// The distinction from [`OnchainTokenMetadata`] is the whole point: a list is
+/// a claim by whoever curated it, and the owner decides whether to trust that
+/// curator. A contract's own answer is a claim by the counterparty, which is
+/// exactly the party a reviewer is being protected from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedToken {
+    pub chain_id: u64,
+    pub address: Address,
+    pub symbol: String,
+    pub name: Option<String>,
+    pub decimals: u8,
+}
+
+/// Why a listed token was refused at import.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListingRejection {
+    /// The contract answered neither `symbol()` nor `decimals()`, so there is
+    /// no evidence a token lives at this address at all.
+    NotATokenContract,
+    /// The list and the contract disagree about `decimals`. One of them is
+    /// wrong, and since `decimals` scales every amount the owner will ever be
+    /// shown for this token, guessing which would risk misrendering an amount
+    /// by orders of magnitude.
+    DecimalsMismatch { listed: u8, onchain: u8 },
+}
+
+impl std::fmt::Display for ListingRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotATokenContract => {
+                write!(formatter, "answered neither symbol() nor decimals()")
+            }
+            Self::DecimalsMismatch { listed, onchain } => write!(
+                formatter,
+                "the list says {listed} decimals, the contract reports {onchain}"
+            ),
+        }
+    }
 }
 
 pub struct TokenStore {
@@ -179,44 +236,45 @@ impl TokenStore {
         }
     }
 
-    /// Insert one token. Fails if the (chain, address) pair already exists.
-    pub fn add(
-        &mut self,
-        chain_id: u64,
-        address: Address,
-        metadata: &OnchainTokenMetadata,
-        source: &str,
-    ) -> Result<StoredToken> {
-        let inserted = self.insert_if_absent(chain_id, address, metadata, source)?;
+    /// Insert one listed token. Fails if the (chain, address) pair exists.
+    pub fn add(&mut self, token: &ListedToken, source: &str) -> Result<StoredToken> {
+        let inserted = self.insert_if_absent(token, source)?;
         ensure!(
             inserted,
-            "token {} on chain {chain_id} is already in the database",
-            address.to_checksum(None)
+            "token {} on chain {} is already in the database",
+            token.address.to_checksum(None),
+            token.chain_id
         );
-        self.get(chain_id, address)?
+        self.get(token.chain_id, token.address)?
             .context("inserted token missing")
     }
 
-    /// Insert one token unless the pair already exists. Returns whether an
-    /// insert happened; an existing entry is never overwritten.
-    pub fn insert_if_absent(
-        &mut self,
-        chain_id: u64,
-        address: Address,
-        metadata: &OnchainTokenMetadata,
-        source: &str,
-    ) -> Result<bool> {
-        ensure!(chain_id > 0, "chain ID must be positive");
+    /// Insert one listed token unless the pair already exists. Returns whether
+    /// an insert happened; an existing entry is never overwritten.
+    ///
+    /// The stored symbol and name are the list's, never the contract's. They
+    /// are sanitized on the way in because a list is untrusted text, and
+    /// sanitized again at render time because this is not the only way a row
+    /// can reach the database.
+    pub fn insert_if_absent(&mut self, token: &ListedToken, source: &str) -> Result<bool> {
+        ensure!(token.chain_id > 0, "chain ID must be positive");
+        let symbol = sanitize(&token.symbol);
+        ensure!(
+            !symbol.is_empty(),
+            "token {} on chain {} has an empty symbol once sanitized",
+            token.address.to_checksum(None),
+            token.chain_id
+        );
         let changed = self.database.connection.execute(
             "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(chain_id, address) DO NOTHING",
             params![
-                i64::try_from(chain_id).context("chain ID out of range")?,
-                format!("{address:#x}"),
-                metadata.symbol.as_deref().map(sanitize),
-                metadata.name.as_deref().map(sanitize),
-                metadata.decimals,
+                i64::try_from(token.chain_id).context("chain ID out of range")?,
+                format!("{:#x}", token.address),
+                symbol,
+                token.name.as_deref().map(sanitize),
+                token.decimals,
                 source,
                 Utc::now().to_rfc3339(),
             ],
@@ -391,6 +449,53 @@ pub async fn fetch_onchain_metadata(
         }
     }
     Ok(out)
+}
+
+/// Check listed tokens against their contracts, returning each token with the
+/// reason it must be refused, if any.
+///
+/// The chain is not consulted about what a token is *called* — that is the
+/// list's job and the reason the owner confirms a list at all. It is consulted
+/// about two things a list can get wrong without anyone noticing:
+///
+/// - whether a contract that behaves like a token exists at the address, so a
+///   typo or a dead entry cannot become a named row; and
+/// - whether `decimals` agrees, because `decimals` silently scales every
+///   amount the owner will be shown for this token, and a list that is off by
+///   twelve would misrender an amount by a factor of a trillion.
+///
+/// Neither check can put a contract-chosen string in front of a reviewer.
+pub async fn verify_listings(
+    network: &NetworkConfig,
+    listed: &[ListedToken],
+) -> Result<Vec<(ListedToken, Option<ListingRejection>)>> {
+    let addresses: Vec<Address> = listed.iter().map(|token| token.address).collect();
+    let onchain = fetch_onchain_metadata(network, &addresses).await?;
+    Ok(listed
+        .iter()
+        .map(|token| {
+            let found = onchain.get(&token.address).cloned().unwrap_or_default();
+            (token.clone(), listing_rejection(token, &found))
+        })
+        .collect())
+}
+
+/// The rule [`verify_listings`] applies to one token, separated from the RPC
+/// so it can be read and tested as the decision it is.
+fn listing_rejection(
+    listed: &ListedToken,
+    onchain: &OnchainTokenMetadata,
+) -> Option<ListingRejection> {
+    if onchain.symbol.is_none() && onchain.decimals.is_none() {
+        return Some(ListingRejection::NotATokenContract);
+    }
+    match onchain.decimals {
+        Some(reported) if reported != listed.decimals => Some(ListingRejection::DecimalsMismatch {
+            listed: listed.decimals,
+            onchain: reported,
+        }),
+        _ => None,
+    }
 }
 
 /// One token balance line in a portfolio.
@@ -798,11 +903,13 @@ mod tests {
         (directory, store)
     }
 
-    fn usdc() -> OnchainTokenMetadata {
-        OnchainTokenMetadata {
-            symbol: Some("USDC".into()),
+    fn usdc(chain_id: u64, address: Address) -> ListedToken {
+        ListedToken {
+            chain_id,
+            address,
+            symbol: "USDC".into(),
             name: Some("USD Coin".into()),
-            decimals: Some(6),
+            decimals: 6,
         }
     }
 
@@ -810,25 +917,38 @@ mod tests {
     fn chain_and_address_conflicts_are_impossible() {
         let (_directory, mut store) = store();
         let token = Address::repeat_byte(0x11);
-        store.add(1, token, &usdc(), "manual").unwrap();
+        store.add(&usdc(1, token), "manual").unwrap();
 
         // The same pair fails loudly on add and is skipped on bulk insert,
         // never overwritten.
         let error = store
-            .add(1, token, &OnchainTokenMetadata::default(), "manual")
+            .add(
+                &ListedToken {
+                    symbol: "IMPOSTOR".into(),
+                    ..usdc(1, token)
+                },
+                "manual",
+            )
             .unwrap_err();
         assert!(error.to_string().contains("already in the database"));
-        assert!(!store.insert_if_absent(1, token, &usdc(), "list").unwrap());
+        assert!(
+            !store
+                .insert_if_absent(
+                    &ListedToken {
+                        symbol: "IMPOSTOR".into(),
+                        ..usdc(1, token)
+                    },
+                    "list"
+                )
+                .unwrap()
+        );
         let stored = store.get(1, token).unwrap().unwrap();
         assert_eq!(stored.source, "manual");
+        // A second list cannot rename a token the owner already confirmed.
         assert_eq!(stored.symbol.as_deref(), Some("USDC"));
 
         // The same address on another chain is a distinct entry.
-        assert!(
-            store
-                .insert_if_absent(8453, token, &usdc(), "list")
-                .unwrap()
-        );
+        assert!(store.insert_if_absent(&usdc(8453, token), "list").unwrap());
         assert_eq!(store.count(None).unwrap(), 2);
         assert_eq!(store.count(Some(1)).unwrap(), 1);
     }
@@ -837,10 +957,10 @@ mod tests {
     fn listing_is_deterministic_and_checksummed() {
         let (_directory, mut store) = store();
         store
-            .add(1, Address::repeat_byte(0xB2), &usdc(), "manual")
+            .add(&usdc(1, Address::repeat_byte(0xB2)), "manual")
             .unwrap();
         store
-            .add(1, Address::repeat_byte(0x0A), &usdc(), "manual")
+            .add(&usdc(1, Address::repeat_byte(0x0A)), "manual")
             .unwrap();
         let listed = store.list(Some(1), 10, 0).unwrap();
         assert_eq!(listed.len(), 2);
@@ -859,12 +979,12 @@ mod tests {
         let token = Address::repeat_byte(0x33);
         store
             .add(
-                1,
-                token,
-                &OnchainTokenMetadata {
-                    symbol: Some("US\u{1b}[31mDC\n".into()),
+                &ListedToken {
+                    chain_id: 1,
+                    address: token,
+                    symbol: "US\u{1b}[31mDC\n".into(),
                     name: Some("x".repeat(500)),
-                    decimals: Some(6),
+                    decimals: 6,
                 },
                 "manual",
             )
@@ -872,6 +992,85 @@ mod tests {
         let stored = store.get(1, token).unwrap().unwrap();
         assert_eq!(stored.symbol.as_deref(), Some("US[31mDC"));
         assert_eq!(stored.name.as_deref().map(str::len), Some(MAX_TEXT_LEN));
+    }
+
+    /// A list entry whose symbol is nothing but control characters would store
+    /// as an empty name and render as a token with no identity at all.
+    #[test]
+    fn a_symbol_that_sanitizes_away_is_refused() {
+        let (_directory, mut store) = store();
+        let error = store
+            .add(
+                &ListedToken {
+                    chain_id: 1,
+                    address: Address::repeat_byte(0x55),
+                    symbol: "\u{202e}\n\t".into(),
+                    name: None,
+                    decimals: 18,
+                },
+                "list",
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("empty symbol"), "{error}");
+        assert_eq!(store.count(None).unwrap(), 0);
+    }
+
+    /// The rule `verify_listings` applies, exercised directly so it is pinned
+    /// without needing an RPC: the contract may veto a listing, but it never
+    /// gets to supply the name.
+    #[test]
+    fn a_listing_is_vetoed_by_decimals_but_never_renamed() {
+        let listed = usdc(1, Address::repeat_byte(0x66));
+
+        // Agreement: accepted, and the stored symbol stays the list's even
+        // though the contract calls itself something else entirely.
+        assert_eq!(
+            listing_rejection(
+                &listed,
+                &OnchainTokenMetadata {
+                    symbol: Some("Definitely Not USDC".into()),
+                    name: None,
+                    decimals: Some(6),
+                }
+            ),
+            None
+        );
+
+        // Disagreement about decimals: refused rather than resolved.
+        assert_eq!(
+            listing_rejection(
+                &listed,
+                &OnchainTokenMetadata {
+                    symbol: Some("USDC".into()),
+                    name: None,
+                    decimals: Some(18),
+                }
+            ),
+            Some(ListingRejection::DecimalsMismatch {
+                listed: 6,
+                onchain: 18
+            })
+        );
+
+        // Nothing token-like at the address at all.
+        assert_eq!(
+            listing_rejection(&listed, &OnchainTokenMetadata::default()),
+            Some(ListingRejection::NotATokenContract)
+        );
+
+        // A contract that answers symbol() but not decimals() is still a
+        // token; the list's decimals stand because nothing contradicts them.
+        assert_eq!(
+            listing_rejection(
+                &listed,
+                &OnchainTokenMetadata {
+                    symbol: Some("USDC".into()),
+                    name: None,
+                    decimals: None,
+                }
+            ),
+            None
+        );
     }
 
     #[test]
@@ -889,7 +1088,7 @@ mod tests {
         let token = Address::repeat_byte(0x44);
         {
             let mut store = open(directory.path());
-            store.add(10, token, &usdc(), "manual").unwrap();
+            store.add(&usdc(10, token), "manual").unwrap();
         }
         let store = open(directory.path());
         assert_eq!(store.count(None).unwrap(), 1);
