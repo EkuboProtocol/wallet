@@ -1161,55 +1161,58 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
             // read to the end: the pager owns the screen, so there is no
             // scrollback to fight, and it reports whether the reader ever got
             // there. Quitting early is a decline, not a re-prompt.
-            let accept = |document: LegalDocument, prompt: &str| -> Result<bool> {
-                let digest = document.digest();
-                let body = format!(
-                    "{}\n\nDocument digest: {digest}",
-                    terminal_note_safe(&document.text())
-                );
-                if crate::pager::read_fully(document.title(), &body)?
-                    != crate::pager::Outcome::ReadToEnd
-                {
-                    crate::tui::warning(format!(
-                        "{} was closed before the end; nothing was accepted.",
-                        document.title()
-                    ));
-                    return Ok(false);
-                }
-                // Asked in a screen of its own rather than an inline prompt.
-                // The pager has just held the terminal; dropping to the
-                // scrollback for the one question that matters put the digest
-                // and the answer in a different place from the document they
-                // are about.
-                let accepted = crate::fullscreen::confirm_review(
-                    document.title(),
-                    &[
-                        vec![crate::fullscreen::Span::toned(
-                            "You have read this document to the end.",
-                            crate::tui::Tone::Muted,
-                        )],
-                        Vec::new(),
-                        vec![
-                            crate::fullscreen::Span::toned(
-                                "Document digest: ",
+            let accept =
+                |document: LegalDocument, question: &str, accept_label: &str| -> Result<bool> {
+                    let digest = document.digest();
+                    let body = format!(
+                        "{}\n\nDocument digest: {digest}",
+                        terminal_note_safe(&document.text())
+                    );
+                    if crate::pager::read_fully(document.title(), &body)?
+                        != crate::pager::Outcome::ReadToEnd
+                    {
+                        crate::tui::warning(format!(
+                            "{} was closed before the end; nothing was accepted.",
+                            document.title()
+                        ));
+                        return Ok(false);
+                    }
+                    // Asked in a screen of its own rather than an inline prompt.
+                    // The pager has just held the terminal; dropping to the
+                    // scrollback for the one question that matters put the digest
+                    // and the answer in a different place from the document they
+                    // are about.
+                    let accepted = crate::fullscreen::confirm_review(
+                        document.title(),
+                        &[
+                            vec![crate::fullscreen::Span::toned(
+                                "You have read this document to the end.",
                                 crate::tui::Tone::Muted,
-                            ),
-                            crate::fullscreen::Span::plain(&digest),
+                            )],
+                            Vec::new(),
+                            vec![
+                                crate::fullscreen::Span::toned(
+                                    "Document digest: ",
+                                    crate::tui::Tone::Muted,
+                                ),
+                                crate::fullscreen::Span::plain(&digest),
+                            ],
                         ],
-                    ],
-                    prompt,
-                    "Decline — signing stays disabled",
-                )?;
-                if accepted {
-                    store.record_acceptance(document, &digest)?;
-                }
-                Ok(accepted)
-            };
+                        question,
+                        accept_label,
+                        "Decline — signing stays disabled",
+                    )?;
+                    if accepted {
+                        store.record_acceptance(document, &digest)?;
+                    }
+                    Ok(accepted)
+                };
             crate::tui::intro("Ekubo Wallet legal acceptance");
             ensure!(
                 accept(
                     LegalDocument::TermsOfService,
                     "Do you accept these Terms of Service?",
+                    "Accept the Terms of Service",
                 )?,
                 "the Terms of Service were not accepted; signing stays disabled"
             );
@@ -1217,6 +1220,7 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
                 accept(
                     LegalDocument::PrivacyPolicy,
                     "Do you separately acknowledge this Privacy Policy?",
+                    "Acknowledge the Privacy Policy",
                 )?,
                 "the Privacy Policy was not acknowledged; signing stays disabled"
             );
@@ -3155,6 +3159,7 @@ async fn run_network_edit(
                 ("RPC URL", draft.rpc_url.to_string()),
             ],
         ),
+        "Save these changes to this network?",
         "Save these changes",
         "Cancel — nothing is written",
     )? {

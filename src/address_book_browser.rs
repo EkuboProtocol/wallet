@@ -48,10 +48,7 @@ use crate::{
     human_presence::{HumanPresence, PresenceRequest},
     tui::{self, Tone},
 };
-use ratatui::{
-    layout::Layout,
-    style::{Modifier, Style},
-};
+use ratatui::layout::Layout;
 
 /// Everything a save needs, resolved before anything is shown or asked.
 #[derive(Debug)]
@@ -77,6 +74,8 @@ struct Review {
     facts: Vec<(String, String)>,
     warnings: Vec<String>,
     question: &'static str,
+    /// The affirmative option under `question` in the in-screen rendering.
+    accept_label: &'static str,
 }
 
 impl Review {
@@ -147,6 +146,7 @@ fn save_review(draft: &EntryDraft, existing: Option<&AddressBookEntry>) -> Revie
         facts,
         warnings,
         question: "Save this alias?",
+        accept_label: "Save this alias",
     }
 }
 
@@ -163,6 +163,7 @@ fn remove_review(existing: &AddressBookEntry, network_name: &str, chain_id: u64)
         ],
         warnings: Vec::new(),
         question: "Remove this alias?",
+        accept_label: "Remove this alias",
     }
 }
 
@@ -731,7 +732,7 @@ fn draw_confirm(frame: &mut ratatui::Frame, confirm: &mut Confirm) {
     let [header, body, decision, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
-        Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -753,23 +754,13 @@ fn draw_confirm(frame: &mut ratatui::Frame, confirm: &mut Confirm) {
         .collect();
     frame.render_widget(Paragraph::new(visible), body);
 
-    let option = |selected: bool, text: &str| {
-        let line = UiLine::from(UiSpan::raw(format!(
-            " {} {text} ",
-            if selected { "▸" } else { " " }
-        )));
-        if selected {
-            line.style(Style::new().add_modifier(Modifier::REVERSED))
-        } else {
-            line
-        }
-    };
     frame.render_widget(
-        Paragraph::new(vec![
-            UiLine::default(),
-            option(!confirm.accept, "Cancel — nothing is written"),
-            option(confirm.accept, confirm.review.question),
-        ]),
+        crate::fullscreen::decision_pane(
+            confirm.review.question,
+            "Cancel — nothing is written",
+            confirm.review.accept_label,
+            confirm.accept,
+        ),
         decision,
     );
     frame.render_widget(

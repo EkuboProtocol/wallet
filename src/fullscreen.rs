@@ -651,13 +651,15 @@ pub(crate) fn is_interrupt(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'd'))
 }
 
-/// The two-option decision row every confirmation screen ends with.
+/// The question and two-option decision row every confirmation screen ends
+/// with. Four lines tall: a blank separator, the question, then the options.
 ///
 /// `accept` is the affirmative option and always sits second, so the cursor
 /// starting on the refusal means the affirmative answer is the one that has to
 /// be reached for. Shared so three screens cannot style the same decision
 /// differently.
 pub(crate) fn decision_pane<'a>(
+    question: &'a str,
     cancel_label: &'a str,
     accept_label: &'a str,
     accepting: bool,
@@ -675,6 +677,10 @@ pub(crate) fn decision_pane<'a>(
     };
     Paragraph::new(vec![
         UiLine::default(),
+        UiLine::from(UiSpan::styled(
+            format!(" {question}"),
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
         option(!accepting, cancel_label),
         option(accepting, accept_label),
     ])
@@ -816,6 +822,7 @@ pub(crate) fn confirm_review(
     title: &str,
     document: &[Line],
     question: &str,
+    accept_label: &str,
     cancel_label: &str,
 ) -> Result<bool> {
     if !crate::tui::interactive() {
@@ -829,7 +836,7 @@ pub(crate) fn confirm_review(
             let [header, body, decision, footer] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Fill(1),
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
@@ -849,7 +856,10 @@ pub(crate) fn confirm_review(
                 })
                 .collect();
             frame.render_widget(Paragraph::new(visible), body);
-            frame.render_widget(decision_pane(cancel_label, question, accepting), decision);
+            frame.render_widget(
+                decision_pane(question, cancel_label, accept_label, accepting),
+                decision,
+            );
             frame.render_widget(
                 footer_line(
                     None,
