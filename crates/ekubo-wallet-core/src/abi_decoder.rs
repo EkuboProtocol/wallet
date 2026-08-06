@@ -32,6 +32,12 @@ pub const MAX_RETURN_DATA_BYTES: usize = 1_048_576;
 pub const MAX_RECURSION_DEPTH: usize = 16;
 pub const MAX_COLLECTION_ITEMS: usize = 2_048;
 pub const MAX_MULTICALL_CHILDREN: usize = 128;
+/// Nested decodes one request may perform in total, across every level.
+///
+/// Generous against anything a real multicall produces — a batch of a hundred
+/// calls each decoding a handful of nested results stays far below it — and
+/// finite, which the depth and width caps are not when combined.
+pub const MAX_TOTAL_DECODES: usize = 4_096;
 pub const MAX_SEMANTIC_TRANSFORMATIONS: usize = 32;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -206,6 +212,14 @@ struct DecodeFailure(StructuredDecodeError);
 
 struct DecodeBudget {
     collection_items_remaining: usize,
+    /// Nested decodes left before the whole request is abandoned.
+    ///
+    /// Depth and per-level width were both capped, and their product was not:
+    /// `MAX_MULTICALL_CHILDREN` children at each of `MAX_RECURSION_DEPTH`
+    /// levels is 128^16 decodes, every one of them legal by the existing
+    /// limits. A budget shared across the entire request is what makes the two
+    /// caps compose instead of multiply.
+    decodes_remaining: usize,
 }
 
 pub(crate) struct DecodedAbiError {
@@ -242,6 +256,7 @@ pub(crate) fn decode_abi_error(data: &[u8], input_abi: &[Value]) -> Option<Decod
     }
     let mut budget = DecodeBudget {
         collection_items_remaining: MAX_COLLECTION_ITEMS,
+        decodes_remaining: MAX_TOTAL_DECODES,
     };
     let args = error
         .inputs
@@ -264,10 +279,12 @@ pub fn decode_abi_result(
 ) -> AbiDecodeResult {
     let mut budget = DecodeBudget {
         collection_items_remaining: MAX_COLLECTION_ITEMS,
+        decodes_remaining: MAX_TOTAL_DECODES,
     };
     decode_at_depth(return_data, plan, include_raw, 0, &mut budget)
 }
 
+/// One decode, charged against the request's shared budget.
 fn decode_at_depth(
     return_data: &str,
     plan: &AbiDecodePlan,
@@ -275,6 +292,22 @@ fn decode_at_depth(
     plan_depth: usize,
     budget: &mut DecodeBudget,
 ) -> AbiDecodeResult {
+    // Charged before any work, including the hex scan below, so exhausting the
+    // budget costs one comparison rather than another pass over a megabyte.
+    let Some(remaining) = budget.decodes_remaining.checked_sub(1) else {
+        return failed_result(
+            plan.required(),
+            detail(
+                "decode_budget_exhausted",
+                format!(
+                    "decoding this result would exceed the {MAX_TOTAL_DECODES}-decode budget \
+                     for one request"
+                ),
+            ),
+            include_raw.then(|| return_data.to_owned()),
+        );
+    };
+    budget.decodes_remaining = remaining;
     let raw = match validate_return_data(return_data) {
         Ok(raw) => raw,
         Err(error) => {
