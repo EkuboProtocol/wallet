@@ -12,7 +12,7 @@ use crate::{
         transfers::{Transfer, transfer_plan},
     },
     custody::{KeyStore, OsKeyStore},
-    execution::{ReceiptStatus, SigningOverrides, sign_execution},
+    execution::ReceiptStatus,
     fork::{ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
     input_validation::{parse_chain_id, validate_timeout_seconds},
     legal::{self, LegalDocument, LegalStatus, LegalStore},
@@ -2165,26 +2165,7 @@ impl WalletMcpServer {
         stored_policy: crate::policy_store::StoredPolicy,
         on_simulation_failure: OnSimulationFailure,
     ) -> Result<ExecutionStatusOutput> {
-        plan.validate()?;
-        ensure!(
-            plan.sender == wallet.address,
-            "execution plan sender mismatch"
-        );
-        ensure!(
-            plan.chain_id.as_str() == network.chain_id.to_string(),
-            "execution plan chain mismatch"
-        );
-        // The digest binds the result to this exact plan, and a fork result is
-        // hypothetical and can never authorize a send. Signing re-checks the
-        // digest too; both are cheap and neither should be reachable.
-        ensure!(
-            simulation.digest == format!("{:#x}", plan.digest()),
-            "simulation does not describe this execution plan"
-        );
-        ensure!(
-            simulation.fork.is_none(),
-            "a fork simulation is hypothetical and cannot be sent"
-        );
+        crate::orchestrator::validate_send(&wallet, &network, &plan, &simulation)?;
         // Whatever identifier this result carried is spent now.
         simulation.simulation_id = None;
 
@@ -2206,12 +2187,18 @@ impl WalletMcpServer {
             );
         }
 
-        if !simulation.allowed || !simulation.simulation.success {
-            let request = self
-                .pending
-                .lock()
-                .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
-                .create(&wallet.id, &network.name, &plan, stored_policy.revision)?;
+        let disposition = crate::orchestrator::execute_automatic(
+            &self.config,
+            &self.pending,
+            &*self.keys,
+            &wallet,
+            &network,
+            &stored_policy,
+            &plan,
+            &simulation,
+        )
+        .await?;
+        if let crate::orchestrator::SendDisposition::Queued(request) = disposition {
             let mut output = execution_status_output(request);
             output.instruction = Some(if simulation.simulation.success {
                 format!(
@@ -2231,48 +2218,9 @@ impl WalletMcpServer {
             output.simulation = Some(simulation);
             return Ok(output);
         }
-
-        // A predecessor that already mined, cancelled, or was replaced must
-        // never block this send: settle the wallet+chain in-flight slot
-        // against the chain before signing a new envelope.
-        let in_flight = self
-            .pending
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
-            .in_flight(&wallet.id, &network.chain_id.to_string())?;
-        if let Some(previous) = in_flight {
-            crate::reconcile::reconcile_record(&self.pending, &network, previous, true).await?;
-        }
-
-        let signed = sign_execution(
-            &wallet,
-            &network,
-            &plan,
-            &simulation,
-            &*self.keys,
-            SigningOverrides::default(),
-        )
-        .await?;
-        ensure!(
-            self.config.wallet(&wallet.id)? == wallet,
-            "wallet configuration changed while the transaction was being signed"
-        );
-        ensure!(
-            self.config.network_by_chain_id(plan.chain_id.as_str())? == network,
-            "network configuration changed while the transaction was being signed"
-        );
-        let record = self
-            .pending
-            .lock()
-            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
-            .record_automatic_signed(
-                &wallet.id,
-                &network.name,
-                &plan,
-                stored_policy.revision,
-                &signed.serialized_transaction,
-                &signed.transaction_hash,
-            )?;
+        let crate::orchestrator::SendDisposition::Signed(record) = disposition else {
+            unreachable!("queued disposition returned above");
+        };
         self.submit_signed_record(&wallet, &network, record, Some(simulation))
             .await
     }

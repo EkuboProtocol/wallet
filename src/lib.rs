@@ -17,6 +17,7 @@ pub mod input_validation;
 pub mod legal;
 pub mod mcp;
 pub mod message;
+pub mod orchestrator;
 pub mod pager;
 pub mod pending;
 pub mod plan_fetch;
