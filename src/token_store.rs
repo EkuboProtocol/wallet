@@ -877,10 +877,9 @@ mod tests {
 
     #[test]
     fn fetcher_call_encodes_the_deployed_selector() {
-        use sha3::{Digest, Keccak256};
-        let expected = Keccak256::digest(
-            b"getNonzeroBalancesAndAllowances(address,address[],address[])".as_slice(),
-        );
+        use alloy::primitives::keccak256;
+        let expected =
+            keccak256(b"getNonzeroBalancesAndAllowances(address,address[],address[])".as_slice());
         assert_eq!(getNonzeroBalancesAndAllowancesCall::SELECTOR, expected[..4]);
         assert_eq!(
             format!("{TOKEN_DATA_FETCHER_ADDRESS:#x}"),

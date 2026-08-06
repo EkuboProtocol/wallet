@@ -17,12 +17,12 @@
 //! plain file, so an agent with filesystem access cannot forge acceptance.
 
 use crate::policy_store::PolicyStore;
+use alloy::primitives::keccak256;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Keccak256};
 use std::{fmt::Write as _, fs, path::Path};
 
 /// The pre-database acceptance file, deleted on sight.
@@ -225,7 +225,7 @@ impl LegalDocument {
     /// Keccak-256 digest of the exact document text.
     #[must_use]
     pub fn digest(self) -> String {
-        format!("0x{}", hex::encode(Keccak256::digest(self.text())))
+        format!("0x{}", hex::encode(keccak256(self.text())))
     }
 
     #[must_use]

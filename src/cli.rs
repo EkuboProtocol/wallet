@@ -20,7 +20,7 @@ use crate::{
     },
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
-    render::{OutputMode, described_time, emit, relative_time},
+    render::{OutputMode, described_time, emit, print_json, relative_time},
     rpc::verify_chain_id,
     simulation::{SimulationResult, simulate_execution},
     tx_browser::status_label,
@@ -29,13 +29,15 @@ use crate::{
         parse_typed_data,
     },
 };
-use alloy::{primitives::Address, signers::SignerSync};
+use alloy::{
+    primitives::{Address, keccak256},
+    signers::SignerSync,
+};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use directories::BaseDirs;
 use num_bigint::BigUint;
-use sha3::{Digest, Keccak256};
 use std::{
     collections::BTreeMap,
     fs,
@@ -971,7 +973,7 @@ async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMo
                 .with_context(|| format!("failed to parse {}", policy_file.display()))?;
             let policy = WalletPolicy::parse(value)?;
             let canonical = serde_json::to_vec(&policy)?;
-            let digest = format!("0x{}", hex::encode(Keccak256::digest(&canonical)));
+            let digest = format!("0x{}", hex::encode(keccak256(&canonical)));
             emit(
                 mode,
                 &serde_json::json!({
@@ -1036,7 +1038,7 @@ async fn review_policy_proposal(
 
     let diff = crate::core::policy::diff_policies(&current.policy, &proposal.policy);
     let policy_bytes = serde_json::to_vec(&proposal.policy)?;
-    let digest = format!("0x{}", hex::encode(Keccak256::digest(&policy_bytes)));
+    let digest = format!("0x{}", hex::encode(keccak256(&policy_bytes)));
     let mut question = crate::tui::Confirmation::new(
         "Apply proposed wallet policy",
         "An agent proposed this replacement policy. The permission diff below is authoritative; \
@@ -2383,7 +2385,7 @@ async fn replace_policy(
     let mut policies = PolicyStore::production(config.data_dir())?;
     let current = policies.get(wallet_id)?;
     let policy_bytes = serde_json::to_vec(policy)?;
-    let digest = format!("0x{}", hex::encode(Keccak256::digest(&policy_bytes)));
+    let digest = format!("0x{}", hex::encode(keccak256(&policy_bytes)));
     let mut question = crate::tui::Confirmation::new(
         "Replace wallet policy",
         "Replace the complete policy enforced before this wallet signs.",
@@ -3705,12 +3707,6 @@ fn require_interactive(operation: &str) -> Result<()> {
         io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal(),
         "{operation} requires an interactive terminal"
     );
-    Ok(())
-}
-
-fn print_json(value: &impl serde::Serialize) -> Result<()> {
-    serde_json::to_writer_pretty(io::stdout().lock(), value)?;
-    println!();
     Ok(())
 }
 

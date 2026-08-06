@@ -229,64 +229,6 @@ pub fn explorer_transaction_url(
     ))
 }
 
-/// Generic human rendering for JSON values: indented `key: value` lines with
-/// numbered entries for arrays of objects. A fallback for future commands
-/// without a bespoke view, so `--json` stays the only way to get raw JSON.
-#[must_use]
-pub fn generic_human(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    render_value(&mut out, value, 0);
-    out
-}
-
-fn render_value(out: &mut String, value: &serde_json::Value, indent: usize) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, child) in map {
-                render_entry(out, key, child, indent);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for (index, item) in items.iter().enumerate() {
-                render_entry(out, &format!("{}.", index + 1), item, indent);
-            }
-        }
-        scalar => {
-            out.push_str(&" ".repeat(indent));
-            out.push_str(&scalar_text(scalar));
-            out.push('\n');
-        }
-    }
-}
-
-fn render_entry(out: &mut String, key: &str, value: &serde_json::Value, indent: usize) {
-    use std::fmt::Write as _;
-    let pad = " ".repeat(indent);
-    match value {
-        serde_json::Value::Object(map) if map.is_empty() => {
-            let _ = writeln!(out, "{pad}{key}: {{}}");
-        }
-        serde_json::Value::Array(items) if items.is_empty() => {
-            let _ = writeln!(out, "{pad}{key}: (none)");
-        }
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-            let _ = writeln!(out, "{pad}{key}:");
-            render_value(out, value, indent + 2);
-        }
-        scalar => {
-            let _ = writeln!(out, "{pad}{key}: {}", scalar_text(scalar));
-        }
-    }
-}
-
-fn scalar_text(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Null => "null".into(),
-        other => other.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,19 +258,6 @@ mod tests {
         let mut bare = network;
         bare.block_explorer_url = None;
         assert_eq!(explorer_transaction_url(&bare, "0xabc"), None);
-    }
-
-    #[test]
-    fn generic_rendering_flattens_objects_and_numbers_arrays() {
-        let rendered = generic_human(&serde_json::json!({
-            "wallet": "primary",
-            "networks": [{"name": "ethereum"}],
-            "empty": [],
-        }));
-        assert!(rendered.contains("wallet: primary"));
-        assert!(rendered.contains("1.:\n") || rendered.contains("1.:"));
-        assert!(rendered.contains("  name: ethereum"));
-        assert!(rendered.contains("empty: (none)"));
     }
 
     #[test]

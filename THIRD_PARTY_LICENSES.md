@@ -54,7 +54,6 @@ file follows in the appendix. Regenerate this document with
 - base64ct 1.8.3 — RustCrypto Developers — https://github.com/RustCrypto/formats
 - blocking 1.6.2 — Stjepan Glavina <stjepang@gmail.com> — https://github.com/smol-rs/blocking
 - concurrent-queue 2.5.0 — Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net> — https://github.com/smol-rs/concurrent-queue
-- const-oid 0.10.2 — RustCrypto Developers — https://github.com/RustCrypto/formats
 - const-oid 0.9.6 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/const-oid
 - crypto-bigint 0.5.5 — RustCrypto Developers — https://github.com/RustCrypto/crypto-bigint
 - der 0.7.10 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/der
@@ -2668,36 +2667,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-```
-
-## License text for: const-oid 0.10.2
-
-```text
-Copyright (c) 2020-2026 The RustCrypto Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
 ```
 
 ## License text for: const-oid 0.9.6
