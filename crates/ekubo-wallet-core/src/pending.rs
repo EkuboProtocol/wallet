@@ -519,9 +519,21 @@ impl PendingStore {
     /// own nonce. Repricing appends to the hash history — an earlier attempt
     /// may still mine — while only the newest bytes stay rebroadcastable. The
     /// record keeps its in-flight slot; the pair is one logical transaction.
+    /// Record a cancellation envelope, replacing the incumbent it was priced
+    /// against.
+    ///
+    /// `priced_against` is the newest cancellation hash the caller saw when it
+    /// computed this envelope's fees, or `None` if there was none. It has to
+    /// still be the newest, because a replacement is only a replacement of the
+    /// thing it outbid: the MCP server and the CLI share this database but not
+    /// a lock, so two processes can both bump over generation N, and whichever
+    /// writes second would install its lower-priced envelope as the newest.
+    /// The next reprice then bumps from that demoted baseline, and the
+    /// cancellation the owner is trying to push through loses to the original.
     pub fn store_cancellation(
         &mut self,
         request_id: Uuid,
+        priced_against: Option<&str>,
         cancel_serialized_transaction: &str,
         cancel_transaction_hash: &str,
     ) -> Result<PendingTransaction> {
@@ -548,6 +560,11 @@ impl PendingStore {
             .map(parse_cancel_hashes)
             .transpose()?
             .unwrap_or_default();
+        ensure!(
+            hashes.last().map(String::as_str) == priced_against,
+            "another cancellation was recorded while this one was being priced; \
+             re-read the request and reprice against the newest envelope"
+        );
         ensure!(
             !hashes.contains(&cancel_transaction_hash.to_owned()),
             "this exact cancellation was already recorded"
@@ -1338,7 +1355,7 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .store_cancellation(signed.request_id, "0x0304", CANCEL_HASH_ONE)
+                .store_cancellation(signed.request_id, None, "0x0304", CANCEL_HASH_ONE)
                 .is_err()
         );
         store.claim_for_submission(signed.request_id).unwrap();
@@ -1350,16 +1367,16 @@ mod tests {
         // Repricing appends to the hash history, keeps only the newest bytes,
         // and refuses duplicates.
         let cancelling = store
-            .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+            .store_cancellation(request_id, None, "0x0304", CANCEL_HASH_ONE)
             .unwrap();
         assert_eq!(cancelling.status, PendingStatus::Cancelling);
         assert!(
             store
-                .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+                .store_cancellation(request_id, Some(CANCEL_HASH_ONE), "0x0304", CANCEL_HASH_ONE)
                 .is_err()
         );
         let repriced = store
-            .store_cancellation(request_id, "0x0506", CANCEL_HASH_TWO)
+            .store_cancellation(request_id, Some(CANCEL_HASH_ONE), "0x0506", CANCEL_HASH_TWO)
             .unwrap();
         assert_eq!(
             repriced.cancel_serialized_transaction.as_deref(),
@@ -1369,6 +1386,22 @@ mod tests {
             repriced.cancel_transaction_hashes,
             [CANCEL_HASH_ONE, CANCEL_HASH_TWO]
         );
+
+        // A replacement is a replacement of the thing it outbid. This one was
+        // priced against the first hash while the second is already newest, so
+        // its fee came from a superseded baseline — storing it would install a
+        // cheaper envelope as the newest and the next reprice would bump from
+        // there, handing the race back to the transaction being cancelled.
+        let stale = store
+            .store_cancellation(
+                request_id,
+                Some(CANCEL_HASH_ONE),
+                "0x0708",
+                "0x3333333333333333333333333333333333333333333333333333333333333333",
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(stale.contains("while this one was being priced"), "{stale}");
 
         let cancelled = store.mark_cancelled(request_id, "123", None).unwrap();
         assert_eq!(cancelled.status, PendingStatus::Cancelled);
@@ -1421,7 +1454,7 @@ mod tests {
         let (_directory, mut store) = store();
         let request_id = broadcast_original(&mut store);
         store
-            .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+            .store_cancellation(request_id, None, "0x0304", CANCEL_HASH_ONE)
             .unwrap();
         assert_eq!(
             store
@@ -1439,7 +1472,7 @@ mod tests {
         let (_directory, mut store) = store();
         let request_id = broadcast_original(&mut store);
         store
-            .store_cancellation(request_id, "0x0304", CANCEL_HASH_ONE)
+            .store_cancellation(request_id, None, "0x0304", CANCEL_HASH_ONE)
             .unwrap();
         assert_eq!(
             store.mark_replaced(request_id).unwrap().status,

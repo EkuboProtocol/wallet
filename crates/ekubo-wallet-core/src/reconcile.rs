@@ -299,6 +299,14 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     record: PendingTransaction,
     keys: &K,
 ) -> Result<(PendingTransaction, BroadcastResult)> {
+    // Re-read before pricing anything. The caller hands over a snapshot: the
+    // transaction browser captured its copy before the owner opened the detail
+    // view and pressed the key, and the CLI and the MCP server share this
+    // database without sharing a lock. Pricing a replacement against a
+    // cancellation that has since been superseded produces one that can be
+    // cheaper than what is already in the mempool, which loses the race to the
+    // transaction being cancelled.
+    let record = lock(pending)?.get(record.request_id).unwrap_or(record);
     let record = reconcile_record(pending, network, record, true).await?;
     let block = |record: &PendingTransaction| {
         record
@@ -346,6 +354,7 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     // the chain.
     let stored = lock(pending)?.store_cancellation(
         record.request_id,
+        record.cancel_transaction_hashes.last().map(String::as_str),
         &signed.serialized_transaction,
         &signed.transaction_hash,
     )?;
