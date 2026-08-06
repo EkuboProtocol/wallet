@@ -224,6 +224,13 @@ impl ConfigStore {
         // and every MCP call, so an oversized file would be parsed into memory
         // each time. Nothing legitimate approaches this: the cap is far above
         // a configuration holding the maximum wallets and networks.
+        // Narrow an existing file that is readable by anyone. `save` writes
+        // 0600, but a file restored from a backup, copied by an older build, or
+        // unpacked from an archive arrives with whatever mode it was given —
+        // and this one holds RPC URLs, which can carry provider credentials.
+        // Repairing on read means it is fixed the first time anything looks at
+        // it rather than the next time something writes.
+        set_private_file_permissions(&self.file)?;
         let mut reader = BufReader::new(file).take(MAX_CONFIG_BYTES as u64 + 1);
         let mut bytes = Vec::new();
         reader
@@ -810,6 +817,32 @@ fn sync_parent(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn a_widely_readable_configuration_is_narrowed_when_it_is_read() {
+        // The file holds RPC URLs, which can carry provider credentials. A
+        // restore or an older build can leave it 0644; nothing would have
+        // fixed that until the next write.
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        store
+            .update(|state| {
+                state.networks = default_networks();
+                Ok(())
+            })
+            .unwrap();
+        std::fs::set_permissions(store.file(), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.load().unwrap();
+
+        let mode = std::fs::metadata(store.file())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0, "config stayed readable: {mode:o}");
+    }
 
     #[test]
     #[cfg(unix)]
