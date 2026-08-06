@@ -57,6 +57,19 @@ use uuid::Uuid;
 /// Plans one fork may hold. Kept to a single digit because replay is
 /// quadratic in the calls a session sends.
 pub const MAX_PLANS_PER_FORK: usize = 8;
+
+/// Serialized plan bytes one fork may retain across everything applied to it.
+///
+/// The count above bounds entries, not size: a plan validates at up to
+/// `MAX_SERIALIZED_PLAN_BYTES`, so eight of them is a fork holding well over a
+/// hundred megabytes, and `MAX_FORKS` of those is gigabytes in a process that
+/// otherwise uses megabytes. Reachable without contrivance — a single step to
+/// a codeless address with multi-megabyte zero calldata costs 4 gas a byte,
+/// fits a normal block limit, simulates successfully, and is therefore kept.
+///
+/// The same reasoning `SimulationStore` applies to recorded simulations, which
+/// gained a byte budget for the same reason a count cap could not provide.
+pub const MAX_FORK_PLAN_BYTES: usize = 1024 * 1024;
 /// Concurrent forks one wallet may hold.
 pub const MAX_FORKS_PER_WALLET: usize = 4;
 /// Concurrent forks this process may hold across every wallet.
@@ -99,6 +112,19 @@ pub struct ForkSession {
     pub expires_at: DateTime<Utc>,
     /// Validated plans already applied, in application order.
     pub plans: Vec<ExecutionPlan>,
+    /// Serialized size of each applied plan, measured once when it was
+    /// appended. Kept beside the plans so the byte budget is a sum rather than
+    /// a re-serialization of everything on every append.
+    plan_bytes: Vec<usize>,
+}
+
+/// What one plan costs against `MAX_FORK_PLAN_BYTES`.
+///
+/// A plan that will not serialize cannot have been validated, so this cannot
+/// happen — but returning the ceiling rather than zero means a bug here
+/// refuses the append instead of making the budget inert.
+fn serialized_plan_bytes(plan: &ExecutionPlan) -> usize {
+    serde_json::to_vec(plan).map_or(MAX_FORK_PLAN_BYTES, |bytes| bytes.len())
 }
 
 impl ForkSession {
@@ -263,9 +289,36 @@ impl ForkStore {
             created_at: now,
             expires_at: now + TimeDelta::seconds(FORK_TTL_SECONDS),
             plans: Vec::new(),
+            plan_bytes: Vec::new(),
         };
         self.sessions.insert(session.fork_id, session.clone());
         Ok(session)
+    }
+
+    /// Refuse a fork this store could not hold anyway, before anything spends
+    /// an RPC round trip pinning its parent.
+    ///
+    /// `create` performs the same checks and remains the authority; this is the
+    /// cheap refusal in front of them. Admission used to happen only after
+    /// `pin_parent_block`, so a caller at its fork limit paid two RPC calls per
+    /// attempt to be told no — the one tool whose outbound work no bound
+    /// covered.
+    pub fn ensure_capacity(&mut self, wallet_id: &str, now: DateTime<Utc>) -> Result<()> {
+        self.prune(now);
+        let held = self
+            .sessions
+            .values()
+            .filter(|session| session.wallet_id == wallet_id)
+            .count();
+        ensure!(
+            held < MAX_FORKS_PER_WALLET,
+            "wallet {wallet_id} already holds {MAX_FORKS_PER_WALLET} simulation forks; discard one with wallet_discard_fork"
+        );
+        ensure!(
+            self.sessions.len() < MAX_FORKS,
+            "this wallet server already holds {MAX_FORKS} simulation forks; discard one with wallet_discard_fork"
+        );
+        Ok(())
     }
 
     /// Read a live fork. Expiry is enforced here, so an expired fork is
@@ -300,6 +353,17 @@ impl ForkStore {
             session.plans.len() < MAX_PLANS_PER_FORK,
             "fork {fork_id} already holds the maximum of {MAX_PLANS_PER_FORK} plans; open a new fork"
         );
+        let retained = session
+            .plan_bytes
+            .iter()
+            .sum::<usize>()
+            .saturating_add(serialized_plan_bytes(&plan));
+        ensure!(
+            retained <= MAX_FORK_PLAN_BYTES,
+            "fork {fork_id} would retain more than {MAX_FORK_PLAN_BYTES} bytes of applied plans; \
+             open a new fork"
+        );
+        session.plan_bytes.push(serialized_plan_bytes(&plan));
         session.plans.push(plan);
         Ok(session.clone())
     }
@@ -621,6 +685,55 @@ mod tests {
         // A multi-call plan replays through Calibur, so replay needs the
         // delegation designator override.
         assert!(session.preface().requires_calibur());
+    }
+
+    #[test]
+    fn a_fork_is_bounded_by_retained_plan_bytes_as_well_as_plan_count() {
+        let (mut store, session, now) = store_with_fork();
+        let mut bulky = plan(1);
+        // Well under MAX_PLANS_PER_FORK, well over the byte budget: the count
+        // says nothing about how much calldata each plan carries, and a plan
+        // this size validates, simulates, and is therefore kept.
+        bulky.ordered_steps[0].transaction.data = vec![0_u8; MAX_FORK_PLAN_BYTES].into();
+        let error = store
+            .append(session.fork_id, bulky, 0, now)
+            .expect_err("an oversized plan must not be retained");
+        assert!(error.to_string().contains("bytes of applied plans"));
+
+        // The ordinary case is untouched: a real plan is kilobytes.
+        assert_eq!(
+            store
+                .append(session.fork_id, plan(1), 0, now)
+                .unwrap()
+                .plans
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn capacity_is_refusable_before_a_parent_block_is_pinned() {
+        let now = Utc::now();
+        let mut store = ForkStore::new();
+        for _ in 0..MAX_FORKS_PER_WALLET {
+            store.ensure_capacity("wallet-a", now).unwrap();
+            store
+                .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+                .unwrap();
+        }
+        // Same answer `create` would give, reached without the RPC round trip
+        // that pinning a parent block costs.
+        let error = store
+            .ensure_capacity("wallet-a", now)
+            .expect_err("a wallet at its fork limit must be refused up front");
+        assert!(error.to_string().contains("already holds"));
+        assert!(
+            store
+                .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+                .is_err()
+        );
+        // Another wallet is unaffected: this is a per-wallet limit.
+        store.ensure_capacity("wallet-b", now).unwrap();
     }
 
     #[test]

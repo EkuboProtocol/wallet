@@ -999,6 +999,14 @@ impl WalletMcpServer {
             .config
             .network_by_chain_id(&chain_id)
             .map_err(|error| tool_error(&error))?;
+        // Refuse before spending the round trip, not after. `create` checks
+        // the same limits and stays the authority; this keeps a caller at its
+        // fork limit from buying two RPC calls per attempt to be told no.
+        self.forks
+            .lock()
+            .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
+            .ensure_capacity(&wallet_id, Utc::now())
+            .map_err(|error| tool_error(&error))?;
         let parent = pin_parent_block(&network)
             .await
             .map_err(|error| tool_error(&error))?;
