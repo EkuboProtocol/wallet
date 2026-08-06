@@ -525,39 +525,5 @@ pub async fn reconcile_all(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const fn receipt(succeeded: bool) -> ReceiptStatus {
-        ReceiptStatus {
-            succeeded,
-            block_number: 100,
-            gas_used: 21_000,
-            effective_gas_price: 1_000_000_000,
-        }
-    }
-
-    #[test]
-    fn a_receipt_settles_the_envelope_regardless_of_nonce() {
-        assert_eq!(
-            classify(5, 6, Some(receipt(true))),
-            ChainObservation::Mined(receipt(true))
-        );
-        assert_eq!(
-            classify(5, 5, Some(receipt(false))),
-            ChainObservation::Mined(receipt(false))
-        );
-    }
-
-    #[test]
-    fn a_consumed_nonce_without_a_receipt_is_a_replacement() {
-        assert_eq!(classify(5, 6, None), ChainObservation::Replaced);
-        assert_eq!(classify(0, 3, None), ChainObservation::Replaced);
-    }
-
-    #[test]
-    fn an_unconsumed_nonce_without_a_receipt_is_still_pending() {
-        assert_eq!(classify(5, 5, None), ChainObservation::StillPending);
-        assert_eq!(classify(5, 0, None), ChainObservation::StillPending);
-    }
-}
+#[path = "reconcile_test.rs"]
+mod tests;

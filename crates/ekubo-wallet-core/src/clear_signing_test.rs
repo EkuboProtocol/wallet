@@ -1,0 +1,96 @@
+//! Tests for [`super`].
+//!
+//! Out of line so the audit corpus is production code: V12 bills measured
+//! bytes and excludes `*_test.rs` by default. A `#[path]` child module has
+//! exactly the privacy access an inline one does, so nothing these can reach
+//! changes, and the test paths are the ones they always were.
+
+use super::*;
+
+#[test]
+fn every_vendored_descriptor_resolves_and_parses() {
+    let registry = registry();
+    // The one known upstream defect: swell's burn format carries no
+    // intent, which the engine requires. Anything beyond that fails.
+    let unexpected: Vec<_> = registry
+        .failures
+        .iter()
+        .filter(|(path, _)| *path != "registry/swell/calldata-swell.json")
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "vendored descriptors failed to parse: {unexpected:?}"
+    );
+    assert!(
+        registry.calldata.len() > 50,
+        "only {} calldata descriptors loaded",
+        registry.calldata.len()
+    );
+    assert!(
+        registry.eip712.len() > 100,
+        "only {} eip712 descriptors loaded",
+        registry.eip712.len()
+    );
+}
+
+#[tokio::test]
+async fn the_vendored_vetoken_descriptor_interprets_a_stake() {
+    let (chain, address, calldata) = stake_fixture();
+    let reading = interpret(
+        chain,
+        CallEnvelope {
+            from: Address::repeat_byte(0x11),
+            to: address,
+        },
+        &Bytes::from(calldata),
+        U256::ZERO,
+        &TokenMetadataMap::new(),
+    )
+    .await
+    .expect("descriptor matches");
+    assert!(!reading.intent.is_empty());
+    assert!(!reading.fields.is_empty());
+}
+
+#[tokio::test]
+async fn a_permit_descriptor_reads_mainnet_usdc_typed_data() {
+    // The registry's permit descriptors resolve through the shared
+    // eip712-erc2612-permit include, so this also proves the include
+    // chain resolves from the embedded tree.
+    let typed_data = serde_json::json!({
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"}
+            ],
+            "Permit": [
+                {"name": "owner", "type": "address"},
+                {"name": "spender", "type": "address"},
+                {"name": "value", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+                {"name": "deadline", "type": "uint256"}
+            ]
+        },
+        "primaryType": "Permit",
+        "domain": {
+            "name": "USD Coin",
+            "version": "2",
+            "chainId": 1,
+            "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "message": {
+            "owner": "0x1111111111111111111111111111111111111111",
+            "spender": "0x2222222222222222222222222222222222222222",
+            "value": "1000000",
+            "nonce": "0",
+            "deadline": "1900000000"
+        }
+    });
+    let reading = interpret_typed_data(&typed_data)
+        .await
+        .expect("usdc permit descriptor matches");
+    assert!(!reading.intent.is_empty());
+    assert!(!reading.fields.is_empty());
+}

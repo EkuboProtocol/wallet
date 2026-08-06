@@ -1,0 +1,1505 @@
+//! Tests for [`super`].
+//!
+//! Out of line so the audit corpus is production code: V12 bills measured
+//! bytes and excludes `*_test.rs` by default. A `#[path]` child module has
+//! exactly the privacy access an inline one does, so nothing these can reach
+//! changes, and the test paths are the ones they always were.
+
+use super::*;
+use crate::{
+    config::{WalletMetadata, WalletSource},
+    policy_store::DatabaseKey,
+};
+use alloy::primitives::Address;
+use std::str::FromStr;
+
+#[test]
+fn tool_errors_are_capped_and_stripped() {
+    // An RPC or plan producer chooses this text and alloy embeds whole
+    // response bodies in it, so neither its length nor its bytes are the
+    // wallet's to trust.
+    let error = tool_error(&format!("upstream said \u{1b}[31m{}", "y".repeat(50_000)));
+    assert!(
+        error.message.chars().count() <= MAX_TOOL_ERROR_CHARS,
+        "{} characters survived",
+        error.message.chars().count()
+    );
+    assert!(!error.message.contains('\u{1b}'), "{}", error.message);
+    // The head of the message is what carries the diagnosis, so it must
+    // survive intact rather than being truncated from the front.
+    assert!(error.message.starts_with("upstream said"));
+}
+
+fn server() -> (tempfile::TempDir, WalletMcpServer) {
+    let directory = tempfile::tempdir().unwrap();
+    let config = ConfigStore::new(directory.path());
+    config
+        .update(|state| {
+            state.wallets.push(WalletMetadata {
+                id: "primary".into(),
+                address: Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+                created_at: Utc::now(),
+                source: WalletSource::Created,
+                exported_at: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let mut policies = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
+    policies
+        .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+        .unwrap();
+    let pending_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
+    let typed_data_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
+    let message_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
+    let legal_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
+    let token_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
+    let address_book_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([4; 32]),
+    )
+    .unwrap();
+    let server = WalletMcpServer::new(
+        config,
+        policies,
+        PendingStore::new(pending_database),
+        TypedDataStore::new(typed_data_database),
+        MessageStore::new(message_database),
+        LegalStore::new(legal_database),
+        TokenStore::new(token_database),
+        AddressBookStore::new(address_book_database),
+        Arc::new(crate::custody::MemoryKeyStore::default()),
+    )
+    .unwrap();
+    (directory, server)
+}
+
+fn accept_legal(server: &WalletMcpServer) {
+    let store = server.legal.lock().unwrap();
+    store
+        .record_acceptance(
+            LegalDocument::TermsOfService,
+            &LegalDocument::TermsOfService.digest(),
+        )
+        .unwrap();
+    store
+        .record_acceptance(
+            LegalDocument::PrivacyPolicy,
+            &LegalDocument::PrivacyPolicy.digest(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn inventory_omits_rpc_urls_and_private_state() {
+    let (_directory, server) = server();
+    let Json(inventory) = server.wallet_list().unwrap();
+    assert_eq!(inventory.wallets[0].id, "primary");
+    assert!(
+        inventory
+            .networks
+            .iter()
+            .all(|network| !network.name.contains("http"))
+    );
+}
+
+#[test]
+fn policy_tool_reads_encrypted_policy_revision() {
+    let (_directory, server) = server();
+    let Json(output) = server
+        .wallet_get_policy(Parameters(WalletInput {
+            wallet_id: "primary".into(),
+        }))
+        .unwrap();
+    assert_eq!(output.revision, 1);
+    assert_eq!(output.wallet_id, "primary");
+}
+
+#[test]
+fn advertised_version_matches_crate() {
+    assert_eq!(crate::VERSION, env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn tool_schemas_contain_no_boolean_schemas() {
+    // Schemars renders serde_json::Value as the boolean schema `true`,
+    // which Claude Code's MCP client rejects when it validates tools/list
+    // ("Invalid input at tools.N.outputSchema..."). Every position that
+    // holds a subschema must hold an object.
+    fn assert_no_boolean_schemas(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let child_path = format!("{path}.{key}");
+                    // additionalProperties is exempt: boolean forms are
+                    // universal there and clients accept them.
+                    let schema_position = matches!(key.as_str(), "items" | "contains" | "not")
+                        || path.ends_with(".properties")
+                        || path.ends_with(".$defs")
+                        || path.ends_with(".definitions");
+                    if schema_position {
+                        assert!(
+                            child.is_object(),
+                            "boolean or non-object schema at {child_path}: {child}"
+                        );
+                    }
+                    assert_no_boolean_schemas(child, &child_path);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    assert_no_boolean_schemas(item, &format!("{path}[{index}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_no_nonstandard_formats(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(format) = map.get("format").and_then(serde_json::Value::as_str) {
+                    assert!(
+                        !(format.starts_with("uint")
+                            || format.starts_with("int")
+                            || format == "float"
+                            || format == "double"),
+                        "nonstandard format {format:?} at {path}"
+                    );
+                }
+                for (key, child) in map {
+                    assert_no_nonstandard_formats(child, &format!("{path}.{key}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    assert_no_nonstandard_formats(item, &format!("{path}[{index}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for tool in WalletMcpServer::sanitized_tool_router().list_all() {
+        let name = tool.name.clone();
+        let input = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+        assert_no_boolean_schemas(&input, &format!("{name}.inputSchema"));
+        assert_no_nonstandard_formats(&input, &format!("{name}.inputSchema"));
+        if let Some(output) = &tool.output_schema {
+            let output = serde_json::to_value(output.as_ref()).unwrap();
+            assert_no_boolean_schemas(&output, &format!("{name}.outputSchema"));
+            assert_no_nonstandard_formats(&output, &format!("{name}.outputSchema"));
+        }
+    }
+}
+
+/// Put a fork into the server's registry without touching an RPC.
+fn insert_fork(server: &WalletMcpServer, wallet_id: &str, chain_id: u64) -> uuid::Uuid {
+    use crate::fork::ForkParent;
+
+    server
+        .forks
+        .lock()
+        .unwrap()
+        .create(
+            wallet_id,
+            Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+            chain_id,
+            ForkParent {
+                number: 1_000,
+                hash: alloy::primitives::B256::repeat_byte(0xcd),
+                gas_limit: 30_000_000,
+            },
+            Utc::now(),
+        )
+        .unwrap()
+        .fork_id
+}
+
+#[test]
+fn a_fork_only_answers_for_the_wallet_and_chain_it_was_opened_for() {
+    let (_directory, server) = server();
+    let fork_id = insert_fork(&server, "primary", 1);
+
+    assert!(
+        server
+            .fork_session(Some(fork_id), "1", Some("primary"))
+            .unwrap()
+            .is_some()
+    );
+    let wrong_chain = server
+        .fork_session(Some(fork_id), "8453", Some("primary"))
+        .expect_err("a fork must not answer for another chain");
+    assert!(format!("{wrong_chain:?}").contains("different chain"));
+    let wrong_wallet = server
+        .fork_session(Some(fork_id), "1", Some("other"))
+        .expect_err("a fork must not answer for another wallet");
+    assert!(format!("{wrong_wallet:?}").contains("different wallet"));
+}
+
+#[test]
+fn an_unknown_or_discarded_fork_is_rejected_rather_than_ignored() {
+    let (_directory, server) = server();
+    let fork_id = insert_fork(&server, "primary", 1);
+
+    // Omitting fork_id keeps the real-state path; it never silently
+    // resolves to some other fork.
+    assert!(
+        server
+            .fork_session(None, "1", Some("primary"))
+            .unwrap()
+            .is_none()
+    );
+
+    let discarded = server
+        .wallet_discard_fork(Parameters(DiscardForkInput { fork_id }))
+        .unwrap();
+    assert!(discarded.0.discarded);
+    let again = server
+        .wallet_discard_fork(Parameters(DiscardForkInput { fork_id }))
+        .unwrap();
+    assert!(!again.0.discarded);
+
+    let error = server
+        .fork_session(Some(fork_id), "1", Some("primary"))
+        .expect_err("a discarded fork must not resolve");
+    assert!(format!("{error:?}").contains("unknown or expired"));
+}
+
+#[tokio::test]
+async fn a_fork_cannot_be_opened_for_an_unknown_wallet_or_chain() {
+    let (_directory, server) = server();
+    let unknown_wallet = server
+        .wallet_create_fork(Parameters(CreateForkInput {
+            wallet_id: "missing".into(),
+            chain_id: "1".into(),
+        }))
+        .await
+        .err()
+        .expect("an unknown wallet must not open a fork");
+    assert!(format!("{unknown_wallet:?}").contains("unknown wallet"));
+
+    let unknown_chain = server
+        .wallet_create_fork(Parameters(CreateForkInput {
+            wallet_id: "primary".into(),
+            chain_id: "999999".into(),
+        }))
+        .await
+        .err()
+        .expect("an unconfigured chain must not open a fork");
+    assert!(format!("{unknown_chain:?}").contains("no configured network"));
+    assert!(server.forks.lock().unwrap().is_empty());
+}
+
+#[test]
+fn forks_never_reach_the_signing_or_approval_surface() {
+    // Fork state lives only in this process, and only the read and
+    // simulate tools accept a fork_id. Everything that can sign,
+    // approve, or submit takes no fork input at all.
+    let schemas = WalletMcpServer::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.clone().into_owned(),
+                serde_json::to_string(tool.input_schema.as_ref()).unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let accepts_fork = schemas
+        .iter()
+        .filter(|(_, schema)| schema.contains("fork_id"))
+        .map(|(name, _)| name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        accepts_fork,
+        [
+            "wallet_batch_eth_call",
+            "wallet_discard_fork",
+            "wallet_get_balances",
+            "wallet_get_portfolio",
+            "wallet_get_status",
+            "wallet_simulate_execution_plan",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>(),
+    );
+    for signing_tool in [
+        "wallet_send_execution_plan",
+        "wallet_send_transfers",
+        "wallet_sign_message",
+        "wallet_sign_typed_data",
+        "wallet_wait_for_approval",
+        "wallet_wait_for_execution",
+        "wallet_propose_policy",
+    ] {
+        assert!(
+            !schemas[signing_tool].contains("fork"),
+            "{signing_tool} must not accept fork input"
+        );
+    }
+}
+
+#[test]
+fn tool_inventory_exposes_implemented_parity_surface() {
+    let names = WalletMcpServer::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        names,
+        [
+            "wallet_propose_network",
+            "wallet_address_book",
+            "wallet_attempt_cancel",
+            "wallet_batch_eth_call",
+            "wallet_create_fork",
+            "wallet_decode_abi_result",
+            "wallet_discard_fork",
+            "wallet_get_balances",
+            "wallet_get_legal",
+            "wallet_get_policy",
+            "wallet_get_portfolio",
+            "wallet_get_status",
+            "wallet_get_execution_status",
+            "wallet_list",
+            "wallet_list_tokens",
+            "wallet_propose_policy",
+            "wallet_propose_tokens",
+            "wallet_search_tokens",
+            "wallet_send_execution_plan",
+            "wallet_send_transfers",
+            "wallet_sign_message",
+            "wallet_sign_typed_data",
+            "wallet_simulate_execution_plan",
+            "wallet_wait_for_approval",
+            "wallet_wait_for_execution",
+            "wallet_wait_for_message",
+            "wallet_wait_for_typed_data",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+}
+
+#[test]
+fn approval_wait_schema_uses_only_the_pending_request_id() {
+    let router = WalletMcpServer::tool_router();
+    let tool = router.get("wallet_wait_for_approval").unwrap();
+    let properties = tool
+        .input_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    assert!(properties.contains_key("request_id"));
+    assert!(properties.contains_key("timeout_seconds"));
+    assert!(!properties.contains_key("wallet_id"));
+    assert!(!properties.contains_key("chain_id"));
+    assert_eq!(
+        tool.annotations.as_ref().unwrap().read_only_hint,
+        Some(true)
+    );
+}
+
+#[test]
+fn proposing_a_network_is_not_destructive_and_is_idempotent() {
+    // The annotations are how a client decides whether to ask its user
+    // before calling. Proposing destroys nothing and changes nothing an
+    // existing request depends on: a repeat replaces the suggestion for
+    // that chain, and the configuration is untouched either way. The
+    // destructive act is accepting it, which has no tool at all.
+    let router = WalletMcpServer::tool_router();
+    let tool = router.get("wallet_propose_network").unwrap();
+    let annotations = tool.annotations.as_ref().unwrap();
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert_eq!(annotations.idempotent_hint, Some(true));
+    assert_eq!(annotations.read_only_hint, Some(false));
+}
+
+/// Endpoint admission resolves a hostname the caller chose, so a name
+/// collision has to be settled before it: a profile that could never be
+/// stored must not become outbound work on its way to being rejected.
+///
+/// A name already belonging to a *different* chain is the one conflict no
+/// confirmation can resolve, so it fails at proposal time rather than
+/// becoming a decision the owner cannot act on.
+#[tokio::test]
+async fn proposing_a_network_settles_name_conflicts_before_contacting_anything() {
+    let (_directory, server) = server();
+    let existing = server.config.load().unwrap().networks[0].clone();
+    let result = server
+        .wallet_propose_network(Parameters(AddNetworkInput {
+            name: existing.name.clone(),
+            display_name: "Untrusted Test".into(),
+            aliases: vec!["untrusted-testnet".into()],
+            chain_id: "999999".into(),
+            // Nothing listens here, so reaching it at all fails slowly and
+            // with a connection error rather than the conflict below.
+            rpc_url: "http://127.0.0.1:9".parse().unwrap(),
+            max_gas_limit: "30000000".into(),
+            native_currency: NativeCurrency {
+                name: "Test Ether".into(),
+                symbol: "TETH".into(),
+                decimals: 18,
+            },
+            block_explorer_url: "https://explorer.example.invalid".parse().unwrap(),
+            documentation_url: "https://docs.example.invalid".parse().unwrap(),
+        }))
+        .await;
+    let Err(error) = result else {
+        panic!("a conflicting network was added");
+    };
+    assert!(
+        error.message.contains("already names chain"),
+        "rejected for the wrong reason: {}",
+        error.message
+    );
+}
+
+fn add_network_input(rpc_url: &str) -> AddNetworkInput {
+    AddNetworkInput {
+        name: "untrusted".into(),
+        display_name: "Untrusted Test".into(),
+        aliases: vec![],
+        chain_id: "999999".into(),
+        rpc_url: rpc_url.parse().unwrap(),
+        max_gas_limit: "30000000".into(),
+        native_currency: NativeCurrency {
+            name: "Test Ether".into(),
+            symbol: "TETH".into(),
+            decimals: 18,
+        },
+        block_explorer_url: "https://explorer.example.invalid".parse().unwrap(),
+        documentation_url: "https://docs.example.invalid".parse().unwrap(),
+    }
+}
+
+/// Both halves of the admission on the one tool that contacts an address
+/// its caller chose. They share a test because the probe permit is
+/// process-global: as separate tests they would race each other for it.
+#[tokio::test]
+async fn network_add_admits_an_endpoint_before_contacting_it() {
+    let (_directory, server) = server();
+
+    // One probe at a time. Held here, so the tool must refuse rather than
+    // queue behind it — and must refuse before resolving anything.
+    let held = NETWORK_PROBE_SLOTS
+        .try_acquire()
+        .expect("the only permit is free");
+    let result = server
+        .wallet_propose_network(Parameters(add_network_input(
+            "https://rpc.example.invalid/",
+        )))
+        .await;
+    let Err(error) = result else {
+        panic!("a second probe ran while one was in flight");
+    };
+    assert!(
+        error.message.contains("already being checked"),
+        "refused for the wrong reason: {}",
+        error.message
+    );
+    drop(held);
+
+    // The address is admitted before the request, not judged by whether
+    // the request happens to succeed.
+    for (rpc_url, reason) in [
+        ("http://mainnet.example.invalid/rpc", "https"),
+        ("https://127.0.0.1/rpc", "private or reserved"),
+        (
+            "https://169.254.169.254/latest/meta-data/",
+            "private or reserved",
+        ),
+        ("https://[::1]/rpc", "private or reserved"),
+        ("https://localhost/rpc", "public host"),
+        ("https://vault.internal/rpc", "public host"),
+        ("https://key@mainnet.example.invalid/rpc", "credentials"),
+    ] {
+        let result = server
+            .wallet_propose_network(Parameters(add_network_input(rpc_url)))
+            .await;
+        let Err(error) = result else {
+            panic!("{rpc_url} was accepted");
+        };
+        assert!(
+            error.message.contains(reason),
+            "{rpc_url} rejected for the wrong reason: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = ConfigStore::new(directory.path());
+    config
+        .update(|state| {
+            state.wallets.push(WalletMetadata {
+                id: "orphan".into(),
+                address: Address::repeat_byte(0x22),
+                created_at: Utc::now(),
+                source: WalletSource::Created,
+                exported_at: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let policies = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    let pending_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    let typed_data_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    let message_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    let legal_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    let token_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    let address_book_database = PolicyStore::open(
+        &directory.path().join("policies.db"),
+        &DatabaseKey::new([5; 32]),
+    )
+    .unwrap();
+    let result = WalletMcpServer::new(
+        config,
+        policies,
+        PendingStore::new(pending_database),
+        TypedDataStore::new(typed_data_database),
+        MessageStore::new(message_database),
+        LegalStore::new(legal_database),
+        TokenStore::new(token_database),
+        AddressBookStore::new(address_book_database),
+        std::sync::Arc::new(crate::custody::MemoryKeyStore::default()),
+    );
+    assert!(result.is_err());
+    assert!(result.err().unwrap().to_string().contains("has no policy"));
+}
+
+fn permit_payload() -> serde_json::Value {
+    serde_json::json!({
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"}
+            ],
+            "Permit": [
+                {"name": "owner", "type": "address"},
+                {"name": "spender", "type": "address"},
+                {"name": "value", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+                {"name": "deadline", "type": "uint256"}
+            ]
+        },
+        "primaryType": "Permit",
+        "domain": {
+            "name": "Test Token",
+            "chainId": 1,
+            "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "message": {
+            "owner": "0x1111111111111111111111111111111111111111",
+            "spender": "0x2222222222222222222222222222222222222222",
+            "value": "1000000",
+            "nonce": "0",
+            "deadline": "1900000000"
+        }
+    })
+}
+
+#[test]
+fn every_tool_except_legal_is_gated_on_acceptance() {
+    let (_directory, server) = server();
+    for tool in WalletMcpServer::sanitized_tool_router().list_all() {
+        let gated = server.tool_gate(&tool.name).is_err();
+        assert_eq!(
+            gated,
+            tool.name != "wallet_get_legal",
+            "unexpected gate state for {}",
+            tool.name
+        );
+    }
+    accept_legal(&server);
+    for tool in WalletMcpServer::sanitized_tool_router().list_all() {
+        assert!(server.tool_gate(&tool.name).is_ok());
+    }
+}
+
+#[test]
+fn simulation_failure_handling_defaults_to_the_approval_queue() {
+    // Callers that never heard of the field keep the behavior they had:
+    // a failed simulation becomes a request the user can override.
+    let input: SendExecutionPlanInput = serde_json::from_value(serde_json::json!({
+        "wallet_id": "primary",
+        "chain_id": "1",
+        "request_id": "00000000-0000-0000-0000-000000000000",
+    }))
+    .expect("the field is optional");
+    assert_eq!(
+        input.on_simulation_failure,
+        OnSimulationFailure::RequestApproval
+    );
+
+    let asked: SendExecutionPlanInput = serde_json::from_value(serde_json::json!({
+        "wallet_id": "primary",
+        "chain_id": "1",
+        "request_id": "00000000-0000-0000-0000-000000000000",
+        "on_simulation_failure": "fail",
+    }))
+    .expect("snake_case values parse");
+    assert_eq!(asked.on_simulation_failure, OnSimulationFailure::Fail);
+
+    // Transfers take the same choice, so the two send surfaces cannot
+    // disagree about what a failed simulation means.
+    let transfers: TransfersInput = serde_json::from_value(serde_json::json!({
+        "wallet_id": "primary",
+        "chain_id": "1",
+        "transfers": [],
+        "on_simulation_failure": "fail",
+    }))
+    .expect("transfers accept the same field");
+    assert_eq!(transfers.on_simulation_failure, OnSimulationFailure::Fail);
+
+    assert!(
+        serde_json::from_value::<SendExecutionPlanInput>(serde_json::json!({
+            "wallet_id": "primary",
+            "chain_id": "1",
+            "request_id": "00000000-0000-0000-0000-000000000000",
+            "on_simulation_failure": "sign_anyway",
+        }))
+        .is_err(),
+        "only the two defined actions are accepted"
+    );
+}
+
+#[test]
+fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
+    // An agent that reads allowed=false as a blocker reports findings back
+    // and asks the user to widen their policy, which is the one thing the
+    // user is not being asked to do: the send is what queues the review.
+    assert!(
+        SERVER_INSTRUCTIONS.contains("policy denial is the ordinary route to a human approval")
+    );
+    assert!(SERVER_INSTRUCTIONS.contains("never a prerequisite for the one in hand"));
+
+    // wallet_wait_for_execution returns immediately while a request is
+    // still AwaitingApproval, so the instructions must not let an agent
+    // reach for it and conclude that nothing is happening.
+    assert!(SERVER_INSTRUCTIONS.contains("wallet_wait_for_execution does not cover this phase"));
+    assert!(SERVER_INSTRUCTIONS.contains("never hand back a request-id and stop"));
+
+    // The same fact belongs on the tool an agent is holding when it first
+    // sees policy findings.
+    let router = WalletMcpServer::sanitized_tool_router();
+    let simulate = router
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name == "wallet_simulate_execution_plan")
+        .expect("the simulation tool is published");
+    let description = simulate.description.clone().unwrap_or_default();
+    assert!(description.contains("not a reason to stop"));
+
+    // And on the result itself, in band, at the moment the agent decides
+    // what to do next: instructions and descriptions are read once, but
+    // the denial arrives mid-task.
+    let next_step = policy_denial_next_step(uuid::Uuid::nil());
+    assert!(next_step.contains("not a dead end"));
+    assert!(next_step.contains("wallet_send_execution_plan"));
+    assert!(next_step.contains(&uuid::Uuid::nil().to_string()));
+    assert!(next_step.contains("do not ask the user to change their policy"));
+}
+
+fn sendable_plan() -> ExecutionPlan {
+    ExecutionPlan::parse(serde_json::json!({
+        "schema_version": "1",
+        "chain_id": "1",
+        "caip2_chain_id": "eip155:1",
+        "sender": "0x1111111111111111111111111111111111111111",
+        "ordered_steps": [{
+            "step": 1,
+            "kind": "execution",
+            "transaction": {
+                "chain_id": "1",
+                "from": "0x1111111111111111111111111111111111111111",
+                "to": "0x2222222222222222222222222222222222222222",
+                "data": "0x",
+                "value": "1"
+            }
+        }]
+    }))
+    .unwrap()
+}
+
+/// A result that failed for a reason no live simulation in these tests
+/// could produce, so an error quoting it proves the send reused this
+/// record rather than simulating again.
+fn recorded_failure(plan: &ExecutionPlan, policy_revision: u64) -> SimulationResult {
+    use crate::{
+        core::execution_plan::SimulationFailureAction,
+        simulation::{
+            ExecutionMode, SimulationExecution, SimulationFailure, SimulationFailureCategory,
+        },
+    };
+    SimulationResult {
+        simulation_id: None,
+        digest: format!("{:#x}", plan.digest()),
+        allowed: false,
+        policy_findings: Vec::new(),
+        policy_revision,
+        execution_mode: ExecutionMode::Direct,
+        implementation: None,
+        will_authorize_delegation: false,
+        replaces_delegated_implementation: None,
+        simulation: SimulationExecution {
+            success: false,
+            gas_used: None,
+            block_gas_limit: None,
+            output: None,
+            error: Some("recorded revert".into()),
+            failure: Some(SimulationFailure {
+                category: SimulationFailureCategory::ExecutionReverted,
+                message: "recorded revert".into(),
+                retryable_same_plan: false,
+                recommended_action: SimulationFailureAction::RepreparePlan,
+                instruction: "GUIDANCE FROM THE RECORDED SIMULATION".into(),
+                source: "wallet_default".into(),
+                revert_data: None,
+                revert_selector: None,
+                unwrapped_revert_data: None,
+                unwrapped_revert_selector: None,
+                wrapped_errors: None,
+                decoded_error: None,
+            }),
+        },
+        token_spends: std::collections::BTreeMap::new(),
+        balance_changes: None,
+        block_number: "100".into(),
+        fork: None,
+    }
+}
+
+#[tokio::test]
+async fn a_recorded_simulation_is_sent_without_simulating_again_and_only_once() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let plan = sendable_plan();
+    let recorded = server.simulations.lock().unwrap().record(
+        "primary",
+        "1",
+        plan.clone(),
+        Some("mcp.ekubo.org".into()),
+        recorded_failure(&plan, 1),
+        Utc::now(),
+    );
+
+    let error = Box::pin(server.send_recorded_simulation(
+        server.config.wallet("primary").unwrap(),
+        server.config.network_by_chain_id("1").unwrap(),
+        recorded.simulation_id,
+        OnSimulationFailure::Fail,
+    ))
+    .await
+    .expect_err("the recorded failure is reported, not re-simulated");
+    // The recorded result's own guidance comes back, so nothing asked the
+    // RPC to execute this plan a second time.
+    assert!(
+        error.to_string().contains("GUIDANCE FROM THE RECORDED"),
+        "{error}"
+    );
+
+    // And the record is spent, so one simulation can authorize at most one
+    // send however many times the identifier is replayed.
+    assert!(server.simulations.lock().unwrap().is_empty());
+    let replayed = Box::pin(server.send_recorded_simulation(
+        server.config.wallet("primary").unwrap(),
+        server.config.network_by_chain_id("1").unwrap(),
+        recorded.simulation_id,
+        OnSimulationFailure::Fail,
+    ))
+    .await
+    .expect_err("a spent simulation must not send again");
+    assert!(replayed.to_string().contains("already sent"), "{replayed}");
+}
+
+#[tokio::test]
+async fn a_simulation_evaluated_under_a_superseded_policy_is_refused() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let plan = sendable_plan();
+    let recorded = server.simulations.lock().unwrap().record(
+        "primary",
+        "1",
+        plan.clone(),
+        Some("mcp.ekubo.org".into()),
+        recorded_failure(&plan, 1),
+        Utc::now(),
+    );
+    {
+        let mut policies = server.policies.lock().unwrap();
+        let current = policies.get("primary").unwrap().unwrap();
+        policies
+            .put(
+                "primary",
+                &WalletPolicy::require_approval_for_everything(),
+                Some(current.revision),
+            )
+            .unwrap();
+    }
+    let error = Box::pin(server.send_recorded_simulation(
+        server.config.wallet("primary").unwrap(),
+        server.config.network_by_chain_id("1").unwrap(),
+        recorded.simulation_id,
+        OnSimulationFailure::Fail,
+    ))
+    .await
+    .expect_err("findings from a policy that is no longer active must not be sent");
+    assert!(error.to_string().contains("moved to revision 2"), "{error}");
+}
+
+#[tokio::test]
+async fn a_fork_result_can_never_be_sent_even_if_one_reaches_the_registry() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let plan = sendable_plan();
+    let mut hypothetical = recorded_failure(&plan, 1);
+    hypothetical.fork = Some(crate::fork::ForkContext {
+        fork_id: uuid::Uuid::new_v4(),
+        hypothetical: true,
+        chain_id: "1".into(),
+        parent_block_number: "100".into(),
+        simulated_block_number: "101".into(),
+        applied_plans: 1,
+        max_plans: 8,
+        expires_at: Utc::now(),
+        note: crate::fork::FORK_NOTE.into(),
+    });
+    let recorded = server.simulations.lock().unwrap().record(
+        "primary",
+        "1",
+        plan,
+        None,
+        hypothetical,
+        Utc::now(),
+    );
+    let error = Box::pin(server.send_recorded_simulation(
+        server.config.wallet("primary").unwrap(),
+        server.config.network_by_chain_id("1").unwrap(),
+        recorded.simulation_id,
+        OnSimulationFailure::Fail,
+    ))
+    .await
+    .expect_err("a hypothetical result must not authorize a send");
+    assert!(error.to_string().contains("hypothetical"), "{error}");
+}
+
+#[test]
+fn a_send_names_exactly_one_of_plan_simulation_and_request() {
+    let base = serde_json::json!({"wallet_id": "primary", "chain_id": "1"});
+    let with = |extra: serde_json::Value| {
+        let mut value = base.clone();
+        for (key, entry) in extra.as_object().unwrap() {
+            value[key] = entry.clone();
+        }
+        serde_json::from_value::<SendExecutionPlanInput>(value)
+    };
+    let id = serde_json::json!("00000000-0000-0000-0000-000000000000");
+    assert!(
+        with(serde_json::json!({"simulation_id": id}))
+            .unwrap()
+            .simulation_id
+            .is_some()
+    );
+    // The tool rejects zero or several of them; the schema itself accepts
+    // each field independently, which is what the count check is for.
+    let none = with(serde_json::json!({})).unwrap();
+    assert!(none.reference.is_none() && none.simulation_id.is_none() && none.request_id.is_none());
+    let with_reference = with(serde_json::json!({
+        "reference": {
+            "kind": "artifact_reference",
+            "artifact_type": "execution_plan",
+            "url": "https://mcp.ekubo.org/artifact/x",
+            "integrity": {
+                "algorithm": "keccak256",
+                "value": format!("0x{}", "11".repeat(32)),
+            },
+            "bytes": 2,
+            // Additive producer fields must not break older wallets.
+            "some_future_field": true,
+        },
+    }))
+    .unwrap();
+    assert!(with_reference.reference.is_some());
+}
+
+#[tokio::test]
+async fn simulate_refuses_a_mismatched_plan_digest_before_simulating() {
+    use base64::Engine as _;
+    let (_directory, server) = server();
+    let body = "{\"schema_version\":\"1\"}";
+    let url = format!(
+        "data:application/json;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(body)
+    );
+    let result = server
+        .wallet_simulate_execution_plan(Parameters(SimulateInput {
+            wallet_id: "primary".into(),
+            chain_id: "1".into(),
+            reference: ekubo_wallet_core::plan_fetch::ArtifactReference {
+                kind: "artifact_reference".into(),
+                artifact_type: ekubo_wallet_core::plan_fetch::ArtifactType::ExecutionPlan,
+                url,
+                integrity: Some(ekubo_wallet_core::plan_fetch::ArtifactIntegrity {
+                    algorithm: "keccak256".into(),
+                    value: format!("0x{}", "11".repeat(32)),
+                }),
+                bytes: Some(body.len() as u64),
+                summary: ekubo_wallet_core::plan_fetch::ArtifactSummary::default(),
+                instruction: None,
+            },
+            fork_id: None,
+        }))
+        .await;
+    let Err(error) = result else {
+        panic!("a digest mismatch must refuse the plan");
+    };
+    assert!(
+        error.message.contains("must not be simulated or signed"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn signing_tools_fail_closed_until_legal_acceptance() {
+    let (_directory, server) = server();
+    let result = server
+        .wallet_send_transfers(Parameters(TransfersInput {
+            wallet_id: "primary".into(),
+            chain_id: "1".into(),
+            transfers: vec![Transfer {
+                token: Address::ZERO,
+                to: Address::from_str("0x2222222222222222222222222222222222222222").unwrap(),
+                amount: DecimalU256::new("1").unwrap(),
+            }],
+            on_simulation_failure: OnSimulationFailure::default(),
+        }))
+        .await;
+    let Err(error) = result else {
+        panic!("send unexpectedly bypassed the legal acceptance gate");
+    };
+    assert!(error.message.contains("legal accept"));
+
+    let result = server.wallet_sign_typed_data(Parameters(SignTypedDataInput {
+        wallet_id: "primary".into(),
+        typed_data: permit_payload(),
+    }));
+    let Err(error) = result else {
+        panic!("typed-data signing unexpectedly bypassed the legal acceptance gate");
+    };
+    assert!(error.message.contains("legal accept"));
+
+    let result = server.wallet_sign_message(Parameters(SignMessageInput {
+        wallet_id: "primary".into(),
+        message_text: Some("gm".into()),
+        message_hex: None,
+        chain_id: None,
+    }));
+    let Err(error) = result else {
+        panic!("message signing unexpectedly bypassed the legal acceptance gate");
+    };
+    assert!(error.message.contains("legal accept"));
+}
+
+fn sign_message(server: &WalletMcpServer, text: &str) -> Result<Json<MessageOutput>, ErrorData> {
+    server.wallet_sign_message(Parameters(SignMessageInput {
+        wallet_id: "primary".into(),
+        message_text: Some(text.into()),
+        message_hex: None,
+        chain_id: None,
+    }))
+}
+
+fn siwe_payload(address: &str) -> String {
+    [
+        "example.com wants you to sign in with your Ethereum account:",
+        address,
+        "",
+        "Sign in to Example.",
+        "",
+        "URI: https://example.com/login",
+        "Version: 1",
+        "Chain ID: 1",
+        "Nonce: 32891756",
+        "Issued At: 2026-08-04T16:25:24Z",
+    ]
+    .join("\n")
+}
+
+#[test]
+fn message_signing_always_queues_and_never_signs_inline() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    // The wallet policy is allow-all: a message still queues, because no
+    // policy can score what a message signature authorizes.
+    let Json(output) = sign_message(&server, "gm").unwrap();
+    assert_eq!(output.status, MessageStatus::AwaitingApproval);
+    assert!(output.signature.is_none());
+    assert!(output.chain_id.is_none());
+    assert_eq!(output.message_hex, "0x676d");
+    assert_eq!(output.display.text.as_deref(), Some("gm"));
+    assert_eq!(
+        output.digest,
+        format!("{:#x}", crate::message::message_digest(b"gm"))
+    );
+    assert!(output.siwe.is_none());
+    assert!(
+        output
+            .display
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("not a recognized sign-in message"))
+    );
+    assert!(
+        output
+            .instruction
+            .as_deref()
+            .unwrap()
+            .contains("ekubo-wallet review")
+    );
+
+    // A duplicate message reuses the pending request.
+    let Json(duplicate) = sign_message(&server, "gm").unwrap();
+    assert_eq!(duplicate.request_id, output.request_id);
+
+    // Waiting on it returns the same pending state with a re-poll nudge.
+    let Json(waited) = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(server.wallet_wait_for_message(Parameters(MessageWaitInput {
+            request_id: output.request_id,
+            timeout_seconds: 1,
+        })))
+        .unwrap();
+    assert_eq!(waited.status, MessageStatus::AwaitingApproval);
+    assert!(waited.signature.is_none());
+    assert!(
+        waited
+            .instruction
+            .as_deref()
+            .unwrap()
+            .contains("wallet_wait_for_message")
+    );
+}
+
+#[test]
+fn sign_in_messages_are_parsed_and_bound_to_the_signing_wallet() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let Json(output) = sign_message(
+        &server,
+        &siwe_payload("0x1111111111111111111111111111111111111111"),
+    )
+    .unwrap();
+    let siwe = output.siwe.unwrap();
+    assert_eq!(siwe.domain, "example.com");
+    assert_eq!(siwe.nonce, "32891756");
+    assert!(
+        !output
+            .display
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("not a recognized sign-in message"))
+    );
+
+    // A login naming another account is refused before a request exists.
+    let Err(error) = sign_message(
+        &server,
+        &siwe_payload("0x2222222222222222222222222222222222222222"),
+    ) else {
+        panic!("a sign-in for another account was queued");
+    };
+    assert!(error.message.contains("names account"));
+}
+
+#[test]
+fn message_input_is_validated_before_anything_queues() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let Err(error) = server.wallet_sign_message(Parameters(SignMessageInput {
+        wallet_id: "primary".into(),
+        message_text: None,
+        message_hex: Some(format!("0x{}", "ab".repeat(32))),
+        chain_id: None,
+    })) else {
+        panic!("a bare 32-byte digest was queued for signing");
+    };
+    assert!(error.message.contains("eth_sign is not supported"));
+
+    let both = server.wallet_sign_message(Parameters(SignMessageInput {
+        wallet_id: "primary".into(),
+        message_text: Some("gm".into()),
+        message_hex: Some("0x676d".into()),
+        chain_id: None,
+    }));
+    assert!(both.is_err());
+
+    let neither = server.wallet_sign_message(Parameters(SignMessageInput {
+        wallet_id: "primary".into(),
+        message_text: None,
+        message_hex: None,
+        chain_id: None,
+    }));
+    assert!(neither.is_err());
+
+    // A chain the server does not know is rejected outright, even though
+    // the signature would not be bound to it.
+    let foreign = server.wallet_sign_message(Parameters(SignMessageInput {
+        wallet_id: "primary".into(),
+        message_text: Some("gm".into()),
+        message_hex: None,
+        chain_id: Some("999999".into()),
+    }));
+    assert!(foreign.is_err());
+}
+
+fn order_payload() -> serde_json::Value {
+    serde_json::json!({
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"}
+            ],
+            "Order": [
+                {"name": "maker", "type": "address"},
+                {"name": "amount", "type": "uint256"}
+            ]
+        },
+        "primaryType": "Order",
+        "domain": {
+            "name": "Test Exchange",
+            "chainId": 1,
+            "verifyingContract": "0x4444444444444444444444444444444444444444"
+        },
+        "message": {
+            "maker": "0x1111111111111111111111111111111111111111",
+            "amount": "5"
+        }
+    })
+}
+
+#[test]
+fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    // The wallet policy is allow-all, but a payload that is not a
+    // recognized permit cannot be policy-evaluated and must queue.
+    let Json(output) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: order_payload(),
+        }))
+        .unwrap();
+    assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
+    assert_eq!(output.chain_id, "1");
+    assert!(output.signature.is_none());
+    assert!(output.permit_approvals.is_none());
+    assert!(
+        output
+            .instruction
+            .as_deref()
+            .unwrap()
+            .contains("ekubo-wallet review")
+    );
+
+    // A duplicate payload reuses the pending request.
+    let Json(duplicate) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: order_payload(),
+        }))
+        .unwrap();
+    assert_eq!(duplicate.request_id, output.request_id);
+
+    // A chain the server does not know is rejected outright.
+    let mut foreign = order_payload();
+    foreign["domain"]["chainId"] = serde_json::json!(999_999);
+    assert!(
+        server
+            .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+                wallet_id: "primary".into(),
+                typed_data: foreign,
+            }))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_recognized_permit_queues_even_under_the_most_permissive_policy() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    // The wallet is on the allow-all policy, which authorizes approvals to
+    // any spender for any token in unlimited amounts. No policy authorizes
+    // a signature: a spender holding one permit under a limit can collect
+    // an unbounded number of them, so every payload goes to a human.
+    let Json(output) = server
+        .wallet_sign_typed_data(Parameters(SignTypedDataInput {
+            wallet_id: "primary".into(),
+            typed_data: permit_payload(),
+        }))
+        .unwrap();
+    assert_eq!(output.status, TypedDataStatus::AwaitingApproval);
+    assert!(output.signature.is_none());
+    assert!(output.approved_at.is_none());
+    // The approvals it grants are still decoded, as review information.
+    let approvals = output.permit_approvals.as_deref().unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].kind, "erc2612_permit");
+    assert!(
+        output
+            .instruction
+            .as_deref()
+            .unwrap()
+            .contains("ekubo-wallet review")
+    );
+}
+
+#[test]
+fn policy_proposals_bind_revision_and_return_a_permission_diff() {
+    let (_directory, server) = server();
+    accept_legal(&server);
+    let proposed = serde_json::to_value(WalletPolicy::require_approval_for_everything()).unwrap();
+
+    // The wrong source revision is rejected with re-read guidance.
+    let stale = server.wallet_propose_policy(Parameters(ProposePolicyInput {
+        wallet_id: "primary".into(),
+        source_revision: 7,
+        policy: proposed.clone(),
+        rationale: "tighten to approvals-only".into(),
+    }));
+    let Err(error) = stale else {
+        panic!("stale source revision unexpectedly accepted");
+    };
+    assert!(error.message.contains("active revision"));
+
+    let Json(output) = server
+        .wallet_propose_policy(Parameters(ProposePolicyInput {
+            wallet_id: "primary".into(),
+            source_revision: 1,
+            policy: proposed.clone(),
+            rationale: "tighten to approvals-only".into(),
+        }))
+        .unwrap();
+    assert_eq!(output.source_revision, 1);
+    assert!(!output.replaced_previous_proposal);
+    assert!(!output.diff.is_empty());
+    assert!(output.diff.iter().any(|line| line.starts_with('-')));
+    assert!(
+        output
+            .instruction
+            .contains("ekubo-wallet policy review primary")
+    );
+
+    // A newer proposal replaces the pending one; the tool never touches
+    // the active policy.
+    let Json(second) = server
+        .wallet_propose_policy(Parameters(ProposePolicyInput {
+            wallet_id: "primary".into(),
+            source_revision: 1,
+            policy: proposed,
+            rationale: "same change, updated rationale".into(),
+        }))
+        .unwrap();
+    assert!(second.replaced_previous_proposal);
+    let policies = server.policies.lock().unwrap();
+    assert_eq!(policies.get("primary").unwrap().unwrap().revision, 1);
+    assert_eq!(
+        policies.proposal("primary").unwrap().unwrap().rationale,
+        "same change, updated rationale"
+    );
+
+    // An invalid document is rejected with authoring guidance.
+    drop(policies);
+    let invalid = server.wallet_propose_policy(Parameters(ProposePolicyInput {
+        wallet_id: "primary".into(),
+        source_revision: 1,
+        policy: serde_json::json!({"chains": {"1": {"unexpected": true}}}),
+        rationale: "broken".into(),
+    }));
+    let Err(error) = invalid else {
+        panic!("invalid policy unexpectedly accepted");
+    };
+    assert!(error.message.contains("policy-authoring"));
+}
+
+#[test]
+fn legal_tool_reports_status_and_document_text() {
+    let (_directory, server) = server();
+    let Json(output) = server
+        .wallet_get_legal(Parameters(LegalInput {
+            document: Some(LegalDocument::PrivacyPolicy),
+        }))
+        .unwrap();
+    assert!(!output.status.signing_allowed);
+    assert!(output.instruction.contains("legal accept"));
+    let document = output.document.unwrap();
+    assert!(document.text.contains("RPC"));
+    assert_eq!(document.digest, LegalDocument::PrivacyPolicy.digest());
+
+    accept_legal(&server);
+    let Json(output) = server
+        .wallet_get_legal(Parameters(LegalInput { document: None }))
+        .unwrap();
+    assert!(output.status.signing_allowed);
+    assert!(output.document.is_none());
+}
+
+#[test]
+fn address_book_tool_is_lookup_only() {
+    let (_directory, server) = server();
+    let Json(empty) = server
+        .wallet_address_book(Parameters(AddressBookInput {
+            chain_id: None,
+            alias: None,
+            limit: 10,
+            offset: 0,
+        }))
+        .unwrap();
+    assert_eq!(empty.total, 0);
+
+    // Entries written by the CLI store are visible read-only.
+    let mut store = AddressBookStore::new(
+        PolicyStore::open(
+            &server.config.data_dir().join("policies.db"),
+            &DatabaseKey::new([4; 32]),
+        )
+        .unwrap(),
+    );
+    store
+        .upsert(
+            1,
+            "alice",
+            Address::from_str("0x3333333333333333333333333333333333333333").unwrap(),
+            Some("payroll"),
+        )
+        .unwrap();
+    let Json(found) = server
+        .wallet_address_book(Parameters(AddressBookInput {
+            chain_id: Some(crate::token_store::ChainIdInput::Number(1)),
+            alias: Some("alice".into()),
+            limit: 10,
+            offset: 0,
+        }))
+        .unwrap();
+    assert_eq!(found.total, 1);
+    assert_eq!(found.entries[0].note.as_deref(), Some("payroll"));
+
+    // Alias lookup without a chain is ambiguous and rejected.
+    assert!(
+        server
+            .wallet_address_book(Parameters(AddressBookInput {
+                chain_id: None,
+                alias: Some("alice".into()),
+                limit: 10,
+                offset: 0,
+            }))
+            .is_err()
+    );
+
+    // The MCP router exposes no mutation tool for the address book.
+    let router = WalletMcpServer::tool_router();
+    let tool = router.get("wallet_address_book").unwrap();
+    assert_eq!(
+        tool.annotations.as_ref().unwrap().read_only_hint,
+        Some(true)
+    );
+}
+
+#[test]
+fn server_advertises_the_security_resource_and_rpc_simulation_boundary() {
+    let (_directory, server) = server();
+    let info = ServerHandler::get_info(&server);
+    assert!(info.capabilities.resources.is_some());
+    assert!(info.capabilities.tools.is_some());
+    assert!(SECURITY_MODEL.contains("eth_simulateV1"));
+    assert!(SECURITY_MODEL.contains("no local EVM"));
+    assert!(SECURITY_MODEL.contains("eth_getProof"));
+    // A simulation fork is replay through the same RPC, not a local EVM,
+    // and it must be described as carrying no signing authority.
+    assert!(SECURITY_MODEL.contains("no simulated state is stored or reconstructed locally"));
+    assert!(SECURITY_MODEL.contains("cannot create a pending request"));
+    assert!(SERVER_INSTRUCTIONS.contains("wallet_create_fork"));
+    assert!(SERVER_INSTRUCTIONS.contains("hypothetical"));
+}
+
+#[test]
+fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
+    // The wallet builds no calldata, so an agent asked to swap or provide
+    // liquidity with no plan producer connected needs somewhere to go.
+    assert!(SERVER_INSTRUCTIONS.contains("https://mcp.ekubo.org"));
+    assert!(SERVER_INSTRUCTIONS.contains("swapping"));
+    assert!(SERVER_INSTRUCTIONS.contains("liquidity"));
+    assert!(SERVER_INSTRUCTIONS.contains("yield"));
+    // ...and the same sentence has to deny it any privileged standing,
+    // because nothing in this process treats a plan's origin as special.
+    assert!(SERVER_INSTRUCTIONS.contains("grants that server no extra trust"));
+    // Nothing outside the instruction text may mention it: no tool
+    // description, no resource, and above all no code path.
+    let router = WalletMcpServer::sanitized_tool_router();
+    for tool in router.list_all() {
+        let rendered = serde_json::to_string(&tool).unwrap();
+        assert!(
+            !rendered.contains("ekubo.org"),
+            "{} must not name a specific plan producer",
+            tool.name
+        );
+    }
+    assert!(!SECURITY_MODEL.contains("ekubo.org"));
+}

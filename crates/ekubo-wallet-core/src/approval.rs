@@ -137,18 +137,5 @@ pub trait ReviewPresenter: Send + Sync {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_builder_preserves_review_data() {
-        let request = ApprovalRequest::new(ApprovalKind::Transaction, "Transfer", "Send funds")
-            .fact("Recipient", "0xabc")
-            .warning("Simulation changed a token allowance")
-            .digest("0x1234");
-
-        assert_eq!(request.facts[0].label, "Recipient");
-        assert_eq!(request.warnings.len(), 1);
-        assert_eq!(request.digest.as_deref(), Some("0x1234"));
-    }
-}
+#[path = "approval_test.rs"]
+mod tests;

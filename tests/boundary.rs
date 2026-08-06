@@ -141,13 +141,11 @@ fn no_token_contract_is_asked_for_its_decimals() {
 /// right there. These are the names of those helpers.
 #[test]
 fn the_mcp_server_cannot_write_stored_metadata() {
-    let source = fs::read_to_string(repository_root().join("src/mcp.rs")).unwrap();
-    // Production code only. The test module below legitimately writes through
-    // the stores to set up state the read-only tools are then checked against,
-    // which is the CLI's job being stood in for rather than the server doing it.
-    let mcp = source
-        .split_once("#[cfg(test)]")
-        .map_or(source.as_str(), |(production, _)| production);
+    // The whole file is production code: the tests that legitimately write
+    // through the stores — standing in for the CLI while read-only tools are
+    // checked against the state — live in `mcp_test.rs` and `pipeline_test.rs`,
+    // which this never reads. That is what the `_test.rs` split bought here.
+    let mcp = fs::read_to_string(repository_root().join("src/mcp.rs")).unwrap();
     for forbidden in [
         "add_configured_network",
         "replace_configured_network",
@@ -176,8 +174,17 @@ fn rpc_credentials_are_redacted_in_exactly_one_place() {
     let core = repository_root().join("crates/ekubo-wallet-core/src");
     for entry in fs::read_dir(&core).unwrap() {
         let path = entry.unwrap().path();
+        // `rpc.rs` is the one implementation, and `*_test.rs` files are not
+        // production code — `rpc_test.rs` asserts on the redacted form, which
+        // is the helper being tested rather than a second copy of it.
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         if path.extension().is_none_or(|extension| extension != "rs")
-            || path.file_name().is_some_and(|name| name == "rpc.rs")
+            || name == "rpc.rs"
+            || name.ends_with("_test.rs")
         {
             continue;
         }
