@@ -998,15 +998,11 @@ impl ChainIdInput {
                 ensure!(*value > 0, "chain ID must be positive");
                 Ok(*value)
             }
-            Self::Text(text) => {
-                ensure!(
-                    !text.is_empty()
-                        && !text.starts_with('0')
-                        && text.bytes().all(|byte| byte.is_ascii_digit()),
-                    "invalid decimal chain ID {text}"
-                );
-                text.parse().context("unsupported chain ID")
-            }
+            // The shared parser rather than a second copy of the same rules.
+            // This one had drifted already: it never bounded the length, so a
+            // filter could hand over an arbitrarily long run of digits to be
+            // scanned before being rejected for not fitting a uint64.
+            Self::Text(text) => crate::input_validation::parse_chain_id(text),
         }
     }
 }
