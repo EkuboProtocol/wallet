@@ -36,7 +36,6 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
         "approval requires an interactive terminal"
     );
 
-    crate::tui::init_prompt_theme();
     crate::tui::intro("Ekubo Wallet approval");
 
     let mut body = terminal_safe(&request.summary);

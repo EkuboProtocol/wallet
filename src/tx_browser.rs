@@ -1,6 +1,6 @@
 //! Full-screen transaction history browser.
 //!
-//! The transaction list used to be an `inquire` select: it sized its page
+//! The transaction list used to be a scrolling select prompt: it sized its page
 //! once when the prompt opened, so a terminal resized (or simply short) mid
 //! prompt scrolled the whole screen instead of the cursor, and its
 //! type-to-filter matched only the visible row text — which is truncated to

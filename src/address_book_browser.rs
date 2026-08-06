@@ -386,7 +386,6 @@ async fn add_flow(
     networks: &[NetworkConfig],
 ) -> Result<()> {
     ensure!(!networks.is_empty(), "no networks are configured");
-    tui::init_prompt_theme();
     tui::intro("Add address book entry");
     let labels = networks
         .iter()
@@ -433,7 +432,6 @@ async fn edit_flow(
     networks: &[NetworkConfig],
     entry: &AddressBookEntry,
 ) -> Result<()> {
-    tui::init_prompt_theme();
     tui::intro(format!("Edit address book entry {}", entry.alias));
     let chain_id: u64 = entry
         .chain_id
@@ -469,7 +467,6 @@ async fn remove_flow(
     networks: &[NetworkConfig],
     entry: &AddressBookEntry,
 ) -> Result<()> {
-    tui::init_prompt_theme();
     let chain_id: u64 = entry
         .chain_id
         .parse()
@@ -498,36 +495,27 @@ fn cancelled() {
 
 /// `Ok(None)` means the user backed out with Esc or Ctrl+C.
 fn prompt_alias() -> Result<Option<String>> {
-    Ok(tui::optional(
-        inquire::Text::new(&tui::question("Alias"))
-            .with_placeholder("alice")
-            .with_help_message("1-64 letters, numbers, underscores, hyphens, or periods")
-            .with_validator(|value: &str| {
-                Ok(match validate_alias(value.trim()) {
-                    Ok(()) => inquire::validator::Validation::Valid,
-                    Err(error) => inquire::validator::Validation::Invalid(error.to_string().into()),
-                })
-            })
-            .prompt(),
-    )?
-    .map(|alias| alias.trim().to_owned()))
+    Ok(tui::text("Alias")
+        .placeholder("alice")
+        .help("1-64 letters, numbers, underscores, hyphens, or periods")
+        .validate(|value| validate_alias(value.trim()).map_err(|error| error.to_string()))
+        .prompt()?
+        .map(|alias| alias.trim().to_owned()))
 }
 
 fn prompt_address(initial: Option<&str>) -> Result<Option<Address>> {
-    let message = tui::question("Address");
-    let mut prompt = inquire::Text::new(&message)
-        .with_placeholder("0x…")
-        .with_validator(|value: &str| {
-            Ok(if Address::from_str(value.trim()).is_ok() {
-                inquire::validator::Validation::Valid
-            } else {
-                inquire::validator::Validation::Invalid("must be a 20-byte EVM address".into())
-            })
-        });
+    let mut prompt = tui::text("Address").placeholder("0x…").validate(|value| {
+        if Address::from_str(value.trim()).is_ok() {
+            Ok(())
+        } else {
+            Err("must be a 20-byte EVM address".into())
+        }
+    });
     if let Some(initial) = initial {
-        prompt = prompt.with_initial_value(initial);
+        prompt = prompt.initial(initial);
     }
-    Ok(tui::optional(prompt.prompt())?
+    Ok(prompt
+        .prompt()?
         .map(|address| Address::from_str(address.trim()).expect("validated above")))
 }
 
@@ -539,29 +527,24 @@ enum NotePrompt {
 }
 
 fn prompt_note(initial: Option<&str>) -> Result<NotePrompt> {
-    let message = tui::question("Note");
-    let mut prompt = inquire::Text::new(&message)
-        .with_help_message("Optional — leave empty for none")
-        .with_validator(|value: &str| {
-            Ok(if value.chars().any(char::is_control) {
-                inquire::validator::Validation::Invalid("cannot contain control characters".into())
+    let mut prompt = tui::text("Note")
+        .help("Optional — leave empty for none")
+        .validate(|value| {
+            if value.chars().any(char::is_control) {
+                Err("cannot contain control characters".into())
             } else if value.len() > MAX_NOTE_LEN {
-                inquire::validator::Validation::Invalid(
-                    format!("must be at most {MAX_NOTE_LEN} bytes").into(),
-                )
+                Err(format!("must be at most {MAX_NOTE_LEN} bytes"))
             } else {
-                inquire::validator::Validation::Valid
-            })
+                Ok(())
+            }
         });
     if let Some(initial) = initial {
-        prompt = prompt.with_initial_value(initial);
+        prompt = prompt.initial(initial);
     }
-    Ok(
-        tui::optional(prompt.prompt())?.map_or(NotePrompt::Cancelled, |note| {
-            let note = note.trim().to_owned();
-            NotePrompt::Value(if note.is_empty() { None } else { Some(note) })
-        }),
-    )
+    Ok(prompt.prompt()?.map_or(NotePrompt::Cancelled, |note| {
+        let note = note.trim();
+        NotePrompt::Value((!note.is_empty()).then(|| note.to_owned()))
+    }))
 }
 
 #[cfg(test)]

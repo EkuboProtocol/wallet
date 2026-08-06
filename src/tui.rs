@@ -1,9 +1,11 @@
 //! Interactive terminal prompts and styled status output.
 //!
-//! Every interactive prompt in this CLI is an `inquire` prompt configured
-//! with the wallet's one color scheme, and every piece of non-prompt chrome
-//! (intro/outro banners, notes, warnings, progress lines) is drawn by the
-//! helpers here, so the whole interactive surface lives in one module.
+//! Every interactive prompt in this CLI is drawn by the ratatui-based
+//! engine in this module — a short-lived inline viewport that erases itself
+//! and leaves one answered line in the scrollback — and every piece of
+//! non-prompt chrome (intro/outro banners, notes, warnings, progress lines)
+//! is drawn by the helpers here, so the whole interactive surface lives in
+//! one module on one terminal stack.
 //!
 //! Styling never reaches machine-readable output: chrome writes to stderr,
 //! colors switch off when the stream is not a terminal or `NO_COLOR` is set,
@@ -16,9 +18,20 @@ use std::fmt::Display;
 use std::io::{self, IsTerminal};
 use std::sync::OnceLock;
 
+use anyhow::{Context as _, Result, ensure};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::style::Stylize;
-use inquire::InquireError;
-use inquire::ui::{Attributes, Color, RenderConfig, StyleSheet, Styled};
+use crossterm::terminal as raw;
+use ratatui::{
+    Terminal, TerminalOptions, Viewport,
+    backend::CrosstermBackend,
+    layout::Position,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+};
+
+use crate::render::display_width;
 
 /// Semantic colors, so call sites say what a value means and the palette
 /// stays consistent everywhere.
@@ -78,30 +91,6 @@ pub fn paint_stdout(text: &str, tone: Tone) -> String {
     }
 }
 
-/// Install the wallet's color scheme for every subsequent inquire prompt.
-/// Safe to call more than once.
-pub fn init_prompt_theme() {
-    let config = if stderr_colored() {
-        RenderConfig::default_colored()
-            .with_prompt_prefix(Styled::new("◆").with_fg(Color::LightCyan))
-            .with_answered_prompt_prefix(Styled::new("◇").with_fg(Color::LightGreen))
-            .with_highlighted_option_prefix(Styled::new("●").with_fg(Color::LightGreen))
-            .with_scroll_up_prefix(Styled::new("▲").with_fg(Color::DarkGrey))
-            .with_scroll_down_prefix(Styled::new("▼").with_fg(Color::DarkGrey))
-            .with_selected_option(Some(
-                StyleSheet::new()
-                    .with_fg(Color::LightCyan)
-                    .with_attr(Attributes::BOLD),
-            ))
-            .with_answer(StyleSheet::new().with_fg(Color::LightCyan))
-            .with_help_message(StyleSheet::new().with_fg(Color::DarkGrey))
-            .with_canceled_prompt_indicator(Styled::new("(cancelled)").with_fg(Color::DarkRed))
-    } else {
-        RenderConfig::empty()
-    };
-    inquire::set_global_render_config(config);
-}
-
 /// Whether prompts can run at all: interactive stdin plus a terminal to draw
 /// on. Callers decide what to do when they cannot.
 #[must_use]
@@ -109,24 +98,14 @@ pub fn interactive() -> bool {
     io::stdin().is_terminal() && io::stderr().is_terminal()
 }
 
-/// Maps a prompt result so Esc and Ctrl+C read as "the user declined to
-/// answer" (`None`) while real terminal failures stay errors.
-pub fn optional<T>(result: Result<T, InquireError>) -> anyhow::Result<Option<T>> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Punctuates a prompt message so the answer cannot read as part of the
 /// question.
 ///
-/// inquire redraws an answered prompt as `message answer` with a single
-/// space between them, so a message ending in a word runs straight into what
-/// was typed — `Network identifier base` reads as a four-word question, not
-/// as a question and its answer. Every prompt message in the wallet goes
-/// through here, so the separator is the same one everywhere.
+/// An answered prompt is left in the scrollback as `message answer` with a
+/// single space between them, so a message ending in a word runs straight
+/// into what was typed — `Network identifier base` reads as a four-word
+/// question, not as a question and its answer. Every prompt message in the
+/// wallet goes through here, so the separator is the same one everywhere.
 #[must_use]
 pub fn question(message: &str) -> String {
     let message = message.trim_end();
@@ -137,18 +116,143 @@ pub fn question(message: &str) -> String {
     }
 }
 
+/// Whether a keypress means "back out of this prompt".
+fn cancels(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || (key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'd')))
+}
+
+/// The wallet's prompt palette, disabled alongside every other color.
+fn accent(style: Style) -> Style {
+    if stderr_colored() {
+        style.fg(Color::Cyan)
+    } else {
+        style
+    }
+}
+
+fn dimmed(style: Style) -> Style {
+    if stderr_colored() {
+        style.fg(Color::DarkGray)
+    } else {
+        style
+    }
+}
+
+fn strong(style: Style) -> Style {
+    if stderr_colored() {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+/// A short-lived inline prompt viewport: raw mode plus a few reserved rows
+/// at the cursor. Closing erases the rows, so the one answered line printed
+/// after is all that lands in the scrollback. Raw mode is undone on drop so
+/// an error or panic mid-prompt still hands the terminal back.
+struct Inline {
+    terminal: Terminal<CrosstermBackend<io::Stderr>>,
+}
+
+impl Inline {
+    fn open(height: u16) -> Result<Self> {
+        ensure!(
+            interactive(),
+            "this prompt requires an interactive terminal"
+        );
+        raw::enable_raw_mode()?;
+        match Terminal::with_options(
+            CrosstermBackend::new(io::stderr()),
+            TerminalOptions {
+                viewport: Viewport::Inline(height),
+            },
+        ) {
+            Ok(terminal) => Ok(Self { terminal }),
+            Err(error) => {
+                let _unused = raw::disable_raw_mode();
+                Err(error.into())
+            }
+        }
+    }
+
+    fn close(mut self) -> Result<()> {
+        self.terminal.clear()?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
+}
+
+impl Drop for Inline {
+    fn drop(&mut self) {
+        let _unused = raw::disable_raw_mode();
+    }
+}
+
+/// The next key press, skipping releases, repeats-as-releases, and every
+/// non-key event (a resize just redraws on the next loop).
+fn next_key() -> Result<KeyEvent> {
+    loop {
+        if let Event::Key(key) = crossterm::event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            return Ok(key);
+        }
+    }
+}
+
+/// The answered line a finished prompt leaves in the scrollback.
+fn answered(message: &str, answer: &str) {
+    eprintln!(
+        "{}  {} {}",
+        paint("◇", Tone::Success),
+        paint(message, Tone::Emphasis),
+        paint(answer, Tone::Info)
+    );
+}
+
+/// The line a cancelled prompt leaves in the scrollback.
+fn cancelled_line(message: &str) {
+    eprintln!(
+        "{}  {} {}",
+        paint("■", Tone::Danger),
+        paint(message, Tone::Emphasis),
+        paint("(cancelled)", Tone::Muted)
+    );
+}
+
 /// A yes-or-no question, defaulting to no.
 ///
 /// `Ok(false)` covers an explicit no and backing out with Esc or Ctrl+C
 /// alike: neither is consent, and the caller has nothing to tell them apart
 /// for.
-pub fn confirm(message: &str) -> anyhow::Result<bool> {
-    Ok(optional(
-        inquire::Confirm::new(&question(message))
-            .with_default(false)
-            .prompt(),
-    )?
-    .unwrap_or(false))
+pub fn confirm(message: &str) -> Result<bool> {
+    let message = question(message);
+    let inline = Inline::open(1)?;
+    let mut terminal = inline;
+    let answer = loop {
+        terminal.terminal.draw(|frame| {
+            let line = Line::from(vec![
+                Span::styled("◆ ", accent(Style::new())),
+                Span::styled(message.clone(), strong(Style::new())),
+                Span::styled(" (y/N)", dimmed(Style::new())),
+            ]);
+            frame.render_widget(Paragraph::new(line), frame.area());
+        })?;
+        let key = next_key()?;
+        if cancels(key) {
+            break false;
+        }
+        match key.code {
+            KeyCode::Char('y' | 'Y') => break true,
+            KeyCode::Char('n' | 'N') | KeyCode::Enter => break false,
+            _ => {}
+        }
+    };
+    terminal.close()?;
+    answered(&message, if answer { "Yes" } else { "No" });
+    Ok(answer)
 }
 
 /// A local change that needs a yes or no.
@@ -204,8 +308,7 @@ impl Confirmation {
     }
 
     /// Print the change, then ask. `Ok(false)` means it must not happen.
-    pub fn ask(self, prompt: &str) -> anyhow::Result<bool> {
-        init_prompt_theme();
+    pub fn ask(self, prompt: &str) -> Result<bool> {
         intro(crate::render::terminal_safe_line(&self.title));
 
         let mut body = crate::render::terminal_safe_line(&self.summary);
@@ -224,36 +327,364 @@ impl Confirmation {
 }
 
 /// One choice from a list of labels, by index. `Ok(None)` means the user
-/// backed out with Esc or Ctrl+C. PageUp/PageDown, Home/End, and
-/// type-to-filter all work inside the list.
+/// backed out with Esc or Ctrl+C. Arrows move, PageUp/PageDown and Home/End
+/// jump, and typing filters the list; Enter selects.
 ///
 /// Labels are clamped to one terminal row each — see
 /// [`crate::render::interactive_list_label`] for why a wrapping label breaks
 /// the whole prompt rather than just its own line.
-pub fn pick(prompt: &str, labels: Vec<String>, page_size: usize) -> anyhow::Result<Option<usize>> {
-    struct Choice {
-        index: usize,
-        label: String,
-    }
-    impl Display for Choice {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str(&self.label)
-        }
-    }
-    let choices = labels
-        .into_iter()
-        .enumerate()
-        .map(|(index, label)| Choice {
-            index,
-            label: crate::render::interactive_list_label(&label),
-        })
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "callers hand over the labels; borrowing would only move the clone to them"
+)]
+pub fn pick(prompt: &str, labels: Vec<String>, page_size: usize) -> Result<Option<usize>> {
+    let message = question(prompt);
+    let labels: Vec<String> = labels
+        .iter()
+        .map(|label| crate::render::interactive_list_label(label))
         .collect();
-    Ok(optional(
-        inquire::Select::new(&question(prompt), choices)
-            .with_page_size(page_size.max(3))
-            .prompt(),
-    )?
-    .map(|choice| choice.index))
+    let rows = page_size.max(3).min(labels.len().max(1));
+    let inline = Inline::open(u16::try_from(rows + 1).unwrap_or(u16::MAX))?;
+    let mut terminal = inline;
+    let mut filter = String::new();
+    let mut selected = 0_usize;
+    let mut offset = 0_usize;
+
+    let outcome = loop {
+        let needle = filter.to_lowercase();
+        let filtered: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .filter(|(_, label)| needle.is_empty() || label.to_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect();
+        selected = selected.min(filtered.len().saturating_sub(1));
+        if selected < offset {
+            offset = selected;
+        }
+        if selected + 1 > offset + rows {
+            offset = selected + 1 - rows;
+        }
+
+        terminal.terminal.draw(|frame| {
+            let mut lines = Vec::with_capacity(rows + 1);
+            let mut header = vec![
+                Span::styled("◆ ", accent(Style::new())),
+                Span::styled(message.clone(), strong(Style::new())),
+            ];
+            if filter.is_empty() {
+                header.push(Span::styled(" (type to filter)", dimmed(Style::new())));
+            } else {
+                header.push(Span::raw(" "));
+                header.push(Span::styled(filter.clone(), accent(Style::new())));
+            }
+            lines.push(Line::from(header));
+            if filtered.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "  (no matches — Backspace to clear the filter)",
+                    dimmed(Style::new()),
+                )));
+            }
+            for (row, &index) in filtered.iter().skip(offset).take(rows).enumerate() {
+                let position = offset + row;
+                let current = position == selected;
+                let more_above = row == 0 && offset > 0;
+                let more_below = row + 1 == rows && offset + rows < filtered.len();
+                let marker = if current {
+                    "● "
+                } else if more_above {
+                    "▲ "
+                } else if more_below {
+                    "▼ "
+                } else {
+                    "  "
+                };
+                let marker_style = if current {
+                    accent(Style::new())
+                } else {
+                    dimmed(Style::new())
+                };
+                let label_style = if current {
+                    strong(accent(Style::new()))
+                } else {
+                    Style::new()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(labels[index].clone(), label_style),
+                ]));
+            }
+            frame.render_widget(Paragraph::new(lines), frame.area());
+        })?;
+
+        let key = next_key()?;
+        if cancels(key) {
+            break None;
+        }
+        match key.code {
+            KeyCode::Up => selected = selected.saturating_sub(1),
+            KeyCode::Down => {
+                selected = (selected + 1).min(filtered.len().saturating_sub(1));
+            }
+            KeyCode::PageUp => selected = selected.saturating_sub(rows),
+            KeyCode::PageDown => {
+                selected = (selected + rows).min(filtered.len().saturating_sub(1));
+            }
+            KeyCode::Home => selected = 0,
+            KeyCode::End => selected = filtered.len().saturating_sub(1),
+            KeyCode::Enter => {
+                if let Some(&index) = filtered.get(selected) {
+                    break Some(index);
+                }
+            }
+            KeyCode::Backspace => {
+                filter.pop();
+                selected = 0;
+                offset = 0;
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                filter.push(character);
+                selected = 0;
+                offset = 0;
+            }
+            _ => {}
+        }
+    };
+
+    terminal.close()?;
+    match outcome {
+        Some(index) => answered(&message, &labels[index]),
+        None => cancelled_line(&message),
+    }
+    Ok(outcome)
+}
+
+/// A single-line text prompt with live validation, built the same way for
+/// plain and masked input. `Ok(None)` means the user backed out with Esc or
+/// Ctrl+C.
+pub struct TextPrompt<'a> {
+    message: String,
+    placeholder: Option<String>,
+    help: Option<String>,
+    value: String,
+    default: Option<String>,
+    masked: bool,
+    #[allow(clippy::type_complexity)]
+    validator: Option<Box<dyn Fn(&str) -> std::result::Result<(), String> + 'a>>,
+}
+
+/// Starts a text prompt for `message`.
+#[must_use]
+pub fn text(message: &str) -> TextPrompt<'static> {
+    TextPrompt {
+        message: question(message),
+        placeholder: None,
+        help: None,
+        value: String::new(),
+        default: None,
+        masked: false,
+        validator: None,
+    }
+}
+
+impl<'a> TextPrompt<'a> {
+    /// Example text shown dimmed while the line is empty.
+    #[must_use]
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// One line of guidance shown under the input.
+    #[must_use]
+    pub fn help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    /// Pre-fills the line, for editing an existing value.
+    #[must_use]
+    pub fn initial(mut self, initial: impl Into<String>) -> Self {
+        self.value = initial.into();
+        self
+    }
+
+    /// The answer an empty submission stands for.
+    #[must_use]
+    pub fn default_value(mut self, default: impl Into<String>) -> Self {
+        self.default = Some(default.into());
+        self
+    }
+
+    /// Echo bullets instead of the typed characters, for key material. The
+    /// answered line never echoes the value either way.
+    #[must_use]
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
+    }
+
+    /// Rejects invalid submissions with `Err(reason)`; the prompt shows the
+    /// reason and stays open.
+    #[must_use]
+    pub fn validate(
+        mut self,
+        validator: impl Fn(&str) -> std::result::Result<(), String> + 'a,
+    ) -> TextPrompt<'a> {
+        self.validator = Some(Box::new(validator));
+        self
+    }
+
+    /// Runs the prompt. The answered line echoes the value, except for
+    /// masked prompts, which leave only bullets behind.
+    pub fn prompt(self) -> Result<Option<String>> {
+        let inline = Inline::open(2)?;
+        let mut terminal = inline;
+        let mut value = self.value;
+        let mut cursor = value.chars().count();
+        let mut error: Option<String> = None;
+
+        let outcome = loop {
+            terminal.terminal.draw(|frame| {
+                let area = frame.area();
+                let shown = if self.masked {
+                    "•".repeat(value.chars().count())
+                } else {
+                    value.clone()
+                };
+                let mut input = vec![
+                    Span::styled("◆ ", accent(Style::new())),
+                    Span::styled(self.message.clone(), strong(Style::new())),
+                    Span::raw(" "),
+                ];
+                let prefix_width = 3 + display_width(&self.message) + 1;
+                if shown.is_empty() {
+                    if let Some(placeholder) = &self.placeholder {
+                        input.push(Span::styled(placeholder.clone(), dimmed(Style::new())));
+                    } else if let Some(default) = &self.default {
+                        input.push(Span::styled(
+                            format!("(default: {default})"),
+                            dimmed(Style::new()),
+                        ));
+                    }
+                } else {
+                    input.push(Span::raw(shown.clone()));
+                }
+                let status = error.as_ref().map_or_else(
+                    || {
+                        Line::from(Span::styled(
+                            self.help.clone().unwrap_or_default(),
+                            dimmed(Style::new()),
+                        ))
+                    },
+                    |reason| {
+                        Line::from(Span::styled(
+                            format!("▲ {reason}"),
+                            if stderr_colored() {
+                                Style::new().fg(Color::Red)
+                            } else {
+                                Style::new()
+                            },
+                        ))
+                    },
+                );
+                frame.render_widget(Paragraph::new(vec![Line::from(input), status]), area);
+                let ahead: String = if self.masked {
+                    "•".repeat(cursor)
+                } else {
+                    value.chars().take(cursor).collect()
+                };
+                let x = area.x
+                    + u16::try_from(prefix_width + display_width(&ahead)).unwrap_or(u16::MAX);
+                frame.set_cursor_position(Position { x, y: area.y });
+            })?;
+
+            let key = next_key()?;
+            if cancels(key) {
+                break None;
+            }
+            match key.code {
+                KeyCode::Enter => {
+                    let candidate = if value.is_empty() {
+                        self.default.clone().unwrap_or_default()
+                    } else {
+                        value.clone()
+                    };
+                    match self
+                        .validator
+                        .as_ref()
+                        .map_or(Ok(()), |check| check(&candidate))
+                    {
+                        Ok(()) => break Some(candidate),
+                        Err(reason) => error = Some(reason),
+                    }
+                }
+                KeyCode::Left => cursor = cursor.saturating_sub(1),
+                KeyCode::Right => cursor = (cursor + 1).min(value.chars().count()),
+                KeyCode::Home => cursor = 0,
+                KeyCode::End => cursor = value.chars().count(),
+                KeyCode::Backspace => {
+                    if cursor > 0 {
+                        let byte = char_boundary(&value, cursor - 1);
+                        value.remove(byte);
+                        cursor -= 1;
+                        error = None;
+                    }
+                }
+                KeyCode::Delete => {
+                    if cursor < value.chars().count() {
+                        let byte = char_boundary(&value, cursor);
+                        value.remove(byte);
+                        error = None;
+                    }
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    value.clear();
+                    cursor = 0;
+                    error = None;
+                }
+                KeyCode::Char(character)
+                    if !character.is_control()
+                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    let byte = char_boundary(&value, cursor);
+                    value.insert(byte, character);
+                    cursor += 1;
+                    error = None;
+                }
+                _ => {}
+            }
+        };
+
+        terminal.close()?;
+        match &outcome {
+            Some(answer) => {
+                if self.masked {
+                    answered(&self.message, "••••••••");
+                } else {
+                    answered(&self.message, answer);
+                }
+            }
+            None => cancelled_line(&self.message),
+        }
+        Ok(outcome)
+    }
+
+    /// Like [`TextPrompt::prompt`], but cancellation is an error naming the
+    /// field — for flows that cannot continue without an answer.
+    pub fn prompt_required(self) -> Result<String> {
+        let message = self.message.clone();
+        self.prompt()?
+            .with_context(|| format!("cancelled at {message}"))
+    }
+}
+
+/// The byte index of the `index`-th character of `value`.
+fn char_boundary(value: &str, index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(index)
+        .map_or(value.len(), |(byte, _)| byte)
 }
 
 /// Opens a titled interactive section.
@@ -377,16 +808,21 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_reads_as_none_and_failures_stay_errors() {
-        assert_eq!(optional(Ok(1)).unwrap(), Some(1));
-        assert_eq!(
-            optional::<u8>(Err(InquireError::OperationCanceled)).unwrap(),
-            None
-        );
-        assert_eq!(
-            optional::<u8>(Err(InquireError::OperationInterrupted)).unwrap(),
-            None
-        );
-        assert!(optional::<u8>(Err(InquireError::NotTTY)).is_err());
+    fn escape_and_control_chords_cancel_but_plain_keys_do_not() {
+        let press = |code, modifiers| KeyEvent::new(code, modifiers);
+        assert!(cancels(press(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(cancels(press(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(cancels(press(KeyCode::Char('d'), KeyModifiers::CONTROL)));
+        assert!(!cancels(press(KeyCode::Char('c'), KeyModifiers::NONE)));
+        assert!(!cancels(press(KeyCode::Enter, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn text_editing_lands_on_character_boundaries() {
+        assert_eq!(char_boundary("héllo", 0), 0);
+        assert_eq!(char_boundary("héllo", 1), 1);
+        assert_eq!(char_boundary("héllo", 2), 3);
+        assert_eq!(char_boundary("héllo", 5), 6);
+        assert_eq!(char_boundary("", 0), 0);
     }
 }

@@ -391,7 +391,6 @@ enum TransactionCommand {
 
 impl Cli {
     pub async fn run(self) -> Result<()> {
-        crate::tui::init_prompt_theme();
         let config = match self.data_dir {
             Some(path) => ConfigStore::new(path),
             None => ConfigStore::production()?,
@@ -484,10 +483,9 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
         WalletCommand::Import { wallet_id } => {
             require_interactive("wallet import")?;
             crate::tui::intro("Import an existing wallet");
-            let mut input = inquire::Password::new(&crate::tui::question("Private key"))
-                .with_display_mode(inquire::PasswordDisplayMode::Masked)
-                .without_confirmation()
-                .prompt()
+            let mut input = crate::tui::text("Private key")
+                .masked()
+                .prompt_required()
                 .context("failed to read private key")?;
             let key = PrivateKeyMaterial::from_hex(&input)?;
             input.zeroize();
@@ -2497,19 +2495,13 @@ fn prompt_network_choice(
     let chain_id = if let Some(chain_id) = args.chain_id {
         chain_id
     } else {
-        let answer = crate::tui::optional(
-            inquire::Text::new(&crate::tui::question("Chain ID"))
-                .with_placeholder("8453")
-                .with_validator(|value: &str| {
-                    Ok(match value.trim().parse::<u64>() {
-                        Ok(chain_id) if chain_id > 0 => inquire::validator::Validation::Valid,
-                        _ => inquire::validator::Validation::Invalid(
-                            "must be a positive whole number".into(),
-                        ),
-                    })
-                })
-                .prompt(),
-        )?;
+        let answer = crate::tui::text("Chain ID")
+            .placeholder("8453")
+            .validate(|value| match value.trim().parse::<u64>() {
+                Ok(chain_id) if chain_id > 0 => Ok(()),
+                _ => Err("must be a positive whole number".into()),
+            })
+            .prompt()?;
         let Some(answer) = answer else {
             return Ok(None);
         };
@@ -2542,25 +2534,17 @@ fn prompt_network_choice(
     // is the separate display-name field further down the profile. Asking for
     // a "network name" and then rejecting a space is the prompt's mistake,
     // not the answer's.
-    let name = crate::tui::optional(
-        inquire::Text::new(&crate::tui::question("Network identifier"))
-            .with_placeholder("base")
-            .with_help_message(
-                "One word, used on the command line — the readable name is asked for next",
-            )
-            .with_validator(|value: &str| {
-                Ok(
-                    if value.trim().is_empty() || value.trim().contains(char::is_whitespace) {
-                        inquire::validator::Validation::Invalid(
-                            "one word only — spaces belong in the display name".into(),
-                        )
-                    } else {
-                        inquire::validator::Validation::Valid
-                    },
-                )
-            })
-            .prompt(),
-    )?;
+    let name = crate::tui::text("Network identifier")
+        .placeholder("base")
+        .help("One word, used on the command line — the readable name is asked for next")
+        .validate(|value| {
+            if value.trim().is_empty() || value.trim().contains(char::is_whitespace) {
+                Err("one word only — spaces belong in the display name".into())
+            } else {
+                Ok(())
+            }
+        })
+        .prompt()?;
     let Some(name) = name else { return Ok(None) };
     Ok(Some(name.trim().to_owned()))
 }
@@ -3132,7 +3116,7 @@ Run the same command in a terminal to be prompted for them one at a time, or see
     Ok(answers)
 }
 
-/// One inquire prompt for one network field, validated while the prompt is
+/// One text prompt for one network field, validated while the prompt is
 /// still open rather than after the whole profile has been typed out.
 /// `current` pre-fills the line when an existing value is being edited.
 ///
@@ -3142,22 +3126,16 @@ Run the same command in a terminal to be prompted for them one at a time, or see
 /// keeps any embedded key out of shell history.
 fn prompt_network_field(field: &RequiredField, current: Option<&str>) -> Result<String> {
     let flag = field.flag;
-    let label = crate::tui::question(field.prompt);
-    let mut input = inquire::Text::new(&label)
-        .with_placeholder(field.example)
-        .with_validator(move |value: &str| {
-            Ok(match validate_network_field(flag, value) {
-                Ok(()) => inquire::validator::Validation::Valid,
-                Err(reason) => inquire::validator::Validation::Invalid(reason.into()),
-            })
-        });
+    let mut input = crate::tui::text(field.prompt)
+        .placeholder(field.example)
+        .validate(move |value| validate_network_field(flag, value));
     if let Some(current) = current {
-        input = input.with_initial_value(current);
+        input = input.initial(current);
     } else if let Some(default) = field.default {
-        input = input.with_default(default);
+        input = input.default_value(default);
     }
     input
-        .prompt()
+        .prompt_required()
         .with_context(|| format!("failed to read {} ({})", field.prompt, field.flag))
 }
 

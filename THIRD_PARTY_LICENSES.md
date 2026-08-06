@@ -185,13 +185,11 @@ file follows in the appendix. Regenerate this document with
 - float-cmp 0.10.0 — Mike Dilger <mike@mikedilger.com> — https://github.com/mikedilger/float-cmp
 - fs_extra 1.3.0 — Denis Kurilenko <webdesus@gmail.com> — https://github.com/webdesus/fs_extra
 - funty 2.0.0 — myrrlyn <self@myrrlyn.dev> — https://github.com/myrrlyn/funty
-- fuzzy-matcher 0.3.7 — Jinzhou Zhang <lotabout@gmail.com> — https://github.com/lotabout/fuzzy-matcher
 - generic-array 0.14.7 — Bartłomiej Kamiński <fizyk20@gmail.com>, Aaron Trent <novacrazy@gmail.com> — https://github.com/fizyk20/generic-array.git
 - http-body 1.1.0 — Carl Lerche <me@carllerche.com>, Lucio Franco <luciofranco14@gmail.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/http-body
 - http-body-util 0.1.4 — Carl Lerche <me@carllerche.com>, Lucio Franco <luciofranco14@gmail.com>, Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/http-body
 - hyper 1.11.0 — Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/hyper
 - hyper-util 0.1.20 — Sean McArthur <sean@seanmonstar.com> — https://github.com/hyperium/hyper-util
-- inquire 0.9.4 — Mikael Mello <git@mikaelmello.com> — https://github.com/mikaelmello/inquire
 - instability 0.3.13 — Stephen M. Coakley <me@stephencoakley.com>, The Ratatui Developers — https://github.com/ratatui/instability
 - libm 0.2.16 — Alex Crichton <alex@alexcrichton.com>, Amanieu d'Antras <amanieu@gmail.com>, Jorge Aparicio <japaricious@gmail.com>, Trevor Gross <tg@trevorgross.com> — https://github.com/rust-lang/compiler-builtins
 - libredox 0.1.19 — 4lDO2 <4lDO2@protonmail.com> — https://gitlab.redox-os.org/redox-os/libredox.git
@@ -728,7 +726,6 @@ file follows in the appendix. Regenerate this document with
 - fixed-hash 0.8.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - impl-codec 0.6.0: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - impl-trait-for-tuples 0.2.3: Apache-2.0 OR MIT — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
-- inquire 0.9.4: MIT — MIT License: https://opensource.org/license/mit
 - jni 0.22.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - jni-macros 0.22.4: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
 - jni-sys-macros 0.4.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -4326,32 +4323,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-```
-
-## License text for: fuzzy-matcher 0.3.7
-
-```text
-The MIT License (MIT)
-
-Copyright (c) 2019 Jinzhou Zhang
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ## License text for: generic-array 0.14.7
