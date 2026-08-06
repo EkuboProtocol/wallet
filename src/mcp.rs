@@ -2763,8 +2763,17 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
 
 impl WalletMcpServer {
     /// The per-call legal gate: every tool except `wallet_get_legal` requires
-    /// current acceptance of the terms of service and privacy policy.
+    /// current acceptance of the terms of service and privacy policy. Before
+    /// either, every tool re-checks the database schema version, so a database
+    /// migrated underneath this process (for example by a newer build) refuses
+    /// all requests with a restart instruction instead of being written to
+    /// through a stale understanding of its shape.
     fn tool_gate(&self, tool_name: &str) -> Result<(), ErrorData> {
+        self.policies
+            .lock()
+            .map_err(|_| anyhow::anyhow!("policy store lock was poisoned"))
+            .and_then(|store| store.assert_schema_current())
+            .map_err(|error| tool_error(&error))?;
         if tool_name == "wallet_get_legal" {
             return Ok(());
         }
