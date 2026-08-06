@@ -1,15 +1,19 @@
-//! Resolving referenced artifacts from a URL instead of inline tool arguments.
+//! Resolving referenced artifacts from producer envelopes instead of inline
+//! tool arguments.
 //!
-//! Producers such as the Ekubo MCP server return references — a short-lived
-//! `https` URL where a body is stored plus a keccak256 digest of its exact
-//! bytes — so the agent between the producer and this wallet relays a line of
-//! text instead of re-emitting kilobytes of calldata. Two artifact kinds
-//! travel this way: execution plans (`execution_plan_reference`) and
-//! read-call bundles (`read_calls_reference`, exact `wallet_batch_eth_call`
-//! argument bodies). This wallet fetches the body itself, verifies the
-//! digest, and then parses and validates it exactly as it would an inline
-//! one; a fetched body earns no extra trust from having a URL, and an inline
-//! body is still expressible as a `data:` URI that never touches the network.
+//! Producers such as the Ekubo MCP server return one `artifact_reference`
+//! envelope per stored wallet payload: the `https` URL where the body is
+//! stored, an integrity block (keccak256 of its exact bytes plus their
+//! count), and a summary for sanity checks. The agent between the producer
+//! and this wallet relays the envelope verbatim as a single `reference`
+//! argument instead of re-emitting kilobytes of calldata. Two artifact kinds
+//! travel this way: execution plans and read-call bundles (exact
+//! `wallet_batch_eth_call` argument bodies). This wallet fetches the body
+//! itself, verifies the digest and byte count, and then parses and validates
+//! it exactly as it would an inline one; a fetched body earns no extra trust
+//! from having a URL, and an inline body is still expressible as a `data:`
+//! URI that never touches the network — there the bytes are the reference,
+//! so integrity is verified only when supplied.
 //!
 //! These fetches are this process's only outbound requests that are not a
 //! configured chain RPC, so admission is deliberately narrow: `https` on the
@@ -23,6 +27,9 @@ use alloy::primitives::keccak256;
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
 use percent_encoding::percent_decode_str;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use url::{Host, Url};
@@ -80,77 +87,246 @@ impl FetchPolicy {
     }
 }
 
-/// Names the artifact being fetched in every admission and integrity error,
-/// so a failed plan fetch and a failed read-bundle fetch stay as specific as
-/// they were when plans were the only referenced artifact.
-#[derive(Clone, Copy, Debug)]
-pub struct FetchSubject {
-    /// The artifact's noun in error messages: "execution plan URL is not…".
-    pub noun: &'static str,
-    /// What a 404 should tell the agent to do about the expired reference.
-    pub refresh_hint: &'static str,
-    /// The consequence clause of a digest mismatch.
-    pub mismatch_consequence: &'static str,
+/// Which artifact a reference names. Drives every admission and integrity
+/// error's noun and refresh guidance, so a failed plan fetch and a failed
+/// read-bundle fetch stay as specific as they were when plans were the only
+/// referenced artifact.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactType {
+    ExecutionPlan,
+    ReadCalls,
 }
 
-pub const EXECUTION_PLAN_SUBJECT: FetchSubject = FetchSubject {
-    noun: "execution plan",
-    refresh_hint: "re-run the producer's preparation tool for a fresh plan and reference",
-    mismatch_consequence: "it must not be simulated or signed",
-};
+impl ArtifactType {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::ExecutionPlan => "execution plan",
+            Self::ReadCalls => "read-call bundle",
+        }
+    }
 
-pub const READ_CALLS_SUBJECT: FetchSubject = FetchSubject {
-    noun: "read-call bundle",
-    refresh_hint: "re-run the producer's tool for a fresh bundle and reference",
-    mismatch_consequence: "its calls must not be executed",
-};
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::ExecutionPlan => "execution_plan",
+            Self::ReadCalls => "read_calls",
+        }
+    }
 
-/// Fetch, verify, parse, and validate one execution plan.
+    fn refresh_hint(self) -> &'static str {
+        match self {
+            Self::ExecutionPlan => {
+                "re-run the producer's preparation tool for a fresh plan and reference"
+            }
+            Self::ReadCalls => "re-run the producer's tool for a fresh bundle and reference",
+        }
+    }
+
+    fn mismatch_consequence(self) -> &'static str {
+        match self {
+            Self::ExecutionPlan => "it must not be simulated or signed",
+            Self::ReadCalls => "its calls must not be executed",
+        }
+    }
+}
+
+/// The integrity block of a reference. Strict: an integrity object carrying
+/// fields this wallet does not understand is an integrity object it cannot
+/// claim to have verified.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactIntegrity {
+    /// Digest algorithm over the exact stored bytes. Kept a string rather
+    /// than an enum so a rejection can name both what was sent and the
+    /// supported set; only "keccak256" is accepted today.
+    pub algorithm: String,
+    /// 0x-prefixed 64-hex digest of the exact bytes served.
+    pub value: String,
+}
+
+/// Producer-supplied facts about the referenced body, for sanity checks
+/// before and after fetching. Additive-tolerant: fields present are
+/// cross-checked, absent or unknown ones are ignored.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
+pub struct ArtifactSummary {
+    #[serde(default)]
+    pub chain_id: Option<String>,
+    #[serde(default)]
+    pub sender: Option<String>,
+    #[serde(default)]
+    pub step_count: Option<u32>,
+    #[serde(default)]
+    pub call_count: Option<u32>,
+}
+
+/// One producer `artifact_reference` envelope, accepted VERBATIM as a tool
+/// argument.
 ///
-/// `expected_content_keccak256` is the digest published beside the URL by
-/// whatever produced the plan. When present, it is recomputed over the exact
-/// bytes obtained here and a mismatch is a hard failure: the plan the agent
-/// saw prepared is then provably not the plan this wallet would execute.
-pub async fn resolve_execution_plan(
-    url: &str,
-    expected_content_keccak256: Option<&str>,
+/// The envelope itself tolerates additive fields (future producers may
+/// enrich it without stranding deployed wallets) while `integrity` stays
+/// strict. `integrity` and `bytes` are required whenever the body travels
+/// over the network; a `data:` URI carries its bytes in the reference
+/// itself, so there they are verified only when supplied.
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
+pub struct ArtifactReference {
+    /// Must be `artifact_reference`.
+    pub kind: String,
+    pub artifact_type: ArtifactType,
+    /// Public `https` URL of the stored body, or a
+    /// `data:application/json[;base64]` URI carrying it inline.
+    pub url: String,
+    #[serde(default)]
+    pub integrity: Option<ArtifactIntegrity>,
+    /// Exact byte length of the stored body; a fetched body of any other
+    /// length is refused.
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub summary: ArtifactSummary,
+    #[serde(default)]
+    pub instruction: Option<String>,
+}
+
+/// Where verified bytes came from, for provenance display at approval time.
+/// The `https` host is the vetted, pinned name admission checked, so showing
+/// it to the user is showing a TLS-verified fact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArtifactSource {
+    Https { host: String },
+    InlineDataUri,
+}
+
+impl fmt::Display for ArtifactSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Https { host } => formatter.write_str(host),
+            Self::InlineDataUri => formatter.write_str("inline data URI"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FetchedArtifact {
+    pub bytes: Vec<u8>,
+    pub source: ArtifactSource,
+}
+
+/// Fetch, verify, parse, and validate one referenced execution plan, and
+/// report where its bytes came from.
+pub async fn resolve_execution_plan_reference(
+    reference: &ArtifactReference,
     policy: FetchPolicy,
-) -> Result<ExecutionPlan> {
-    let bytes = fetch_verified_bytes(
-        url,
-        expected_content_keccak256,
-        policy,
-        EXECUTION_PLAN_SUBJECT,
-    )
-    .await?;
+) -> Result<(ExecutionPlan, ArtifactSource)> {
+    let fetched = fetch_reference(reference, ArtifactType::ExecutionPlan, policy).await?;
     let value: serde_json::Value =
-        serde_json::from_slice(&bytes).context("execution plan body is not valid JSON")?;
-    ExecutionPlan::parse(value)
+        serde_json::from_slice(&fetched.bytes).context("execution plan body is not valid JSON")?;
+    let plan = ExecutionPlan::parse(value)?;
+    // The summary is what the agent showed the human before this wallet ever
+    // fetched the body, so any present field that disagrees with the parsed
+    // plan is a hard failure, not a warning.
+    let summary = &reference.summary;
+    if let Some(chain_id) = &summary.chain_id {
+        ensure!(
+            chain_id == plan.chain_id.as_str(),
+            "the reference summary says chain {chain_id} but the plan is for chain {}",
+            plan.chain_id
+        );
+    }
+    if let Some(sender) = &summary.sender {
+        let summary_sender: alloy::primitives::Address = sender
+            .parse()
+            .context("the reference summary's sender is not an EVM address")?;
+        ensure!(
+            summary_sender == plan.sender,
+            "the reference summary says sender {summary_sender} but the plan's sender is {}",
+            plan.sender
+        );
+    }
+    if let Some(step_count) = summary.step_count {
+        ensure!(
+            step_count as usize == plan.ordered_steps.len(),
+            "the reference summary says {step_count} steps but the plan has {}",
+            plan.ordered_steps.len()
+        );
+    }
+    Ok((plan, fetched.source))
 }
 
 /// Fetch one referenced body — remote `https` or local `data:` URI — and
-/// verify it against the digest its producer published, without interpreting
-/// the bytes. Callers parse and validate the result exactly as they would an
-/// inline body.
-pub async fn fetch_verified_bytes(
-    url: &str,
-    expected_content_keccak256: Option<&str>,
+/// verify it against the digest and byte count its producer published,
+/// without interpreting the bytes. Callers parse and validate the result
+/// exactly as they would an inline body.
+pub async fn fetch_reference(
+    reference: &ArtifactReference,
+    expected_type: ArtifactType,
     policy: FetchPolicy,
-    subject: FetchSubject,
-) -> Result<Vec<u8>> {
-    let bytes = if url.starts_with("data:") {
-        decode_data_uri(url, subject)?
-    } else {
-        fetch_remote(url, policy, subject).await?
-    };
-    if let Some(expected) = expected_content_keccak256 {
-        verify_digest(&bytes, expected, subject)?;
+) -> Result<FetchedArtifact> {
+    let noun = expected_type.noun();
+    ensure!(
+        reference.kind == "artifact_reference",
+        "the reference's kind is {:?}, not \"artifact_reference\"",
+        reference.kind
+    );
+    ensure!(
+        reference.artifact_type == expected_type,
+        "this tool takes an artifact_type \"{}\" reference, but this reference is \"{}\"",
+        expected_type.wire_name(),
+        reference.artifact_type.wire_name(),
+    );
+    if let Some(integrity) = &reference.integrity {
+        ensure!(
+            integrity.algorithm == "keccak256",
+            "integrity algorithm {:?} is not supported; this wallet verifies keccak256",
+            integrity.algorithm
+        );
     }
-    Ok(bytes)
+    if let Some(bytes) = reference.bytes {
+        // Refuse before allocating or fetching anything oversized.
+        ensure!(
+            bytes <= MAX_SERIALIZED_PLAN_BYTES as u64,
+            "{noun} reference promises a body over {MAX_SERIALIZED_PLAN_BYTES} bytes"
+        );
+    }
+
+    let (body, source) = if reference.url.starts_with("data:") {
+        (
+            decode_data_uri(&reference.url, expected_type)?,
+            ArtifactSource::InlineDataUri,
+        )
+    } else {
+        // A body that travels over the network must be verifiable: the
+        // silent skip-verification path of the old optional digest is gone.
+        ensure!(
+            reference.integrity.is_some(),
+            "{noun} references fetched over the network must carry an integrity block"
+        );
+        ensure!(
+            reference.bytes.is_some(),
+            "{noun} references fetched over the network must carry their exact byte count"
+        );
+        let (bytes, host) = fetch_remote(&reference.url, policy, expected_type).await?;
+        (bytes, ArtifactSource::Https { host })
+    };
+
+    if let Some(expected_bytes) = reference.bytes {
+        ensure!(
+            body.len() as u64 == expected_bytes,
+            "the reference promised {expected_bytes} bytes but the {noun} body is {} bytes; \
+             the artifact was altered or truncated",
+            body.len()
+        );
+    }
+    if let Some(integrity) = &reference.integrity {
+        verify_digest(&body, &integrity.value, expected_type)?;
+    }
+    Ok(FetchedArtifact {
+        bytes: body,
+        source,
+    })
 }
 
 /// Decode `data:application/json[;base64],…` without touching the network.
-fn decode_data_uri(url: &str, subject: FetchSubject) -> Result<Vec<u8>> {
+fn decode_data_uri(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
     let remainder = url
         .strip_prefix("data:")
         .expect("caller matched the data: prefix");
@@ -173,7 +349,7 @@ fn decode_data_uri(url: &str, subject: FetchSubject) -> Result<Vec<u8>> {
             );
         }
     }
-    let noun = subject.noun;
+    let noun = artifact_type.noun();
     // Checked before the decode, not after it. Neither encoding can contract:
     // base64 packs three bytes into four characters and percent-encoding only
     // ever expands, so a payload longer than this cannot decode to anything
@@ -201,8 +377,12 @@ fn decode_data_uri(url: &str, subject: FetchSubject) -> Result<Vec<u8>> {
 // The suffix checks run on an already-lowercased copy of the hostname; the
 // lint pattern-matches them as file-extension comparisons, which they are not.
 #[allow(clippy::case_sensitive_file_extension_comparisons)]
-async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> Result<Vec<u8>> {
-    let noun = subject.noun;
+async fn fetch_remote(
+    url: &str,
+    policy: FetchPolicy,
+    artifact_type: ArtifactType,
+) -> Result<(Vec<u8>, String)> {
+    let noun = artifact_type.noun();
     let parsed = Url::parse(url).with_context(|| format!("{noun} URL is not a valid URL"))?;
     ensure!(
         parsed.scheme() == "https" || (policy.allow_insecure && parsed.scheme() == "http"),
@@ -250,21 +430,13 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
         "{noun} host resolves to a private or reserved address"
     );
 
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        // A proxy resolves the hostname itself and connects on this process's
-        // behalf, so the override below would pin nothing and the addresses
-        // vetted above would never be the ones dialled. Admission only means
-        // something if this process makes the connection, so the ambient
-        // HTTPS_PROXY/ALL_PROXY environment is ignored here. The chain RPC is
-        // a different case: that endpoint is one the owner configured, and
-        // reaching it through their proxy is their decision to make.
-        .no_proxy()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(TOTAL_TIMEOUT)
-        .resolve_to_addrs(&host_text, &resolved)
-        .build()
-        .context("could not build the reference fetch client")?;
+    let mut sorted_addrs = resolved;
+    sorted_addrs.sort_unstable();
+    let client = pinned_client(PinnedKey {
+        host: host_text.clone(),
+        port,
+        addrs: sorted_addrs,
+    })?;
     let response = client
         .get(parsed)
         .header("accept", "application/json")
@@ -275,7 +447,7 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
     if status == reqwest::StatusCode::NOT_FOUND {
         bail!(
             "{noun} reference returned 404: it has expired or never existed; {}",
-            subject.refresh_hint
+            artifact_type.refresh_hint()
         );
     }
     ensure!(status.is_success(), "{noun} fetch returned HTTP {status}");
@@ -298,23 +470,71 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
         );
         body.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok((body, host_text.to_ascii_lowercase()))
 }
 
-fn verify_digest(bytes: &[u8], expected: &str, subject: FetchSubject) -> Result<()> {
+/// A vetted connection identity: the admission decision and the pooled
+/// client are keyed on the same bytes, so a resolver answering differently
+/// later produces a different key rather than reusing a stale pin.
+#[derive(Clone, PartialEq, Eq)]
+struct PinnedKey {
+    host: String,
+    port: u16,
+    addrs: Vec<SocketAddr>,
+}
+
+/// Clients pooled per vetted (host, port, resolved-addrs) identity.
+/// Simulate-then-send fetches the same reference seconds apart; reusing the
+/// pooled TLS connection avoids paying connector construction and a fresh
+/// handshake twice. Bounded so a hostile sequence of hosts cannot grow
+/// memory; eviction is oldest-first. Resolution and vetting still run on
+/// every fetch — only the vetted result is reused.
+static PINNED_CLIENTS: std::sync::OnceLock<std::sync::Mutex<Vec<(PinnedKey, reqwest::Client)>>> =
+    std::sync::OnceLock::new();
+const MAX_PINNED_CLIENTS: usize = 8;
+
+fn pinned_client(key: PinnedKey) -> Result<reqwest::Client> {
+    let pool = PINNED_CLIENTS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let mut entries = pool.lock().expect("pinned-client pool lock");
+    if let Some(position) = entries.iter().position(|(existing, _)| *existing == key) {
+        return Ok(entries[position].1.clone());
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        // A proxy resolves the hostname itself and connects on this process's
+        // behalf, so the override below would pin nothing and the addresses
+        // vetted above would never be the ones dialled. Admission only means
+        // something if this process makes the connection, so the ambient
+        // HTTPS_PROXY/ALL_PROXY environment is ignored here. The chain RPC is
+        // a different case: that endpoint is one the owner configured, and
+        // reaching it through their proxy is their decision to make.
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(TOTAL_TIMEOUT)
+        .resolve_to_addrs(&key.host, &key.addrs)
+        .build()
+        .context("could not build the reference fetch client")?;
+    if entries.len() >= MAX_PINNED_CLIENTS {
+        entries.remove(0);
+    }
+    entries.push((key, client.clone()));
+    Ok(client)
+}
+
+fn verify_digest(bytes: &[u8], expected: &str, artifact_type: ArtifactType) -> Result<()> {
     let normalized = expected.strip_prefix("0x").unwrap_or(expected);
     ensure!(
         normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "expected_content_keccak256 must be a 32-byte hex digest"
+        "integrity.value must be a 32-byte hex keccak256 digest"
     );
     let actual = format!("{:x}", keccak256(bytes));
     ensure!(
         actual == normalized.to_ascii_lowercase(),
         "fetched {} bytes hash to 0x{actual} but the reference promised 0x{}; \
          the body was altered or the reference is stale, so {}",
-        subject.noun,
+        artifact_type.noun(),
         normalized.to_ascii_lowercase(),
-        subject.mismatch_consequence
+        artifact_type.mismatch_consequence()
     );
     Ok(())
 }
@@ -499,6 +719,39 @@ mod tests {
         format!("0x{:x}", keccak256(body.as_bytes()))
     }
 
+    fn reference_for(
+        artifact_type: ArtifactType,
+        url: impl Into<String>,
+        body: Option<&str>,
+    ) -> ArtifactReference {
+        ArtifactReference {
+            kind: "artifact_reference".into(),
+            artifact_type,
+            url: url.into(),
+            integrity: body.map(|body| ArtifactIntegrity {
+                algorithm: "keccak256".into(),
+                value: digest_of(body),
+            }),
+            bytes: body.map(|body| body.len() as u64),
+            summary: ArtifactSummary::default(),
+            instruction: None,
+        }
+    }
+
+    fn data_uri_of(body: &str) -> String {
+        format!(
+            "data:application/json;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(body)
+        )
+    }
+
+    async fn resolve(
+        reference: &ArtifactReference,
+        policy: FetchPolicy,
+    ) -> Result<(ExecutionPlan, ArtifactSource)> {
+        resolve_execution_plan_reference(reference, policy).await
+    }
+
     async fn serve_once(status_line: &'static str, body: String) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -518,12 +771,116 @@ mod tests {
     #[tokio::test]
     async fn resolves_a_base64_data_uri() {
         let body = plan_json();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
-        let url = format!("data:application/json;base64,{encoded}");
-        let plan = resolve_execution_plan(&url, Some(&digest_of(&body)), FetchPolicy::production())
+        let reference = reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        let (plan, source) = resolve(&reference, FetchPolicy::production())
             .await
             .unwrap();
         assert_eq!(plan.chain_id.as_str(), "1");
+        assert_eq!(source, ArtifactSource::InlineDataUri);
+        assert_eq!(source.to_string(), "inline data URI");
+    }
+
+    #[tokio::test]
+    async fn a_data_uri_needs_no_integrity_block() {
+        // The bytes are the reference: requiring an agent to compute
+        // keccak256 over an inline plan would add friction with no security
+        // gain. Integrity is still verified whenever it is supplied.
+        let body = plan_json();
+        let reference = reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), None);
+        let (plan, _) = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap();
+        assert_eq!(plan.ordered_steps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refuses_an_unsupported_integrity_algorithm() {
+        let body = plan_json();
+        let mut reference =
+            reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        reference.integrity = Some(ArtifactIntegrity {
+            algorithm: "sha256".into(),
+            value: digest_of(&body),
+        });
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("sha256"), "{message}");
+        assert!(message.contains("keccak256"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn refuses_a_byte_count_mismatch() {
+        let body = plan_json();
+        let mut reference =
+            reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        reference.bytes = Some(body.len() as u64 + 1);
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("altered or truncated"));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_wrong_artifact_type_or_kind() {
+        let body = plan_json();
+        let reference = reference_for(ArtifactType::ReadCalls, data_uri_of(&body), Some(&body));
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("execution_plan"), "{message}");
+        assert!(message.contains("read_calls"), "{message}");
+
+        let mut reference =
+            reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        reference.kind = "ekubo_execution_plan_reference".into();
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("artifact_reference"));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_summary_that_disagrees_with_the_plan() {
+        let body = plan_json();
+        let mut reference =
+            reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        reference.summary.chain_id = Some("8453".into());
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("chain 8453"));
+
+        let mut reference =
+            reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        reference.summary.step_count = Some(7);
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("7 steps"));
+
+        let mut reference =
+            reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        reference.summary.sender = Some("0x3333333333333333333333333333333333333333".into());
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("sender"));
+    }
+
+    #[tokio::test]
+    async fn a_remote_reference_requires_integrity_and_byte_count() {
+        let reference = reference_for(
+            ArtifactType::ExecutionPlan,
+            "https://mcp.ekubo.org/artifact/x",
+            None,
+        );
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("integrity block"));
     }
 
     #[tokio::test]
@@ -532,8 +889,12 @@ mod tests {
         let encoded: String =
             percent_encoding::utf8_percent_encode(&body, percent_encoding::NON_ALPHANUMERIC)
                 .to_string();
-        let url = format!("data:application/json,{encoded}");
-        let plan = resolve_execution_plan(&url, Some(&digest_of(&body)), FetchPolicy::production())
+        let reference = reference_for(
+            ArtifactType::ExecutionPlan,
+            format!("data:application/json,{encoded}"),
+            Some(&body),
+        );
+        let (plan, _) = resolve(&reference, FetchPolicy::production())
             .await
             .unwrap();
         assert_eq!(plan.ordered_steps.len(), 1);
@@ -542,10 +903,13 @@ mod tests {
     #[tokio::test]
     async fn refuses_a_digest_mismatch() {
         let body = plan_json();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
-        let url = format!("data:application/json;base64,{encoded}");
-        let wrong = format!("0x{}", "11".repeat(32));
-        let error = resolve_execution_plan(&url, Some(&wrong), FetchPolicy::production())
+        let mut reference =
+            reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        reference.integrity = Some(ArtifactIntegrity {
+            algorithm: "keccak256".into(),
+            value: format!("0x{}", "11".repeat(32)),
+        });
+        let error = resolve(&reference, FetchPolicy::production())
             .await
             .unwrap_err();
         assert!(
@@ -557,25 +921,27 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_a_non_json_data_uri_media_type() {
-        let error = resolve_execution_plan(
+        let reference = reference_for(
+            ArtifactType::ExecutionPlan,
             "data:text/html;base64,PGI+PC9iPg==",
             None,
-            FetchPolicy::production(),
-        )
-        .await
-        .unwrap_err();
+        );
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("application/json"));
     }
 
     #[tokio::test]
     async fn fetches_and_validates_a_remote_plan() {
         let body = plan_json();
-        let digest = digest_of(&body);
-        let url = serve_once("HTTP/1.1 200 OK", body).await;
-        let plan = resolve_execution_plan(&url, Some(&digest), FetchPolicy::insecure_for_tests())
+        let url = serve_once("HTTP/1.1 200 OK", body.clone()).await;
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+        let (plan, source) = resolve(&reference, FetchPolicy::insecure_for_tests())
             .await
             .unwrap();
         assert_eq!(plan.caip2_chain_id, "eip155:1");
+        assert!(matches!(source, ArtifactSource::Https { host } if host == "127.0.0.1"));
     }
 
     #[tokio::test]
@@ -585,24 +951,24 @@ mod tests {
         // two drift apart the address override stops binding and the fetch
         // resolves a second time, against nothing that was checked.
         let body = plan_json();
-        let digest = digest_of(&body);
-        let url = serve_once("HTTP/1.1 200 OK", body)
+        let url = serve_once("HTTP/1.1 200 OK", body.clone())
             .await
             .replace("127.0.0.1", "localhost.");
-        let plan = resolve_execution_plan(&url, Some(&digest), FetchPolicy::insecure_for_tests())
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+        let (plan, source) = resolve(&reference, FetchPolicy::insecure_for_tests())
             .await
             .unwrap();
         assert_eq!(plan.caip2_chain_id, "eip155:1");
+        // The provenance host is the vetted, trailing-dot-normalized name.
+        assert!(matches!(source, ArtifactSource::Https { host } if host == "localhost"));
     }
 
     #[tokio::test]
     async fn reports_an_expired_reference_without_echoing_the_body() {
-        let url = serve_once(
-            "HTTP/1.1 404 Not Found",
-            "{\"error\":{\"secret\":\"internal detail\"}}".to_owned(),
-        )
-        .await;
-        let error = resolve_execution_plan(&url, None, FetchPolicy::insecure_for_tests())
+        let secret = "{\"error\":{\"secret\":\"internal detail\"}}";
+        let url = serve_once("HTTP/1.1 404 Not Found", secret.to_owned()).await;
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(secret));
+        let error = resolve(&reference, FetchPolicy::insecure_for_tests())
             .await
             .unwrap_err();
         let message = error.to_string();
@@ -612,16 +978,13 @@ mod tests {
 
     #[tokio::test]
     async fn read_call_bundle_errors_name_the_bundle_not_the_plan() {
-        let url = serve_once(
-            "HTTP/1.1 404 Not Found",
-            "{\"error\":{\"secret\":\"internal detail\"}}".to_owned(),
-        )
-        .await;
-        let error = fetch_verified_bytes(
-            &url,
-            None,
+        let secret = "{\"error\":{\"secret\":\"internal detail\"}}";
+        let url = serve_once("HTTP/1.1 404 Not Found", secret.to_owned()).await;
+        let reference = reference_for(ArtifactType::ReadCalls, url, Some(secret));
+        let error = fetch_reference(
+            &reference,
+            ArtifactType::ReadCalls,
             FetchPolicy::insecure_for_tests(),
-            READ_CALLS_SUBJECT,
         )
         .await
         .unwrap_err();
@@ -631,14 +994,15 @@ mod tests {
         assert!(!message.contains("internal detail"));
 
         let body = "{\"chain_id\":\"1\",\"calls\":[]}";
-        let encoded = base64::engine::general_purpose::STANDARD.encode(body);
-        let data_url = format!("data:application/json;base64,{encoded}");
-        let wrong = format!("0x{}", "22".repeat(32));
-        let mismatch = fetch_verified_bytes(
-            &data_url,
-            Some(&wrong),
+        let mut reference = reference_for(ArtifactType::ReadCalls, data_uri_of(body), Some(body));
+        reference.integrity = Some(ArtifactIntegrity {
+            algorithm: "keccak256".into(),
+            value: format!("0x{}", "22".repeat(32)),
+        });
+        let mismatch = fetch_reference(
+            &reference,
+            ArtifactType::ReadCalls,
             FetchPolicy::production(),
-            READ_CALLS_SUBJECT,
         )
         .await
         .unwrap_err();
@@ -652,7 +1016,8 @@ mod tests {
     #[tokio::test]
     async fn refuses_redirects() {
         let url = serve_once("HTTP/1.1 302 Found", String::new()).await;
-        let error = resolve_execution_plan(&url, None, FetchPolicy::insecure_for_tests())
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(""));
+        let error = resolve(&reference, FetchPolicy::insecure_for_tests())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("HTTP 302"));
@@ -673,7 +1038,8 @@ mod tests {
             "https://user:secret@mcp.ekubo.org/plan/x",
             "https://mcp.ekubo.org/plan/x#fragment",
         ] {
-            let error = resolve_execution_plan(url, None, FetchPolicy::production())
+            let reference = reference_for(ArtifactType::ExecutionPlan, url, Some("{}"));
+            let error = resolve(&reference, FetchPolicy::production())
                 .await
                 .unwrap_err();
             let message = error.to_string();
@@ -687,8 +1053,12 @@ mod tests {
     #[tokio::test]
     async fn refuses_an_oversized_data_uri() {
         let oversized = "a".repeat(MAX_SERIALIZED_PLAN_BYTES + 1);
-        let url = format!("data:application/json,{oversized}");
-        let error = resolve_execution_plan(&url, None, FetchPolicy::production())
+        let reference = reference_for(
+            ArtifactType::ExecutionPlan,
+            format!("data:application/json,{oversized}"),
+            None,
+        );
+        let error = resolve(&reference, FetchPolicy::production())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exceeds"));
@@ -696,8 +1066,12 @@ mod tests {
         // The base64 arm had no coverage at all, and it is the one where the
         // encoded length and the decoded length differ.
         let oversized = "A".repeat(MAX_DATA_URI_PAYLOAD_BYTES + 4);
-        let url = format!("data:application/json;base64,{oversized}");
-        let error = resolve_execution_plan(&url, None, FetchPolicy::production())
+        let reference = reference_for(
+            ArtifactType::ExecutionPlan,
+            format!("data:application/json;base64,{oversized}"),
+            None,
+        );
+        let error = resolve(&reference, FetchPolicy::production())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exceeds"), "{error}");

@@ -250,8 +250,7 @@ async fn permit2_allowance(
         chain_id: network.chain_id.to_string(),
         block_parameter: "latest".into(),
         from: None,
-        calls_url: None,
-        expected_content_keccak256: None,
+        reference: None,
         fork_id: fork.map(|preface| preface.fork_id),
         calls: vec![BatchReadCall {
             id: Some("allowance".into()),
@@ -332,8 +331,7 @@ async fn batch_reads_are_pinned_and_decoded(network: &NetworkConfig) {
         chain_id: network.chain_id.to_string(),
         block_parameter: "latest".into(),
         from: None,
-        calls_url: None,
-        expected_content_keccak256: None,
+        reference: None,
         fork_id: None,
         calls: vec![
             BatchReadCall {

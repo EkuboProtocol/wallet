@@ -32,7 +32,14 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 const SCHEMA_VERSION: i64 = 2;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.policy-database-key.v1";
+/// The credential-store entry holding this database's key.
+///
+/// Named for the database rather than for policies, because policies are only
+/// one of the things it protects: the same file holds the pending signing
+/// queues, the address book, and the token names a reviewer reads before
+/// approving a transfer. A name that says "policy" invites the reading that
+/// everything else in there is incidental, and none of it is.
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
 const KEYRING_USER: &str = "default";
 
 /// A raw 256-bit `SQLCipher` key. Debug output never exposes its contents.

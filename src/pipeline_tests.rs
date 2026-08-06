@@ -318,6 +318,18 @@ fn pipeline_server(
     (directory, server, wallet)
 }
 
+fn plan_reference(sender: Address) -> ekubo_wallet_core::plan_fetch::ArtifactReference {
+    ekubo_wallet_core::plan_fetch::ArtifactReference {
+        kind: "artifact_reference".into(),
+        artifact_type: ekubo_wallet_core::plan_fetch::ArtifactType::ExecutionPlan,
+        url: plan_data_uri(sender),
+        integrity: None,
+        bytes: None,
+        summary: ekubo_wallet_core::plan_fetch::ArtifactSummary::default(),
+        instruction: None,
+    }
+}
+
 fn plan_data_uri(sender: Address) -> String {
     let plan = serde_json::json!({
         "schema_version": "1",
@@ -352,8 +364,7 @@ async fn automatic_path_signs_broadcasts_and_confirms_through_the_stub() {
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
             chain_id: CHAIN_ID.to_string(),
-            execution_plan_url: Some(plan_data_uri(wallet.address)),
-            expected_content_keccak256: None,
+            reference: Some(plan_reference(wallet.address)),
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
@@ -390,8 +401,7 @@ async fn policy_denial_queues_and_the_approved_row_broadcasts_by_request_id() {
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
             chain_id: CHAIN_ID.to_string(),
-            execution_plan_url: Some(plan_data_uri(wallet.address)),
-            expected_content_keccak256: None,
+            reference: Some(plan_reference(wallet.address)),
             simulation_id: None,
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
@@ -458,8 +468,7 @@ async fn policy_denial_queues_and_the_approved_row_broadcasts_by_request_id() {
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
             chain_id: CHAIN_ID.to_string(),
-            execution_plan_url: None,
-            expected_content_keccak256: None,
+            reference: None,
             simulation_id: None,
             request_id: Some(request_id),
             on_simulation_failure: OnSimulationFailure::RequestApproval,
@@ -481,8 +490,7 @@ async fn simulate_then_send_consumes_the_recorded_simulation() {
         .wallet_simulate_execution_plan(Parameters(SimulateInput {
             wallet_id: "primary".into(),
             chain_id: CHAIN_ID.to_string(),
-            execution_plan_url: plan_data_uri(wallet.address),
-            expected_content_keccak256: None,
+            reference: plan_reference(wallet.address),
             fork_id: None,
         }))
         .await
@@ -498,8 +506,7 @@ async fn simulate_then_send_consumes_the_recorded_simulation() {
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
             chain_id: CHAIN_ID.to_string(),
-            execution_plan_url: None,
-            expected_content_keccak256: None,
+            reference: None,
             simulation_id: Some(simulation_id),
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,
@@ -514,8 +521,7 @@ async fn simulate_then_send_consumes_the_recorded_simulation() {
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
             chain_id: CHAIN_ID.to_string(),
-            execution_plan_url: None,
-            expected_content_keccak256: None,
+            reference: None,
             simulation_id: Some(simulation_id),
             request_id: None,
             on_simulation_failure: OnSimulationFailure::RequestApproval,

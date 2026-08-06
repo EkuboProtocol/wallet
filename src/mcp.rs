@@ -21,7 +21,7 @@ use crate::{
         parse_message_input, parse_siwe, siwe_warnings,
     },
     pending::{PendingStatus, PendingStore, PendingTransaction},
-    plan_fetch::{FetchPolicy, resolve_execution_plan},
+    plan_fetch::{ArtifactReference, FetchPolicy, resolve_execution_plan_reference},
     policy_store::PolicyStore,
     rpc::{WalletStatus, transaction_known, verify_chain_id, wallet_status},
     simulation::{SimulationResult, simulate_execution},
@@ -208,19 +208,14 @@ struct WalletNetworkInput {
 struct SimulateInput {
     wallet_id: String,
     chain_id: String,
-    /// Where to read the exact execution plan: the `execution_plan_url` from a
-    /// producer's `execution_plan_reference` (fetched over public https), or a
-    /// `data:application/json[;base64],…` URI carrying the plan inline. Pass a
-    /// reference URL through unchanged; never fetch or restate the plan
-    /// yourself.
-    execution_plan_url: String,
-    /// keccak256 of the exact plan bytes, as published beside the URL (the
-    /// reference's `content_keccak256`). The wallet recomputes it over what it
-    /// actually fetched and refuses a mismatch, so what the agent saw prepared
-    /// is what gets simulated. Strongly recommended whenever the producer
-    /// supplied one.
-    #[serde(default)]
-    expected_content_keccak256: Option<String>,
+    /// The producer's `artifact_reference` envelope, passed through VERBATIM:
+    /// never rename, edit, restate, or reconstruct any of its fields. The
+    /// wallet fetches the plan body itself and verifies the envelope's
+    /// integrity digest and byte count over what it actually fetched, so what
+    /// the agent saw prepared is what gets simulated. An inline plan travels
+    /// as an envelope whose url is a `data:application/json[;base64],…` URI
+    /// of its exact bytes (integrity optional there).
+    reference: ArtifactReference,
     /// Simulate on top of everything already applied to this temporary fork
     /// and, if execution succeeds, append this plan to it. Omit to simulate
     /// against real chain state.
@@ -247,17 +242,11 @@ struct TransfersInput {
 struct SendExecutionPlanInput {
     wallet_id: String,
     chain_id: String,
-    /// Where to read the plan to simulate and send: a producer reference's
-    /// `execution_plan_url` (public https) or a `data:application/json` URI
-    /// carrying the plan inline. Provide exactly one of `execution_plan_url`,
+    /// The producer's `artifact_reference` envelope for the plan to simulate
+    /// and send, passed through VERBATIM. Provide exactly one of `reference`,
     /// `simulation_id`, or `request_id`.
     #[serde(default)]
-    execution_plan_url: Option<String>,
-    /// keccak256 of the exact plan bytes as published beside
-    /// `execution_plan_url`; the wallet refuses a mismatch. Only meaningful
-    /// with `execution_plan_url`.
-    #[serde(default)]
-    expected_content_keccak256: Option<String>,
+    reference: Option<ArtifactReference>,
     /// The `simulation_id` of a plan already simulated against real chain
     /// state by `wallet_simulate_execution_plan`, which is sent without
     /// simulating it a second time. The plan comes from that recorded
@@ -859,7 +848,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_simulate_execution_plan",
-        description = "Resolve an exact execution plan from execution_plan_url (a producer reference's public https URL, verified against expected_content_keccak256, or a data:application/json URI carrying the plan inline), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Pass a producer's execution_plan_reference fields through unchanged instead of restating the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result still goes to wallet_send_execution_plan, which queues it for human approval.",
+        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result still goes to wallet_send_execution_plan, which queues it for human approval.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_simulate_execution_plan(
@@ -876,13 +865,22 @@ impl WalletMcpServer {
             .config
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
-        let execution_plan = resolve_execution_plan(
-            &input.execution_plan_url,
-            input.expected_content_keccak256.as_deref(),
-            FetchPolicy::production(),
-        )
-        .await
-        .map_err(|error| tool_error(&error))?;
+        // Cheap envelope sanity check before any outbound fetch: the summary
+        // is what the agent showed the human, so a chain that disagrees with
+        // the tool call is refused without spending the fetch.
+        if let Some(summary_chain) = &input.reference.summary.chain_id {
+            ensure_tool(
+                *summary_chain == input.chain_id,
+                &format!(
+                    "the reference summary says chain {summary_chain} but this call names chain {}",
+                    input.chain_id
+                ),
+            )?;
+        }
+        let (execution_plan, _plan_source) =
+            resolve_execution_plan_reference(&input.reference, FetchPolicy::production())
+                .await
+                .map_err(|error| tool_error(&error))?;
         let stored_policy = self
             .policies
             .lock()
@@ -1083,7 +1081,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_batch_eth_call",
-        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference passed through unchanged as calls_url plus expected_content_keccak256 — the wallet fetches and digest-verifies the stored call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
+        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the stored call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_batch_eth_call(
@@ -1341,7 +1339,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from execution_plan_url (a producer reference's public https URL, verified against expected_content_keccak256, or a data:application/json URI carrying the plan inline); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of execution_plan_url, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; policy denials queue for approval either way. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference; send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; policy denials queue for approval either way. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1353,18 +1351,12 @@ impl WalletMcpServer {
         &self,
         Parameters(input): Parameters<SendExecutionPlanInput>,
     ) -> Result<Json<ExecutionStatusOutput>, ErrorData> {
-        let selected = usize::from(input.execution_plan_url.is_some())
+        let selected = usize::from(input.reference.is_some())
             + usize::from(input.simulation_id.is_some())
             + usize::from(input.request_id.is_some());
         if selected != 1 {
             return Err(ErrorData::invalid_params(
-                "provide exactly one of execution_plan_url, simulation_id, or request_id",
-                None,
-            ));
-        }
-        if input.expected_content_keccak256.is_some() && input.execution_plan_url.is_none() {
-            return Err(ErrorData::invalid_params(
-                "expected_content_keccak256 is only meaningful with execution_plan_url",
+                "provide exactly one of reference, simulation_id, or request_id",
                 None,
             ));
         }
@@ -1376,19 +1368,12 @@ impl WalletMcpServer {
             .config
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
-        let output = match (
-            input.execution_plan_url,
-            input.simulation_id,
-            input.request_id,
-        ) {
-            (Some(plan_url), None, None) => {
-                let plan = resolve_execution_plan(
-                    &plan_url,
-                    input.expected_content_keccak256.as_deref(),
-                    FetchPolicy::production(),
-                )
-                .await
-                .map_err(|error| tool_error(&error))?;
+        let output = match (input.reference, input.simulation_id, input.request_id) {
+            (Some(reference), None, None) => {
+                let (plan, _plan_source) =
+                    resolve_execution_plan_reference(&reference, FetchPolicy::production())
+                        .await
+                        .map_err(|error| tool_error(&error))?;
                 Box::pin(self.send_new_plan(wallet, network, plan, input.on_simulation_failure))
                     .await
             }
@@ -3738,16 +3723,24 @@ mod tests {
         // each field independently, which is what the count check is for.
         let none = with(serde_json::json!({})).unwrap();
         assert!(
-            none.execution_plan_url.is_none()
-                && none.simulation_id.is_none()
-                && none.request_id.is_none()
+            none.reference.is_none() && none.simulation_id.is_none() && none.request_id.is_none()
         );
-        let url = with(serde_json::json!({
-            "execution_plan_url": "https://mcp.ekubo.org/plan/x",
-            "expected_content_keccak256": format!("0x{}", "11".repeat(32)),
+        let with_reference = with(serde_json::json!({
+            "reference": {
+                "kind": "artifact_reference",
+                "artifact_type": "execution_plan",
+                "url": "https://mcp.ekubo.org/artifact/x",
+                "integrity": {
+                    "algorithm": "keccak256",
+                    "value": format!("0x{}", "11".repeat(32)),
+                },
+                "bytes": 2,
+                // Additive producer fields must not break older wallets.
+                "some_future_field": true,
+            },
         }))
         .unwrap();
-        assert!(url.execution_plan_url.is_some() && url.expected_content_keccak256.is_some());
+        assert!(with_reference.reference.is_some());
     }
 
     #[tokio::test]
@@ -3763,8 +3756,18 @@ mod tests {
             .wallet_simulate_execution_plan(Parameters(SimulateInput {
                 wallet_id: "primary".into(),
                 chain_id: "1".into(),
-                execution_plan_url: url,
-                expected_content_keccak256: Some(format!("0x{}", "11".repeat(32))),
+                reference: ekubo_wallet_core::plan_fetch::ArtifactReference {
+                    kind: "artifact_reference".into(),
+                    artifact_type: ekubo_wallet_core::plan_fetch::ArtifactType::ExecutionPlan,
+                    url,
+                    integrity: Some(ekubo_wallet_core::plan_fetch::ArtifactIntegrity {
+                        algorithm: "keccak256".into(),
+                        value: format!("0x{}", "11".repeat(32)),
+                    }),
+                    bytes: Some(body.len() as u64),
+                    summary: ekubo_wallet_core::plan_fetch::ArtifactSummary::default(),
+                    instruction: None,
+                },
                 fork_id: None,
             }))
             .await;

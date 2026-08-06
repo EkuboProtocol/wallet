@@ -13,11 +13,11 @@
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
-| `wallet_simulate_execution_plan` | Resolve the exact plan from `execution_plan_url` — a producer reference's public https URL verified against `expected_content_keccak256`, or a `data:application/json` URI carrying the plan inline — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
+| `wallet_simulate_execution_plan` | Resolve the exact plan from the producer's `artifact_reference` envelope, passed through verbatim as `reference` — the wallet fetches the body (public https or an inline `data:application/json` URI) and verifies the envelope's integrity digest and byte count — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
 | `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
 | `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
 | `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. Takes the same `on_simulation_failure` choice as `wallet_send_execution_plan`. |
-| `wallet_send_execution_plan` | Resolve a plan from `execution_plan_url`, then validate, simulate, policy-check, sign, and broadcast it; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
+| `wallet_send_execution_plan` | Resolve a plan from a producer `reference` envelope, then validate, simulate, policy-check, sign, and broadcast it; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. The only tool that blocks through the human pause. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_attempt_cancel` | Outbid a broadcast-but-unmined transaction with a 0-value self-send at its own nonce. The one signing path that consults no policy: every field derives from the stored envelope and the chain — target is the wallet itself, calldata empty, no authorization list, fees from the incumbent envelope plus a bounded market bump — so it can only narrow an in-flight authorization to nothing, at the cost of gas. Fails if the transaction already mined; repeating the call reprices a cancellation that is itself stuck. |
@@ -46,33 +46,39 @@ a capability pointer, not a trust statement: a plan from there is validated,
 simulated, and policy-checked exactly like a plan from anywhere else, and no
 code path in this process treats a plan's origin as meaningful.
 
-Plans arrive by URL rather than as inline tool arguments, because the agent
-relaying a producer's tool result into a wallet tool call pays for every byte
-of it as model output. A producer returns an `execution_plan_reference` — a
-short-lived https URL holding the plan body plus `content_keccak256` over its
-exact bytes — and the agent passes the URL and digest through unchanged. The
-wallet fetches the body itself (public https only: default port, no
-credentials, fragments, or redirects, no private or reserved addresses even
-after DNS resolution, 16 MiB cap), recomputes the digest, refuses a mismatch,
-and then parses and validates the plan exactly as if it had been supplied
-inline. A plan held locally travels as a `data:application/json;base64` URI of
-its exact bytes and touches no network. A 404 means the reference expired:
-re-run the producer's preparation tool. These fetches are the only outbound
-requests this process makes that are not a configured chain RPC.
+Plans arrive by reference rather than as inline tool arguments, because the
+agent relaying a producer's tool result into a wallet tool call pays for
+every byte of it as model output. A producer returns an `artifact_reference`
+envelope — the https URL holding the plan body, an `integrity` block
+(keccak256 of its exact bytes plus their count), and a `summary` for sanity
+checks — and the agent passes the whole envelope through unchanged as the
+tool's `reference` argument. The wallet fetches the body itself (public https
+only: default port, no credentials, fragments, or redirects, no private or
+reserved addresses even after DNS resolution, 16 MiB cap), recomputes the
+digest and byte count, refuses a mismatch, cross-checks any summary fields
+against the parsed plan, and then validates the plan exactly as if it had
+been supplied inline. The envelope tolerates additive producer fields;
+`integrity` is strict, and both it and `bytes` are mandatory for anything
+fetched over the network. A plan held locally travels as an envelope whose
+URL is a `data:application/json;base64` URI of its exact bytes and touches no
+network (there the bytes are the reference, so integrity is verified only
+when supplied). A 404 means the reference expired: re-run the producer's
+preparation tool. These fetches are the only outbound requests this process
+makes that are not a configured chain RPC.
 
 Read-call bundles travel under the same discipline. A producer returns a
-`read_calls_reference` — a short-lived https URL holding an exact
-`wallet_batch_eth_call` argument body (`chain_id`, optional `block_parameter`
-and `from`, `calls` with their decode plans) plus `content_keccak256` — and
-the agent passes `read_calls_url` as `calls_url` and the digest as
-`expected_content_keccak256`, unchanged, with the reference's `chain_id` and
-no inline `calls`. The same admission policy, digest verification, and size
-cap apply. The fetched body is parsed against exactly the inline argument
-surface with unknown fields rejected, so a bundle can never carry a
-`fork_id`, another `calls_url`, or any field the tool call itself did not
-declare, and its `chain_id` must equal the one the tool call selected. The
-body alone supplies `block_parameter`, `from`, and `calls`; `fork_id` remains
-a tool-call decision, so a bundle can be read against a fork.
+`read_calls_reference` envelope whose stored body is an exact
+`wallet_batch_eth_call` argument object (`chain_id`, optional
+`block_parameter` and `from`, `calls` with their decode plans), and the agent
+passes the whole envelope unchanged as `wallet_batch_eth_call`'s `reference`
+argument with the reference's `chain_id` and no inline `calls`. The same
+admission policy, integrity verification, and size cap apply. The fetched
+body is parsed against exactly the inline argument surface with unknown
+fields rejected, so a bundle can never carry a `fork_id`, a nested
+reference, or any field the tool call itself did not declare, and its
+`chain_id` must equal the one the tool call selected. The body alone supplies
+`block_parameter`, `from`, and `calls`; `fork_id` remains a tool-call
+decision, so a bundle can be read against a fork.
 
 `eth_simulateV1` is the most expensive request this wallet makes, and an agent
 that simulates a plan to show the user what it does should not pay for that
@@ -203,9 +209,9 @@ fallback, sends `msg.sender`-dependent calls individually, and can decode each
 exact result in the same call. `block_parameter` accepts `latest`, `pending`,
 `safe`, `finalized`, `earliest`, or a canonical hexadecimal block quantity.
 Calls are supplied either inline or by a producer's `read_calls_reference`
-(`calls_url` plus `expected_content_keccak256`, mutually exclusive with
-inline `calls`; with `calls_url`, leave `from` unset and `block_parameter` at
-its default — the fetched body governs both).
+envelope passed verbatim as `reference` (mutually exclusive with inline
+`calls`; with `reference`, leave `from` unset and `block_parameter` at its
+default — the fetched body governs both).
 
 Five decode plan kinds are supported: `function_result`, `abi_parameters`,
 `multicall3`, `function_result_bytes_array`, and `semantic_value`. Complete

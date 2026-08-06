@@ -4,7 +4,7 @@ use crate::{
     },
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
-    plan_fetch::{FetchPolicy, READ_CALLS_SUBJECT, fetch_verified_bytes},
+    plan_fetch::{ArtifactReference, ArtifactType, FetchPolicy, fetch_reference},
     rpc::{MULTICALL3_ADDRESS, sanitized_rpc_error},
 };
 use alloy::{
@@ -63,23 +63,20 @@ pub struct BatchEthCallInput {
     pub block_parameter: String,
     #[serde(default)]
     pub from: Option<String>,
-    /// Inline read calls. Pass exactly one of `calls` and `calls_url`.
+    /// Inline read calls. Pass exactly one of `calls` and `reference`.
     #[serde(default)]
     pub calls: Vec<BatchReadCall>,
-    /// A producer `read_calls_reference` URL holding the exact call bundle:
-    /// the same JSON object as this tool's inline arguments minus `fork_id`
-    /// (`chain_id`, optional `block_parameter` and `from`, `calls`). Fetched
-    /// under the execution-plan admission policy — public https on the
-    /// default port or a `data:application/json` URI, digest-verified,
-    /// size-capped. The body's `chain_id` must equal `chain_id` above, and
-    /// the body alone supplies `block_parameter`, `from`, and `calls`.
+    /// A producer `read_calls_reference` envelope, passed through VERBATIM,
+    /// whose stored body is the exact call bundle: the same JSON object as
+    /// this tool's inline arguments minus `fork_id` (`chain_id`, optional
+    /// `block_parameter` and `from`, `calls`). Fetched under the
+    /// execution-plan admission policy — public https on the default port or
+    /// a `data:application/json` URI — then verified against the envelope's
+    /// integrity digest and byte count. The body's `chain_id` must equal
+    /// `chain_id` above, and the body alone supplies `block_parameter`,
+    /// `from`, and `calls`.
     #[serde(default)]
-    pub calls_url: Option<String>,
-    /// The keccak256 digest the producer published beside `calls_url`,
-    /// passed unchanged; it is recomputed over the fetched bytes and a
-    /// mismatch is a hard failure. Only valid with `calls_url`.
-    #[serde(default)]
-    pub expected_content_keccak256: Option<String>,
+    pub reference: Option<ArtifactReference>,
     /// Read the hypothetical state of this temporary simulation fork instead
     /// of real chain state. A fork pins its own parent block, so
     /// `block_parameter` must be left at `latest`, and at most
@@ -90,7 +87,7 @@ pub struct BatchEthCallInput {
 
 /// The exact stored body of a read-calls reference: this tool's inline
 /// argument surface and nothing else. `deny_unknown_fields` is the smuggling
-/// boundary — a fetched body cannot carry a `fork_id`, a nested `calls_url`,
+/// boundary — a fetched body cannot carry a `fork_id`, a nested reference,
 /// a digest, or any future top-level field this tool grows, so a producer's
 /// bundle can never widen what the tool call itself declared.
 #[derive(Clone, Debug, Deserialize)]
@@ -104,7 +101,7 @@ pub struct ReadCallsBody {
     pub calls: Vec<BatchReadCall>,
 }
 
-/// Settle the `calls_url` reference surface into an effective inline input.
+/// Settle the `reference` envelope surface into an effective inline input.
 ///
 /// Exclusivity is checked before any fetch, so a malformed tool call never
 /// becomes an outbound request to a caller-chosen URL. The resolved input
@@ -113,16 +110,12 @@ pub async fn resolve_read_input(
     input: BatchEthCallInput,
     policy: FetchPolicy,
 ) -> Result<BatchEthCallInput> {
-    let Some(url) = input.calls_url.clone() else {
-        ensure!(
-            input.expected_content_keccak256.is_none(),
-            "expected_content_keccak256 accompanies calls_url; inline calls are already exact"
-        );
+    let Some(reference) = input.reference.clone() else {
         return Ok(input);
     };
     ensure!(
         input.calls.is_empty(),
-        "pass exactly one of calls and calls_url"
+        "pass exactly one of calls and reference"
     );
     ensure!(
         input.from.is_none(),
@@ -132,14 +125,15 @@ pub async fn resolve_read_input(
         input.block_parameter == default_block_parameter(),
         "a referenced bundle carries its own block_parameter; leave it at latest"
     );
-    let bytes = fetch_verified_bytes(
-        &url,
-        input.expected_content_keccak256.as_deref(),
-        policy,
-        READ_CALLS_SUBJECT,
-    )
-    .await?;
-    let body: ReadCallsBody = serde_json::from_slice(&bytes)
+    if let Some(summary_chain) = &reference.summary.chain_id {
+        ensure!(
+            *summary_chain == input.chain_id,
+            "the reference summary says chain {summary_chain} but this call names chain {}",
+            input.chain_id
+        );
+    }
+    let fetched = fetch_reference(&reference, ArtifactType::ReadCalls, policy).await?;
+    let body: ReadCallsBody = serde_json::from_slice(&fetched.bytes)
         .context("read-call bundle is not a valid wallet_batch_eth_call argument object")?;
     ensure!(
         body.chain_id == input.chain_id,
@@ -148,13 +142,19 @@ pub async fn resolve_read_input(
         body.chain_id,
         input.chain_id
     );
+    if let Some(call_count) = reference.summary.call_count {
+        ensure!(
+            call_count as usize == body.calls.len(),
+            "the reference summary says {call_count} calls but the bundle has {}",
+            body.calls.len()
+        );
+    }
     Ok(BatchEthCallInput {
         chain_id: input.chain_id,
         block_parameter: body.block_parameter,
         from: body.from,
         calls: body.calls,
-        calls_url: None,
-        expected_content_keccak256: None,
+        reference: None,
         fork_id: input.fork_id,
     })
 }
@@ -596,8 +596,8 @@ fn format_result(
 
 fn validate_input(input: &BatchEthCallInput) -> Result<()> {
     ensure!(
-        input.calls_url.is_none() && input.expected_content_keccak256.is_none(),
-        "resolve calls_url into inline calls before executing the batch"
+        input.reference.is_none(),
+        "resolve the reference into inline calls before executing the batch"
     );
     ensure!(
         !input.chain_id.is_empty()
@@ -792,9 +792,23 @@ mod tests {
             block_parameter: "latest".into(),
             from: None,
             calls: vec![call()],
-            calls_url: None,
-            expected_content_keccak256: None,
+            reference: None,
             fork_id: None,
+        }
+    }
+
+    fn reference_for(url: impl Into<String>, body: Option<&str>) -> ArtifactReference {
+        ArtifactReference {
+            kind: "artifact_reference".into(),
+            artifact_type: ArtifactType::ReadCalls,
+            url: url.into(),
+            integrity: body.map(|body| crate::plan_fetch::ArtifactIntegrity {
+                algorithm: "keccak256".into(),
+                value: format!("0x{:x}", alloy::primitives::keccak256(body.as_bytes())),
+            }),
+            bytes: body.map(|body| body.len() as u64),
+            summary: crate::plan_fetch::ArtifactSummary::default(),
+            instruction: None,
         }
     }
 
@@ -834,25 +848,18 @@ mod tests {
     async fn resolve_read_input_enforces_reference_exclusivity_before_fetching() {
         // A URL that would fail loudly if it were ever fetched: every case
         // below must error on exclusivity alone.
-        let url = Some("https://never.fetched.invalid/read/x".to_owned());
+        let url = "https://never.fetched.invalid/read/x";
 
         let mut both = inline_input();
-        both.calls_url = url.clone();
+        both.reference = Some(reference_for(url, Some("{}")));
         let error = resolve_read_input(both, FetchPolicy::production())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exactly one of calls"));
 
-        let mut stray_digest = inline_input();
-        stray_digest.expected_content_keccak256 = Some(format!("0x{}", "11".repeat(32)));
-        let error = resolve_read_input(stray_digest, FetchPolicy::production())
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("accompanies calls_url"));
-
         let mut with_from = inline_input();
         with_from.calls.clear();
-        with_from.calls_url = url.clone();
+        with_from.reference = Some(reference_for(url, Some("{}")));
         with_from.from = Some("0x1111111111111111111111111111111111111111".into());
         let error = resolve_read_input(with_from, FetchPolicy::production())
             .await
@@ -861,12 +868,23 @@ mod tests {
 
         let mut with_block = inline_input();
         with_block.calls.clear();
-        with_block.calls_url = url;
+        with_block.reference = Some(reference_for(url, Some("{}")));
         with_block.block_parameter = "pending".into();
         let error = resolve_read_input(with_block, FetchPolicy::production())
             .await
             .unwrap_err();
         assert!(error.to_string().contains("its own block_parameter"));
+
+        // A summary that names a different chain is refused before any fetch.
+        let mut wrong_chain = inline_input();
+        wrong_chain.calls.clear();
+        let mut reference = reference_for(url, Some("{}"));
+        reference.summary.chain_id = Some("8453".into());
+        wrong_chain.reference = Some(reference);
+        let error = resolve_read_input(wrong_chain, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("chain 8453"));
     }
 
     #[tokio::test]
@@ -881,18 +899,18 @@ mod tests {
             }],
         })
         .to_string();
-        let digest = format!("0x{:x}", alloy::primitives::keccak256(body.as_bytes()));
         let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
 
         let mut input = inline_input();
         input.calls.clear();
-        input.calls_url = Some(format!("data:application/json;base64,{encoded}"));
-        input.expected_content_keccak256 = Some(digest);
+        input.reference = Some(reference_for(
+            format!("data:application/json;base64,{encoded}"),
+            Some(&body),
+        ));
         let resolved = resolve_read_input(input, FetchPolicy::production())
             .await
             .unwrap();
-        assert!(resolved.calls_url.is_none());
-        assert!(resolved.expected_content_keccak256.is_none());
+        assert!(resolved.reference.is_none());
         assert_eq!(resolved.block_parameter, "pending");
         assert_eq!(resolved.calls.len(), 1);
         assert!(validate_input(&resolved).is_ok());
@@ -906,7 +924,10 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(body);
         let mut input = inline_input();
         input.calls.clear();
-        input.calls_url = Some(format!("data:application/json;base64,{encoded}"));
+        input.reference = Some(reference_for(
+            format!("data:application/json;base64,{encoded}"),
+            Some(body),
+        ));
         let error = resolve_read_input(input, FetchPolicy::production())
             .await
             .unwrap_err();
@@ -926,8 +947,7 @@ mod tests {
             chain_id: "1".into(),
             block_parameter: "latest".into(),
             from: None,
-            calls_url: None,
-            expected_content_keccak256: None,
+            reference: None,
             fork_id: None,
             calls: vec![BatchReadCall {
                 id: Some("weth-total-supply".into()),
