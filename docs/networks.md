@@ -8,9 +8,10 @@ profile per chain ID so MCP calls remain unambiguous.
 
 `network list` prints each profile in full, including its complete RPC URL, so
 the configuration can be read back and edited. RPC URLs are configuration rather
-than key material, and the human CLI does not redact them. No MCP tool returns
-an RPC URL: `wallet_list` deliberately omits them so an agent can discover valid
-chain IDs without seeing provider credentials.
+than key material, and nothing redacts them: the CLI, MCP tools (`wallet_list`
+returns each network's RPC URL), and surfaced RPC errors all show the endpoint
+verbatim. A provider credential embedded in an RPC URL is read-only and easy to
+rotate, so use one whose disclosure would be an inconvenience, not a loss.
 
 | CLI name | Chain ID | Max transaction gas | Default public RPC |
 | --- | ---: | ---: | --- |

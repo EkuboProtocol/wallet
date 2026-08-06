@@ -166,7 +166,7 @@
             "null"
           ]
         },
-        "max_spend_per_transaction": {
+        "max_transfer_amount": {
           "type": "string",
           "default": "0"
         },

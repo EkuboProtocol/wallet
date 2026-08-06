@@ -115,7 +115,7 @@ fn accept_legal(server: &WalletMcpServer) {
 }
 
 #[test]
-fn inventory_omits_rpc_urls_and_private_state() {
+fn inventory_names_each_network_endpoint() {
     let (_directory, server) = server();
     let Json(inventory) = server.wallet_list().unwrap();
     assert_eq!(inventory.wallets[0].id, "primary");
@@ -123,7 +123,7 @@ fn inventory_omits_rpc_urls_and_private_state() {
         inventory
             .networks
             .iter()
-            .all(|network| !network.name.contains("http"))
+            .all(|network| network.rpc_url.starts_with("http"))
     );
 }
 

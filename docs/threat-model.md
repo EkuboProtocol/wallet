@@ -219,9 +219,10 @@ took ten seconds to answer would be a different product, and the reason to
 write this down is so the choice stays visible rather than becoming an
 assumption nobody remembers making.
 
-RPC URLs can contain credentials. They are never returned by MCP inventory, and
-the configured endpoint's userinfo, path, and query are each redacted from
-surfaced errors, but `config.json` stores them locally. Use credentials whose
+RPC URLs can contain provider credentials, and the wallet deliberately does not
+treat them as secrets: `wallet_list` returns them, and surfaced RPC errors name
+the endpoint verbatim. Such credentials are read-only and easy to rotate, so
+hiding them bought little and cost error fidelity. Use credentials whose
 disclosure scope is appropriate for the local MCP host.
 
 `wallet_propose_network` is the one MCP tool that makes this process send a request

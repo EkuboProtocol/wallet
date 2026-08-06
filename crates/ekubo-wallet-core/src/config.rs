@@ -226,8 +226,7 @@ impl ConfigStore {
         // a configuration holding the maximum wallets and networks.
         // Narrow an existing file that is readable by anyone. `save` writes
         // 0600, but a file restored from a backup, copied by an older build, or
-        // unpacked from an archive arrives with whatever mode it was given —
-        // and this one holds RPC URLs, which can carry provider credentials.
+        // unpacked from an archive arrives with whatever mode it was given.
         // Repairing on read means it is fixed the first time anything looks at
         // it rather than the next time something writes.
         set_private_file_permissions(&self.file)?;

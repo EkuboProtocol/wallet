@@ -64,7 +64,7 @@ pub struct TokenPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default = "zero")]
-    pub max_spend_per_transaction: String,
+    pub max_transfer_amount: String,
     #[serde(default)]
     pub transfer_recipients: BTreeMap<String, NamedAddressPolicy>,
 }
@@ -128,8 +128,6 @@ pub enum FindingSeverity {
     Error,
 }
 
-pub type TokenSpends = BTreeMap<String, BigUint>;
-
 impl WalletPolicy {
     /// The canonical identity of this policy document: keccak-256 over its
     /// canonical JSON serialization. Every surface that names a policy —
@@ -187,7 +185,7 @@ impl WalletPolicy {
                     "*".into(),
                     TokenPolicy {
                         label: None,
-                        max_spend_per_transaction: max_uint256(),
+                        max_transfer_amount: max_uint256(),
                         transfer_recipients: BTreeMap::from([(
                             "*".into(),
                             NamedAddressPolicy { label: None },
@@ -266,11 +264,14 @@ impl WalletPolicy {
 }
 
 #[must_use]
-pub fn evaluate_policy(
-    plan: &ExecutionPlan,
-    policy: &WalletPolicy,
-    token_spends: Option<&TokenSpends>,
-) -> Vec<PolicyFinding> {
+/// Every predicate here is decided from the execution plan's own bytes. Nothing
+/// the RPC reports — observed balances, transfer logs, gas, or whether the
+/// simulation succeeded — reaches a policy decision, so a dishonest endpoint
+/// cannot relax a rule by misreporting what a transaction did. The cost is
+/// stated in `docs/policies.md`: a spend the calldata does not declare, such as
+/// a router pulling tokens under a pre-existing allowance, is bounded by the
+/// target and approval rules that authorized it rather than by a token limit.
+pub fn evaluate_policy(plan: &ExecutionPlan, policy: &WalletPolicy) -> Vec<PolicyFinding> {
     let mut findings = Vec::new();
     let Some(chain) = policy.chain(plan.chain_id.as_str()) else {
         findings.push(error(
@@ -366,62 +367,6 @@ pub fn evaluate_policy(
         }
     }
 
-    let mut evaluated = BTreeSet::<String>::new();
-    for (token, rule) in &chain.tokens {
-        if token == "*" {
-            continue;
-        }
-        let observed = token_spends.and_then(|spends| find_spend(spends, token));
-        let Some(observed) = observed else {
-            findings.push(error(
-                "token_spend_not_measured",
-                format!(
-                    "{token} spend was not measured during simulation on chain {}",
-                    plan.chain_id
-                ),
-                None,
-            ));
-            continue;
-        };
-        evaluated.insert(token.clone());
-        if exceeds_limit(observed, &rule.max_spend_per_transaction) {
-            findings.push(error(
-                "token_spend_limit",
-                format!(
-                    "{token} observed spend {observed} exceeds {} on chain {}",
-                    rule.max_spend_per_transaction, plan.chain_id
-                ),
-                None,
-            ));
-        }
-    }
-    for (token, observed) in token_spends.into_iter().flatten() {
-        let normalized = normalize_address(token).unwrap_or_else(|_| token.to_ascii_lowercase());
-        if evaluated.contains(&normalized) {
-            continue;
-        }
-        let Some(rule) = exact_or_wildcard(&chain.tokens, &normalized) else {
-            findings.push(error(
-                "token_spend_not_allowed",
-                format!(
-                    "{normalized} has observed spend but no token policy on chain {}",
-                    plan.chain_id
-                ),
-                None,
-            ));
-            continue;
-        };
-        if exceeds_limit(observed, &rule.max_spend_per_transaction) {
-            findings.push(error(
-                "token_spend_limit",
-                format!(
-                    "{normalized} observed spend {observed} exceeds {} on chain {}",
-                    rule.max_spend_per_transaction, plan.chain_id
-                ),
-                None,
-            ));
-        }
-    }
     findings
 }
 
@@ -518,20 +463,18 @@ fn evaluate_transfer(
             Some(step),
         ));
     }
-    // The spend checked after simulation is whatever the token reported about
-    // itself, through its balance or its logs. A direct transfer also states
-    // its amount in calldata, which is the one number the token contract does
-    // not author, so the limit is enforced against that too. For a token
-    // covered only by a `*` rule this is the sole spend check there is: the
-    // wildcard is excluded from balance probes, and a token that emits no
-    // canonical Transfer log produces no observation to evaluate.
+    // The amount a direct transfer states in its own calldata is the one number
+    // neither the token contract nor the RPC authors, so it is the only spend
+    // figure this policy will bind. Tokens moved without appearing in calldata —
+    // pulled by a router, or spent under a pre-existing allowance — are bounded
+    // by the target and approval rules that authorized the call, not here.
     let declared = BigUint::from_bytes_be(&amount.to_be_bytes::<32>());
-    if exceeds_limit(&declared, &rule.max_spend_per_transaction) {
+    if exceeds_limit(&declared, &rule.max_transfer_amount) {
         findings.push(error(
             "token_spend_limit",
             format!(
                 "{token} transfer of {declared} exceeds {} on chain {}",
-                rule.max_spend_per_transaction, plan.chain_id
+                rule.max_transfer_amount, plan.chain_id
             ),
             Some(step),
         ));
@@ -696,7 +639,7 @@ fn token_grant(token: &str, rule: &TokenPolicy) -> String {
     };
     format!(
         "token {token}: spend up to {} per transaction; {recipients}",
-        amount_text(&rule.max_spend_per_transaction)
+        amount_text(&rule.max_transfer_amount)
     )
 }
 
@@ -846,11 +789,11 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
                 }
             }
             (Some(old), Some(new)) if old != new => {
-                if old.max_spend_per_transaction != new.max_spend_per_transaction {
+                if old.max_transfer_amount != new.max_transfer_amount {
                     lines.push(format!(
                         "~ chain {label}: token {token} spend per transaction {} → {}",
-                        amount_text(&old.max_spend_per_transaction),
-                        amount_text(&new.max_spend_per_transaction),
+                        amount_text(&old.max_transfer_amount),
+                        amount_text(&new.max_transfer_amount),
                     ));
                 }
                 let recipients: BTreeSet<&String> = old
@@ -975,7 +918,7 @@ fn normalize_token_map(map: &mut BTreeMap<String, TokenPolicy>) -> Result<()> {
     let mut output = BTreeMap::new();
     for (raw, mut rule) in std::mem::take(map) {
         validate_label(rule.label.as_deref())?;
-        validate_decimal(&rule.max_spend_per_transaction)?;
+        validate_decimal(&rule.max_transfer_amount)?;
         let mut recipients = BTreeMap::new();
         for (recipient, recipient_rule) in rule.transfer_recipients {
             validate_label(recipient_rule.label.as_deref())?;
@@ -1020,15 +963,6 @@ fn wildcard_successor<'a, T>(proposed: &'a BTreeMap<String, T>, key: &str) -> Op
         return None;
     }
     proposed.get("*")
-}
-
-fn find_spend<'a>(spends: &'a TokenSpends, token: &str) -> Option<&'a BigUint> {
-    spends.get(token).or_else(|| {
-        spends
-            .iter()
-            .find(|(address, _)| address.eq_ignore_ascii_case(token))
-            .map(|(_, value)| value)
-    })
 }
 
 fn key(address: Address) -> String {

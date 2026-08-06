@@ -215,7 +215,6 @@ fn recursively_unwraps_calibur_and_decodes_declared_target_error() {
         SimulationFailureCategory::ExecutionReverted,
         "execution reverted",
         Some(&encoded),
-        &default_networks()[0],
     );
     assert_eq!(
         failure.unwrapped_revert_data,
@@ -298,7 +297,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
         format!("{weth:#x}"),
         TokenPolicy {
             label: Some("Wrapped Ether".into()),
-            max_spend_per_transaction: "0".into(),
+            max_transfer_amount: "0".into(),
             transfer_recipients: BTreeMap::from([("*".into(), NamedAddressPolicy { label: None })]),
         },
     )]);

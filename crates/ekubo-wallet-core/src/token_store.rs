@@ -991,9 +991,7 @@ async fn aggregate<P: Provider>(
     let bytes = tokio::time::timeout(RPC_TIMEOUT, pending)
         .await
         .context("Multicall3 request timed out")?
-        .map_err(|error| {
-            crate::rpc::sanitized_rpc_error(network, &error).context("Multicall3 request failed")
-        })?;
+        .map_err(|error| crate::rpc::rpc_error(&error).context("Multicall3 request failed"))?;
     aggregate3Call::abi_decode_returns(&bytes).context("Multicall3 returned undecodable data")
 }
 

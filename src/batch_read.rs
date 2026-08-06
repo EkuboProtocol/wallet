@@ -6,7 +6,7 @@ use crate::{
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
     plan_fetch::{ArtifactReference, ArtifactType, FetchPolicy, fetch_reference},
-    rpc::{MULTICALL3_ADDRESS, sanitized_rpc_error},
+    rpc::{MULTICALL3_ADDRESS, rpc_error},
 };
 use alloy::{
     consensus::BlockHeader,
@@ -294,7 +294,7 @@ pub async fn batch_eth_call(
     })
     .await
     .context("batch read RPC setup timed out")?
-    .map_err(|error| sanitized_rpc_error(network, &error))?;
+    .map_err(|error| rpc_error(&error))?;
     ensure!(
         setup.0 == network.chain_id,
         "RPC reports chain {}, not {}",

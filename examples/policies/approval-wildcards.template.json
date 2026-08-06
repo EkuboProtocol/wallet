@@ -33,7 +33,7 @@
       "tokens": {
         "*": {
           "label": "Applied separately to each observed token, not pooled across them",
-          "max_spend_per_transaction": "100000000",
+          "max_transfer_amount": "100000000",
           "transfer_recipients": {}
         }
       }

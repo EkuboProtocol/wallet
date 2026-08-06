@@ -189,6 +189,7 @@ struct PublicWallet {
 struct PublicNetwork {
     name: String,
     chain_id: String,
+    rpc_url: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -781,7 +782,7 @@ struct SimulateOutput {
 impl WalletMcpServer {
     #[tool(
         name = "wallet_list",
-        description = "Discover all local wallets and globally configured network names and decimal chain IDs. Never returns private keys or RPC URLs.",
+        description = "Discover all local wallets and globally configured networks: name, decimal chain ID, and RPC URL. Never returns private keys.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_list(&self) -> Result<Json<WalletInventory>, ErrorData> {
@@ -803,6 +804,7 @@ impl WalletMcpServer {
                 .map(|network| PublicNetwork {
                     name: network.name,
                     chain_id: network.chain_id.to_string(),
+                    rpc_url: network.rpc_url.to_string(),
                 })
                 .collect(),
         }))
@@ -1477,7 +1479,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_network",
-        description = "Suggest one complete server-wide EVM network for the owner to confirm with `ekubo-wallet network review`. Adds nothing: a proposal naming a chain ID that is already configured is an edit of that network, one naming a chain ID that is not is an addition, and neither takes effect until the owner accepts it in the terminal. The RPC endpoint is admitted (public https, no credentials, no private address) when proposed and its chain ID is verified when accepted. RPC URLs are stored locally and never returned by wallet_list.",
+        description = "Suggest one complete server-wide EVM network for the owner to confirm with `ekubo-wallet network review`. Adds nothing: a proposal naming a chain ID that is already configured is an edit of that network, one naming a chain ID that is not is an addition, and neither takes effect until the owner accepts it in the terminal. The RPC endpoint is admitted (public https, no credentials, no private address) when proposed and its chain ID is verified when accepted.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

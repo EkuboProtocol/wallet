@@ -44,7 +44,7 @@ fn wildcard_token_policy(limit: &str) -> WalletPolicy {
                 "targets": { "*": { "allow_any_calldata": true } },
                 "tokens": {
                     "*": {
-                        "max_spend_per_transaction": limit,
+                        "max_transfer_amount": limit,
                         "transfer_recipients": { "*": {} }
                     }
                 }
@@ -108,7 +108,7 @@ fn every_level_that_falls_back_says_so() {
                     "*": { "tokens": { "*": { "max_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935" } } }
                 },
                 "tokens": { "0x5555555555555555555555555555555555555555": {
-                    "max_spend_per_transaction": "10",
+                    "max_transfer_amount": "10",
                     "transfer_recipients": {
                         "0x6666666666666666666666666666666666666666": {},
                         "*": {}
@@ -123,7 +123,7 @@ fn every_level_that_falls_back_says_so() {
                     "*": { "tokens": { "*": { "max_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935" } } }
                 },
                 "tokens": { "0x5555555555555555555555555555555555555555": {
-                    "max_spend_per_transaction": "10",
+                    "max_transfer_amount": "10",
                     "transfer_recipients": { "*": {} }
                 } }
             } }
@@ -166,17 +166,11 @@ fn removing_a_rule_with_no_wildcard_is_still_a_removal() {
 
 #[test]
 fn a_wildcard_token_rule_bounds_what_a_transfer_declares() {
-    // A token whose Transfer event is not the canonical three-topic shape
-    // produces no observed spend, and `*` is excluded from the balance
-    // probes, so there was nothing for the limit to be measured against.
-    // That made naming a token strictly stronger than covering it with a
-    // wildcard — the opposite of what writing `*` reads like.
+    // The declared amount in the transfer's own calldata is the only spend
+    // figure the policy binds, so a wildcard rule constrains a transfer
+    // exactly as a named one does. Nothing here consults the simulation.
     let policy = wildcard_token_policy("1000000");
-    let findings = evaluate_policy(
-        &transfer_plan_of(U256::from(2_000_000_u64)),
-        &policy,
-        Some(&BTreeMap::new()),
-    );
+    let findings = evaluate_policy(&transfer_plan_of(U256::from(2_000_000_u64)), &policy);
     assert!(!policy_allows(&findings), "{findings:?}");
     assert!(
         findings
@@ -189,26 +183,14 @@ fn a_wildcard_token_rule_bounds_what_a_transfer_declares() {
 #[test]
 fn a_transfer_within_the_wildcard_limit_still_passes() {
     let policy = wildcard_token_policy("1000000");
-    let findings = evaluate_policy(
-        &transfer_plan_of(U256::from(1_000_000_u64)),
-        &policy,
-        Some(&BTreeMap::new()),
-    );
+    let findings = evaluate_policy(&transfer_plan_of(U256::from(1_000_000_u64)), &policy);
     assert!(policy_allows(&findings), "{findings:?}");
 }
 
 #[test]
 fn default_policy_allows_transfer_and_normalizes_keys() {
     let policy = WalletPolicy::allow_all_with_approval();
-    let spends = BTreeMap::from([(
-        "0x2222222222222222222222222222222222222222".into(),
-        BigUint::from(1_u8),
-    )]);
-    assert!(policy_allows(&evaluate_policy(
-        &transfer_plan(),
-        &policy,
-        Some(&spends)
-    )));
+    assert!(policy_allows(&evaluate_policy(&transfer_plan(), &policy)));
 }
 
 #[test]
@@ -220,11 +202,7 @@ fn exact_chain_replaces_wildcard() {
         }
     }))
     .unwrap();
-    assert!(!policy_allows(&evaluate_policy(
-        &transfer_plan(),
-        &policy,
-        Some(&BTreeMap::new())
-    )));
+    assert!(!policy_allows(&evaluate_policy(&transfer_plan(), &policy)));
 }
 
 #[test]
@@ -289,7 +267,7 @@ fn policy_diff_is_minimized_and_permission_level() {
                 },
                 "tokens": {
                     "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
-                        "max_spend_per_transaction": "5000000",
+                        "max_transfer_amount": "5000000",
                         "transfer_recipients": {
                             "0x3333333333333333333333333333333333333333": {}
                         }

@@ -2,7 +2,7 @@ use crate::{
     config::{NetworkConfig, WalletMetadata},
     core::{execution_plan::ExecutionPlan, policy::policy_denies},
     custody::{KeyStore, load_matching_signer},
-    rpc::{sanitize_rpc_message, sanitized_rpc_error, transaction_receipt, verify_chain_id},
+    rpc::{rpc_error, transaction_receipt, verify_chain_id},
     simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
 };
 use alloy::{
@@ -223,7 +223,7 @@ pub async fn prepare_execution(
     })
     .await
     .context("transaction preparation RPC timed out")?
-    .map_err(|error| sanitized_rpc_error(network, &error))?;
+    .map_err(|error| rpc_error(&error))?;
     ensure!(
         prepared.0 == network.chain_id,
         "RPC reports chain {}, not {}",
@@ -702,7 +702,7 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
     })
     .await
     .context("cancellation preparation RPC timed out")?
-    .map_err(|error| sanitized_rpc_error(network, &error))?;
+    .map_err(|error| rpc_error(&error))?;
     ensure!(
         chain_id == network.chain_id,
         "RPC reports chain {chain_id}, not {}",
@@ -812,7 +812,7 @@ async fn send_exact_bytes(
             match tokio::time::timeout(RPC_TIMEOUT, provider.send_raw_transaction(&bytes)).await {
                 Ok(Ok(pending)) if pending.tx_hash() == &hash => None,
                 Ok(Ok(_)) => Some("RPC returned an unexpected transaction hash".to_owned()),
-                Ok(Err(error)) => Some(sanitize_rpc_message(network, &error.to_string())),
+                Ok(Err(error)) => Some(error.to_string()),
                 Err(_) => Some("transaction submission RPC timed out".to_owned()),
             };
         if let Some(failure) = failure {

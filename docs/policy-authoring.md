@@ -26,7 +26,7 @@ starting from the exact document and revision returned by wallet_get_policy.
   `allowed_selectors` map of exact four-byte selectors.
 - `approval_spenders`: which spenders may receive ERC-20 approvals (including
   recognized EIP-712 permits), per token, with `max_amount` caps.
-- `tokens`: per-token `max_spend_per_transaction` (measured from the transfer
+- `tokens`: per-token `max_transfer_amount` (measured from the transfer
   activity of the plan's simulation) and the exact `transfer_recipients`
   allowed.
 

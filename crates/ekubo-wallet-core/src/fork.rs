@@ -28,7 +28,7 @@
 use crate::{
     config::NetworkConfig,
     core::execution_plan::ExecutionPlan,
-    rpc::sanitized_rpc_error,
+    rpc::rpc_error,
     simulation::{
         ExecutionMode, PlannedCall, delegation_override, effective_gas_limit, planned_call,
         planned_request, simulation_slot,
@@ -409,7 +409,7 @@ pub async fn pin_parent_block(network: &NetworkConfig) -> Result<ForkParent> {
     })
     .await
     .context("fork parent-block RPC timed out")?
-    .map_err(|error| sanitized_rpc_error(network, &error))?;
+    .map_err(|error| rpc_error(&error))?;
     ensure!(
         chain_id == network.chain_id,
         "RPC reports chain {chain_id}, not {}",
@@ -479,7 +479,7 @@ pub async fn execute_reads(
     )
     .await
     .context("fork eth_simulateV1 request timed out")?
-    .map_err(|error| sanitized_rpc_error(network, &error))?;
+    .map_err(|error| rpc_error(&error))?;
 
     let mut simulated = validate_replay(
         preface.parent,

@@ -81,7 +81,6 @@ broadcast.
 | Signing hash re-derived from stored payload on every read | `typed_data::TypedDataStore::read`, `message::MessageStore::read` |
 | Terminal text safety (control chars and bidi overrides) | `sanitize` (the one disallowed-set), re-exported through `render` |
 | Descriptor interpretation is display-only and bounded | `clear_signing` (vendored full ERC-7730 registry embedded by `build.rs`; the pinned `clear-signing` crate renders; every output line passes `sanitize` with length and count caps; nothing in the signing path reads a descriptor) |
-| RPC endpoint and credentials never echo in errors | `rpc::sanitize_rpc_message` / `rpc::sanitized_rpc_error` (the one redactor) |
 | Encrypted store configuration and fail-closed startup | `policy_store::PolicyStore::open`, `policy_store::verify_integrity`, `policy_store::load_or_create_database_key` |
 | Schema changes underneath a live server refuse requests | `policy_store::PolicyStore::assert_schema_current`, called from the MCP `tool_gate` |
 | Legal acceptance gates every tool | MCP `tool_gate` (binary crate) over `legal::require_status_allows_use` (core) |

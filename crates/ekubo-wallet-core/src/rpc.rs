@@ -84,20 +84,8 @@ impl ReceiptStatus {
     }
 }
 
-/// The scheme, host, and port of an RPC URL, with any userinfo, path, and query
-/// removed. Provider credentials commonly live in the path or query, so this is
-/// the most that may be shown without disclosing them.
-#[must_use]
-pub fn rpc_origin(url: &url::Url) -> String {
-    let host = url.host_str().unwrap_or("<invalid-host>");
-    url.port().map_or_else(
-        || format!("{}://{host}", url.scheme()),
-        |port| format!("{}://{host}:{port}", url.scheme()),
-    )
-}
-
 pub async fn verify_chain_id(network: &NetworkConfig) -> Result<()> {
-    let observed = with_timeout(network, async {
+    let observed = with_timeout(async {
         ProviderBuilder::new()
             .connect_http(network.rpc_url.clone())
             .get_chain_id()
@@ -122,16 +110,10 @@ pub async fn wallet_status(
     }
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let (chain_id, balance, transaction_count, code) = tokio::try_join!(
-        timeout_call(network, provider.get_chain_id()),
-        timeout_call(network, async {
-            provider.get_balance(wallet.address).await
-        }),
-        timeout_call(network, async {
-            provider.get_transaction_count(wallet.address).await
-        }),
-        timeout_call(network, async {
-            provider.get_code_at(wallet.address).await
-        }),
+        with_timeout(provider.get_chain_id()),
+        with_timeout(async { provider.get_balance(wallet.address).await }),
+        with_timeout(async { provider.get_transaction_count(wallet.address).await }),
+        with_timeout(async { provider.get_code_at(wallet.address).await }),
     )?;
     ensure!(
         chain_id == network.chain_id,
@@ -172,16 +154,14 @@ async fn fork_wallet_status(
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let pinned = BlockId::number(preface.parent.number);
     let (chain_id, transaction_count, code) = tokio::try_join!(
-        timeout_call(network, provider.get_chain_id()),
-        timeout_call(network, async {
+        with_timeout(provider.get_chain_id()),
+        with_timeout(async {
             provider
                 .get_transaction_count(wallet.address)
                 .block_id(pinned)
                 .await
         }),
-        timeout_call(network, async {
-            provider.get_code_at(wallet.address).block_id(pinned).await
-        }),
+        with_timeout(async { provider.get_code_at(wallet.address).block_id(pinned).await }),
     )?;
     ensure!(
         chain_id == network.chain_id,
@@ -214,8 +194,8 @@ pub async fn transaction_receipt(
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let (chain_id, receipt) = tokio::try_join!(
-        timeout_call(network, provider.get_chain_id()),
-        timeout_call(network, provider.get_transaction_receipt(hash)),
+        with_timeout(provider.get_chain_id()),
+        with_timeout(provider.get_transaction_receipt(hash)),
     )?;
     ensure!(
         chain_id == network.chain_id,
@@ -262,8 +242,8 @@ pub async fn transaction_receipt_details(
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let (chain_id, receipt) = tokio::try_join!(
-        timeout_call(network, provider.get_chain_id()),
-        timeout_call(network, provider.get_transaction_receipt(hash)),
+        with_timeout(provider.get_chain_id()),
+        with_timeout(provider.get_transaction_receipt(hash)),
     )?;
     ensure!(
         chain_id == network.chain_id,
@@ -298,8 +278,8 @@ pub async fn transaction_receipt_details(
 pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let (chain_id, block_number) = tokio::try_join!(
-        timeout_call(network, provider.get_chain_id()),
-        timeout_call(network, provider.get_block_number()),
+        with_timeout(provider.get_chain_id()),
+        with_timeout(provider.get_block_number()),
     )?;
     ensure!(
         chain_id == network.chain_id,
@@ -316,10 +296,8 @@ pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
 pub async fn mined_transaction_count(network: &NetworkConfig, address: Address) -> Result<u64> {
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let (chain_id, count) = tokio::try_join!(
-        timeout_call(network, provider.get_chain_id()),
-        timeout_call(network, async {
-            provider.get_transaction_count(address).latest().await
-        }),
+        with_timeout(provider.get_chain_id()),
+        with_timeout(async { provider.get_transaction_count(address).latest().await }),
     )?;
     ensure!(
         chain_id == network.chain_id,
@@ -337,8 +315,8 @@ pub async fn transaction_known(network: &NetworkConfig, transaction_hash: &str) 
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let (chain_id, transaction) = tokio::try_join!(
-        timeout_call(network, provider.get_chain_id()),
-        timeout_call(network, provider.get_transaction_by_hash(hash)),
+        with_timeout(provider.get_chain_id()),
+        with_timeout(provider.get_transaction_by_hash(hash)),
     )?;
     ensure!(
         chain_id == network.chain_id,
@@ -348,94 +326,22 @@ pub async fn transaction_known(network: &NetworkConfig, transaction_hash: &str) 
     Ok(transaction.is_some())
 }
 
-async fn with_timeout<T, E>(
-    network: &NetworkConfig,
-    future: impl Future<Output = std::result::Result<T, E>>,
-) -> Result<T>
+async fn with_timeout<T, E>(future: impl Future<Output = std::result::Result<T, E>>) -> Result<T>
 where
     E: std::fmt::Display,
 {
     tokio::time::timeout(RPC_TIMEOUT, future)
         .await
         .context("RPC request timed out")?
-        .map_err(|error| sanitized_rpc_error(network, &error))
+        .map_err(|error| rpc_error(&error))
 }
 
-async fn timeout_call<T, E>(
-    network: &NetworkConfig,
-    future: impl Future<Output = std::result::Result<T, E>>,
-) -> Result<T>
-where
-    E: std::fmt::Display,
-{
-    with_timeout(network, future).await
-}
-
-/// Strips the configured RPC endpoint from text before it can reach an agent
-/// or a log. The exact URL collapses to `<rpc-url>`, and because some
-/// providers carry credentials as URL userinfo, any `user:password@host` form
-/// collapses to the bare host as well. Every module that surfaces an RPC
-/// error goes through this one implementation.
-#[must_use]
-pub fn sanitize_rpc_message(network: &NetworkConfig, message: &str) -> String {
-    let url = &network.rpc_url;
-    // The whole URL first: once a component has been replaced, the full string
-    // can no longer match.
-    let mut sanitized = message.replace(url.as_str(), "<rpc-url>");
-    // A provider echoes fragments of the endpoint far more often than the
-    // whole of it, and the whole-URL replace above only fires on this
-    // process's exact spelling — a re-normalized form, an added query, or a
-    // path quoted on its own all miss it. The path and query are where keys
-    // usually live: `/v3/<KEY>` is the most common provider layout there is,
-    // and `?apikey=` the next. Neither can be told apart from an innocent
-    // path, so both are redacted whole. `rpc_origin` already documents scheme,
-    // host, and port as the most that may be shown; this brings the sanitizer
-    // in line with that.
-    if let Some(query) = url.query()
-        && !query.is_empty()
-    {
-        sanitized = sanitized.replace(query, "<redacted>");
-    }
-    let path = url.path();
-    if path.len() > 1 {
-        sanitized = sanitized.replace(path, "<redacted>");
-    }
-    let username = url.username();
-    let password = url.password();
-    if (!username.is_empty() || password.is_some())
-        && let Some(host) = url.host_str()
-    {
-        // `Url::authority` yields whichever form this URL actually has —
-        // `user:pass@host:port`, `user@host:port`, or `:pass@host:port`. The
-        // previous single hand-built `user:pass@host` pattern matched none of
-        // them but the first, so a URL carrying only a username produced the
-        // pattern `KEY:@host`, which no provider ever echoes, and the key
-        // survived. Which endpoint failed is worth keeping, so the authority
-        // collapses to its host and port rather than to a placeholder.
-        let bare = url
-            .port()
-            .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
-        sanitized = sanitized.replace(url.authority(), &bare);
-        // A provider may also quote a credential on its own, outside any
-        // authority it echoes.
-        if let Some(password) = password {
-            sanitized = sanitized.replace(password, "<redacted>");
-        }
-        if !username.is_empty() {
-            sanitized = sanitized.replace(username, "<redacted>");
-        }
-    }
-    sanitized
-}
-
-pub fn sanitized_rpc_error(
-    network: &NetworkConfig,
-    error: &impl std::fmt::Display,
-) -> anyhow::Error {
-    anyhow::anyhow!(
-        "RPC request failed: {}",
-        sanitize_rpc_message(network, &error.to_string())
-    )
+/// One shared spelling for a failed RPC request. The error passes through
+/// unredacted, endpoint and all: the RPC URL is configuration, and a provider
+/// credential embedded in it is read-only and easy to rotate, so which exact
+/// endpoint failed is worth more than hiding it.
+pub fn rpc_error(error: &impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("RPC request failed: {error}")
 }
 
 /// Parses an EIP-7702 delegation designator: the 23-byte runtime code form

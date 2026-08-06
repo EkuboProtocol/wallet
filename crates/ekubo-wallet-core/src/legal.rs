@@ -195,9 +195,7 @@ pub fn privacy_policy() -> String {
         let _ = writeln!(
             text,
             "- {} (chain {}): {}",
-            network.name,
-            network.chain_id,
-            crate::rpc::rpc_origin(&network.rpc_url)
+            network.name, network.chain_id, network.rpc_url
         );
     }
     text.push_str(PRIVACY_POLICY_CLOSING);

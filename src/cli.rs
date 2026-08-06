@@ -3722,7 +3722,7 @@ async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()
         verify_chain_id(&proposal).await.map_err(|_| {
             anyhow::anyhow!(
                 "the RPC at {} did not answer eth_chainId with chain {}; nothing was written",
-                ekubo_wallet_core::rpc::rpc_origin(&proposal.rpc_url),
+                proposal.rpc_url,
                 proposal.chain_id
             )
         })?;
