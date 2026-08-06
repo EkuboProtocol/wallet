@@ -40,13 +40,29 @@ procedure is in [docs/releasing.md](docs/releasing.md).
 ## Interactive terminal UX uses ratatui
 
 `ratatui` (crossterm backend, sharing the existing crossterm dependency) is the
-approved direction, and `src/tx_browser.rs` is the pattern: alternate screen,
-per-frame layout so resizing cannot break it, and a toned `Span`/`Line`
-document model reusing `tui::Tone`. Extend that approach for new or reworked
-list and detail views rather than adding `inquire` prompts — inquire sizes its
-page once and breaks on short or resized terminals. `tui.rs`'s confirm and
-select helpers still wrap inquire, and `cli.rs` and `address_book_browser.rs`
-still call its text and password prompts — those are the migration candidates.
+only terminal UI library here; `inquire` is gone. `src/tx_browser.rs` is the
+pattern: alternate screen, per-frame layout so resizing cannot break it, and a
+toned `Span`/`Line` document model reusing `tui::Tone`.
+
+The rule that matters now is not which library but **one command, one screen
+mode**. `src/fullscreen.rs` draws on the alternate screen; `tui.rs`'s
+`confirm`, `pick`, and `text` open an inline viewport at the cursor and print
+the line they answered into the scrollback. Both are ratatui, and mixing them
+inside one command is the defect: the terminal flips modes at every step and
+the finished prompts pile up behind the full-screen view. That is what left
+half-typed address-book forms on the screen after the browser exited.
+
+So: a command that shows any full-screen surface stays full-screen to its last
+question. Build from `fullscreen`'s pieces — `pick_table`, `edit_form`,
+`confirm_review`, `TextField`, `decision_pane`, `SearchableTable` — and let
+only the finished result reach the scrollback, once, after the screen is
+released. A command that never opens a screen may use the inline prompts
+throughout; `wallet create`'s starting-policy question and the inline approval
+fallback are the two that legitimately do.
+
+The one unavoidable handover is platform owner authentication: a polkit text
+agent prompts on the same terminal, so release the screen around it and
+re-enter afterwards, as `address_book_browser` does.
 
 ## Judge refactors on maintainability, not audit cost
 
