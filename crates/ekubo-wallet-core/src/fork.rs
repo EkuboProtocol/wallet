@@ -543,7 +543,7 @@ where
 mod tests {
     use super::*;
     use crate::core::execution_plan::{
-        DecimalU256, ExecutionStep, ExecutionStepKind, PlannedTransaction, SubmitCondition,
+        DecimalU256, ExecutionStep, ExecutionStepKind, PlannedTransaction,
     };
     use alloy::primitives::Bytes;
 
@@ -566,7 +566,6 @@ mod tests {
                 .map(|index| ExecutionStep {
                     step: u32::try_from(index + 1).unwrap(),
                     kind: ExecutionStepKind::Execution,
-                    submit_condition: SubmitCondition::Always,
                     transaction: PlannedTransaction {
                         chain_id: DecimalU256::new("1").unwrap(),
                         from: sender,
@@ -575,12 +574,11 @@ mod tests {
                         value: DecimalU256::new("0").unwrap(),
                         gas: None,
                     },
-                    eip1193: None,
                     revert_decode: None,
                 })
                 .collect(),
-            execution_policy: None,
-            adapters: None,
+            required_capabilities: Vec::new(),
+            extensions: serde_json::Map::new(),
             simulation_failure_policy: None,
         }
     }

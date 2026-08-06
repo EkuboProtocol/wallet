@@ -23,7 +23,13 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// databases nobody outside development ever held, so carrying upgrade steps
 /// for them would have been machinery for a population of zero — and it would
 /// have told a first-time owner that their brand-new database had a history.
-const SCHEMA_VERSION: i64 = 1;
+// Schema 2 (2026-08-06): execution plans dropped submit_condition /
+// execution_policy / adapters / eip1193 and gained required_capabilities /
+// extensions, which changes both stored plan_json parsing and plan_digest
+// derivation, and pending_transactions gained plan_source. Re-hashing rows
+// the owner already approved would re-label signed history, so pre-change
+// databases are refused instead of migrated.
+const SCHEMA_VERSION: i64 = 2;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.policy-database-key.v1";
@@ -173,9 +179,17 @@ impl PolicyStore {
             }
             Some(version) => version,
         };
+        if version < SCHEMA_VERSION {
+            anyhow::bail!(
+                "policy database schema {version} predates the schema this build understands \
+                 ({SCHEMA_VERSION}); this pre-release build does not migrate old databases — \
+                 move the database aside and let ekubo-wallet create a fresh one (any \
+                 in-flight pending rows are lost with it)"
+            );
+        }
         ensure!(
             version == SCHEMA_VERSION,
-            "policy database schema {version} is not the schema this build understands \
+            "policy database schema {version} is newer than the schema this build understands \
              ({SCHEMA_VERSION}); upgrade ekubo-wallet"
         );
         verify_integrity(&connection)?;
@@ -577,6 +591,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  chain_id TEXT NOT NULL,
                  plan_json TEXT NOT NULL,
                  plan_digest TEXT NOT NULL,
+                 plan_source TEXT,
                  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed', 'submitting',
@@ -1005,7 +1020,10 @@ mod tests {
             .err()
             .expect("a foreign schema must be refused")
             .to_string();
-        assert!(error.contains("schema 9 is not the schema"), "{error}");
+        assert!(
+            error.contains("schema 9 is newer than the schema"),
+            "{error}"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
@@ -1026,7 +1044,7 @@ mod tests {
             .err()
             .expect("a newer schema must be refused")
             .to_string();
-        assert!(error.contains("is not the schema"), "{error}");
+        assert!(error.contains("is newer than the schema"), "{error}");
     }
 
     #[test]
@@ -1034,7 +1052,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("policies.db");
         let store = PolicyStore::open(&path, &key(3)).unwrap();
-        assert_eq!(schema_version(&store.connection).unwrap(), Some(1));
+        assert_eq!(
+            schema_version(&store.connection).unwrap(),
+            Some(SCHEMA_VERSION)
+        );
         // Every table the build expects exists from creation; nothing arrives
         // by later upgrade.
         for table in [

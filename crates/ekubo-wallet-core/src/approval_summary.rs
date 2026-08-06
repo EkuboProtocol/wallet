@@ -540,15 +540,12 @@ fn word_address(word: &[u8]) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::execution_plan::{
-        DecimalU256, ExecutionStepKind, PlannedTransaction, SubmitCondition,
-    };
+    use crate::core::execution_plan::{DecimalU256, ExecutionStepKind, PlannedTransaction};
 
     fn step(step_number: u32, to: Address, data: Vec<u8>) -> ExecutionStep {
         ExecutionStep {
             step: step_number,
             kind: ExecutionStepKind::Execution,
-            submit_condition: SubmitCondition::Always,
             transaction: PlannedTransaction {
                 chain_id: DecimalU256::new("1").unwrap(),
                 from: Address::repeat_byte(0x11),
@@ -557,7 +554,6 @@ mod tests {
                 value: DecimalU256::new("0").unwrap(),
                 gas: None,
             },
-            eip1193: None,
             revert_decode: None,
         }
     }

@@ -372,9 +372,8 @@ async fn transaction_approval_request(
         request = request.fact(
             format!("Call {}", step.step),
             format!(
-                "kind={:?}; condition={:?}; target={:#x}; value={} wei; selector={selector}; calldata={} bytes",
+                "kind={:?}; target={:#x}; value={} wei; selector={selector}; calldata={} bytes",
                 step.kind,
-                step.submit_condition,
                 step.transaction.to,
                 step.transaction.value,
                 calldata.len(),

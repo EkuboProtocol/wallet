@@ -146,7 +146,6 @@ fn plan(chain_id: u64, calls: Vec<(Address, Vec<u8>)>) -> ExecutionPlan {
             json!({
                 "step": index + 1,
                 "kind": "execution",
-                "submit_condition": "always",
                 "transaction": {
                     "chain_id": chain_id.to_string(),
                     "from": format!("{:#x}", sender()),

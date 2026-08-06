@@ -160,7 +160,6 @@ mod tests {
             "ordered_steps": [{
                 "step": 1,
                 "kind": "execution",
-                "submit_condition": "always",
                 "transaction": {
                     "chain_id": "1",
                     "from": "0x1111111111111111111111111111111111111111",

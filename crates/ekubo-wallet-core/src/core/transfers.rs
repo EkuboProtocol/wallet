@@ -1,6 +1,5 @@
 use crate::core::execution_plan::{
     DecimalU256, ExecutionPlan, ExecutionStep, ExecutionStepKind, PlannedTransaction,
-    SubmitCondition,
 };
 use alloy::{
     primitives::{Address, Bytes, U256},
@@ -76,7 +75,6 @@ fn make_plan(
             .map(|(index, (to, data, value))| ExecutionStep {
                 step: u32::try_from(index + 1).expect("number of calls fits u32"),
                 kind: ExecutionStepKind::Execution,
-                submit_condition: SubmitCondition::Always,
                 transaction: PlannedTransaction {
                     chain_id: chain_id.clone(),
                     from: sender,
@@ -85,12 +83,11 @@ fn make_plan(
                     value,
                     gas: None,
                 },
-                eip1193: None,
                 revert_decode: None,
             })
             .collect(),
-        execution_policy: None,
-        adapters: None,
+        required_capabilities: Vec::new(),
+        extensions: serde_json::Map::new(),
         simulation_failure_policy: None,
     };
     plan.validate()?;

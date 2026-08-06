@@ -74,16 +74,6 @@ pub enum ExecutionStepKind {
     Other,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SubmitCondition {
-    Always,
-    IfRequiredByCurrentAllowance,
-    AfterPriorRequiredStepsHaveSuccessfulReceipts,
-    AfterExecutionHasSuccessfulReceiptIfAllowanceRemains,
-    AfterRequiredSignatureIsSupplied,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PlannedTransaction {
@@ -104,11 +94,7 @@ pub struct PlannedTransaction {
 pub struct ExecutionStep {
     pub step: u32,
     pub kind: ExecutionStepKind,
-    pub submit_condition: SubmitCondition,
     pub transaction: PlannedTransaction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::abi_decoder::any_json_object_schema")]
-    pub eip1193: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert_decode: Option<RevertDecodePlan>,
 }
@@ -178,6 +164,15 @@ pub struct SimulationFailurePolicy {
     pub simulation_setup_error: SimulationFailureDirective,
 }
 
+/// The behaviors this wallet implements that a plan may require. A plan
+/// listing anything else is rejected outright: a capability the wallet cannot
+/// honor silently is a plan it must not execute. `atomic_batch` is trivially
+/// satisfied — multi-step plans always execute as one atomic Calibur EIP-7702
+/// batch with `revertOnFailure` (see `simulation::planned_call`).
+const SUPPORTED_CAPABILITIES: &[&str] = &["atomic_batch"];
+const MAX_REQUIRED_CAPABILITIES: usize = 32;
+const MAX_EXTENSIONS_BYTES: usize = 64 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
@@ -188,12 +183,15 @@ pub struct ExecutionPlan {
     pub sender: Address,
     #[schemars(length(min = 1, max = 4096))]
     pub ordered_steps: Vec<ExecutionStep>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Capabilities this plan requires of the executing wallet; every entry
+    /// must be in `SUPPORTED_CAPABILITIES` or the plan is rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_capabilities: Vec<String>,
+    /// Producer extension bag: ignored by this wallet, but size-bounded so it
+    /// cannot become a smuggling or bloat channel.
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     #[schemars(schema_with = "crate::abi_decoder::any_json_object_schema")]
-    pub execution_policy: Option<Map<String, Value>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "crate::abi_decoder::any_json_object_schema")]
-    pub adapters: Option<Map<String, Value>>,
+    pub extensions: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simulation_failure_policy: Option<SimulationFailurePolicy>,
 }
@@ -221,6 +219,24 @@ impl ExecutionPlan {
         ensure!(
             self.caip2_chain_id == format!("eip155:{}", self.chain_id),
             "CAIP-2 chain does not match chain_id"
+        );
+        ensure!(
+            self.required_capabilities.len() <= MAX_REQUIRED_CAPABILITIES,
+            "execution plan lists more than {MAX_REQUIRED_CAPABILITIES} required capabilities"
+        );
+        for capability in &self.required_capabilities {
+            ensure!(
+                capability.len() <= 64 && capability.bytes().all(|byte| byte.is_ascii_graphic()),
+                "required capability names must be short printable ASCII"
+            );
+            ensure!(
+                SUPPORTED_CAPABILITIES.contains(&capability.as_str()),
+                "this wallet does not implement required capability {capability:?}; supported: {SUPPORTED_CAPABILITIES:?}"
+            );
+        }
+        ensure!(
+            serde_json::to_vec(&self.extensions)?.len() <= MAX_EXTENSIONS_BYTES,
+            "execution plan extensions exceed {MAX_EXTENSIONS_BYTES} bytes"
         );
         if let Some(policy) = &self.simulation_failure_policy {
             ensure_directive(&policy.rpc_error)?;
@@ -267,6 +283,13 @@ impl ExecutionPlan {
         Ok(())
     }
 
+    /// Digest identity = exactly what gets broadcast plus the step labels
+    /// shown at approval: `schema_version`, `chain_id`, `sender`, and each
+    /// step's number, kind, and transaction (`chain_id`, `from`, `to`,
+    /// `data`, `value`). It deliberately excludes `gas`, `revert_decode`,
+    /// `simulation_failure_policy`, `required_capabilities`, and
+    /// `extensions`: none of those change the bytes the human's approval
+    /// binds.
     #[must_use]
     pub fn digest(&self) -> B256 {
         let steps = self
@@ -276,7 +299,6 @@ impl ExecutionPlan {
                 json!({
                     "step": step.step,
                     "kind": step.kind,
-                    "submit_condition": step.submit_condition,
                     "transaction": {
                         "chain_id": step.transaction.chain_id,
                         "from": format!("{:#x}", step.transaction.from),
@@ -318,7 +340,6 @@ mod tests {
             "ordered_steps": [{
                 "step": 1,
                 "kind": "execution",
-                "submit_condition": "always",
                 "transaction": {
                     "chain_id": "1",
                     "from": "0x1111111111111111111111111111111111111111",
@@ -335,7 +356,7 @@ mod tests {
         let parsed = ExecutionPlan::parse(plan()).unwrap();
         assert_eq!(
             format!("{:#x}", parsed.digest()),
-            "0x42716b445f3fba53b743e84bac446db55e3e1bda6fa71130dd9c16bbbc395b0b"
+            "0x93aeec006e55dfe0f54041d53c94387e08c504d4f3b3826cd3426dbc7da38ea5"
         );
     }
 

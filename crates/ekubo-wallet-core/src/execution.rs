@@ -1062,7 +1062,6 @@ mod tests {
                 json!({
                     "step": index + 1,
                     "kind": "execution",
-                    "submit_condition": "always",
                     "transaction": {
                         "chain_id": "1",
                         "from": sender,

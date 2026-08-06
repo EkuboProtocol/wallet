@@ -327,7 +327,6 @@ fn plan_data_uri(sender: Address) -> String {
         "ordered_steps": [{
             "step": 1,
             "kind": "execution",
-            "submit_condition": "always",
             "transaction": {
                 "chain_id": CHAIN_ID.to_string(),
                 "from": format!("{sender:#x}"),
