@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc af9742bc189894fce80660bd4de012c2b3cbe03867269d4eded20786aae8737b # shrinks to rule = Any([IsWallet])
+cc f42559778f2856154168b5d4e6684c35b86cf3e21b92be70e482f46e5ecc8d64 # shrinks to rule = Any([AnyValue, IsWallet])
+cc f8ec091b692487e30fa096266c6c3c7e2d82d4b360418c0e39662cdc42426ae8 # shrinks to rule = Any([All([])])

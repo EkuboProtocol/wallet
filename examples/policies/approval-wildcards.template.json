@@ -1,50 +1,39 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
-  "version": 2,
+  "version": 1,
   "chains": {
     "*": {
-      "label": "TEMPLATE: wildcard fallback that a per-chain entry can tighten",
+      "label": "TEMPLATE: the fallback a per-chain entry replaces outright",
       "max_calls_per_batch": 16,
-      "native": { "max_value_per_transaction": "0" },
-      "targets": {
-        "*": {
-          "label": "Any target, but only these two selectors",
-          "allowed_selectors": {
-            "0x095ea7b3": { "label": "approve(address,uint256)" },
-            "0xa9059cbb": { "label": "transfer(address,uint256)" }
-          }
-        }
-      },
-      "approval_spenders": {
-        "0x1111111111111111111111111111111111111111": {
-          "label": "TEMPLATE: an exact spender entry always wins over the wildcard below",
-          "tokens": {
-            "*": {
-              "label": "Up to 100 units of any six-decimal token",
-              "max_amount": "100000000"
+      "native_value": { "eq": "0" },
+      "rules": [
+        {
+          "effect": "allow",
+          "label": "Transfers, but only to an address the owner has named in the address book",
+          "calldata": {
+            "selector": {
+              "abi": "transfer(address to, uint256 amount)",
+              "args": { "to": "is_address_book" }
             }
           }
         },
-        "*": {
-          "label": "Every other spender is capped far lower",
-          "tokens": { "*": { "max_amount": "1000000" } }
+        {
+          "effect": "allow",
+          "label": "Revoking an allowance is always safe; granting one is not",
+          "calldata": {
+            "selector": {
+              "abi": "approve(address spender, uint256 amount)",
+              "args": { "amount": { "eq": "0" } }
+            }
+          }
         }
-      },
-      "tokens": {
-        "*": {
-          "label": "Applied separately to each observed token, not pooled across them",
-          "max_transfer_amount": "100000000",
-          "transfer_recipients": {}
-        }
-      }
+      ]
     },
     "8453": {
-      "label": "TEMPLATE: Base overrides the wildcard entirely rather than extending it",
+      "label": "TEMPLATE: Base replaces the wildcard entirely rather than extending it",
       "max_calls_per_batch": 4,
-      "native": { "max_value_per_transaction": "0" },
-      "targets": {},
-      "approval_spenders": {},
-      "tokens": {}
+      "native_value": { "eq": "0" },
+      "rules": []
     }
   }
 }

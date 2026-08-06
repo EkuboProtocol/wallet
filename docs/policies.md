@@ -1,49 +1,142 @@
 # Policies
 
-A policy is `chains` → decimal chain ID or `"*"` → address-keyed maps. The `"*"`
+A policy is `chains` → decimal chain ID or `"*"` → that chain's rules. The `"*"`
 entry applies only when no exact chain ID entry exists, so an exact entry
-replaces rather than extends the fallback. Without a wildcard, a permission for
-an address on one chain never applies to that address on another chain. Each
-chain policy independently configures the maximum calls in one atomic batch,
-native value per transaction, non-token targets with allowed four-byte selectors
-or an explicit any-calldata opt-in, approval spenders with per-token ceilings,
-and token policies with a direct-transfer amount limit and recipient maps. Exact
-address entries always take precedence over wildcards.
+replaces rather than extends the fallback. Without a wildcard, a permission on
+one chain never applies to another.
 
-Amounts are decimal strings in the asset's smallest unit: `10000000000` is
-10,000 units of a six-decimal token. There is no amount wildcard; use a
-deliberately large integer for an effectively unbounded ceiling. A wildcard
-token rule applies its limit separately to each token it covers rather than
-pooling unlike raw units.
+Each chain configures the maximum calls in one atomic batch, a `native_value`
+guard, and an unordered set of `rules`.
 
-Every predicate is decided from the execution plan's own bytes. Nothing the RPC
-reports — observed balances, transfer logs, gas, or whether the simulation
-succeeded — reaches a policy decision. That is deliberate: the configured
+## How a call is decided
+
+Every call in a plan is graded on its own, against the whole rule set:
+
+- any matching `deny` rule denies,
+- otherwise any matching `allow` rule allows,
+- otherwise the call is denied.
+
+Rules are a **set**, not a list. Order carries no meaning, and deny always beats
+allow, so a rule can be read without reading the rules around it. That is also
+what lets the permission diff shown before a policy is installed be a diff of
+the document rather than a simulation of it.
+
+A rule is a conjunction of optional predicate slots — `to`, `from`, `value`,
+`calldata` — plus its `effect`. **A slot that is absent constrains nothing.** A
+rule naming only `to` permits every function that contract has, including any
+batching entry point that forwards elsewhere; the permission diff says so out
+loud rather than leaving it to be inferred.
+
+## Predicates
+
+One predicate language applies to every slot and, through `selector`, to every
+decoded argument underneath it.
+
+| Predicate | Meaning |
+| --- | --- |
+| `"any_value"` | Matches anything, including calldata this policy cannot decode. |
+| `{"eq": "…"}` | Equal to one literal. |
+| `{"in": ["…", "…"]}` | Equal to one of a set. |
+| `"is_wallet"` | The address is this wallet. |
+| `"is_token"` | The address is a token the owner has confirmed locally. |
+| `"is_address_book"` | The address is a human-entered address-book entry. |
+| `{"selector": {"abi": "…", "args": {…}}}` | Calldata is a call to this exact function; `args` constrain its parameters by name. |
+| `{"each": …}` | Every element of an array satisfies the inner predicate. |
+| `{"any": [...]}` / `{"all": [...]}` / `{"not": …}` | Boolean combinators. |
+| `{"length": …}` | The element or byte count satisfies the inner predicate. |
+
+Literals are written one of exactly two ways: **hex with a `0x` prefix**, or
+**decimal with no prefix**. Bare hex is refused rather than guessed at, because
+`10` is a legal spelling of both sixteen and ten.
+
+`is_wallet` is what makes a rule portable — "the proceeds must come back to me"
+without naming an address. `is_address_book` is narrow, because entries are
+individually typed in by the owner. `is_token` is broad: it means "not a
+contract I have never heard of", not "one of these tokens".
+
+Note that `is_token` and `is_address_book` make a policy depend on the local
+token database and address book. Both are written only by human CLI actions —
+nothing reachable from an agent can add a row — and that is load-bearing rather
+than incidental, so `tests/boundary.rs` holds a tripwire on it.
+
+## Naming the function, not the selector
+
+A `selector` predicate carries the function's full signature and derives the
+four-byte selector from it. A policy therefore can never allowlist four bytes
+whose meaning it does not know, and a reviewer reads
+`approve(address spender, uint256 amount)` rather than `0x095ea7b3`.
+
+Every parameter must be named, because rules refer to arguments by name.
+Arguments are decoded strictly: the wallet re-encodes what it decoded and
+requires the original bytes back, which rejects trailing garbage, non-canonical
+offsets, and dirty address padding in one comparison. A rule cannot be satisfied
+by an alternate encoding that the target contract's decoder would read
+differently.
+
+Anything unanswerable is a non-match — calldata too short, a decode that fails,
+a predicate applied to the wrong shape — and since an unmatched call is denied,
+uncertainty denies.
+
+## Nested calls
+
+There is no special support for batching functions, and none is needed:
+`{"each": {"selector": …}}` over a `bytes[]` argument constrains each inner call
+using the same vocabulary as the outer one.
+
+```json
+"calldata": { "selector": {
+  "abi": "multicall(bytes[] data)",
+  "args": { "data": { "each": { "selector": {
+    "abi": "transfer(address to, uint256 amount)",
+    "args": { "to": "is_address_book" }
+  }}}}
+}}
+```
+
+A `bytes` argument left unconstrained is *unconstrained* — the wallet does not
+try to guess at an encoding it was not told about. Prefer plans that emit
+separate steps over plans that nest calls: this wallet already executes a
+multi-step plan as one atomic EIP-7702 Calibur batch, so a producer needing
+atomicity does not need a router's `multicall`, and separate steps are each
+graded on their own.
+
+## Native value
+
+`native_value` is a chain-level predicate applied to **every call**, on top of
+whichever rule matched. It is a guard, not a grant: no rule can widen it. Omit
+it and it is `{"eq": "0"}`, so a document that never mentions native value never
+sends any.
+
+## There are no amounts
+
+A per-transaction ceiling is not a spending limit when the same agent may ask
+again immediately, so the format does not offer one. What a rule bounds is
+*which* calls may be made, not how much they move. Never describe a policy as
+capping spend.
+
+## What a policy never reads
+
+Every predicate is decided from the execution plan's own bytes plus the local
+stores above. Nothing the RPC reports — observed balances, transfer logs, gas,
+or whether the simulation succeeded — reaches a policy decision. The configured
 endpoint is the only witness to a simulation, so a rule scored against what it
-reported is one a dishonest endpoint can relax by misreporting what a
-transaction did, while still reading like a limit that binds. A limit that
-silently stops binding is worse than no limit, because the author trusts it.
+reported is one a dishonest endpoint could relax by misreporting what a
+transaction did, while still reading like a limit that binds.
 
-The cost is a real gap, and it is better known than discovered. A token moved
-without appearing in calldata — pulled by a router, or spent by a counterparty
-under an allowance granted earlier — is not bounded by `max_transfer_amount`,
-because nothing in the plan declares that amount. What bounds it is whatever
-authorized the call in the first place: the `targets` entry and selector that
-permitted the router, and the `approval_spenders` ceiling that decided how much
-that spender could ever pull. Write those two as the real limit on a routed
-spend; `max_transfer_amount` bounds a direct `transfer` and nothing else.
+Simulation still gates signing: a plan that does not simulate successfully is
+refused whatever the policy says, and the balance changes a simulation reports
+are shown at approval time. Neither is a policy predicate — one is a
+precondition, the other a display.
 
-Simulation still runs, and still gates signing. A plan that does not simulate
-successfully is refused whatever the policy says, and the balance changes a
-simulation reports are shown at approval time so a human sees the predicted
-effect. Neither of those is a policy predicate: one is a precondition, the other
-is a display.
+A queued request has no expiry, and the document has no setting that gives it
+one. Nothing about what may be signed is decided by reading this machine's
+clock. A transaction that must not execute after some moment carries that
+deadline in the calldata the user approved, where the chain enforces it.
 
-Simulation is not a policy setting. Every plan is simulated before it can sign,
-and a simulation that does not succeed is an error finding of its own, so a
-reverting plan is never allowed no matter what the rest of the document
-permits. Policies written before this was fixed may still carry the retired
-`require_simulation` field; it is discarded when the document is read.
+`max_calls_per_batch` accepts up to 4096; real batches are bounded by the
+selected policy, memory, encoded transaction size, and the per-chain gas cap.
+
+## Files
 
 Policy documents have a generated [JSON Schema](../schemas/policy.schema.json)
 derived from the same types the wallet enforces. Print the current one with
@@ -54,11 +147,11 @@ for editor completion. Starting points live in [`examples/`](../examples):
 | --- | --- |
 | [`policy.json`](../examples/policy.json) | The allow-all profile, one of the two choices `wallet create` offers. |
 | [`policies/deny-all.json`](../examples/policies/deny-all.json) | Exactly what `policy require-approval` installs, and the default for imported wallets. |
-| [`policies/token-budget.template.json`](../examples/policies/token-budget.template.json) | One chain, one router, one token, with capped allowance and per-transaction spend. |
-| [`policies/approval-wildcards.template.json`](../examples/policies/approval-wildcards.template.json) | How exact entries override wildcards for spenders, tokens, and chains. |
+| [`policies/token-budget.template.json`](../examples/policies/token-budget.template.json) | One chain, one router, one token: a bounded approval, a swap paying back to this wallet, and a blanket deny on operator grants. |
+| [`policies/approval-wildcards.template.json`](../examples/policies/approval-wildcards.template.json) | How an exact chain entry replaces the wildcard, and how the metadata predicates read. |
 | [`policies/allow-all-with-approval.template.json`](../examples/policies/allow-all-with-approval.template.json) | Exactly what `policy allow-all` installs. |
 
-Template chain IDs, addresses, and selectors must be replaced and verified
+Template chain IDs, addresses, and signatures must be replaced and verified
 before use. An agent can help draft a copy, but applying it stays an explicit
 human CLI action:
 
@@ -70,19 +163,10 @@ ekubo-wallet policy show primary
 ```
 
 `policy validate` needs no wallet, no database, and no authentication, so a
-policy can be drafted and checked before anything exists to apply it to.
-
-A queued request has no expiry, and the policy document has no setting that
-gives it one: it waits until the user approves or rejects it, or until a policy
-change invalidates it. Nothing about what may be signed is decided by reading
-this machine's clock, which its owner — or anything running as them — can set
-to whatever they like. A transaction that must not execute after some moment
-carries that deadline in the calldata the user approved, where the chain
-enforces it and re-simulation at approval time surfaces it as a failure.
-
-`max_calls_per_batch` accepts up to 4096; the transfer and execution-plan tool
-schemas impose no list maximum of their own, so real batches are bounded by the
-selected policy, memory, encoded transaction size, and the per-chain gas cap.
+policy can be drafted and checked before anything exists to apply it to. It also
+type-checks every predicate against the signature it sits under, so a rule that
+could only ever fail is refused at install time rather than silently never
+matching at signing time.
 
 Policy changes increment a local revision and invalidate every approval that has
 not yet been signed.

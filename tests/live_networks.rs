@@ -95,6 +95,13 @@ fn wallet() -> WalletMetadata {
     }
 }
 
+fn policy_context() -> ekubo_wallet::core::predicate::PolicyContext {
+    ekubo_wallet::core::predicate::PolicyContext {
+        wallet: sender(),
+        ..ekubo_wallet::core::predicate::PolicyContext::default()
+    }
+}
+
 fn policy() -> StoredPolicy {
     StoredPolicy {
         wallet_id: "live-matrix".into(),
@@ -220,9 +227,10 @@ async fn simulate_retrying(
 ) -> SimulationResult {
     let mut delay = Duration::from_secs(2);
     for _ in 0..4 {
-        let result = simulate_execution(&wallet(), network, plan, &policy(), fork)
-            .await
-            .expect("simulation returns a result");
+        let result =
+            simulate_execution(&wallet(), network, plan, &policy(), &policy_context(), fork)
+                .await
+                .expect("simulation returns a result");
         let throttled = result
             .simulation
             .failure
@@ -235,7 +243,7 @@ async fn simulate_retrying(
         tokio::time::sleep(delay).await;
         delay *= 2;
     }
-    simulate_execution(&wallet(), network, plan, &policy(), fork)
+    simulate_execution(&wallet(), network, plan, &policy(), &policy_context(), fork)
         .await
         .expect("simulation returns a result")
 }
@@ -469,6 +477,7 @@ async fn simulation_failure_is_reported_and_blocks_signing(network: &NetworkConf
         network,
         &approve_plan(network.chain_id, spender(), 1_000),
         &policy(),
+        &policy_context(),
         None,
     )
     .await

@@ -139,6 +139,11 @@ fn no_token_contract_is_asked_for_its_decimals() {
 /// database only through a terminal confirmation and an OS presence check, and
 /// the way that erodes is a write helper called from a tool body because it was
 /// right there. These are the names of those helpers.
+///
+/// Since `is_token` and `is_address_book` exist, these rows also decide policy:
+/// a confirmed token or alias can satisfy a predicate the owner wrote, so an
+/// agent able to write one could grant itself authority. Display was already
+/// reason enough; authorization makes it load-bearing.
 #[test]
 fn the_mcp_server_cannot_write_stored_metadata() {
     // The whole file is production code: the tests that legitimately write
@@ -169,25 +174,34 @@ fn the_mcp_server_cannot_write_stored_metadata() {
 /// still reading, to whoever wrote the policy, like a limit that binds. The
 /// policy therefore decides everything from the execution plan's own bytes.
 ///
-/// `evaluate_policy` taking exactly the plan and the policy is what enforces
-/// that: with no channel for an observation to arrive through, the property is
-/// structural rather than a rule someone has to remember. This pins the
-/// signature so restoring such a channel has to be a deliberate act.
+/// `evaluate_policy` taking exactly the plan, the policy, and a resolved
+/// [`PolicyContext`] is what enforces that. The context carries only plain
+/// sets read out of the local, human-curated token and address-book databases,
+/// so `is_token` and `is_address_book` can be answered without giving the
+/// evaluator a store handle, a lock, or any way to reach the RPC. With no
+/// channel for an observation to arrive through, the property is structural
+/// rather than a rule someone has to remember. This pins the signature so
+/// restoring such a channel has to be a deliberate act.
+///
+/// Promoting those two stores from display metadata into authorization inputs
+/// is why their write paths must stay human-only; the assertion below is the
+/// tripwire for the MCP side of that.
 #[test]
 fn no_policy_predicate_can_consult_a_simulation() {
     let policy =
         fs::read_to_string(repository_root().join("crates/ekubo-wallet-core/src/core/policy.rs"))
             .unwrap();
 
-    let signature = policy
-        .lines()
-        .find(|line| line.starts_with("pub fn evaluate_policy"))
-        .expect("evaluate_policy must remain a single-line signature in policy.rs");
+    let declaration = policy
+        .split_once("pub fn evaluate_policy(")
+        .and_then(|(_, rest)| rest.split_once(" {"))
+        .map(|(head, _)| head.split_whitespace().collect::<Vec<_>>().join(" "))
+        .expect("evaluate_policy must remain declared in policy.rs");
     assert_eq!(
-        signature,
-        "pub fn evaluate_policy(plan: &ExecutionPlan, policy: &WalletPolicy) -> Vec<PolicyFinding> {",
-        "evaluate_policy grew a parameter; a policy decision takes the plan and the policy and \
-         nothing the RPC reported"
+        declaration,
+        "plan: &ExecutionPlan, policy: &WalletPolicy, context: &PolicyContext, ) -> Vec<PolicyFinding>",
+        "evaluate_policy grew a parameter; a policy decision takes the plan, the policy, and the \
+         resolved local metadata, and nothing the RPC reported"
     );
 
     for forbidden in ["TokenSpends", "token_spends", "crate::simulation"] {
@@ -195,6 +209,24 @@ fn no_policy_predicate_can_consult_a_simulation() {
             !policy.contains(forbidden),
             "policy.rs references {forbidden}; simulation observations must not reach a policy \
              predicate"
+        );
+    }
+
+    // The evaluator is handed resolved sets, never a store, so it cannot read
+    // anything that was not settled before the decision began.
+    let predicate = fs::read_to_string(
+        repository_root().join("crates/ekubo-wallet-core/src/core/predicate.rs"),
+    )
+    .unwrap();
+    for forbidden in [
+        "TokenStore",
+        "AddressBookStore",
+        "rusqlite",
+        "crate::simulation",
+    ] {
+        assert!(
+            !predicate.contains(forbidden),
+            "predicate.rs references {forbidden}; the predicate language reads resolved data only"
         );
     }
 }

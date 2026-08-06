@@ -46,7 +46,7 @@ fn every_shipped_policy_example_parses() {
         let policy = WalletPolicy::parse(read_json(relative))
             .unwrap_or_else(|error| panic!("{relative} is not a valid policy: {error:#}"));
         assert_eq!(
-            policy.version, 2,
+            policy.version, 1,
             "{relative} declares an unexpected version"
         );
         assert!(!policy.chains.is_empty(), "{relative} configures no chains");
@@ -88,10 +88,11 @@ fn deny_all_example_permits_nothing_automatically() {
     let chain = policy
         .chain("1")
         .expect("wildcard chain applies to any chain");
-    assert!(chain.targets.is_empty());
-    assert!(chain.tokens.is_empty());
-    assert!(chain.approval_spenders.is_empty());
-    assert_eq!(chain.native.max_value_per_transaction, "0");
+    assert!(
+        chain.rules.is_empty(),
+        "no rule means every call falls to the default deny"
+    );
+    assert_eq!(chain.native_value.describe(), "exactly 0");
 }
 
 #[test]

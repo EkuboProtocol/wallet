@@ -2027,6 +2027,7 @@ async fn run_approve(
         config,
         pending,
         &crate::token_store::TokenStore::production(config.data_dir())?,
+        &crate::address_book::AddressBookStore::production(config.data_dir())?,
         &read_policy,
         request,
         crate::approval::InteractiveProof::from_terminal()?,

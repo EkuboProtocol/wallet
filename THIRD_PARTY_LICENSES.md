@@ -51,6 +51,8 @@ file follows in the appendix. Regenerate this document with
 - autocfg 1.5.1 — Josh Stone <cuviper@gmail.com> — https://github.com/cuviper/autocfg
 - base16ct 0.2.0 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/base16ct
 - base64ct 1.8.3 — RustCrypto Developers — https://github.com/RustCrypto/formats
+- bit-set 0.8.0 — Alexis Beingessner <a.beingessner@gmail.com> — https://github.com/contain-rs/bit-set
+- bit-vec 0.8.0 — Alexis Beingessner <a.beingessner@gmail.com> — https://github.com/contain-rs/bit-vec
 - blocking 1.6.2 — Stjepan Glavina <stjepang@gmail.com> — https://github.com/smol-rs/blocking
 - concurrent-queue 2.5.0 — Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net> — https://github.com/smol-rs/concurrent-queue
 - const-oid 0.9.6 — RustCrypto Developers — https://github.com/RustCrypto/formats/tree/master/const-oid
@@ -62,6 +64,7 @@ file follows in the appendix. Regenerate this document with
 - event-listener 5.4.2 — Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net> — https://github.com/smol-rs/event-listener
 - event-listener-strategy 0.5.4 — John Nunley <dev@notgull.net> — https://github.com/smol-rs/event-listener-strategy
 - fastrand 2.5.0 — Stjepan Glavina <stjepang@gmail.com> — https://github.com/smol-rs/fastrand
+- fnv 1.0.7 — Alex Crichton <alex@alexcrichton.com> — https://github.com/servo/rust-fnv
 - futures-lite 2.6.1 — Stjepan Glavina <stjepang@gmail.com>, Contributors to futures-rs — https://github.com/smol-rs/futures-lite
 - idna_adapter 1.2.2 — The rust-url developers — https://github.com/hsivonen/idna_adapter
 - impl-trait-for-tuples 0.2.3 — Bastian Köcher <git@kchr.de> — https://github.com/bkchr/impl-trait-for-tuples
@@ -487,6 +490,7 @@ file follows in the appendix. Regenerate this document with
 - proc-macro-error3 3.0.1 — CreepySkeleton <creepy-skeleton@yandex.ru>, GnomedDev <david2005thomas@gmail.com>, gamma0987 <gamma0987@posteo.de> — https://github.com/gamma0987/proc-macro-error3
 - proc-macro2 1.0.107 — David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com> — https://github.com/dtolnay/proc-macro2
 - proptest 1.11.0 — Jason Lingle — https://github.com/proptest-rs/proptest
+- quick-error 1.2.3 — Paul Colomiets <paul@colomiets.name>, Colin Kiegel <kiegel@gmx.de> — http://github.com/tailhook/quick-error
 - quinn 0.11.11 — https://github.com/quinn-rs/quinn
 - quinn-proto 0.11.16 — https://github.com/quinn-rs/quinn
 - quinn-udp 0.5.15 — https://github.com/quinn-rs/quinn
@@ -516,6 +520,7 @@ file follows in the appendix. Regenerate this document with
 - rustls-platform-verifier 0.7.0 — https://github.com/rustls/rustls-platform-verifier
 - rustls-platform-verifier-android 0.1.1 — https://github.com/rustls/rustls-platform-verifier
 - rustversion 1.0.23 — David Tolnay <dtolnay@gmail.com> — https://github.com/dtolnay/rustversion
+- rusty-fork 0.3.1 — Jason Lingle — https://github.com/altsysrq/rusty-fork
 - salsa20 0.10.2 — RustCrypto Developers — https://github.com/RustCrypto/stream-ciphers
 - scopeguard 1.2.0 — bluss — https://github.com/bluss/scopeguard
 - scrypt 0.10.0 — RustCrypto Developers — https://github.com/RustCrypto/password-hashes/tree/master/scrypt
@@ -1912,6 +1917,36 @@ THE SOFTWARE.
 ```text
 Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
 Copyright (c) 2021-2025 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: bit-set 0.8.0, bit-vec 0.8.0
+
+```text
+Copyright (c) 2023 The Rust Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -4132,6 +4167,36 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+## License text for: fnv 1.0.7
+
+```text
+Copyright (c) 2017 Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
 ## License text for: foldhash 0.2.0
 
 ```text
@@ -5990,7 +6055,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: proptest 1.11.0
+## License text for: proptest 1.11.0, rusty-fork 0.3.1
 
 ```text
 Copyright (c) 2016 FullContact, Inc
@@ -6018,6 +6083,30 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+## License text for: quick-error 1.2.3
+
+```text
+Copyright (c) 2015 The quick-error Developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## License text for: quinn 0.11.11, quinn-proto 0.11.16, quinn-udp 0.5.15

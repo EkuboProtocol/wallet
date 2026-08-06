@@ -14,7 +14,7 @@
       "format": "uint8",
       "minimum": 0,
       "maximum": 255,
-      "default": 2
+      "default": 1
     },
     "chains": {
       "type": "object",
@@ -43,155 +43,246 @@
           "minimum": 0,
           "default": 16
         },
-        "native": {
-          "$ref": "#/$defs/NativePolicy",
+        "native_value": {
+          "description": "Applied to every call independently, on top of whichever rule matched.\nA guard rather than a grant: no rule can widen it. Omitted, it is\n`{\"eq\": \"0\"}`, so a document that never mentions native value never\nsends any.",
+          "$ref": "#/$defs/Predicate",
           "default": {
-            "max_value_per_transaction": "0"
+            "eq": "0"
           }
         },
-        "targets": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/TargetPolicy"
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Rule"
           },
-          "default": {}
-        },
-        "approval_spenders": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ApprovalSpenderPolicy"
-          },
-          "default": {}
-        },
-        "tokens": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/TokenPolicy"
-          },
-          "default": {}
+          "default": []
         }
       },
       "additionalProperties": false
     },
-    "NativePolicy": {
-      "type": "object",
-      "properties": {
-        "max_value_per_transaction": {
+    "Predicate": {
+      "description": "One predicate over one value.\n\nExternally tagged, so a document reads `{\"in\": [\"0x\u2026\"]}`, `\"is_wallet\"`, or\n`{\"each\": {\"selector\": {\"abi\": \"\u2026\"}}}`.",
+      "oneOf": [
+        {
+          "description": "Matches every value, including one this policy cannot decode. The only\nway to write an unconstrained slot explicitly.",
           "type": "string",
-          "default": "0"
-        }
-      },
-      "additionalProperties": false
-    },
-    "TargetPolicy": {
-      "type": "object",
-      "properties": {
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "const": "any_value"
         },
-        "allow_empty_calldata": {
-          "type": "boolean",
-          "default": false
-        },
-        "allow_any_calldata": {
-          "type": "boolean",
-          "default": false
-        },
-        "allowed_selectors": {
+        {
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/SelectorPolicy"
+          "properties": {
+            "eq": {
+              "type": "string"
+            }
           },
-          "default": {}
-        }
-      },
-      "additionalProperties": false
-    },
-    "SelectorPolicy": {
-      "type": "object",
-      "properties": {
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "additionalProperties": false
-    },
-    "ApprovalSpenderPolicy": {
-      "type": "object",
-      "properties": {
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "required": [
+            "eq"
+          ],
+          "additionalProperties": false
         },
-        "tokens": {
+        {
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ApprovalTokenPolicy"
+          "properties": {
+            "in": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              }
+            }
           },
-          "default": {}
-        }
-      },
-      "additionalProperties": false
-    },
-    "ApprovalTokenPolicy": {
-      "type": "object",
-      "properties": {
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "required": [
+            "in"
+          ],
+          "additionalProperties": false
         },
-        "max_amount": {
+        {
+          "description": "The address is this wallet. The predicate that makes a rule portable:\n\"proceeds must come back to me\" without naming an address.",
           "type": "string",
-          "default": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+          "const": "is_wallet"
+        },
+        {
+          "description": "The address is a token the owner has confirmed in the local token\ndatabase. A broad predicate \u2014 it means \"not a contract I have never\nheard of\", not \"one of these tokens\".",
+          "type": "string",
+          "const": "is_token"
+        },
+        {
+          "description": "The address is a human-entered address-book entry. Narrow, because\nentries are individually typed in by the owner with an alias.",
+          "type": "string",
+          "const": "is_address_book"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "selector": {
+              "$ref": "#/$defs/SelectorPredicate"
+            }
+          },
+          "required": [
+            "selector"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Every element of an array satisfies the inner predicate. An empty array\nsatisfies it vacuously.",
+          "type": "object",
+          "properties": {
+            "each": {
+              "$ref": "#/$defs/Predicate"
+            }
+          },
+          "required": [
+            "each"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "At least one of these predicates matches. An empty list never matches.",
+          "type": "object",
+          "properties": {
+            "any": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Predicate"
+              }
+            }
+          },
+          "required": [
+            "any"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "All of these predicates match. An empty list matches vacuously.",
+          "type": "object",
+          "properties": {
+            "all": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Predicate"
+              }
+            }
+          },
+          "required": [
+            "all"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "not": {
+              "$ref": "#/$defs/Predicate"
+            }
+          },
+          "required": [
+            "not"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "The element count of an array, or the byte length of a `bytes` or\n`string`, satisfies the inner predicate as a `uint256`.",
+          "type": "object",
+          "properties": {
+            "length": {
+              "$ref": "#/$defs/Predicate"
+            }
+          },
+          "required": [
+            "length"
+          ],
+          "additionalProperties": false
         }
-      },
-      "additionalProperties": false
+      ]
     },
-    "TokenPolicy": {
+    "SelectorPredicate": {
       "type": "object",
       "properties": {
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "abi": {
+          "type": "string"
         },
-        "max_transfer_amount": {
-          "type": "string",
-          "default": "0"
-        },
-        "transfer_recipients": {
+        "args": {
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/$defs/NamedAddressPolicy"
-          },
-          "default": {}
+            "$ref": "#/$defs/Predicate"
+          }
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "abi"
+      ]
     },
-    "NamedAddressPolicy": {
+    "Rule": {
+      "description": "One rule: a conjunction of predicate slots and the effect of matching them.",
       "type": "object",
       "properties": {
+        "effect": {
+          "$ref": "#/$defs/Effect"
+        },
         "label": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "to": {
+          "description": "The contract or recipient being called.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Predicate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "from": {
+          "description": "The sending wallet. Rarely needed \u2014 a plan's sender is already bound to\nthe selected wallet before a policy ever sees it \u2014 but available so one\ndocument can carry rules for several wallets.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Predicate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "description": "Native value attached to this call, in wei.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Predicate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "calldata": {
+          "description": "The call's calldata. `{\"eq\": \"0x\"}` is a plain native send; a\n`selector` predicate decodes it and constrains its arguments.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Predicate"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "required": [
+        "effect"
+      ]
+    },
+    "Effect": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny"
+      ]
     }
   },
-  "description": "Stateless per-transaction signing policy. Amounts are decimal strings in the asset's smallest unit. There are no daily limits, rolling windows, or spend counters."
+  "description": "Stateless per-call signing policy. Each chain holds an unordered set of rules: any matching deny rule denies, otherwise any matching allow rule allows, otherwise the call is denied. There are no amount limits, budgets, or spend counters \u2014 a rule bounds which calls may be made, not how much they move."
 }

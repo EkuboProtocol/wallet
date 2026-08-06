@@ -11,10 +11,18 @@ use crate::{
     core::execution_plan::{
         DecimalU256, ExecutionStep, ExecutionStepKind, PlannedTransaction, RevertDecodePlan,
     },
-    core::policy::{NamedAddressPolicy, TokenPolicy},
+    core::policy::{Effect, Rule},
+    core::predicate::{PolicyContext, Predicate},
 };
 use alloy::sol_types::SolError;
 use chrono::Utc;
+
+fn context(wallet: &WalletMetadata) -> PolicyContext {
+    PolicyContext {
+        wallet: wallet.address,
+        ..PolicyContext::default()
+    }
+}
 
 fn plan(calls: usize) -> ExecutionPlan {
     let sender = Address::repeat_byte(0x11);
@@ -243,9 +251,16 @@ async fn live_direct_simulation_uses_eth_simulate_v1() {
         revision: 1,
         updated_at: Utc::now(),
     };
-    let result = simulate_execution(&wallet, &default_networks()[0], &plan(1), &policy, None)
-        .await
-        .unwrap();
+    let result = simulate_execution(
+        &wallet,
+        &default_networks()[0],
+        &plan(1),
+        &policy,
+        &context(&wallet),
+        None,
+    )
+    .await
+    .unwrap();
     assert!(result.simulation.success, "{result:#?}");
     assert_ne!(result.block_number, "0");
 }
@@ -266,9 +281,16 @@ async fn live_batch_simulation_executes_canonical_calibur() {
         revision: 1,
         updated_at: Utc::now(),
     };
-    let result = simulate_execution(&wallet, &default_networks()[0], &plan(2), &policy, None)
-        .await
-        .unwrap();
+    let result = simulate_execution(
+        &wallet,
+        &default_networks()[0],
+        &plan(2),
+        &policy,
+        &context(&wallet),
+        None,
+    )
+    .await
+    .unwrap();
     assert!(result.simulation.success, "{result:#?}");
     assert_eq!(result.execution_mode, ExecutionMode::CaliburBatch);
     assert!(result.will_authorize_delegation);
@@ -293,14 +315,16 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
     .abi_encode()
     .into();
     let mut wallet_policy = crate::core::policy::WalletPolicy::allow_all_with_approval();
-    wallet_policy.chains.get_mut("*").unwrap().tokens = BTreeMap::from([(
-        format!("{weth:#x}"),
-        TokenPolicy {
-            label: Some("Wrapped Ether".into()),
-            max_transfer_amount: "0".into(),
-            transfer_recipients: BTreeMap::from([("*".into(), NamedAddressPolicy { label: None })]),
-        },
-    )]);
+    // Naming WETH in a rule's `to` is what puts it in the pre-queried balance
+    // set; the allow-all rule beside it is what actually authorizes the call.
+    wallet_policy.chains.get_mut("*").unwrap().rules.push(Rule {
+        effect: Effect::Allow,
+        label: Some("Wrapped Ether".into()),
+        to: Some(Predicate::Eq(format!("{weth:#x}"))),
+        from: None,
+        value: None,
+        calldata: None,
+    });
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
         policy: wallet_policy,
@@ -312,6 +336,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
         &default_networks()[0],
         &execution_plan,
         &policy,
+        &context(&wallet),
         None,
     )
     .await

@@ -1,31 +1,17 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
-  "version": 2,
+  "version": 1,
   "chains": {
     "*": {
       "label": "Allow all actions automatically; approve only policy or simulation failures",
       "max_calls_per_batch": 4096,
-      "native": {
-        "max_value_per_transaction": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
-      },
-      "targets": {
-        "*": { "allow_empty_calldata": true, "allow_any_calldata": true }
-      },
-      "approval_spenders": {
-        "*": {
-          "tokens": {
-            "*": {
-              "max_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935"
-            }
-          }
+      "native_value": "any_value",
+      "rules": [
+        {
+          "effect": "allow",
+          "label": "Every call, with any calldata and any native value"
         }
-      },
-      "tokens": {
-        "*": {
-          "max_transfer_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
-          "transfer_recipients": { "*": {} }
-        }
-      }
+      ]
     }
   }
 }

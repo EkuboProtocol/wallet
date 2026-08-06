@@ -916,11 +916,15 @@ impl WalletMcpServer {
             )?;
         }
         let preface = session.as_ref().map(ForkSession::preface);
+        let policy_context = self
+            .policy_context(&wallet, network.chain_id)
+            .map_err(|error| tool_error(&error))?;
         let mut result = simulate_execution(
             &wallet,
             &network,
             &execution_plan,
             &stored_policy,
+            &policy_context,
             preface.as_ref(),
         )
         .await
@@ -1734,7 +1738,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_address_book",
-        description = "Look up user-configured aliases for addresses on particular chains. Entries are lookup convenience data with no signing authority and never affect policy decisions; adding, changing, or removing entries is a separate human CLI operation the user confirms in their own terminal. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
+        description = "Look up user-configured aliases for addresses on particular chains. A policy may refer to these entries through the is_address_book predicate, so an alias can decide whether a call signs automatically; adding, changing, or removing entries is a separate human CLI operation the user confirms in their own terminal, and nothing reachable from here can write one. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_address_book(
@@ -2067,6 +2071,25 @@ impl WalletMcpServer {
             .with_context(|| format!("wallet {wallet_id} has no local policy"))
     }
 
+    /// The local metadata a policy may consult, resolved for one wallet and
+    /// chain. Read here rather than inside the evaluator so a policy decision
+    /// stays a pure function of data.
+    fn policy_context(
+        &self,
+        wallet: &crate::config::WalletMetadata,
+        chain_id: u64,
+    ) -> Result<crate::core::predicate::PolicyContext> {
+        let tokens = self
+            .tokens
+            .lock()
+            .map_err(|_| anyhow::anyhow!("token database lock was poisoned"))?;
+        let address_book = self
+            .address_book
+            .lock()
+            .map_err(|_| anyhow::anyhow!("address book lock was poisoned"))?;
+        crate::policy_context::resolve(wallet.address, chain_id, &tokens, &address_book)
+    }
+
     fn pending_record_by_id(&self, request_id: uuid::Uuid) -> Result<PendingTransaction> {
         let record = self
             .pending
@@ -2132,7 +2155,16 @@ impl WalletMcpServer {
         // The sender, chain, and digest are checked against this wallet and
         // network below, on the path both kinds of send share.
         plan.validate()?;
-        let simulation = simulate_execution(&wallet, &network, &plan, &stored_policy, None).await?;
+        let policy_context = self.policy_context(&wallet, network.chain_id)?;
+        let simulation = simulate_execution(
+            &wallet,
+            &network,
+            &plan,
+            &stored_policy,
+            &policy_context,
+            None,
+        )
+        .await?;
         self.send_simulated_plan(
             wallet,
             network,

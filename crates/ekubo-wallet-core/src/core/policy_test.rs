@@ -1,340 +1,558 @@
 //! Tests for [`super`].
 //!
 //! Out of line so the audit corpus is production code: V12 bills measured
-//! bytes and excludes `*_test.rs` by default. A `#[path]` child module has
-//! exactly the privacy access an inline one does, so nothing these can reach
-//! changes, and the test paths are the ones they always were.
+//! bytes and excludes `*_test.rs` by default.
 
 use super::*;
-use crate::core::execution_plan::ExecutionPlan;
+use crate::core::predicate::PolicyContext;
+use alloy::primitives::{Address, address};
+use proptest::prelude::*;
 use serde_json::json;
 
-fn transfer_plan() -> ExecutionPlan {
-    transfer_plan_of(U256::from(1_u8))
+const WALLET: Address = address!("1111111111111111111111111111111111111111");
+const TOKEN: Address = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
+const ROUTER: Address = address!("2222222222222222222222222222222222222222");
+
+fn context() -> PolicyContext {
+    PolicyContext {
+        wallet: WALLET,
+        known_tokens: std::collections::BTreeSet::from([TOKEN]),
+        address_book: std::collections::BTreeSet::from([ROUTER]),
+    }
 }
 
-fn transfer_plan_of(amount: U256) -> ExecutionPlan {
-    let data = format!(
-        "0xa9059cbb0000000000000000000000003333333333333333333333333333333333333333{amount:064x}"
-    );
+/// A one-step plan calling `to` with `data` and `value` wei.
+fn plan_with(to: Address, data: &str, value: &str) -> ExecutionPlan {
     ExecutionPlan::parse(json!({
         "schema_version": "1",
         "chain_id": "1",
         "caip2_chain_id": "eip155:1",
-        "sender": "0x1111111111111111111111111111111111111111",
+        "sender": format!("{WALLET:#x}"),
         "ordered_steps": [{
             "step": 1,
             "kind": "execution",
             "transaction": {
                 "chain_id": "1",
-                "from": "0x1111111111111111111111111111111111111111",
-                "to": "0x2222222222222222222222222222222222222222",
+                "from": format!("{WALLET:#x}"),
+                "to": format!("{to:#x}"),
                 "data": data,
-                "value": "0"
+                "value": value
             }
         }]
     }))
-    .unwrap()
+    .expect("plan parses")
 }
 
-fn wildcard_token_policy(limit: &str) -> WalletPolicy {
+fn two_step_plan(first: Address, second: Address) -> ExecutionPlan {
+    ExecutionPlan::parse(json!({
+        "schema_version": "1",
+        "chain_id": "1",
+        "caip2_chain_id": "eip155:1",
+        "sender": format!("{WALLET:#x}"),
+        "ordered_steps": [
+            { "step": 1, "kind": "execution", "transaction": {
+                "chain_id": "1", "from": format!("{WALLET:#x}"),
+                "to": format!("{first:#x}"), "data": "0xaabbccdd", "value": "0" }},
+            { "step": 2, "kind": "execution", "transaction": {
+                "chain_id": "1", "from": format!("{WALLET:#x}"),
+                "to": format!("{second:#x}"), "data": "0xaabbccdd", "value": "0" }}
+        ]
+    }))
+    .expect("plan parses")
+}
+
+fn approve_calldata(spender: Address, amount: u64) -> String {
+    format!("0x095ea7b3{:0>64}{amount:064x}", format!("{spender:x}"))
+}
+
+fn policy(value: serde_json::Value) -> WalletPolicy {
+    WalletPolicy::parse(value).expect("policy parses")
+}
+
+fn allows(subject: &WalletPolicy, plan: &ExecutionPlan) -> bool {
+    policy_allows(&evaluate_policy(plan, subject, &context()))
+}
+
+fn codes(subject: &WalletPolicy, plan: &ExecutionPlan) -> Vec<String> {
+    evaluate_policy(plan, subject, &context())
+        .into_iter()
+        .map(|finding| finding.code)
+        .collect()
+}
+
+fn generated(rules: &Vec<serde_json::Value>) -> WalletPolicy {
     WalletPolicy::parse(json!({
-        "chains": {
-            "1": {
-                "targets": { "*": { "allow_any_calldata": true } },
-                "tokens": {
-                    "*": {
-                        "max_transfer_amount": limit,
-                        "transfer_recipients": { "*": {} }
-                    }
-                }
-            }
-        }
+        "version": 1,
+        "chains": { "1": { "native_value": "any_value", "rules": rules } }
     }))
-    .unwrap()
+    .expect("generated policy parses")
 }
 
-#[test]
-fn removing_a_rule_under_a_wildcard_reads_as_widening_not_narrowing() {
-    // Dropping the exact entry for a target while `*` survives does not
-    // take the permission away — `exact_or_wildcard` hands the target to
-    // the wildcard, which here allows any calldata rather than one
-    // selector. A `-` line would tell the reviewer they were tightening
-    // the policy while they approved the opposite.
-    let current = WalletPolicy::parse(json!({
-        "chains": {
-            "1": {
-                "targets": {
-                    "0x2222222222222222222222222222222222222222": {
-                        "allowed_selectors": { "0xa9059cbb": {} }
-                    },
-                    "*": { "allow_any_calldata": true }
-                }
-            }
-        }
-    }))
-    .unwrap();
-    let proposed = WalletPolicy::parse(json!({
-        "chains": {
-            "1": { "targets": { "*": { "allow_any_calldata": true } } }
-        }
-    }))
-    .unwrap();
+// ------------------------------------------------------------- the defaults
 
-    let diff = diff_policies(&current, &proposed);
-    assert!(
-        diff.iter().any(|line| line.contains("falls back to (*)")),
-        "{diff:?}"
-    );
-    assert!(
-        !diff
-            .iter()
-            .any(|line| line.starts_with("- chain 1: target 0x2222")),
-        "a widening was rendered as a removal: {diff:?}"
+#[test]
+fn a_policy_with_no_rules_denies_everything() {
+    let empty = policy(json!({ "version": 1, "chains": { "1": {} } }));
+    assert_eq!(
+        codes(&empty, &plan_with(ROUTER, "0x12345678", "0")),
+        ["call_not_allowed"]
     );
 }
 
 #[test]
-fn every_level_that_falls_back_says_so() {
-    // Approval spenders, the tokens under them, and transfer recipients
-    // all resolve through the same wildcard fallback, so all three have
-    // to describe a removal that widens as a widening.
-    let current = WalletPolicy::parse(json!({
-            "chains": { "1": {
-                "approval_spenders": {
-                    "0x3333333333333333333333333333333333333333": {
-                        "tokens": { "0x4444444444444444444444444444444444444444": { "max_amount": "5" } }
-                    },
-                    "*": { "tokens": { "*": { "max_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935" } } }
-                },
-                "tokens": { "0x5555555555555555555555555555555555555555": {
-                    "max_transfer_amount": "10",
-                    "transfer_recipients": {
-                        "0x6666666666666666666666666666666666666666": {},
-                        "*": {}
-                    }
-                } }
-            } }
-        }))
-        .unwrap();
-    let proposed = WalletPolicy::parse(json!({
-            "chains": { "1": {
-                "approval_spenders": {
-                    "*": { "tokens": { "*": { "max_amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935" } } }
-                },
-                "tokens": { "0x5555555555555555555555555555555555555555": {
-                    "max_transfer_amount": "10",
-                    "transfer_recipients": { "*": {} }
-                } }
-            } }
-        }))
-        .unwrap();
-
-    let diff = diff_policies(&current, &proposed);
-    let widenings = diff
-        .iter()
-        .filter(|line| line.contains("falls back"))
-        .count();
-    assert_eq!(widenings, 2, "{diff:?}");
-    assert!(
-        !diff.iter().any(|line| line.starts_with("- chain 1:")),
-        "a widening was rendered as a removal: {diff:?}"
-    );
-}
-
-#[test]
-fn removing_a_rule_with_no_wildcard_is_still_a_removal() {
-    let current = WalletPolicy::parse(json!({
-        "chains": {
-            "1": {
-                "targets": {
-                    "0x2222222222222222222222222222222222222222": {
-                        "allow_any_calldata": true
-                    }
-                }
-            }
-        }
-    }))
-    .unwrap();
-    let proposed = WalletPolicy::parse(json!({ "chains": { "1": {} } })).unwrap();
-    let diff = diff_policies(&current, &proposed);
-    assert!(
-        diff.iter().any(|line| line.starts_with("- chain 1:")),
-        "{diff:?}"
-    );
-}
-
-#[test]
-fn a_wildcard_token_rule_bounds_what_a_transfer_declares() {
-    // The declared amount in the transfer's own calldata is the only spend
-    // figure the policy binds, so a wildcard rule constrains a transfer
-    // exactly as a named one does. Nothing here consults the simulation.
-    let policy = wildcard_token_policy("1000000");
-    let findings = evaluate_policy(&transfer_plan_of(U256::from(2_000_000_u64)), &policy);
-    assert!(!policy_allows(&findings), "{findings:?}");
-    assert!(
-        findings
-            .iter()
-            .any(|finding| finding.code == "token_spend_limit"),
-        "{findings:?}"
-    );
-}
-
-#[test]
-fn a_transfer_within_the_wildcard_limit_still_passes() {
-    let policy = wildcard_token_policy("1000000");
-    let findings = evaluate_policy(&transfer_plan_of(U256::from(1_000_000_u64)), &policy);
-    assert!(policy_allows(&findings), "{findings:?}");
-}
-
-#[test]
-fn default_policy_allows_transfer_and_normalizes_keys() {
-    let policy = WalletPolicy::allow_all_with_approval();
-    assert!(policy_allows(&evaluate_policy(&transfer_plan(), &policy)));
-}
-
-#[test]
-fn exact_chain_replaces_wildcard() {
-    let policy = WalletPolicy::parse(json!({
-        "chains": {
-            "*": { "targets": { "*": { "allow_any_calldata": true } } },
-            "1": {}
-        }
-    }))
-    .unwrap();
-    assert!(!policy_allows(&evaluate_policy(&transfer_plan(), &policy)));
-}
-
-#[test]
-fn a_policy_written_against_the_retired_simulation_switch_still_opens() {
-    // Simulation is unconditional now. A stored policy that still carries
-    // the old field must keep parsing — failing here would lock the owner
-    // out of their own wallet — and the field must not survive the parse
-    // in either direction.
-    for setting in [true, false] {
-        let policy = WalletPolicy::parse(json!({
-            "chains": { "1": { "tokens": { "*": {} } } },
-            "require_simulation": setting
-        }))
-        .expect("a retired setting is discarded, not rejected");
-        let round_trip = serde_json::to_value(&policy).unwrap();
-        assert!(round_trip.get("require_simulation").is_none());
+fn the_shipped_deny_all_profile_denies_every_shape_of_call() {
+    let deny_all = WalletPolicy::require_approval_for_everything();
+    for (to, data, value) in [
+        (ROUTER, "0x".to_string(), "0"),
+        (ROUTER, "0x".to_string(), "1000"),
+        (TOKEN, approve_calldata(ROUTER, 1), "0"),
+        (ROUTER, "0xdeadbeef".to_string(), "0"),
+    ] {
+        assert!(
+            !allows(&deny_all, &plan_with(to, &data, value)),
+            "{to:#x} {data} {value} was allowed"
+        );
     }
 }
 
 #[test]
-fn a_policy_written_against_the_retired_approval_expiry_still_opens() {
-    // Queued requests no longer expire, and no policy setting can give
-    // them a deadline again. A stored policy that still carries the old
-    // field — top level, per chain, or both — must keep parsing, because
-    // failing here would lock the owner out of their own wallet, and the
-    // field must not survive the parse in either direction.
-    let policy = WalletPolicy::parse(json!({
-        "chains": {
-            "1": { "tokens": { "*": {} }, "approval_expiry_seconds": 300 },
-            "*": { "approval_expiry_seconds": 60 }
-        },
-        "approval_expiry_seconds": 600
-    }))
-    .expect("a retired setting is discarded, not rejected");
-    let round_trip = serde_json::to_value(&policy).unwrap();
-    assert!(round_trip.get("approval_expiry_seconds").is_none());
-    for chain in round_trip["chains"].as_object().unwrap().values() {
-        assert!(chain.get("approval_expiry_seconds").is_none());
+fn the_shipped_allow_all_profile_permits_every_shape_of_call() {
+    let allow_all = WalletPolicy::allow_all_with_approval();
+    for (to, data, value) in [
+        (ROUTER, "0x".to_string(), "0"),
+        (ROUTER, "0x".to_string(), "1000000000000000000"),
+        (TOKEN, approve_calldata(ROUTER, u64::MAX), "0"),
+        (ROUTER, "0xdeadbeef".to_string(), "5"),
+    ] {
+        assert!(
+            allows(&allow_all, &plan_with(to, &data, value)),
+            "{to:#x} {data} {value} was denied"
+        );
     }
 }
 
 #[test]
-fn policy_diff_is_minimized_and_permission_level() {
-    let current = WalletPolicy::require_approval_for_everything();
-    let proposed = WalletPolicy::parse(json!({
-        "chains": {
-            "*": {
-                "max_calls_per_batch": 1,
-                "native": { "max_value_per_transaction": "0" }
-            },
-            "1": {
-                "max_calls_per_batch": 4,
-                "native": { "max_value_per_transaction": "1000000000000000000" },
-                "approval_spenders": {
-                    "0x000000000022d473030f116ddee9f6b43ac78ba3": {
-                        "tokens": {
-                            "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
-                                "max_amount": "5000000"
-                            }
-                        }
-                    }
-                },
-                "tokens": {
-                    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
-                        "max_transfer_amount": "5000000",
-                        "transfer_recipients": {
-                            "0x3333333333333333333333333333333333333333": {}
-                        }
-                    }
-                }
-            }
-        }
-    }))
-    .unwrap();
+fn omitting_native_value_denies_native_value() {
+    // The rule permits the call; the chain guard is what refuses the wei.
+    let guarded = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [{ "effect": "allow" }] } }
+    }));
+    assert!(allows(&guarded, &plan_with(ROUTER, "0x", "0")));
+    assert_eq!(
+        codes(&guarded, &plan_with(ROUTER, "0x", "1")),
+        ["native_value_not_allowed"]
+    );
+}
 
+#[test]
+fn no_rule_can_widen_the_native_value_guard() {
+    let guarded = policy(json!({
+        "version": 1,
+        "chains": { "1": {
+            "native_value": { "eq": "0" },
+            "rules": [{ "effect": "allow", "value": { "eq": "1000" } }]
+        }}
+    }));
+    assert_eq!(
+        codes(&guarded, &plan_with(ROUTER, "0x", "1000")),
+        ["native_value_not_allowed"],
+        "the guard is a conjunction, not a default a rule overrides"
+    );
+}
+
+// ------------------------------------------------------------- rule effects
+
+#[test]
+fn deny_beats_allow_however_the_rules_are_ordered() {
+    let allow_rule = json!({ "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } });
+    let deny_rule = json!({
+        "effect": "deny",
+        "calldata": { "selector": { "abi": "approve(address spender, uint256 amount)" } }
+    });
+    let plan = plan_with(TOKEN, &approve_calldata(ROUTER, 5), "0");
+    for rules in [
+        json!([allow_rule, deny_rule]),
+        json!([deny_rule, allow_rule]),
+    ] {
+        let subject = policy(json!({ "version": 1, "chains": { "1": { "rules": rules } } }));
+        assert_eq!(codes(&subject, &plan), ["call_denied"]);
+    }
+}
+
+#[test]
+fn a_rule_constrains_only_the_slots_it_names() {
+    let subject = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [{
+            "effect": "allow",
+            "to": { "eq": format!("{TOKEN:#x}") }
+        }]}}
+    }));
+    // Same target, wildly different calldata: still allowed, because the rule
+    // says nothing about calldata. This is what `describe` warns about.
+    assert!(allows(&subject, &plan_with(TOKEN, "0xdeadbeef", "0")));
+    assert!(!allows(&subject, &plan_with(ROUTER, "0xdeadbeef", "0")));
+}
+
+#[test]
+fn an_argument_predicate_decides_between_two_otherwise_identical_calls() {
+    let subject = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [{
+            "effect": "allow",
+            "to": { "eq": format!("{TOKEN:#x}") },
+            "calldata": { "selector": {
+                "abi": "approve(address spender, uint256 amount)",
+                "args": { "spender": "is_address_book" }
+            }}
+        }]}}
+    }));
+    assert!(allows(
+        &subject,
+        &plan_with(TOKEN, &approve_calldata(ROUTER, 1), "0")
+    ));
+    assert!(!allows(
+        &subject,
+        &plan_with(TOKEN, &approve_calldata(WALLET, 1), "0")
+    ));
+}
+
+#[test]
+fn every_step_of_a_batch_is_graded_independently() {
+    let subject = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } }
+        ]}}
+    }));
+    let findings = evaluate_policy(&two_step_plan(TOKEN, ROUTER), &subject, &context());
+    assert_eq!(findings.len(), 1);
+    assert_eq!(
+        findings[0].step,
+        Some(2),
+        "the second call is the unmatched one"
+    );
+}
+
+// ------------------------------------------------------------------ chains
+
+#[test]
+fn an_exact_chain_entry_replaces_the_wildcard_rather_than_extending_it() {
+    let subject = policy(json!({
+        "version": 1,
+        "chains": {
+            "*": { "rules": [{ "effect": "allow" }] },
+            "1": { "rules": [] }
+        }
+    }));
+    assert!(
+        !allows(&subject, &plan_with(ROUTER, "0x", "0")),
+        "chain 1 has its own empty rule set"
+    );
+    assert!(
+        subject.chain("8453").is_some(),
+        "a chain with no entry still falls back to the wildcard"
+    );
+}
+
+#[test]
+fn a_chain_with_no_policy_at_all_is_refused() {
+    let subject = policy(json!({ "version": 1, "chains": { "8453": { "rules": [] } } }));
+    assert_eq!(
+        codes(&subject, &plan_with(ROUTER, "0x", "0")),
+        ["chain_not_allowed"]
+    );
+}
+
+#[test]
+fn batches_larger_than_the_chain_limit_are_refused() {
+    let subject = policy(json!({
+        "version": 1,
+        "chains": { "1": { "max_calls_per_batch": 1, "rules": [{ "effect": "allow" }] } }
+    }));
+    assert!(
+        codes(&subject, &two_step_plan(ROUTER, ROUTER)).contains(&"too_many_calls".to_string())
+    );
+}
+
+// ------------------------------------------------------------------ parsing
+
+#[test]
+fn only_version_one_parses() {
+    assert!(WalletPolicy::parse(json!({ "version": 2, "chains": {} })).is_err());
+    assert!(WalletPolicy::parse(json!({ "version": 1, "chains": {} })).is_ok());
+}
+
+#[test]
+fn unknown_fields_are_refused_rather_than_ignored() {
+    // The retired v2 vocabulary must not be silently accepted and ignored.
+    assert!(
+        WalletPolicy::parse(json!({
+            "version": 1,
+            "chains": { "1": { "rules": [], "tokens": {} } }
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn a_rule_predicate_is_type_checked_against_its_slot_at_parse_time() {
+    // `is_token` on the value slot could never match a uint.
+    assert!(
+        WalletPolicy::parse(json!({
+            "version": 1,
+            "chains": { "1": { "rules": [{ "effect": "allow", "value": "is_token" }] } }
+        }))
+        .is_err()
+    );
+    // A bare-hex address literal is refused at install time, not at signing.
+    assert!(
+        WalletPolicy::parse(json!({
+            "version": 1,
+            "chains": { "1": { "rules": [{
+                "effect": "allow",
+                "to": { "eq": "1111111111111111111111111111111111111111" }
+            }]}}
+        }))
+        .is_err()
+    );
+}
+
+#[test]
+fn chain_keys_must_be_canonical_decimal_or_the_wildcard() {
+    for key in ["01", "0x1", "one", ""] {
+        assert!(
+            WalletPolicy::parse(json!({ "version": 1, "chains": { key: { "rules": [] } } }))
+                .is_err(),
+            "{key} should be refused"
+        );
+    }
+    for key in ["1", "0", "8453", "*"] {
+        assert!(
+            WalletPolicy::parse(json!({ "version": 1, "chains": { key: { "rules": [] } } }))
+                .is_ok(),
+            "{key} should parse"
+        );
+    }
+}
+
+#[test]
+fn the_digest_is_stable_across_equivalent_spellings() {
+    let one = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [{
+            "effect": "allow",
+            "calldata": { "selector": { "abi": "approve(address spender,uint256 amount)" } }
+        }]}}
+    }));
+    let two = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [{
+            "effect": "allow",
+            "calldata": { "selector": { "abi": "approve(address spender, uint256 amount)" } }
+        }]}}
+    }));
+    assert_eq!(one.digest().unwrap(), two.digest().unwrap());
+}
+
+// -------------------------------------------------------------------- diffs
+
+#[test]
+fn a_removed_rule_still_covered_by_another_reads_as_covered_not_as_a_loss() {
+    let current = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } },
+            { "effect": "allow" }
+        ]}}
+    }));
+    let proposed = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [{ "effect": "allow" }] }}
+    }));
+    let diff = diff_policies(&current, &proposed);
+    assert!(
+        diff.iter().any(|line| line.contains("still covered by")),
+        "{diff:?}"
+    );
+    assert!(
+        !diff.iter().any(|line| line.starts_with("- ")),
+        "a widening must never render as a removal: {diff:?}"
+    );
+}
+
+#[test]
+fn a_genuinely_removed_rule_reads_as_a_loss() {
+    let current = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } }
+        ]}}
+    }));
+    let proposed = policy(json!({ "version": 1, "chains": { "1": { "rules": [] }}}));
+    let diff = diff_policies(&current, &proposed);
+    assert!(diff.iter().any(|line| line.starts_with("- ")), "{diff:?}");
+}
+
+#[test]
+fn an_unconstrained_calldata_slot_is_called_out_in_the_diff() {
+    let current = policy(json!({ "version": 1, "chains": { "1": { "rules": [] }}}));
+    let proposed = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{ROUTER:#x}") } }
+        ]}}
+    }));
     let diff = diff_policies(&current, &proposed);
     assert!(
         diff.iter()
-            .any(|line| line.starts_with("+ chain 1:") && line.contains("native value up to"))
+            .any(|line| line.contains("any calldata, including batched calls")),
+        "a reviewer must be told the payload is unbounded: {diff:?}"
     );
-    assert!(diff.iter().any(|line| {
-        line.contains("approvals to spender 0x000000000022d473030f116ddee9f6b43ac78ba3")
-            && line.contains("up to 5000000")
-    }));
-    assert!(diff.iter().any(|line| line.contains("transfer recipients")
-        && line.contains("0x3333333333333333333333333333333333333333")));
-    // The unchanged wildcard chain contributes nothing.
-    assert!(!diff.iter().any(|line| line.contains("every chain (*)")));
+}
 
-    // Identical documents diff to an explicit no-change line.
-    let unchanged = diff_policies(&current, &current);
-    assert_eq!(unchanged.len(), 1);
-    assert!(unchanged[0].contains("identical"));
+#[test]
+fn an_identical_policy_reports_no_change() {
+    let subject = WalletPolicy::allow_all_with_approval();
+    assert_eq!(
+        diff_policies(&subject, &subject),
+        ["No permission changes: the proposed policy is identical."]
+    );
+}
 
-    // Removing a grant shows as a removal, and unlimited reads as a word.
-    let allow_all = WalletPolicy::allow_all_with_approval();
-    let shrink = diff_policies(&allow_all, &current);
-    assert!(
-        shrink
+// ----------------------------------------------------------------- fuzzing
+
+fn rule_strategy() -> impl Strategy<Value = serde_json::Value> {
+    let targets = prop::sample::select(vec![
+        format!("{TOKEN:#x}"),
+        format!("{ROUTER:#x}"),
+        format!("{WALLET:#x}"),
+    ]);
+    (
+        prop::sample::select(vec!["allow", "deny"]),
+        prop::option::of(targets),
+        prop::option::of(prop::sample::select(vec!["0", "1", "1000"])),
+    )
+        .prop_map(|(effect, to, value)| {
+            let mut rule = serde_json::Map::new();
+            rule.insert("effect".into(), json!(effect));
+            if let Some(to) = to {
+                rule.insert("to".into(), json!({ "eq": to }));
+            }
+            if let Some(value) = value {
+                rule.insert("value".into(), json!({ "eq": value }));
+            }
+            serde_json::Value::Object(rule)
+        })
+}
+
+fn call_strategy() -> impl Strategy<Value = (Address, String, String)> {
+    (
+        prop::sample::select(vec![TOKEN, ROUTER, WALLET, Address::ZERO]),
+        prop::sample::select(vec!["0x", "0xdeadbeef"]),
+        prop::sample::select(vec!["0", "1", "1000"]),
+    )
+        .prop_map(|(to, data, value)| (to, data.to_string(), value.to_string()))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(768))]
+
+    /// Rules form a set, so permuting them can never change a decision. This
+    /// is what lets the permission diff be a diff of the document rather than
+    /// a simulation of it.
+    #[test]
+    fn shuffling_the_rules_never_changes_the_decision(
+        rules in prop::collection::vec(rule_strategy(), 0..6),
+        call in call_strategy(),
+        rotation in 0usize..6,
+    ) {
+        let (to, data, value) = call;
+        let plan = plan_with(to, &data, &value);
+        let mut rotated = rules.clone();
+        let count = rotated.len();
+        if count > 0 {
+            rotated.rotate_left(rotation % count);
+        }
+        prop_assert_eq!(
+            allows(&generated(&rules), &plan),
+            allows(&generated(&rotated), &plan)
+        );
+    }
+
+    /// Adding a deny rule can only ever remove authority, never add it.
+    #[test]
+    fn adding_a_deny_rule_never_grants_anything(
+        rules in prop::collection::vec(rule_strategy(), 0..5),
+        extra in rule_strategy(),
+        call in call_strategy(),
+    ) {
+        let (to, data, value) = call;
+        let plan = plan_with(to, &data, &value);
+        let mut denial = extra;
+        denial["effect"] = json!("deny");
+        let before = allows(&generated(&rules), &plan);
+        let mut widened = rules.clone();
+        widened.push(denial);
+        let after = allows(&generated(&widened), &plan);
+        prop_assert!(before || !after, "a deny rule granted authority");
+    }
+
+    /// Removing an allow rule can only ever remove authority.
+    #[test]
+    fn dropping_an_allow_rule_never_grants_anything(
+        rules in prop::collection::vec(rule_strategy(), 1..6),
+        index in 0usize..6,
+        call in call_strategy(),
+    ) {
+        let (to, data, value) = call;
+        let plan = plan_with(to, &data, &value);
+        let allow_positions = rules
             .iter()
-            .any(|line| line.starts_with("- chain every chain (*)") || line.starts_with("- chain"))
-    );
-    assert!(shrink.iter().any(|line| line.contains("unlimited")));
-}
+            .enumerate()
+            .filter(|(_, rule)| rule["effect"] == json!("allow"))
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        if allow_positions.is_empty() {
+            return Ok(());
+        }
+        let position = allow_positions[index % allow_positions.len()];
+        let before = allows(&generated(&rules), &plan);
+        let mut narrowed = rules.clone();
+        narrowed.remove(position);
+        let after = allows(&generated(&narrowed), &plan);
+        prop_assert!(
+            before || !after,
+            "dropping an allow rule granted authority"
+        );
+    }
 
-#[test]
-fn a_decimal_quantity_is_bounded_by_length_before_it_is_parsed() {
-    // The largest canonical uint256 is 78 digits, so anything longer is
-    // refused either way. What changes is the cost: `BigUint::from_str` is
-    // superlinear in radix 10, and a policy carries one of these per token,
-    // per spender-token, and per chain.
-    assert!(validate_decimal(MAX_UINT256).is_ok());
-    assert!(validate_decimal("0").is_ok());
-    assert!(validate_decimal(&"9".repeat(MAX_UINT256.len() + 1)).is_err());
-    // A value of the maximum length that is still above the ceiling is
-    // caught by the comparison, as before.
-    let over = "9".repeat(MAX_UINT256.len());
-    assert!(validate_decimal(&over).is_err());
-}
+    /// The decision is total: an allowed call carries no error finding, and a
+    /// denied one always names why rather than falling through silently.
+    #[test]
+    fn every_call_is_decided_and_the_default_is_deny(
+        rules in prop::collection::vec(rule_strategy(), 0..5),
+        call in call_strategy(),
+    ) {
+        let (to, data, value) = call;
+        let plan = plan_with(to, &data, &value);
+        let findings = evaluate_policy(&plan, &generated(&rules), &context());
+        if policy_allows(&findings) {
+            prop_assert!(findings.is_empty());
+        } else {
+            let named = findings
+                .iter()
+                .any(|finding| finding.code == "call_denied" || finding.code == "call_not_allowed");
+            prop_assert!(named, "a denial must name why it denied");
+        }
+    }
 
-#[test]
-fn rejects_removed_stateful_daily_limits() {
-    assert!(
-        WalletPolicy::parse(json!({
-            "chains": { "1": { "native": { "max_value_per_day": "1" } } }
-        }))
-        .is_err()
-    );
-    assert!(
-        WalletPolicy::parse(json!({
-            "chains": { "1": { "tokens": { "*": { "max_spend_per_day": "1" } } } }
-        }))
-        .is_err()
-    );
+    /// Whatever the call looks like, the deny-all profile denies it.
+    #[test]
+    fn the_deny_all_profile_has_no_hole(call in call_strategy()) {
+        let (to, data, value) = call;
+        let plan = plan_with(to, &data, &value);
+        prop_assert!(!allows(&WalletPolicy::require_approval_for_everything(), &plan));
+    }
 }
