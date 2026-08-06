@@ -157,8 +157,32 @@ pub struct BroadcastResult {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SigningOverrides {
-    pub allow_policy_override: bool,
-    pub allow_simulation_failure: bool,
+    allow_policy_override: bool,
+    allow_simulation_failure: bool,
+}
+
+impl SigningOverrides {
+    /// The automatic path: no override exists. Identical to `default()`,
+    /// named so call sites read as the decision they are.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            allow_policy_override: false,
+            allow_simulation_failure: false,
+        }
+    }
+
+    /// Both human overrides — signing past a policy denial and past a failed
+    /// simulation. Mintable only with proof of an interactive terminal, so a
+    /// headless process cannot construct it: the fields are private and this
+    /// is the only constructor that sets either.
+    #[must_use]
+    pub const fn human(_proof: &crate::approval::InteractiveProof) -> Self {
+        Self {
+            allow_policy_override: true,
+            allow_simulation_failure: true,
+        }
+    }
 }
 
 /// Prepare fee and nonce fields through the configured RPC, then load the key

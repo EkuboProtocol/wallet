@@ -84,6 +84,36 @@ pub enum ApprovalDecision {
     Rejected,
 }
 
+/// Proof that a live human is present at an interactive terminal.
+///
+/// This is a capability, not a flag: it cannot be cloned, has no default,
+/// and its only production constructor requires stdin, stdout, and stderr to
+/// all be terminals. [`crate::execution::SigningOverrides::human`] — the only
+/// way to sign past a policy denial or a failed simulation — demands one, so
+/// no headless caller (the MCP server runs over stdio pipes) can mint the
+/// overrides at all. Grep for `from_terminal` to enumerate every place a
+/// human override can originate.
+pub struct InteractiveProof(());
+
+impl InteractiveProof {
+    /// The only production constructor.
+    pub fn from_terminal() -> Result<Self> {
+        ensure!(
+            std::io::stdin().is_terminal()
+                && std::io::stdout().is_terminal()
+                && std::io::stderr().is_terminal(),
+            "this operation requires an interactive terminal"
+        );
+        Ok(Self(()))
+    }
+
+    /// Tests exercise the human path without a terminal.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        Self(())
+    }
+}
+
 /// Presents a server-authored request. It never receives signing material.
 #[async_trait]
 pub trait ApprovalUi: Send + Sync {

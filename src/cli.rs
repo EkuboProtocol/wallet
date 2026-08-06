@@ -1685,6 +1685,7 @@ async fn run_approve(
         pending,
         &read_policy,
         request,
+        crate::approval::InteractiveProof::from_terminal()?,
         &CliTransactionPresenter { no_confirm },
         &PlatformHumanPresence,
         &OsKeyStore,

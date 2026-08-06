@@ -8,7 +8,9 @@
 //! key material is touched.
 
 use crate::{
-    approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ReviewPresenter},
+    approval::{
+        ApprovalDecision, ApprovalKind, ApprovalRequest, InteractiveProof, ReviewPresenter,
+    },
     approval_summary::{
         TokenMetadataMap, interpret_steps, plan_token_metadata, render_balance_changes,
     },
@@ -119,7 +121,7 @@ pub async fn execute_automatic(
         plan,
         simulation,
         keys,
-        SigningOverrides::default(),
+        SigningOverrides::none(),
     )
     .await?;
     ensure!(
@@ -163,13 +165,15 @@ pub enum ApprovalOutcome {
 /// `store_signed` repeats the row and policy checks atomically.
 ///
 /// `read_policy` is called once before review and once after authentication,
-/// so the decision and the signature bind the same policy.
+/// so the decision and the signature bind the same policy. The
+/// [`InteractiveProof`] is consumed: one proof authorizes one approval.
 #[allow(clippy::too_many_lines)]
 pub async fn approve_transaction(
     config: &ConfigStore,
     pending: PendingStore,
     read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
     request: PendingTransaction,
+    proof: InteractiveProof,
     presenter: &dyn ReviewPresenter,
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
@@ -215,10 +219,7 @@ pub async fn approve_transaction(
         None,
     )
     .await?;
-    let overrides = SigningOverrides {
-        allow_policy_override: true,
-        allow_simulation_failure: true,
-    };
+    let overrides = SigningOverrides::human(&proof);
     let prepared = prepare_execution(
         &wallet,
         &network,
