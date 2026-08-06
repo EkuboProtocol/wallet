@@ -192,9 +192,11 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
         policy.allow_insecure || parsed.port().is_none(),
         "{noun} URLs must use the default https port"
     );
+    let mut parsed = parsed;
     let host = parsed
         .host()
         .with_context(|| format!("{noun} URL has no host"))?;
+    let is_domain = matches!(&host, Host::Domain(_));
     let host_text = match &host {
         Host::Domain(domain) => {
             let domain = domain.trim_end_matches('.');
@@ -227,6 +229,19 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
         }
     };
     let port = parsed.port_or_known_default().unwrap_or(443);
+
+    // Everything below — the lookup, the vetting, and the address override —
+    // uses the trailing-dot-trimmed name, while the request would carry the
+    // authority as written. reqwest keys its override on the request's
+    // hostname, and `example.com.` is not the same key as `example.com`, so
+    // the pin would silently fail to bind and the connection would resolve a
+    // second time against nothing that was checked. The URL is normalized to
+    // the name that was actually vetted, so there is one name throughout.
+    if is_domain && parsed.host_str() != Some(host_text.as_str()) {
+        parsed
+            .set_host(Some(&host_text))
+            .with_context(|| format!("{noun} URL has no valid host"))?;
+    }
 
     // Resolve once, vet every address, and pin the connection to the vetted
     // set so a rebinding resolver cannot answer differently for the actual
@@ -456,6 +471,23 @@ mod tests {
         let body = plan_json();
         let digest = digest_of(&body);
         let url = serve_once("HTTP/1.1 200 OK", body).await;
+        let plan = resolve_execution_plan(&url, Some(&digest), FetchPolicy::insecure_for_tests())
+            .await
+            .unwrap();
+        assert_eq!(plan.caip2_chain_id, "eip155:1");
+    }
+
+    #[tokio::test]
+    async fn a_trailing_dot_host_is_vetted_and_fetched_under_one_name() {
+        // The admission checks trim the root label, so the name that was
+        // vetted and pinned must also be the name the request carries. If the
+        // two drift apart the address override stops binding and the fetch
+        // resolves a second time, against nothing that was checked.
+        let body = plan_json();
+        let digest = digest_of(&body);
+        let url = serve_once("HTTP/1.1 200 OK", body)
+            .await
+            .replace("127.0.0.1", "localhost.");
         let plan = resolve_execution_plan(&url, Some(&digest), FetchPolicy::insecure_for_tests())
             .await
             .unwrap();
