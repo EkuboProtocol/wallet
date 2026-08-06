@@ -19,6 +19,45 @@ defect that reaches `main` directly. Regenerate `THIRD_PARTY_LICENSES.md` with
 `contrib/generate-third-party-licenses.py` whenever dependencies change; a test
 fails if it is stale.
 
+## Every test lives in a `_test.rs` file
+
+No `#[cfg(test)] mod tests { … }` bodies in a production file. A module's
+tests go in a sibling file named for it, declared at the bottom of the
+subject:
+
+```rust
+#[cfg(test)]
+#[path = "render_test.rs"]
+mod tests;
+```
+
+The suffix is exactly `_test`, singular. `_tests.rs`, `test_foo.rs`,
+`foo.test.rs`, and `foo_spec.rs` are all billed by `v12`; only `*_test.rs`
+is excluded by default, and inline test bodies are billed as part of the
+file that holds them. Getting this wrong costs money silently — audit
+pricing is measured UTF-8 bytes, so the mistake shows up as a bigger
+invoice and nothing else.
+
+For a second test module in one file, the module's name picks the file
+(`cli_network_disclosure_test.rs` holds `mod network_disclosure_tests`),
+so two modules never collide and test paths never change to accommodate
+the layout.
+
+Nothing else about the tests changes. A `#[path]` child module has exactly
+the privacy access an inline one does, so `use super::*` and every private
+item still reach; the test path stays `render::tests::…`.
+
+Three things deliberately stay inline, because they are production code
+under a `cfg`, not test bodies: `#[cfg(test)]` *functions* such as
+`clear_signing::stake_fixture` and `plan_fetch::insecure_for_tests`, and
+anything behind `#[cfg(any(test, feature = "test-hooks"))]`.
+
+The cost of this is that an audit no longer reads the tests. That is
+usually right — tests are not the security boundary — but it does give up
+findings about the tests themselves, and run 6161 had one (a fixture
+pairing bytes with a hash that could not occur in production). Pass the
+files as explicit `paths` to opt them back in when that is what you want.
+
 ## Commits land on `main`
 
 Push to `main` directly. Do not open a branch or a pull request for ordinary
@@ -66,11 +105,20 @@ re-enter afterwards, as `address_book_browser` does.
 
 ## Judge refactors on maintainability, not audit cost
 
-A full `v12` audit of `src/` costs roughly $550 (measured 2026-08-05: 32,079
-LOC, $549.52). Excluding the four TUI browser modules — `tx_browser`,
-`address_book_browser`, `fullscreen`, `pager`, about 3.3K LOC — saves only
-about $32. Shrinking the audit corpus is therefore never a reason to
-consolidate or delete code; argue those changes on reviewability alone.
+A full `v12` audit costs roughly $525 (measured 2026-08-06, after the test
+split: 44 files, 1,112,246 bytes, $526.34; it was $619.12 with test modules
+inline). Excluding the four TUI browser modules — `tx_browser`,
+`address_book_browser`, `fullscreen`, `pager` — saves only tens of dollars.
+
+Shrinking the audit corpus is therefore never a reason to consolidate or
+delete code; argue those changes on reviewability alone. The `_test.rs` rule
+above is not an exception to that: it moves code rather than removing it, and
+the reviewability argument for it stands on its own.
+
+Pricing is measured UTF-8 bytes plus per-file overhead, and it is not linear —
+26% fewer bytes bought 15% off — so a large part of the price is fixed and
+trimming is worth less than byte counts suggest. `v12_estimate_cost` is free
+and takes a `zipUid`, so measure a hypothetical layout instead of guessing.
 
 When audit spend does matter, scope with `paths` and prefer a diff review per
 change over repeated full audits. Keep `tui.rs` and `render.rs` in scope
