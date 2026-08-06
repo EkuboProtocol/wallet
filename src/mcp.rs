@@ -11,7 +11,7 @@ use crate::{
         policy::WalletPolicy,
         transfers::{Transfer, transfer_plan},
     },
-    custody::OsKeyStore,
+    custody::{KeyStore, OsKeyStore},
     execution::{ReceiptStatus, SigningOverrides, sign_execution},
     fork::{ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
     input_validation::{parse_chain_id, validate_timeout_seconds},
@@ -72,6 +72,9 @@ struct WalletMcpServer {
     /// Simulation results a send may consume instead of simulating again.
     /// In-process only for the same reasons, and short-lived besides.
     simulations: Arc<Mutex<SimulationStore>>,
+    /// Where private keys live. Production uses the OS credential store;
+    /// tests substitute an in-memory store so no real keychain is touched.
+    keys: Arc<dyn KeyStore>,
 }
 
 impl WalletMcpServer {
@@ -102,9 +105,11 @@ impl WalletMcpServer {
             legal,
             tokens,
             address_book,
+            Arc::new(OsKeyStore),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config: ConfigStore,
         policies: PolicyStore,
@@ -114,6 +119,7 @@ impl WalletMcpServer {
         legal: LegalStore,
         tokens: TokenStore,
         address_book: AddressBookStore,
+        keys: Arc<dyn KeyStore>,
     ) -> Result<Self> {
         for wallet in config.load()?.wallets {
             ensure!(
@@ -133,6 +139,7 @@ impl WalletMcpServer {
             address_book: Arc::new(Mutex::new(address_book)),
             forks: Arc::new(Mutex::new(ForkStore::new())),
             simulations: Arc::new(Mutex::new(SimulationStore::new())),
+            keys,
         })
     }
 }
@@ -1461,7 +1468,7 @@ impl WalletMcpServer {
             &wallet,
             &network,
             record,
-            &OsKeyStore,
+            &*self.keys,
         )
         .await
         .map_err(|error| tool_error(&error))?;
@@ -2242,7 +2249,7 @@ impl WalletMcpServer {
             &network,
             &plan,
             &simulation,
-            &OsKeyStore,
+            &*self.keys,
             SigningOverrides::default(),
         )
         .await?;
@@ -2944,6 +2951,7 @@ mod tests {
             LegalStore::new(legal_database),
             TokenStore::new(token_database),
             AddressBookStore::new(address_book_database),
+            Arc::new(crate::custody::MemoryKeyStore::default()),
         )
         .unwrap();
         (directory, server)
@@ -3382,6 +3390,7 @@ mod tests {
             LegalStore::new(legal_database),
             TokenStore::new(token_database),
             AddressBookStore::new(address_book_database),
+            std::sync::Arc::new(crate::custody::MemoryKeyStore::default()),
         );
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("has no policy"));

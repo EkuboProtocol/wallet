@@ -262,33 +262,36 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     }
 }
 
+/// In-memory key store for tests: the same trait surface as the OS store,
+/// no credential-store side effects.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MemoryKeyStore(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+#[cfg(test)]
+impl KeyStore for MemoryKeyStore {
+    fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
+        let mut keys = self.0.lock().unwrap();
+        ensure!(!keys.contains_key(wallet_id), "duplicate key");
+        keys.insert(wallet_id.into(), key.as_bytes().to_vec());
+        Ok(())
+    }
+
+    fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial> {
+        let keys = self.0.lock().unwrap();
+        PrivateKeyMaterial::from_bytes(keys.get(wallet_id).context("missing test key")?)
+    }
+
+    fn delete(&self, wallet_id: &str) -> Result<()> {
+        self.0.lock().unwrap().remove(wallet_id);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::human_presence::TestHumanPresence;
-    use std::{collections::BTreeMap, sync::Mutex};
-
-    #[derive(Default)]
-    struct MemoryKeyStore(Mutex<BTreeMap<String, Vec<u8>>>);
-
-    impl KeyStore for MemoryKeyStore {
-        fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
-            let mut keys = self.0.lock().unwrap();
-            ensure!(!keys.contains_key(wallet_id), "duplicate key");
-            keys.insert(wallet_id.into(), key.as_bytes().to_vec());
-            Ok(())
-        }
-
-        fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial> {
-            let keys = self.0.lock().unwrap();
-            PrivateKeyMaterial::from_bytes(keys.get(wallet_id).context("missing test key")?)
-        }
-
-        fn delete(&self, wallet_id: &str) -> Result<()> {
-            self.0.lock().unwrap().remove(wallet_id);
-            Ok(())
-        }
-    }
 
     fn service(
         allow: bool,

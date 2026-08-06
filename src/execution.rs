@@ -163,7 +163,7 @@ pub struct SigningOverrides {
 
 /// Prepare fee and nonce fields through the configured RPC, then load the key
 /// only after every upstream request has completed and sign locally.
-pub async fn sign_execution<K: KeyStore>(
+pub async fn sign_execution<K: KeyStore + ?Sized>(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     plan: &ExecutionPlan,
@@ -230,7 +230,7 @@ pub async fn prepare_execution(
 }
 
 /// Load the key and sign exactly the already-reviewed preparation fields.
-pub fn sign_prepared_execution<K: KeyStore>(
+pub fn sign_prepared_execution<K: KeyStore + ?Sized>(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     plan: &ExecutionPlan,
@@ -625,7 +625,7 @@ fn cancellation_fees(
 /// authorization to nothing at the cost of gas. Gas is estimated rather than
 /// hardcoded because a wallet with an active EIP-7702 delegation executes its
 /// implementation's code even on a plain self-send.
-pub async fn sign_cancellation<K: KeyStore>(
+pub async fn sign_cancellation<K: KeyStore + ?Sized>(
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     original_serialized_transaction: &str,

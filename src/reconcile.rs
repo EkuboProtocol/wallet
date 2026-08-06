@@ -292,7 +292,7 @@ pub async fn submit_claimed(
 /// field derives from the stored record and the chain, so like an exact-byte
 /// rebroadcast it cannot expand what was already authorized — it can only
 /// narrow an in-flight authorization to nothing, at the cost of gas.
-pub async fn attempt_cancellation<K: KeyStore>(
+pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     pending: &Mutex<PendingStore>,
     wallet: &WalletMetadata,
     network: &NetworkConfig,
