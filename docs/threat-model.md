@@ -183,6 +183,42 @@ validation detect structural mismatches, not a coherently dishonest endpoint.
 Use a trusted authenticated provider—or an independently designed quorum
 boundary—for funded production wallets.
 
+**This is a trust assumption, stated as one.** The endpoint is not merely a
+data source the wallet double-checks; for the automatic path it is the only
+witness to everything the policy decides on. Balances, the simulated result, a
+token's existence, the gas a transaction will burn, whether a receipt exists —
+all of it arrives from one party, and a coherently dishonest one can satisfy
+every structural check this process makes. The policy engine then scores that
+account of reality faithfully, which is the problem: it will approve a
+transaction whose simulated effect was fabricated to look like something the
+policy permits. Nothing else in this design has that shape.
+
+Two ways out exist, and both cost more than they first appear:
+
+- **Verify state rather than accept it.** `eth_getProof` returns Merkle proofs
+  against a block's state root, so balances and storage slots could be checked
+  against a root rather than believed. That bounds state, not execution: it
+  says what the chain held before the transaction, not what running the
+  transaction does. It also needs a trustworthy block root to check against,
+  which is the same problem one level down unless it comes from a light client
+  or a second, independent provider.
+- **Execute locally.** A local EVM — `revm` over fetched state — removes the
+  endpoint from execution entirely and leaves it supplying only state, which
+  the previous point can then prove. This is the complete answer and the
+  expensive one. `eth_simulateV1` is a single round trip that returns the
+  result of a whole ordered plan; local execution means fetching every account,
+  slot, and code object each step touches, discovering them as execution
+  proceeds, at a round trip per miss. For an interactive approval, or an agent
+  loop running unattended against a long-running goal, that difference is the
+  product.
+
+Neither is planned for this release, and saying "trusted RPC is required" is
+the honest description of what is shipping rather than a placeholder for them.
+The tradeoff is real in both directions: a wallet that verified everything and
+took ten seconds to answer would be a different product, and the reason to
+write this down is so the choice stays visible rather than becoming an
+assumption nobody remembers making.
+
 RPC URLs can contain credentials. They are never returned by MCP inventory, and
 the configured endpoint's userinfo, path, and query are each redacted from
 surfaced errors, but `config.json` stores them locally. Use credentials whose
@@ -240,7 +276,7 @@ replenish because no such accounting exists.
 | Race a policy change | Revision checks cancel or reject stale signing/lifecycle transitions. |
 | Flood denied requests | Identical plans deduplicate; awaiting approvals are capped at 64 per wallet. Historical terminal rows still consume disk. |
 | Concurrent transactions reuse a nonce | Only one signed/submitting/broadcast row is allowed per wallet and chain. External use of the same key can still invalidate the chosen nonce. |
-| Malicious RPC fabricates state | Structural pin/link checks help, but a coherent lie remains possible. Trusted RPC is required. |
+| Malicious RPC fabricates state | Structural pin/link checks help, but a coherent lie remains possible, and the policy engine will faithfully score a fabricated simulation. Trusted RPC is an assumption of this release, not a residual detail; see the RPC boundary section for what verifying instead would cost. |
 | RPC or network fails after send | Bytes/hash were stored first; status remains reconcilable and only exact bytes can be retried. |
 | Same-user process accesses credential APIs | Platform isolation and prompts vary; OS compromise or process injection is out of scope. |
 | Agent forges a token name or alias to misdescribe a transfer | Both are proposals; becoming a stored name takes terminal confirmation plus OS presence. Symbols are re-sanitized at render time and refused if they contain `0x`. An unnamed token renders by address in base units — readable, not trusted. |
