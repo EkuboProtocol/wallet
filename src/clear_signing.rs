@@ -849,10 +849,7 @@ fn selector_text(data: &Bytes) -> String {
 /// human approves, so control characters are stripped and length is capped as
 /// defense in depth.
 fn sanitize(text: &str) -> String {
-    text.chars()
-        .filter(|character| !character.is_control())
-        .take(MAX_TEXT_LEN)
-        .collect()
+    crate::sanitize::stripped_capped(text, MAX_TEXT_LEN)
 }
 
 /// Test fixture shared with the approval-summary tests: a `VeToken`

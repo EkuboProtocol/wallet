@@ -720,10 +720,7 @@ fn nonempty_sanitized(text: &str) -> Option<String> {
 /// Token names and symbols are attacker-controlled contract output; strip
 /// control characters and cap length before they reach any display or store.
 fn sanitize(text: &str) -> String {
-    text.chars()
-        .filter(|character| !character.is_control())
-        .take(MAX_TEXT_LEN)
-        .collect::<String>()
+    crate::sanitize::stripped_capped(text, MAX_TEXT_LEN)
         .trim()
         .to_string()
 }

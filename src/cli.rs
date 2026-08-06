@@ -892,17 +892,9 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
 }
 
 /// Legal texts are trusted compile-time strings, but they pass through the
-/// same control-character stripping as every other terminal output.
+/// same stripping as every other terminal output.
 fn terminal_note_safe(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_control() && character != '\n' {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
+    crate::render::terminal_safe_multiline(text)
 }
 
 async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMode) -> Result<()> {
@@ -3589,16 +3581,7 @@ fn print_completion_script(shell: Shell) -> Result<()> {
 }
 
 fn completion_safe(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
+    crate::render::terminal_safe_line(value)
 }
 
 fn run_configure_agent(command: ConfigureAgentCommand) -> Result<()> {

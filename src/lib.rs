@@ -24,6 +24,7 @@ pub mod policy_store;
 pub mod reconcile;
 pub mod render;
 pub mod rpc;
+pub mod sanitize;
 pub mod simulation;
 pub mod simulation_store;
 pub mod token_store;

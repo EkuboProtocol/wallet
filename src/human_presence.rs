@@ -75,15 +75,8 @@ impl PresenceRequest {
 /// One name, fit for a dialog someone else draws: no control characters, no
 /// newlines, and short enough not to push the verb off the end of the line.
 fn subject(value: &str) -> String {
-    let cleaned: String = value
+    let cleaned: String = crate::sanitize::terminal_safe_line(value)
         .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
         .take(SUBJECT_LIMIT)
         .collect();
     let cleaned = cleaned.trim();

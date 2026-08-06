@@ -15,7 +15,7 @@
 //! it. The `0x19` prefix is what makes the human-review promise keepable: a
 //! prefixed message can never collide with an RLP transaction preimage.
 
-use crate::policy_store::PolicyStore;
+use crate::{policy_store::PolicyStore, sanitize::is_bidirectional_control};
 use alloy::primitives::{Address, B256, eip191_hash_message};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
@@ -242,13 +242,6 @@ pub fn describe_message(message: &[u8]) -> MessageDisplay {
         text: text.map(str::to_owned),
         warnings,
     }
-}
-
-const fn is_bidirectional_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-    )
 }
 
 fn looks_hexadecimal(text: &str) -> bool {
