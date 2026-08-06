@@ -2128,14 +2128,12 @@ dependencies = [
  "futures",
  "hex",
  "num-bigint 0.5.1",
- "predicates",
  "ratatui",
  "rmcp",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.19",
  "tokio",
  "tracing-subscriber",
  "unicode-width",
@@ -2383,15 +2381,6 @@ dependencies = [
  "rand 0.8.7",
  "rustc-hex",
  "static_assertions",
-]
-
-[[package]]
-name = "float-cmp"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -3367,12 +3356,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "normalize-line-endings"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3887,10 +3870,7 @@ checksum = "ada8f2932f28a27ee7b70dd6c1c39ea0675c55a36879ab92f3a715eaa1e63cfe"
 dependencies = [
  "anstyle",
  "difflib",
- "float-cmp",
- "normalize-line-endings",
  "predicates-core",
- "regex",
 ]
 
 [[package]]
