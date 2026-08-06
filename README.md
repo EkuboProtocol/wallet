@@ -105,6 +105,8 @@ How it works, and what it does not protect against:
   residual risks
 - [Architecture](docs/architecture.md) — components, the signing pipeline,
   storage and lifecycle
+- [Audit map](docs/audit-map.md) — the audit scope, the two signing paths,
+  and where each security claim is enforced in code
 - [Local storage](docs/storage.md) — data directory, the encrypted database,
   credential-store entries
 
