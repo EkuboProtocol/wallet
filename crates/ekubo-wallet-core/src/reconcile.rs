@@ -124,7 +124,11 @@ pub async fn reconcile_record(
         ChainObservation::Mined(receipt) => {
             let mut pending = lock(pending)?;
             if record.status == PendingStatus::Submitting {
-                record = pending.mark_broadcast(record.request_id, &transaction_hash)?;
+                record = pending.mark_broadcast(
+                    record.request_id,
+                    &transaction_hash,
+                    record.updated_at,
+                )?;
             }
             pending.finalize(
                 record.request_id,
@@ -152,9 +156,15 @@ pub async fn reconcile_record(
                 let known = transaction_known(network, &transaction_hash).await?;
                 let mut pending = lock(pending)?;
                 record = if known {
-                    pending.mark_broadcast(record.request_id, &transaction_hash)?
+                    pending.mark_broadcast(
+                        record.request_id,
+                        &transaction_hash,
+                        record.updated_at,
+                    )?
                 } else {
-                    pending.release_submission(record.request_id)?
+                    // The lease this pass observed, not whichever one the row
+                    // holds now: recovery decided outside the lock.
+                    pending.release_submission(record.request_id, record.updated_at)?
                 };
             }
             Ok(record)
@@ -255,15 +265,18 @@ pub async fn submit_claimed(
             Ok(broadcast) => broadcast,
             Err(error) => {
                 lock(pending)?
-                    .release_submission(claimed.request_id)
+                    .release_submission(claimed.request_id, claimed.updated_at)
                     .context("failed to release transaction submission lease")?;
                 return Err(error);
             }
         };
     let record = {
         let mut pending = lock(pending)?;
-        let broadcast_record =
-            pending.mark_broadcast(claimed.request_id, &broadcast.transaction_hash)?;
+        let broadcast_record = pending.mark_broadcast(
+            claimed.request_id,
+            &broadcast.transaction_hash,
+            claimed.updated_at,
+        )?;
         match broadcast.receipt_status {
             BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => pending
                 .finalize(

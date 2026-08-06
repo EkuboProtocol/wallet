@@ -463,34 +463,70 @@ impl PendingStore {
         self.get(request_id)
     }
 
-    pub fn release_submission(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
+    /// Hand the submission lease back, but only the lease `leased_at` names.
+    ///
+    /// `status = 'submitting'` is not enough to identify a lease. Recovery
+    /// observes a record outside any lock, decides its lease has expired, and
+    /// releases it — and between those two moments another process can release
+    /// and re-claim the same request, because the CLI and the MCP server share
+    /// this database without sharing a lock. The row is still `submitting`, so
+    /// the stale release lands on the *new* lease and the live submitter's own
+    /// `mark_broadcast` then fails after the RPC already accepted the envelope.
+    ///
+    /// `claim_for_submission` stamps `updated_at` when it claims, so that value
+    /// names one lease. Comparing it makes this a compare-and-set.
+    pub fn release_submission(
+        &mut self,
+        request_id: Uuid,
+        leased_at: DateTime<Utc>,
+    ) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = 'signed', updated_at = ?2
-             WHERE request_id = ?1 AND status = 'submitting'",
-            params![request_id.to_string(), Utc::now().to_rfc3339()],
+             WHERE request_id = ?1 AND status = 'submitting' AND updated_at = ?3",
+            params![
+                request_id.to_string(),
+                Utc::now().to_rfc3339(),
+                leased_at.to_rfc3339()
+            ],
         )?;
-        ensure!(changed == 1, "pending transaction is not being submitted");
+        ensure!(
+            changed == 1,
+            "the submission lease was reclaimed while it was being released"
+        );
         self.get(request_id)
     }
 
+    /// Record that the lease `leased_at` names put this envelope on the wire.
+    ///
+    /// Leased for the same reason as `release_submission`: the hash guard
+    /// cannot tell two leases apart, because a rebroadcast is the same bytes
+    /// under the same hash. Without it, a reconciliation acting on an
+    /// observation it made outside the lock could mark broadcast a lease
+    /// another process now holds, and that holder's own call then fails after
+    /// the RPC has already accepted the envelope.
     pub fn mark_broadcast(
         &mut self,
         request_id: Uuid,
         transaction_hash: &str,
+        leased_at: DateTime<Utc>,
     ) -> Result<PendingTransaction> {
         validate_hex(transaction_hash, Some(32))?;
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET
                 status = 'broadcast', broadcast_transaction_hash = ?2, updated_at = ?3
              WHERE request_id = ?1 AND status = 'submitting'
-               AND signed_transaction_hash = ?2",
+               AND signed_transaction_hash = ?2 AND updated_at = ?4",
             params![
                 request_id.to_string(),
                 transaction_hash,
-                Utc::now().to_rfc3339()
+                Utc::now().to_rfc3339(),
+                leased_at.to_rfc3339()
             ],
         )?;
-        ensure!(changed == 1, "broadcast hash or transaction state mismatch");
+        ensure!(
+            changed == 1,
+            "broadcast hash or transaction state mismatch, or the submission lease was reclaimed"
+        );
         self.get(request_id)
     }
 
@@ -1116,16 +1152,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(signed.status, PendingStatus::Signed);
+        let claimed = store.claim_for_submission(request.request_id).unwrap();
+        assert_eq!(claimed.status, PendingStatus::Submitting);
         assert_eq!(
             store
-                .claim_for_submission(request.request_id)
-                .unwrap()
-                .status,
-            PendingStatus::Submitting
-        );
-        assert_eq!(
-            store
-                .mark_broadcast(request.request_id, hash)
+                .mark_broadcast(request.request_id, hash, claimed.updated_at)
                 .unwrap()
                 .status,
             PendingStatus::Broadcast
@@ -1198,8 +1229,10 @@ mod tests {
                 .is_err()
         );
 
-        store.claim_for_submission(first.request_id).unwrap();
-        store.mark_broadcast(first.request_id, first_hash).unwrap();
+        let leased = store.claim_for_submission(first.request_id).unwrap();
+        store
+            .mark_broadcast(first.request_id, first_hash, leased.updated_at)
+            .unwrap();
         store.finalize(first.request_id, true, "123", None).unwrap();
         assert!(
             store
@@ -1257,6 +1290,62 @@ mod tests {
     /// to capture it: a caller pricing gas from its own history reads this
     /// rather than reconstructing it from balance deltas.
     #[test]
+    fn a_stale_observer_cannot_release_a_lease_that_was_reclaimed() {
+        let (_directory, mut store) = store();
+        let hash = hash_of(ORIGINAL_BYTES);
+        let hash = hash.as_str();
+        let signed = store
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                ORIGINAL_BYTES,
+                hash,
+            )
+            .unwrap();
+
+        // What reconciliation observes, outside any lock.
+        let observed = store.claim_for_submission(signed.request_id).unwrap();
+
+        // What happens in the meantime: the lease is released and taken again
+        // by someone else. The row is `submitting` either way, so status alone
+        // cannot tell the two leases apart.
+        store
+            .release_submission(signed.request_id, observed.updated_at)
+            .unwrap();
+        let live = store.claim_for_submission(signed.request_id).unwrap();
+        assert_ne!(live.updated_at, observed.updated_at);
+
+        // The stale release must not land on the live lease, and must not
+        // steal the broadcast either.
+        assert!(
+            store
+                .release_submission(signed.request_id, observed.updated_at)
+                .is_err()
+        );
+        assert!(
+            store
+                .mark_broadcast(signed.request_id, hash, observed.updated_at)
+                .is_err()
+        );
+        assert_eq!(
+            store.get(signed.request_id).unwrap().status,
+            PendingStatus::Submitting
+        );
+
+        // The holder of the live lease still gets its envelope on the wire.
+        assert_eq!(
+            store
+                .mark_broadcast(signed.request_id, hash, live.updated_at)
+                .unwrap()
+                .status,
+            PendingStatus::Broadcast
+        );
+    }
+
+    #[test]
     fn settlement_records_what_the_transaction_actually_cost() {
         let (_directory, mut store) = store();
         let hash = hash_of(ORIGINAL_BYTES);
@@ -1273,8 +1362,10 @@ mod tests {
             )
             .unwrap();
         assert!(signed.mined_fee.is_none());
-        store.claim_for_submission(signed.request_id).unwrap();
-        store.mark_broadcast(signed.request_id, hash).unwrap();
+        let leased = store.claim_for_submission(signed.request_id).unwrap();
+        store
+            .mark_broadcast(signed.request_id, hash, leased.updated_at)
+            .unwrap();
         let fee = MinedFee {
             gas_used: "447730".into(),
             effective_gas_price: "320000000".into(),
@@ -1304,8 +1395,10 @@ mod tests {
                 hash,
             )
             .unwrap();
-        store.claim_for_submission(signed.request_id).unwrap();
-        store.mark_broadcast(signed.request_id, hash).unwrap();
+        let leased = store.claim_for_submission(signed.request_id).unwrap();
+        store
+            .mark_broadcast(signed.request_id, hash, leased.updated_at)
+            .unwrap();
 
         let current = store.database.get("primary").unwrap().unwrap();
         store
@@ -1342,8 +1435,10 @@ mod tests {
         // been replaced on chain.
         assert!(store.mark_replaced(first.request_id).is_err());
 
-        store.claim_for_submission(first.request_id).unwrap();
-        store.mark_broadcast(first.request_id, first_hash).unwrap();
+        let leased = store.claim_for_submission(first.request_id).unwrap();
+        store
+            .mark_broadcast(first.request_id, first_hash, leased.updated_at)
+            .unwrap();
         let replaced = store.mark_replaced(first.request_id).unwrap();
         assert_eq!(replaced.status, PendingStatus::Replaced);
 
@@ -1394,9 +1489,13 @@ mod tests {
                 hash_of(ORIGINAL_BYTES).as_str(),
             )
             .unwrap();
-        store.claim_for_submission(signed.request_id).unwrap();
+        let leased = store.claim_for_submission(signed.request_id).unwrap();
         store
-            .mark_broadcast(signed.request_id, hash_of(ORIGINAL_BYTES).as_str())
+            .mark_broadcast(
+                signed.request_id,
+                hash_of(ORIGINAL_BYTES).as_str(),
+                leased.updated_at,
+            )
             .unwrap();
         signed.request_id
     }
@@ -1427,9 +1526,13 @@ mod tests {
                 )
                 .is_err()
         );
-        store.claim_for_submission(signed.request_id).unwrap();
+        let leased = store.claim_for_submission(signed.request_id).unwrap();
         store
-            .mark_broadcast(signed.request_id, hash_of(ORIGINAL_BYTES).as_str())
+            .mark_broadcast(
+                signed.request_id,
+                hash_of(ORIGINAL_BYTES).as_str(),
+                leased.updated_at,
+            )
             .unwrap();
         let request_id = signed.request_id;
 
