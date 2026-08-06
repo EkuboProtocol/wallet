@@ -108,6 +108,9 @@ pub async fn reconcile_record(
     if record.status == PendingStatus::Cancelling {
         return reconcile_cancelling(pending, network, record).await;
     }
+    if record.status == PendingStatus::Replaced {
+        return recheck_replaced(pending, network, record).await;
+    }
     if !matches!(
         record.status,
         PendingStatus::Broadcast | PendingStatus::Submitting
@@ -170,6 +173,51 @@ pub async fn reconcile_record(
             Ok(record)
         }
     }
+}
+
+/// Give a replacement verdict a chance to be wrong.
+///
+/// `Replaced` is inferred from a consumed nonce and a missing receipt, and a
+/// node whose receipt index lags its nonce reports that about a transaction
+/// that did mine — one transient gap and the record says "replaced" forever,
+/// while the funds moved. Nothing walked that back: the reconcile paths
+/// skipped the status entirely.
+///
+/// Receipts only. The nonce question is already settled, so re-reading it
+/// would buy nothing; the open question is whether one of this wallet's own
+/// envelopes is on chain after all. Newest cancellation first, because a
+/// cancellation is what would have been broadcast last.
+async fn recheck_replaced(
+    pending: &Mutex<PendingStore>,
+    network: &NetworkConfig,
+    record: PendingTransaction,
+) -> Result<PendingTransaction> {
+    let original = record
+        .broadcast_transaction_hash
+        .as_ref()
+        .or(record.signed_transaction_hash.as_ref());
+    if let Some(hash) = original
+        && let Some(receipt) = transaction_receipt(network, hash).await?
+    {
+        return lock(pending)?.finalize(
+            record.request_id,
+            receipt.succeeded,
+            &receipt.block_number.to_string(),
+            Some(&receipt.mined_fee()),
+        );
+    }
+    for hash in record.cancel_transaction_hashes.iter().rev() {
+        if let Some(receipt) = transaction_receipt(network, hash).await? {
+            // A reverted cancellation still consumed the nonce, so it settles
+            // the record the same way a successful one does.
+            return lock(pending)?.mark_cancelled(
+                record.request_id,
+                &receipt.block_number.to_string(),
+                Some(&receipt.mined_fee()),
+            );
+        }
+    }
+    Ok(record)
 }
 
 fn submission_lease_expired(record: &PendingTransaction) -> bool {
@@ -456,7 +504,10 @@ pub async fn reconcile_all(
     for record in records {
         if !matches!(
             record.status,
-            PendingStatus::Broadcast | PendingStatus::Submitting | PendingStatus::Cancelling
+            PendingStatus::Broadcast
+                | PendingStatus::Submitting
+                | PendingStatus::Cancelling
+                | PendingStatus::Replaced
         ) {
             reconciled.push(record);
             continue;

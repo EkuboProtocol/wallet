@@ -640,7 +640,7 @@ impl PendingStore {
             "UPDATE pending_transactions SET
                 status = 'cancelled', block_number = ?2, updated_at = ?3,
                 gas_used = ?4, effective_gas_price = ?5
-             WHERE request_id = ?1 AND status = 'cancelling'",
+             WHERE request_id = ?1 AND status IN ('cancelling', 'replaced')",
             params![
                 request_id.to_string(),
                 block_number,
@@ -658,6 +658,14 @@ impl PendingStore {
     /// leaves the in-flight slot without ever getting a receipt. Callers must
     /// have verified against the chain that the mined account nonce passed the
     /// envelope's nonce while no receipt exists for its hash.
+    /// Record that a different envelope consumed this one's nonce.
+    ///
+    /// A verdict, not a fact. It is inferred from two independent RPC reads —
+    /// a consumed nonce and no receipt for our hash — and a node whose receipt
+    /// index lags its nonce reports exactly that about a transaction of ours
+    /// that did mine. So `replaced` is reachable in error, and `finalize` and
+    /// `mark_cancelled` both accept it as an origin: a receipt that turns up
+    /// later corrects the verdict rather than being ignored by it.
     pub fn mark_replaced(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = 'replaced', updated_at = ?2
@@ -683,7 +691,7 @@ impl PendingStore {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = ?2, block_number = ?3, updated_at = ?4,
                 gas_used = ?5, effective_gas_price = ?6
-             WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
+             WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling', 'replaced')",
             params![
                 request_id.to_string(),
                 status,
@@ -1442,10 +1450,23 @@ mod tests {
         let replaced = store.mark_replaced(first.request_id).unwrap();
         assert_eq!(replaced.status, PendingStatus::Replaced);
 
-        // Terminal: no rebroadcast, no receipt, no second replacement.
+        // No rebroadcast and no second replacement: this envelope is done
+        // being sent, and the verdict is not something to re-derive.
         assert!(store.claim_broadcast_retry(first.request_id).is_err());
-        assert!(store.finalize(first.request_id, true, "123", None).is_err());
         assert!(store.mark_replaced(first.request_id).is_err());
+
+        // But a receipt still settles it. `replaced` is inferred from a
+        // consumed nonce and a missing receipt, which is also what a node
+        // whose receipt index lags its nonce reports about a transaction that
+        // did mine — so the verdict has to be correctable, or one transient
+        // gap says "replaced" forever about funds that moved.
+        assert_eq!(
+            store
+                .finalize(first.request_id, true, "123", None)
+                .unwrap()
+                .status,
+            PendingStatus::Confirmed
+        );
 
         // The wallet+chain in-flight slot is free for the next transaction.
         assert!(
