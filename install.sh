@@ -91,16 +91,28 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# curl, with any bearer token supplied out of band. A process's arguments are
+# readable by anything else running as this user for as long as it lives, so
+# the token travels on stdin as a --config document rather than in argv. The
+# quoting is curl's own config syntax: a backslash and a double quote are the
+# only characters that need escaping inside its quoted values.
+curl_authenticated() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    printf 'header = "Authorization: Bearer %s"\n' \
+      "$(printf '%s' "$GITHUB_TOKEN" | sed 's/[\\"]/\\&/g')" \
+      | curl --config - "$@"
+  else
+    curl "$@"
+  fi
+}
+
 api() {
   api_path=$1
   if [ "$DOWNLOADER" = gh ]; then
     gh api "$api_path"
   else
     set -- -fsSL -H "Accept: application/vnd.github+json"
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-      set -- "$@" -H "Authorization: Bearer $GITHUB_TOKEN"
-    fi
-    curl "$@" "https://api.github.com/$api_path"
+    curl_authenticated "$@" "https://api.github.com/$api_path"
   fi
 }
 
@@ -136,10 +148,8 @@ download_asset() {
     [ "$WORK_DIRECTORY/$asset" = "$destination" ] || mv "$WORK_DIRECTORY/$asset" "$destination"
   else
     set -- -fsSL -o "$destination"
-    if [ -n "${GITHUB_TOKEN:-}" ]; then
-      set -- "$@" -H "Authorization: Bearer $GITHUB_TOKEN"
-    fi
-    curl "$@" "https://github.com/$REPOSITORY/releases/download/$TAG/$asset" || return 1
+    curl_authenticated "$@" \
+      "https://github.com/$REPOSITORY/releases/download/$TAG/$asset" || return 1
   fi
 }
 
