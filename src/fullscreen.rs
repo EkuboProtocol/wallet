@@ -33,6 +33,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
+pub(crate) use crate::render::display_width;
 use crate::render::terminal_safe_line;
 use crate::tui::Tone;
 
@@ -96,12 +97,6 @@ pub fn lines_to_text(lines: &[Line], paint: impl Fn(&str, Tone) -> String) -> St
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-pub(crate) fn display_width(text: &str) -> usize {
-    text.chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
-        .sum()
 }
 
 /// Wrap one line to `columns`, breaking at a space where one is in reach and

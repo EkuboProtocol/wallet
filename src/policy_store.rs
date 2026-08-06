@@ -5,14 +5,17 @@
 //! again. Pending approvals and transaction lifecycle records use separate
 //! tables so exact signed bytes can be recovered without becoming spend state.
 
-use crate::{config::validate_wallet_id, core::policy::WalletPolicy};
+use crate::{
+    config::{create_private_dir, set_private_file_permissions, validate_wallet_id},
+    core::policy::WalletPolicy,
+};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use keyring::{Entry, Error as KeyringError};
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::{fs, fs::OpenOptions, path::Path};
+use std::{fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const SCHEMA_VERSION: i64 = 11;
@@ -760,30 +763,13 @@ fn load_or_create_database_key(database_exists: bool) -> Result<DatabaseKey> {
     }
 }
 
-fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    let _ = path;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::{
+        fs,
+        io::{Read, Seek, SeekFrom, Write},
+    };
 
     fn key(byte: u8) -> DatabaseKey {
         DatabaseKey::new([byte; 32])

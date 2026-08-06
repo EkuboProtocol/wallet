@@ -1,7 +1,7 @@
 use crate::{
     config::{NetworkConfig, WalletMetadata},
     core::{execution_plan::ExecutionPlan, policy::policy_denies},
-    custody::KeyStore,
+    custody::{KeyStore, load_matching_signer},
     rpc::{sanitize_rpc_message, sanitized_rpc_error, transaction_receipt, verify_chain_id},
     simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
 };
@@ -266,12 +266,7 @@ pub fn sign_prepared_execution<K: KeyStore>(
     );
 
     // All RPC preparation completed before this function loads key material.
-    let material = keys.load(&wallet.id)?;
-    let local_signer = material.signer();
-    ensure!(
-        local_signer.address() == wallet.address,
-        "credential-store private key does not match wallet metadata"
-    );
+    let local_signer = load_matching_signer(keys, wallet)?;
     let mut signed_execution = sign_prepared(
         &local_signer,
         prepared.chain_id,
@@ -707,12 +702,7 @@ pub async fn sign_cancellation<K: KeyStore>(
     }
 
     // All RPC preparation completed before this function loads key material.
-    let material = keys.load(&wallet.id)?;
-    let local_signer = material.signer();
-    ensure!(
-        local_signer.address() == wallet.address,
-        "credential-store private key does not match wallet metadata"
-    );
+    let local_signer = load_matching_signer(keys, wallet)?;
     sign_prepared(
         &local_signer,
         network.chain_id,

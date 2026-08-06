@@ -58,6 +58,23 @@ impl fmt::Debug for PrivateKeyMaterial {
     }
 }
 
+/// Loads the wallet's private key and refuses a credential-store entry whose
+/// derived address does not match the wallet metadata: a row swapped
+/// underneath the wallet must never produce a signature. Every signing path
+/// in the process obtains its signer here.
+pub fn load_matching_signer<K: KeyStore + ?Sized>(
+    keys: &K,
+    wallet: &WalletMetadata,
+) -> Result<PrivateKeySigner> {
+    let material = keys.load(&wallet.id)?;
+    let signer = material.signer();
+    ensure!(
+        signer.address() == wallet.address,
+        "credential-store private key does not match wallet metadata"
+    );
+    Ok(signer)
+}
+
 pub trait KeyStore: Send + Sync {
     fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()>;
     fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial>;

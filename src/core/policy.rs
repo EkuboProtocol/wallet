@@ -1,5 +1,5 @@
 use crate::core::execution_plan::ExecutionPlan;
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, U256, keccak256};
 use anyhow::{Context, Result, bail, ensure};
 use num_bigint::BigUint;
 use schemars::JsonSchema;
@@ -131,6 +131,16 @@ pub enum FindingSeverity {
 pub type TokenSpends = BTreeMap<String, BigUint>;
 
 impl WalletPolicy {
+    /// The canonical identity of this policy document: keccak-256 over its
+    /// canonical JSON serialization. Every surface that names a policy —
+    /// validation output, proposal review, replacement review — reports this
+    /// one digest, so two surfaces can never disagree about which policy is
+    /// being discussed.
+    pub fn digest(&self) -> Result<String> {
+        let canonical = serde_json::to_vec(self).context("failed to serialize policy")?;
+        Ok(format!("0x{}", hex::encode(keccak256(&canonical))))
+    }
+
     pub fn parse(input: Value) -> Result<Self> {
         let mut policy: Self = serde_json::from_value(drop_retired_settings(input))
             .context("invalid wallet policy")?;

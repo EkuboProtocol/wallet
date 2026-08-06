@@ -17,6 +17,7 @@
 
 use std::io::{self, IsTerminal, Write};
 
+use crate::render::display_width;
 use anyhow::Result;
 use crossterm::{
     cursor,
@@ -328,12 +329,6 @@ fn bullet_width(text: &str) -> usize {
         return digits + 2;
     }
     0
-}
-
-fn display_width(text: &str) -> usize {
-    text.chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
-        .sum()
 }
 
 /// `text` cut to `columns` display columns. Chrome is written by this module,

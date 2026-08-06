@@ -27,7 +27,7 @@ use crate::{
     },
     fork::{ForkContext, ForkParent, ForkPreface, validate_replay},
     policy_store::StoredPolicy,
-    rpc::sanitize_rpc_message,
+    rpc::{delegated_implementation, sanitize_rpc_message},
 };
 use alloy::{
     consensus::BlockHeader,
@@ -896,11 +896,6 @@ fn tracked_tokens(policy: &crate::core::policy::WalletPolicy, chain_id: &str) ->
             .filter_map(|token| Address::from_str(token).ok())
             .collect()
     })
-}
-
-fn delegated_implementation(code: &Bytes) -> Option<Address> {
-    (code.len() == 23 && code.starts_with(&[0xef, 0x01, 0x00]))
-        .then(|| Address::from_slice(&code[3..]))
 }
 
 fn transfer_activity(wallet: Address, logs: &[Log]) -> BTreeMap<Address, TransferActivity> {

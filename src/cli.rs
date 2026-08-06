@@ -10,7 +10,7 @@ use crate::{
         replace_configured_network,
     },
     core::policy::{FindingSeverity, WalletPolicy},
-    custody::{CustodyService, KeyStore, OsKeyStore, PrivateKeyMaterial},
+    custody::{CustodyService, OsKeyStore, PrivateKeyMaterial, load_matching_signer},
     execution::{PreparedExecution, SigningOverrides, prepare_execution, sign_prepared_execution},
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceRequest},
     legal::{self, LegalDocument, LegalStore},
@@ -29,10 +29,7 @@ use crate::{
         parse_typed_data,
     },
 };
-use alloy::{
-    primitives::{Address, keccak256},
-    signers::SignerSync,
-};
+use alloy::{primitives::Address, signers::SignerSync};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -964,8 +961,7 @@ async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMo
             let value = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed to parse {}", policy_file.display()))?;
             let policy = WalletPolicy::parse(value)?;
-            let canonical = serde_json::to_vec(&policy)?;
-            let digest = format!("0x{}", hex::encode(keccak256(&canonical)));
+            let digest = policy.digest()?;
             emit(
                 mode,
                 &serde_json::json!({
@@ -1029,8 +1025,7 @@ async fn review_policy_proposal(
     }
 
     let diff = crate::core::policy::diff_policies(&current.policy, &proposal.policy);
-    let policy_bytes = serde_json::to_vec(&proposal.policy)?;
-    let digest = format!("0x{}", hex::encode(keccak256(&policy_bytes)));
+    let digest = proposal.policy.digest()?;
     let mut question = crate::tui::Confirmation::new(
         "Apply proposed wallet policy",
         "An agent proposed this replacement policy. The permission diff below is authoritative; \
@@ -1953,12 +1948,7 @@ async fn approve_typed_data(
         config.wallet(&request.wallet_id)? == wallet,
         "wallet configuration changed during approval"
     );
-    let material = OsKeyStore.load(&wallet.id)?;
-    let signer = material.signer();
-    ensure!(
-        signer.address() == wallet.address,
-        "credential-store private key does not match wallet metadata"
-    );
+    let signer = load_matching_signer(&OsKeyStore, &wallet)?;
     let signature = signer
         .sign_hash_sync(&digest)
         .context("failed to sign typed data")?;
@@ -2157,12 +2147,7 @@ async fn approve_message(
         config.wallet(&request.wallet_id)? == wallet,
         "wallet configuration changed during approval"
     );
-    let material = OsKeyStore.load(&wallet.id)?;
-    let signer = material.signer();
-    ensure!(
-        signer.address() == wallet.address,
-        "credential-store private key does not match wallet metadata"
-    );
+    let signer = load_matching_signer(&OsKeyStore, &wallet)?;
     let signature = signer
         .sign_hash_sync(&digest)
         .context("failed to sign the message")?;
@@ -2376,8 +2361,7 @@ async fn replace_policy(
     require_interactive("policy changes")?;
     let mut policies = PolicyStore::production(config.data_dir())?;
     let current = policies.get(wallet_id)?;
-    let policy_bytes = serde_json::to_vec(policy)?;
-    let digest = format!("0x{}", hex::encode(keccak256(&policy_bytes)));
+    let digest = policy.digest()?;
     let mut question = crate::tui::Confirmation::new(
         "Replace wallet policy",
         "Replace the complete policy enforced before this wallet signs.",

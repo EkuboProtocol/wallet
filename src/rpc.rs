@@ -388,7 +388,11 @@ pub fn sanitized_rpc_error(
     )
 }
 
-fn delegated_implementation(code: &Bytes) -> Option<Address> {
+/// Parses an EIP-7702 delegation designator: the 23-byte runtime code form
+/// `0xef0100 || address`. The single implementation for every module that
+/// inspects account code.
+#[must_use]
+pub fn delegated_implementation(code: &Bytes) -> Option<Address> {
     (code.len() == 23 && code.starts_with(&[0xef, 0x01, 0x00]))
         .then(|| Address::from_slice(&code[3..]))
 }

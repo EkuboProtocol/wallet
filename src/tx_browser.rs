@@ -499,8 +499,7 @@ fn table_amount(amount: U256, metadata: Option<&crate::approval_summary::TokenMe
 /// `0xa0b86991…2d883e06`: enough of an address to recognize it, sized for a
 /// table cell. The explorer page linked above the table has every full value.
 fn short_address(address: Address) -> String {
-    let full = format!("{address:#x}");
-    format!("{}…{}", &full[..10], &full[full.len() - 8..])
+    crate::render::short_hex(&format!("{address:#x}"))
 }
 
 /// The wallet's net token movements as an aligned table: one row per token,

@@ -110,10 +110,18 @@ pub fn interactive_list_label(label: &str) -> String {
 
 /// Display width of `text` in terminal columns, counting wide glyphs as the
 /// two columns they actually occupy.
-fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     text.chars()
         .map(|character| UnicodeWidthChar::width(character).unwrap_or(0))
         .sum()
+}
+
+/// `0x1234567890…12345678`: the head and tail of a long hex identifier.
+pub(crate) fn short_hex(value: &str) -> String {
+    if value.len() <= 19 {
+        return value.to_owned();
+    }
+    format!("{}…{}", &value[..10], &value[value.len() - 8..])
 }
 
 /// `text` cut to at most `columns` columns, ellipsized when anything is lost.

@@ -324,10 +324,7 @@ fn columns(alias_width: u16, compact: bool) -> Vec<TableColumn> {
 /// lookalike could match; the search still holds the full value, and every
 /// edit and confirmation shows it whole.
 fn short_address(address: &str) -> String {
-    if address.len() <= usize::from(SHORT_ADDRESS_WIDTH) {
-        return address.to_owned();
-    }
-    format!("{}…{}", &address[..10], &address[address.len() - 8..])
+    crate::render::short_hex(address)
 }
 
 /// The network column names the chain when it is still configured and falls

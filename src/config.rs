@@ -694,7 +694,7 @@ pub fn remove_configured_network(
     Ok(networks.remove(index))
 }
 
-fn create_private_dir(path: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
@@ -704,7 +704,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn set_private_file_permissions(path: &Path) -> Result<()> {
+pub(crate) fn set_private_file_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
