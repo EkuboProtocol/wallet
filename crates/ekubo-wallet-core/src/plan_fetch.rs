@@ -30,6 +30,15 @@ use url::{Host, Url};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The longest `data:` payload worth decoding at all.
+///
+/// Base64 packs three bytes into four characters and percent-encoding never
+/// contracts, so nothing longer than this can decode to a body within
+/// `MAX_SERIALIZED_PLAN_BYTES`. Expressed against that limit rather than as
+/// its own number, because it is the same limit — just measured before the
+/// decode instead of after it.
+const MAX_DATA_URI_PAYLOAD_BYTES: usize = MAX_SERIALIZED_PLAN_BYTES / 3 * 4 + 4;
+
 /// How long name resolution may take before a reference fetch gives up.
 ///
 /// `CONNECT_TIMEOUT` and `TOTAL_TIMEOUT` are configured on the HTTP client, so
@@ -164,6 +173,17 @@ fn decode_data_uri(url: &str, subject: FetchSubject) -> Result<Vec<u8>> {
             );
         }
     }
+    let noun = subject.noun;
+    // Checked before the decode, not after it. Neither encoding can contract:
+    // base64 packs three bytes into four characters and percent-encoding only
+    // ever expands, so a payload longer than this cannot decode to anything
+    // the check below would accept. Refusing on the encoded length keeps the
+    // process from allocating a buffer for bytes the next statement throws
+    // away.
+    ensure!(
+        payload.len() <= MAX_DATA_URI_PAYLOAD_BYTES,
+        "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+    );
     let bytes = if base64_payload {
         base64::engine::general_purpose::STANDARD
             .decode(payload)
@@ -171,7 +191,6 @@ fn decode_data_uri(url: &str, subject: FetchSubject) -> Result<Vec<u8>> {
     } else {
         percent_decode_str(payload).collect()
     };
-    let noun = subject.noun;
     ensure!(
         bytes.len() <= MAX_SERIALIZED_PLAN_BYTES,
         "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
@@ -629,6 +648,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exceeds"));
+
+        // The base64 arm had no coverage at all, and it is the one where the
+        // encoded length and the decoded length differ.
+        let oversized = "A".repeat(MAX_DATA_URI_PAYLOAD_BYTES + 4);
+        let url = format!("data:application/json;base64,{oversized}");
+        let error = resolve_execution_plan(&url, None, FetchPolicy::production())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"), "{error}");
     }
 
     #[test]
