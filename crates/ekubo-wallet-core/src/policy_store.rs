@@ -9,7 +9,7 @@ use crate::{
     config::{create_private_dir, set_private_file_permissions, validate_wallet_id},
     core::policy::WalletPolicy,
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use keyring::{Entry, Error as KeyringError};
@@ -18,10 +18,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{fs::OpenOptions, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-const SCHEMA_VERSION: i64 = 12;
-/// The oldest schema this build can still upgrade. Anything below it belongs
-/// to the retired pre-release ladder and is refused with guidance instead.
-const RETIRED_SCHEMA_FLOOR: i64 = 11;
+/// The shape of the encrypted database. There is one, and this build creates
+/// it: the ladder of pre-release versions that preceded 1.0.0 described
+/// databases nobody outside development ever held, so carrying upgrade steps
+/// for them would have been machinery for a population of zero — and it would
+/// have told a first-time owner that their brand-new database had a history.
+const SCHEMA_VERSION: i64 = 1;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.policy-database-key.v1";
@@ -169,20 +171,12 @@ impl PolicyStore {
                 create_current_schema(&connection)?;
                 SCHEMA_VERSION
             }
-            Some(version) if version < RETIRED_SCHEMA_FLOOR => bail!(
-                "policy database schema {version} predates this build; run ekubo-wallet \
-                 v0.3.0-rc.0 once to upgrade it, then retry"
-            ),
-            Some(version) if version < SCHEMA_VERSION => {
-                migrate(&connection, version)?;
-                SCHEMA_VERSION
-            }
             Some(version) => version,
         };
         ensure!(
             version == SCHEMA_VERSION,
-            "policy database schema {version} is newer than this build understands; upgrade \
-             ekubo-wallet"
+            "policy database schema {version} is not the schema this build understands \
+             ({SCHEMA_VERSION}); upgrade ekubo-wallet"
         );
         verify_integrity(&connection)?;
         set_private_file_permissions(path)?;
@@ -721,19 +715,6 @@ const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals 
      PRIMARY KEY (chain_id, address)
  ) STRICT";
 
-/// Upgrade an older database in place. Each step is idempotent and additive,
-/// so an interrupted upgrade re-runs harmlessly at the next open.
-fn migrate(connection: &Connection, from: i64) -> Result<()> {
-    let mut statements: Vec<&str> = Vec::new();
-    if from < 12 {
-        statements.push(TOKEN_PROPOSALS_TABLE);
-    }
-    let record =
-        format!("UPDATE schema_metadata SET version = {SCHEMA_VERSION} WHERE singleton = 1");
-    statements.push(record.as_str());
-    run_transaction(connection, &statements).context("policy database upgrade failed")
-}
-
 fn run_transaction(connection: &Connection, statements: &[&str]) -> Result<()> {
     connection.execute_batch("BEGIN IMMEDIATE")?;
     for statement in statements {
@@ -912,11 +893,10 @@ mod tests {
     }
 
     #[test]
-    fn pre_collapse_schema_is_refused_and_left_untouched() {
-        // The pre-release upgrade ladder is retired: a database still on an
-        // old schema is refused with guidance naming the release that can
-        // still upgrade it. The refusal must write nothing — the file stays
-        // byte-identical so that release can actually run the upgrade.
+    fn any_other_schema_is_refused_and_left_untouched() {
+        // There is one schema. A database carrying any other version is not
+        // upgraded in place — it is refused, and the refusal writes nothing,
+        // so whatever wrote the file still has it byte for byte.
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("policies.db");
         write_schema_9_database(&path, &key(11));
@@ -924,56 +904,16 @@ mod tests {
 
         let error = PolicyStore::open(&path, &key(11))
             .err()
-            .expect("pre-collapse schema must be refused")
+            .expect("a foreign schema must be refused")
             .to_string();
-        assert!(error.contains("schema 9 predates"), "{error}");
-        assert!(error.contains("v0.3.0-rc.0"), "{error}");
+        assert!(error.contains("schema 9 is not the schema"), "{error}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
-    /// Schema 11 shipped without `token_proposals`. Opening such a database
-    /// must upgrade it in place — an existing wallet cannot be asked to
-    /// recreate its policies because a new table appeared — and must not
-    /// disturb the rows already there.
     #[test]
-    fn a_schema_11_database_gains_token_proposals_in_place() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("policies.db");
-        {
-            let mut store = PolicyStore::open(&path, &key(12)).unwrap();
-            store
-                .put("primary", &WalletPolicy::allow_all_with_approval(), None)
-                .unwrap();
-            store
-                .connection
-                .execute("DROP TABLE token_proposals", [])
-                .unwrap();
-            store
-                .connection
-                .execute("UPDATE schema_metadata SET version = 11", [])
-                .unwrap();
-        }
-
-        let store = PolicyStore::open(&path, &key(12)).unwrap();
-        assert_eq!(schema_version(&store.connection).unwrap(), Some(12));
-        let proposals: i64 = store
-            .connection
-            .query_row("SELECT COUNT(*) FROM token_proposals", [], |row| row.get(0))
-            .expect("the upgrade must create the table");
-        assert_eq!(proposals, 0);
-        // The upgrade is additive: what was already stored survives it.
-        assert!(store.get("primary").unwrap().is_some());
-
-        // And it is idempotent — reopening an already-upgraded database is a
-        // no-op rather than a second CREATE that fails.
-        drop(store);
-        assert!(PolicyStore::open(&path, &key(12)).is_ok());
-    }
-
-    #[test]
-    fn newer_schema_than_this_build_is_refused() {
-        // A database already migrated by a newer build fails closed rather
-        // than being written through a stale understanding of its shape.
+    fn a_schema_from_a_newer_build_is_refused() {
+        // Fails closed rather than being written through a stale
+        // understanding of its shape.
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("policies.db");
         {
@@ -985,9 +925,37 @@ mod tests {
         }
         let error = PolicyStore::open(&path, &key(7))
             .err()
-            .expect("newer schema must be refused")
+            .expect("a newer schema must be refused")
             .to_string();
-        assert!(error.contains("newer than this build"), "{error}");
+        assert!(error.contains("is not the schema"), "{error}");
+    }
+
+    #[test]
+    fn a_fresh_database_is_created_at_the_only_schema_there_is() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let store = PolicyStore::open(&path, &key(3)).unwrap();
+        assert_eq!(schema_version(&store.connection).unwrap(), Some(1));
+        // Every table the build expects exists from creation; nothing arrives
+        // by later upgrade.
+        for table in [
+            "wallet_policies",
+            "pending_transactions",
+            "pending_typed_data",
+            "pending_messages",
+            "policy_proposals",
+            "tokens",
+            "token_proposals",
+            "address_book",
+            "legal_acceptance",
+        ] {
+            store
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap_or_else(|error| panic!("{table} missing from a fresh database: {error}"));
+        }
     }
 
     #[test]
