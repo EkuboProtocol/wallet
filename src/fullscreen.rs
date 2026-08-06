@@ -765,29 +765,42 @@ pub(crate) fn edit_form(
             error = None;
             continue;
         }
-        let save =
-            matches!(key.code, KeyCode::Char('s')) && key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
+        // Ctrl+S saves from anywhere; Enter walks to the next field and saves
+        // only from the last one. Enter must not do both, which is what
+        // deciding this before the match and re-testing it after made it do.
+        let save = match key.code {
             KeyCode::Esc => return Ok(None),
-            KeyCode::Tab | KeyCode::Down => focus = (focus + 1) % editors.len(),
+            KeyCode::Tab | KeyCode::Down => {
+                focus = (focus + 1) % editors.len();
+                false
+            }
             KeyCode::BackTab | KeyCode::Up => {
                 focus = (focus + editors.len() - 1) % editors.len();
+                false
             }
-            KeyCode::Enter if focus + 1 < editors.len() => focus += 1,
-            _ if !save && key.code != KeyCode::Enter => continue,
-            _ => {}
-        }
-        if save || key.code == KeyCode::Enter {
-            let values: Vec<String> = editors
-                .iter()
-                .map(|editor| editor.value().to_owned())
-                .collect();
-            match validate(&values) {
-                Ok(()) => return Ok(Some(values)),
-                Err((index, reason)) => {
-                    focus = index.min(editors.len() - 1);
-                    error = Some(reason);
+            KeyCode::Enter => {
+                if focus + 1 < editors.len() {
+                    focus += 1;
+                    false
+                } else {
+                    true
                 }
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+            _ => false,
+        };
+        if !save {
+            continue;
+        }
+        let values: Vec<String> = editors
+            .iter()
+            .map(|editor| editor.value().to_owned())
+            .collect();
+        match validate(&values) {
+            Ok(()) => return Ok(Some(values)),
+            Err((index, reason)) => {
+                focus = index.min(editors.len() - 1);
+                error = Some(reason);
             }
         }
     }
