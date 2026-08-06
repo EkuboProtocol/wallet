@@ -149,6 +149,16 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
     // it matches on exact chain, address, and selector, and was reviewed when
     // the snapshot was committed. Standard token decoding remains the
     // fallback for everything else.
+    let token = step.transaction.to;
+    let display = metadata.get(&token).cloned().unwrap_or_default();
+    let standard = decode_standard_call(&step.transaction.data);
+    // Computed before the descriptor is consulted, and carried into whichever
+    // reading is shown. A descriptor changes how a call reads, never what it
+    // does, so a token having one must not be the reason its allowance ceiling
+    // goes unmentioned — and the tokens most likely to have a vendored
+    // descriptor are exactly the ones worth approving carefully.
+    let warnings = standard_call_warnings(step.step, token, &display, standard.as_ref());
+
     if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>()
         && let Some(reading) = crate::clear_signing::interpret(
             chain_id,
@@ -166,13 +176,10 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
             step: step.step,
             description: Some(reading.intent),
             details: reading.fields,
-            warnings: Vec::new(),
+            warnings,
         };
     }
-    let token = step.transaction.to;
-    let display = metadata.get(&token).cloned().unwrap_or_default();
-    let mut warnings = Vec::new();
-    let description = match decode_standard_call(&step.transaction.data) {
+    let description = match standard {
         Some(StandardCall::Approve { spender, amount }) => {
             if amount == U256::ZERO {
                 Some(format!(
@@ -180,13 +187,6 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
                     token_label(token, &display)
                 ))
             } else {
-                if is_effectively_unlimited(amount) {
-                    warnings.push(format!(
-                        "Call {} grants an effectively unlimited {} allowance to {spender:#x}.",
-                        step.step,
-                        token_label(token, &display)
-                    ));
-                }
                 Some(format!(
                     "approve spender {spender:#x} for {}",
                     format_token_amount(amount, token, &display)
@@ -204,15 +204,9 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
         Some(StandardCall::SetApprovalForAll {
             operator,
             approved: true,
-        }) => {
-            warnings.push(format!(
-                "Call {} grants {operator:#x} blanket operator control of every {token:#x} token held by this wallet.",
-                step.step
-            ));
-            Some(format!(
-                "setApprovalForAll: grant operator {operator:#x} control of all {token:#x} tokens"
-            ))
-        }
+        }) => Some(format!(
+            "setApprovalForAll: grant operator {operator:#x} control of all {token:#x} tokens"
+        )),
         Some(StandardCall::SetApprovalForAll {
             operator,
             approved: false,
@@ -350,6 +344,41 @@ pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenM
 /// A token is named only when the owner's token database names it. Anything
 /// else is rendered by address and marked, so a reviewer can never read the
 /// absence of a name as the presence of a familiar one.
+/// What a call does, stated independently of how it reads.
+///
+/// These are the two grants that outlive the transaction carrying them: an
+/// allowance the spender may draw whenever it likes, and blanket operator
+/// control of a collection. Both are facts about the decoded call, so they are
+/// derived from the call and attached to whatever description is displayed —
+/// a clear-signing descriptor renders an approval more legibly, which is no
+/// reason for its ceiling to stop being mentioned.
+fn standard_call_warnings(
+    step: u32,
+    token: Address,
+    display: &TokenMetadata,
+    call: Option<&StandardCall>,
+) -> Vec<String> {
+    match call {
+        Some(StandardCall::Approve { spender, amount })
+            if *amount != U256::ZERO && is_effectively_unlimited(*amount) =>
+        {
+            vec![format!(
+                "Call {step} grants an effectively unlimited {} allowance to {spender:#x}.",
+                token_label(token, display)
+            )]
+        }
+        Some(StandardCall::SetApprovalForAll {
+            operator,
+            approved: true,
+        }) => {
+            vec![format!(
+                "Call {step} grants {operator:#x} blanket operator control of every {token:#x} token held by this wallet."
+            )]
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn token_label(token: Address, display: &TokenMetadata) -> String {
     display
         .symbol
@@ -538,6 +567,40 @@ mod tests {
         data.extend_from_slice(&spender.into_word().0);
         data.extend_from_slice(&amount.to_be_bytes::<32>());
         data
+    }
+
+    #[tokio::test]
+    async fn a_descriptor_does_not_silence_the_unlimited_allowance_warning() {
+        // stETH ships a vendored ERC-7730 descriptor for `approve`, so this
+        // call is read through the descriptor path. What it grants is a fact
+        // about the call, not about how the call reads — and a token popular
+        // enough to have a descriptor is exactly one worth approving
+        // carefully.
+        let steth: Address = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+            .parse()
+            .unwrap();
+        let interpretation = interpret_step(
+            &step(
+                1,
+                steth,
+                approve_calldata(Address::repeat_byte(0x22), U256::MAX),
+            ),
+            &TokenMetadataMap::new(),
+        )
+        .await;
+        let description = interpretation.description.clone().unwrap_or_default();
+        assert!(
+            !description.starts_with("approve spender"),
+            "the descriptor did not match, so this proves nothing: {description}"
+        );
+        assert!(
+            interpretation
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unlimited")),
+            "descriptor reading dropped the warning: {:?}",
+            interpretation.warnings
+        );
     }
 
     fn simulation_with_native_delta(delta: &str) -> SimulationResult {
