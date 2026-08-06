@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal};
 use std::str::FromStr;
+use std::time::Duration;
 
 use alloy::primitives::{Address, B256, U256, b256};
 use anyhow::Result;
@@ -194,6 +195,19 @@ pub async fn load_detail(config: &ConfigStore, record: &PendingTransaction) -> V
     detail_lines(record, network.as_ref(), receipt.as_ref())
 }
 
+/// Everything one detail view may spend looking for a receipt.
+///
+/// This lookup runs inside the browser's key loop, so the screen is frozen for
+/// its whole duration — and the cancel action is reachable only from the
+/// detail view, which puts the freeze directly in front of the recovery the
+/// owner opened it for. A `Cancelling` record has up to
+/// `MAX_CANCELLATION_ATTEMPTS` hashes plus the original, each previously
+/// costing its own RPC timeout, so an unreachable endpoint held the terminal
+/// for over two minutes. One budget across all of them instead: past it the
+/// detail renders from stored data, which is what it does for an unconfigured
+/// network anyway.
+const RECEIPT_DETAIL_BUDGET: Duration = Duration::from_secs(15);
+
 async fn load_receipt(
     network: Option<&NetworkConfig>,
     tokens: Option<&crate::token_store::TokenStore>,
@@ -204,24 +218,38 @@ async fn load_receipt(
     if hashes.is_empty() {
         return None;
     }
-    let mut section = ReceiptSection::NotYetAvailable;
-    for hash in hashes {
-        match transaction_receipt_details(network, hash).await {
-            Ok(Some(receipt)) => {
-                let moved: Vec<Address> = transfer_activity(record.execution_plan.sender, &receipt)
-                    .into_iter()
-                    .map(|(token, _)| token)
-                    .collect();
-                let metadata = tokens
-                    .and_then(|tokens| tokens.display_metadata(network.chain_id, &moved).ok())
-                    .unwrap_or_default();
-                return Some(ReceiptSection::Ready { receipt, metadata });
+    let lookup = async {
+        let mut section = ReceiptSection::NotYetAvailable;
+        for hash in hashes {
+            match transaction_receipt_details(network, hash).await {
+                Ok(Some(receipt)) => {
+                    let moved: Vec<Address> =
+                        transfer_activity(record.execution_plan.sender, &receipt)
+                            .into_iter()
+                            .map(|(token, _)| token)
+                            .collect();
+                    let metadata = tokens
+                        .and_then(|tokens| tokens.display_metadata(network.chain_id, &moved).ok())
+                        .unwrap_or_default();
+                    return ReceiptSection::Ready { receipt, metadata };
+                }
+                Ok(None) => {}
+                // A transport failure against one hash will fail for the rest
+                // too, so stop rather than paying the timeout once per
+                // candidate to learn the same thing eight more times.
+                Err(error) => return ReceiptSection::Failed(format!("{error:#}")),
             }
-            Ok(None) => {}
-            Err(error) => section = ReceiptSection::Failed(format!("{error:#}")),
+            section = ReceiptSection::NotYetAvailable;
         }
-    }
-    Some(section)
+        section
+    };
+    Some(
+        tokio::time::timeout(RECEIPT_DETAIL_BUDGET, lookup)
+            .await
+            .unwrap_or_else(|_| {
+                ReceiptSection::Failed("receipt lookup timed out; showing stored details".into())
+            }),
+    )
 }
 
 /// The transaction hashes that may hold this record's receipt, most likely
