@@ -27,6 +27,15 @@ use std::{str::FromStr, time::Duration};
 
 const MAX_BATCH_CALLS: usize = 128;
 
+/// Individual `eth_call` requests one batch may hold in flight at once.
+///
+/// The aggregate path is a single request; the fallback is one per call, and
+/// letting `MAX_BATCH_CALLS` of them leave together turns one tool call into a
+/// burst against an endpoint that agreed to no such thing — and which the
+/// threat model does not let this wallet assume anything about. Eight finishes
+/// a full batch in a handful of round trips without being that burst.
+const MAX_CONCURRENT_INDIVIDUAL_CALLS: usize = 8;
+
 /// Calldata bytes one read may carry. A read is a function selector and its
 /// arguments; nothing legitimate approaches this, and the cap keeps a single
 /// entry from being the whole budget.
@@ -311,27 +320,45 @@ pub async fn batch_eth_call(
     }
 
     let caller = requested_caller.unwrap_or(MULTICALL3_ADDRESS);
-    let futures = calls.iter().enumerate().map(|(index, call)| {
-        let provider = &provider;
-        async move {
-            let request = TransactionRequest::default()
-                .with_from(caller)
-                .with_to(call.to)
-                .with_input(call.data.clone());
-            match tokio::time::timeout(RPC_TIMEOUT, provider.call(request).block(block.call_id))
-                .await
-            {
-                Ok(Ok(bytes)) => format_result(call, index, true, &bytes, None),
-                Ok(Err(_)) | Err(_) => format_result(
-                    call,
-                    index,
-                    false,
-                    &Bytes::new(),
-                    Some("eth_call failed or reverted".into()),
-                ),
-            }
-        }
-    });
+    // One tool call must not become MAX_BATCH_CALLS simultaneous connections.
+    // This path is taken whenever Multicall3 is unavailable *or* the caller
+    // named a `from` address — the second is not an error condition, so the
+    // fan-out is reachable on demand rather than only when something fails.
+    // Throttled rather than refused: a legitimate 128-call batch on a chain
+    // without Multicall3 still completes, in a handful of round trips instead
+    // of one burst the configured endpoint never agreed to.
+    let mut results = Vec::with_capacity(calls.len());
+    for (chunk_index, chunk) in calls.chunks(MAX_CONCURRENT_INDIVIDUAL_CALLS).enumerate() {
+        let offset = chunk_index * MAX_CONCURRENT_INDIVIDUAL_CALLS;
+        results.extend(
+            join_all(chunk.iter().enumerate().map(|(position, call)| {
+                let provider = &provider;
+                let index = offset + position;
+                async move {
+                    let request = TransactionRequest::default()
+                        .with_from(caller)
+                        .with_to(call.to)
+                        .with_input(call.data.clone());
+                    match tokio::time::timeout(
+                        RPC_TIMEOUT,
+                        provider.call(request).block(block.call_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(bytes)) => format_result(call, index, true, &bytes, None),
+                        Ok(Err(_)) | Err(_) => format_result(
+                            call,
+                            index,
+                            false,
+                            &Bytes::new(),
+                            Some("eth_call failed or reverted".into()),
+                        ),
+                    }
+                }
+            }))
+            .await,
+        );
+    }
     Ok(BatchEthCallOutput {
         network: network.name.clone(),
         chain_id: network.chain_id.to_string(),
@@ -340,7 +367,7 @@ pub async fn batch_eth_call(
         strategy: BatchStrategy::Individual,
         caller: caller.to_checksum(None),
         multicall3_address: None,
-        results: join_all(futures).await,
+        results,
         fork: None,
     })
 }
