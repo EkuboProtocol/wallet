@@ -20,7 +20,7 @@ daemon. There is one signing implementation and no generic digest-signing API.
   parent linkage, simulated block number, call count, canonical Calibur runtime
   hash, balance probes, and returned transfer logs. There is no local EVM,
   `eth_getProof` reconstruction, or `eth_call` fallback for signing decisions.
-- Recorded simulations (`src/simulation_store.rs`) are also in-process only.
+- Recorded simulations (`crates/ekubo-wallet-core/src/simulation_store.rs`) are also in-process only.
   Simulating against real chain state returns a `simulation_id`, and a send may
   consume that recorded result instead of executing the identical
   `eth_simulateV1` request again seconds later. An entry supplies the plan as
@@ -28,7 +28,7 @@ daemon. There is one signing implementation and no generic digest-signing API.
   refused if the wallet, chain, or policy revision it was evaluated under has
   moved. The approval CLI is a different process and always re-simulates, so a
   human decides against the chain as it is when they decide.
-- Temporary simulation forks (`src/fork.rs`) are held only in process memory as
+- Temporary simulation forks (`crates/ekubo-wallet-core/src/fork.rs`) are held only in process memory as
   an ordered list of already-validated plans plus one pinned parent block.
   Every call replays that list as consecutive `eth_simulateV1` blocks, so the
   RPC still executes everything and no simulated state is stored locally. They
@@ -38,8 +38,10 @@ daemon. There is one signing implementation and no generic digest-signing API.
 - `keyring` stores wallet keys and a distinct 256-bit SQLCipher key under
   separate service names.
 - `HumanPresence` uses Local Authentication, Windows Hello, or polkit, and is
-  reached only where key material is used or destroyed: signing, key export,
-  and wallet removal. Local configuration changes confirm in the terminal.
+  reached where key material is used or destroyed — signing, key export, and
+  wallet removal — plus one more operation: replacing a wallet's policy, which
+  rewrites the automatic-path security boundary itself. Local configuration
+  changes confirm in the terminal.
 
 The database deliberately contains no daily counters, rolling windows,
 allowance reservations, spend history, or consumption ledger. Policy limits

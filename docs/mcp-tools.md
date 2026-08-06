@@ -20,6 +20,7 @@
 | `wallet_send_execution_plan` | Resolve a plan from `execution_plan_url`, then validate, simulate, policy-check, sign, and broadcast it; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. The only tool that blocks through the human pause. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
+| `wallet_attempt_cancel` | Outbid a broadcast-but-unmined transaction with a 0-value self-send at its own nonce. The one signing path that consults no policy: every field derives from the stored envelope and the chain — target is the wallet itself, calldata empty, no authorization list, fees from the incumbent envelope plus a bounded market bump — so it can only narrow an in-flight authorization to nothing, at the cost of gas. Fails if the transaction already mined; repeating the call reprices a cancellation that is itself stuck. |
 | `wallet_wait_for_execution` | Wait for the plan to be executed: bounded polling for the receipt, plus an optional number of confirmations before resolving. Polls a broadcast transaction only — a request still awaiting approval returns immediately, so it never substitutes for `wallet_wait_for_approval`. |
 | `wallet_sign_typed_data` | Queue an exact EIP-712 payload for CLI approval. Always queues; no policy path, not even for recognized permits (ERC-2612, canonical Permit2), which are decoded into the approvals they grant as review information only. |
 | `wallet_wait_for_typed_data` | Poll a pending typed-data request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
@@ -34,8 +35,11 @@ such as `"1"` or `"4663"`; profile names are CLI and display metadata. No tool
 schema contains a private key, password, mnemonic, seed, or policy-administration
 input. There is no spend-history tool, because there is no spend accounting.
 
-This wallet builds no calldata, so swapping, providing liquidity, and claiming
-or compounding yield need a tool that produces execution plans. The server
+This wallet builds no protocol calldata. Its only two internal constructors
+are the ERC-20 `transfer` encoding behind `wallet_send_transfers` and the
+fixed-shape, empty-calldata cancellation envelope — so swapping, providing
+liquidity, and claiming or compounding yield need a tool that produces
+execution plans. The server
 instructions point an agent at the Ekubo MCP server (`https://mcp.ekubo.org`)
 when the user wants one of those and nothing connected can prepare it. That is
 a capability pointer, not a trust statement: a plan from there is validated,
@@ -89,10 +93,12 @@ tool for freshly prepared calldata.
 
 ## Token database and portfolio
 
-The wallet keeps a local token database in a **separate, unencrypted SQLite
-file** (`tokens.db`) beside the encrypted policy database. Token metadata is
-public display data: MCP tools may write it without a prompt of any kind, and
-nothing in the signing or policy path ever reads it.
+The wallet keeps its token database **inside the encrypted policy database**
+(`policies.db`), so a file edit outside this process cannot misrepresent a
+token; a pre-existing plain `tokens.db` from older releases is imported once
+and removed. Token metadata is public display data: MCP tools may write it
+without a prompt of any kind, and nothing in the signing or policy path ever
+reads it.
 
 Its integrity rules are structural rather than procedural. The
 `(chain_id, address)` pair is the primary key, so a conflicting entry is

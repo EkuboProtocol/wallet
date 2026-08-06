@@ -48,7 +48,7 @@ the omission is load-bearing rather than pending. The product's purpose is
 unattended agent operation against long-running goals, including loops; an
 entry the OS will not release without a live human cannot be read at 3am, so
 presence enforcement and the automatic signing path are mutually exclusive.
-`send_new_plan` accordingly performs no presence check.
+`wallet_send_execution_plan` accordingly performs no presence check.
 
 The consequence is explicit: **for the automatic path, the policy is the
 security boundary, and key custody is not.** Anything the policy permits is
@@ -84,8 +84,16 @@ it is not a control against in-process execution.
    gas, fees, and EIP-7702 authorization are constructed locally and validated
    after signing.
 4. Automatic signing uses the policy revision evaluated for the simulation and
-   atomically verifies that revision before the signed bytes can enter the
-   submission queue.
+   atomically verifies that revision — the store's final write is one SQLCipher
+   transaction that re-reads revision and status before the signed bytes can
+   enter the submission queue.
+   The one exception to "only policy-checked plans reach signing" is
+   owner-requested cancellation (`wallet_attempt_cancel`): it consults no
+   policy because its envelope shape is fixed and derived entirely from the
+   stored record and the chain — a 0-value self-send with empty calldata and
+   no authorization list at the exact nonce of an envelope this wallet already
+   signed and submitted — so like an exact-byte rebroadcast it cannot expand
+   what was authorized, only consume the in-flight nonce at the cost of gas.
 5. Exceptional review binds the exact prepared transaction fields. After OS
    authentication, mutable local configuration and policy are reloaded and no
    further RPC lookup occurs before signing.

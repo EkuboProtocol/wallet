@@ -117,7 +117,9 @@ moved during the human pause — that re-read, not the wording of the system
 dialog, is what keeps the signed fields the reviewed ones. Signing is
 synchronous from that point
 and performs no further RPC request, so the signed fields are exactly those
-reviewed. The process validates the resulting envelope and atomically stores
+reviewed. The process validates the resulting envelope and atomically — in
+one SQLCipher transaction that re-checks the row's digest, status, and the
+active policy revision — stores
 the review digest, exact bytes, and transaction hash.
 
 ## Signature requests
@@ -178,9 +180,20 @@ awaiting_approval ── reject ────────────────
         ▼
       signed ── submission lease ──▶ submitting ──▶ broadcast
                                                    │
-                                                   ▼
-                                          confirmed | reverted
+                                     ┌─────────────┼──────────────┐
+                                     ▼             ▼              ▼
+                              confirmed | reverted │          replaced
+                                                   │
+                                owner cancellation ▼
+                                              cancelling ──▶ cancelled | confirmed | reverted
 ```
+
+`replaced` records that the envelope's nonce was consumed by a different
+mined transaction — the same key used from another device, or this wallet's
+own cancellation — so the stored bytes can never mine. `cancelling` is an
+owner-requested 0-value self-send racing the stuck envelope at its own nonce;
+the pair lives on one row and still counts as one in-flight slot, and the
+record resolves only by receipts to whichever the chain settles.
 
 Removing a wallet cancels its unsubmitted pending records. Changing the active
 policy invalidates approval or cancels a signed request before submission. A
