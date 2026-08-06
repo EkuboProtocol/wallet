@@ -9,7 +9,7 @@ use std::{
     collections::BTreeSet,
     env,
     fs::{self, File, OpenOptions},
-    io::{BufReader, Write},
+    io::{BufReader, Read as _, Write},
     path::{Path, PathBuf},
 };
 use tempfile::NamedTempFile;
@@ -219,7 +219,22 @@ impl ConfigStore {
                     .with_context(|| format!("failed to open {}", self.file.display()));
             }
         };
-        let reader = BufReader::new(file);
+        // Read with a ceiling rather than streaming straight into serde. The
+        // filesystem is untrusted and `load` runs on essentially every command
+        // and every MCP call, so an oversized file would be parsed into memory
+        // each time. Nothing legitimate approaches this: the cap is far above
+        // a configuration holding the maximum wallets and networks.
+        let mut reader = BufReader::new(file).take(MAX_CONFIG_BYTES as u64 + 1);
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("failed to read {}", self.file.display()))?;
+        ensure!(
+            bytes.len() <= MAX_CONFIG_BYTES,
+            "{} exceeds {MAX_CONFIG_BYTES} bytes",
+            self.file.display()
+        );
+        let reader = bytes.as_slice();
         let stored: StoredConfig = serde_json::from_reader(reader)
             .with_context(|| format!("failed to parse {}", self.file.display()))?;
         let config = WalletConfig::try_from(stored)
@@ -521,6 +536,10 @@ pub fn validate_config(config: &WalletConfig) -> Result<()> {
             wallet.id
         );
     }
+    ensure!(
+        config.networks.len() <= MAX_CONFIGURED_NETWORKS,
+        "a configuration may hold at most {MAX_CONFIGURED_NETWORKS} networks"
+    );
     let mut chain_ids = BTreeSet::new();
     let mut identifiers = BTreeSet::new();
     for network in &config.networks {
@@ -553,8 +572,29 @@ pub fn validate_wallet_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The largest configuration document this build will parse.
+///
+/// A wallet entry and a network profile are each well under a kilobyte, and
+/// the counts below cap how many of each there can be, so this sits an order
+/// of magnitude above any honest file. It exists because `load` runs on every
+/// command and the file it reads is not trusted.
+pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+
+/// Networks one configuration may hold. A wallet talks to a handful of chains;
+/// a list longer than this is an accident or an attempt, and either way every
+/// subsequent `load` pays for it.
+pub const MAX_CONFIGURED_NETWORKS: usize = 64;
+
+/// Aliases one network may answer to. Enough for a canonical name, a short
+/// form, and the spellings people actually type.
+pub const MAX_NETWORK_ALIASES: usize = 8;
+
 pub(crate) fn validate_network(network: &NetworkConfig) -> Result<()> {
     validate_network_identifier(&network.name, "network name")?;
+    ensure!(
+        network.aliases.len() <= MAX_NETWORK_ALIASES,
+        "a network may have at most {MAX_NETWORK_ALIASES} aliases"
+    );
     let mut identifiers = BTreeSet::from([&network.name]);
     for alias in &network.aliases {
         validate_network_identifier(alias, "network alias")?;
@@ -713,12 +753,30 @@ pub fn remove_configured_network(
 }
 
 pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
+    // Created private, rather than created and then narrowed. `create_dir_all`
+    // followed by `set_permissions` leaves the directory readable for the
+    // window between the two calls, which is when the wallet's own files are
+    // about to appear in it. `DirBuilder` applies the mode as it creates, so
+    // there is no window and no separate `set_permissions` following a symlink
+    // somebody swapped in.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if !path.exists() {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)?;
+        }
+        // An existing directory may predate this rule, or have been restored
+        // from a backup that widened it.
+        let mode = fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
     }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)?;
     Ok(())
 }
 
@@ -732,6 +790,16 @@ pub(crate) fn set_private_file_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Flush the directory entry so a rename survives a crash.
+///
+/// Unix only, and deliberately not emulated elsewhere: Windows offers no
+/// portable handle to a directory that `sync_all` accepts, and the alternative
+/// — `FlushFileBuffers` on a volume handle — needs privileges this process does
+/// not have and flushes far more than this file. `NamedTempFile::persist` uses
+/// `MoveFileEx`, which is atomic with respect to readers, so a crash there
+/// loses the write rather than corrupting the file. The residual on Windows is
+/// that a power loss immediately after saving can leave the previous
+/// configuration in place; the file is never torn.
 fn sync_parent(path: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
