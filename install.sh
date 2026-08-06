@@ -294,8 +294,13 @@ fi
 install_completion_file() {
   completion_shell=$1
   completion_file=$2
-  mkdir -p "$(dirname "$completion_file")"
-  completion_temporary="$completion_file.tmp.$$"
+  completion_directory=$(dirname "$completion_file")
+  mkdir -p "$completion_directory"
+  # `mktemp` creates the file itself and fails if the name already exists, so
+  # a name guessed in advance cannot stand in for it. A redirection into a
+  # predictable path would follow whatever is already there, handing the write,
+  # the chmod, and the rename to a file this script never chose.
+  completion_temporary=$(mktemp "$completion_directory/.ekubo-wallet.XXXXXXXX") || return 1
   if ! "$CLI_BIN" completion "$completion_shell" > "$completion_temporary"; then
     rm -f "$completion_temporary"
     return 1
@@ -307,8 +312,9 @@ install_completion_file() {
 install_completion_alias() {
   completion_source=$1
   completion_alias=$2
-  completion_alias_temporary="$completion_alias.tmp.$$"
-  mkdir -p "$(dirname "$completion_alias")"
+  completion_alias_directory=$(dirname "$completion_alias")
+  mkdir -p "$completion_alias_directory"
+  completion_alias_temporary=$(mktemp "$completion_alias_directory/.ekubo-wallet.XXXXXXXX") || return 1
   cp "$completion_source" "$completion_alias_temporary"
   chmod 0644 "$completion_alias_temporary"
   mv "$completion_alias_temporary" "$completion_alias"
