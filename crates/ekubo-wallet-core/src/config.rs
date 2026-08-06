@@ -757,11 +757,13 @@ pub fn replace_configured_network(
     let identifiers = std::iter::once(&next.name)
         .chain(next.aliases.iter())
         .collect::<BTreeSet<_>>();
-    // Anything this replaces is exempt from the identifier check: reusing the
-    // aliases of the network being taken over is not a collision with it.
+    // The chain being taken over is exempt from the identifier check: reusing
+    // the name and aliases of the profile being replaced is not a collision
+    // with it. Nothing else is exempt — matching by name as well meant a
+    // candidate for a *new* chain that reused a configured chain's name
+    // silently deleted that chain, whose profile the reviewer was never shown.
     if let Some(existing) = networks.iter().find(|network| {
-        network.name != next.name
-            && network.chain_id != next.chain_id
+        network.chain_id != next.chain_id
             && std::iter::once(&network.name)
                 .chain(network.aliases.iter())
                 .any(|identifier| identifiers.contains(identifier))
@@ -772,7 +774,7 @@ pub fn replace_configured_network(
             existing.chain_id
         );
     }
-    networks.retain(|network| network.name != next.name && network.chain_id != next.chain_id);
+    networks.retain(|network| network.chain_id != next.chain_id);
     networks.push(next);
     Ok(())
 }
@@ -1044,6 +1046,25 @@ mod tests {
             "custom",
             "the aliases came along with the chain"
         );
+    }
+
+    #[test]
+    fn a_replacement_never_evicts_a_chain_by_reusing_its_name() {
+        // The reviewer is shown the candidate and the profile it replaces on
+        // its own chain. A configured chain that merely shares the candidate's
+        // name is on neither screen, so removing it would be a deletion nobody
+        // saw. Refusing is the only answer that cannot surprise.
+        let mut networks = default_networks();
+        let mut candidate = networks
+            .iter()
+            .find(|network| network.name == "base")
+            .unwrap()
+            .clone();
+        candidate.name = "ethereum".into();
+        candidate.aliases = vec!["unclaimed".into()];
+        candidate.chain_id = 999_999;
+        assert!(replace_configured_network(&mut networks, candidate).is_err());
+        assert!(networks.iter().any(|network| network.chain_id == 1));
     }
 
     #[test]

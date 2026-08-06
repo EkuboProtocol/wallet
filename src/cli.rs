@@ -2763,6 +2763,13 @@ async fn run_network(
                 name
             };
             let candidate = network_candidate(name, *args, &prospective)?;
+            // Captured before `prospective` is mutated: this is the profile the
+            // human is about to be shown replacing, and the write below refuses
+            // if the configuration no longer holds it.
+            let reviewed = prospective
+                .iter()
+                .find(|network| network.chain_id == candidate.chain_id)
+                .cloned();
             replace_configured_network(&mut prospective, candidate.clone())?;
             // The complete URL is shown, not just its origin. This is the
             // one moment the user can catch a typo or the wrong endpoint, and
@@ -2783,6 +2790,7 @@ async fn run_network(
             }
             verify_chain_id(&candidate).await?;
             config.update(|state| {
+                ensure_reviewed_network(&state.networks, candidate.chain_id, reviewed.as_ref())?;
                 replace_configured_network(&mut state.networks, candidate.clone())
             })?;
             emit(
@@ -3167,7 +3175,10 @@ async fn run_network_edit(
         return Ok(());
     }
     verify_chain_id(&draft).await?;
-    config.update(|state| replace_configured_network(&mut state.networks, draft.clone()))?;
+    config.update(|state| {
+        ensure_reviewed_network(&state.networks, draft.chain_id, Some(&original))?;
+        replace_configured_network(&mut state.networks, draft.clone())
+    })?;
     emit(
         mode,
         &serde_json::json!({
@@ -3290,6 +3301,32 @@ fn network_base(
         .find(|network| matches(network))
         .cloned()
         .or_else(|| default_networks().into_iter().find(matches))
+}
+
+/// Refuse a network write whose reviewed premise no longer holds.
+///
+/// Every confirmed network change reads the configuration, shows a human what
+/// it is about to replace, and waits — for a prompt, an RPC probe, and an OS
+/// presence check. All three take as long as the person does. A write that
+/// then trusts the reading it took before the pause overwrites whatever landed
+/// during it, and `replace_configured_network` is unconditional, so a chain
+/// removed while the screen was up comes back.
+///
+/// Checked inside the `update` closure, which is the only place the lock is
+/// held and therefore the only place the answer stays true long enough to act
+/// on. Nothing is written on a mismatch; re-running the command re-reads and
+/// re-asks against what is actually configured.
+fn ensure_reviewed_network(
+    networks: &[NetworkConfig],
+    chain_id: u64,
+    reviewed: Option<&NetworkConfig>,
+) -> Result<()> {
+    let current = networks.iter().find(|network| network.chain_id == chain_id);
+    ensure!(
+        current == reviewed,
+        "chain {chain_id} changed while this was being reviewed; nothing was written.          Run the command again to decide against the current configuration."
+    );
+    Ok(())
 }
 
 /// Apply only the fields this invocation actually supplied.
@@ -3703,6 +3740,7 @@ async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()
             })
             .await?;
         config.update(|state| {
+            ensure_reviewed_network(&state.networks, proposal.chain_id, existing.as_ref())?;
             if existing.is_some() {
                 replace_configured_network(&mut state.networks, proposal.clone())
             } else {
