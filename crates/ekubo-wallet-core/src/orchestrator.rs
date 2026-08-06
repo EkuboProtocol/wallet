@@ -30,6 +30,42 @@ use anyhow::{Result, ensure};
 use num_bigint::BigUint;
 use std::{str::FromStr, sync::Mutex};
 
+/// Calldata bytes shown in full at approval time.
+///
+/// A person reads these; past a few hundred bytes nobody is reading them, and
+/// a wall of hex pushes the warnings above it off a terminal that does not
+/// scroll. Beyond the limit the review shows the head, the length, and a
+/// keccak of the whole thing — enough to compare against whatever produced the
+/// call, and honest that the rest was not displayed.
+const MAX_DISPLAYED_CALLDATA_BYTES: usize = 512;
+
+/// Bytes per displayed row. Fixed so the grouping is a property of the
+/// calldata rather than of the terminal's width.
+const CALLDATA_BYTES_PER_ROW: usize = 32;
+
+/// The calldata a reviewer is shown, as fixed-width rows.
+fn calldata_rows(calldata: &[u8]) -> Vec<String> {
+    if calldata.is_empty() {
+        return Vec::new();
+    }
+    let shown = calldata.len().min(MAX_DISPLAYED_CALLDATA_BYTES);
+    let mut rows: Vec<String> = calldata[..shown]
+        .chunks(CALLDATA_BYTES_PER_ROW)
+        .map(hex::encode)
+        .collect();
+    if calldata.len() > shown {
+        // Named rather than silently truncated: the reviewer is told what they
+        // are not seeing, and given a digest that identifies all of it.
+        rows.push(format!(
+            "… {} of {} bytes not shown; keccak256 of the complete calldata is 0x{:x}",
+            calldata.len() - shown,
+            calldata.len(),
+            alloy::primitives::keccak256(calldata)
+        ));
+    }
+    rows
+}
+
 /// What the automatic path did with a simulated plan.
 pub enum SendDisposition {
     /// The policy allowed and the simulation succeeded: the exact envelope is
@@ -421,6 +457,16 @@ async fn transaction_approval_request(
         for detail in &interpretation.details {
             request = request.fact(format!("Call {} ·", step.step), detail);
         }
+        // The bytes themselves. Every line above is a description of them —
+        // the selector is the first four, the "reads as" line is a descriptor's
+        // account of the rest — and the fallback for an unrecognized call tells
+        // the reviewer to "verify the target and selector directly", which they
+        // could not do because the calldata appeared on no screen. A summary a
+        // reviewer cannot check against the thing it summarizes is a claim,
+        // not a review.
+        for row in calldata_rows(calldata) {
+            request = request.fact(format!("Call {} calldata", step.step), row);
+        }
     }
     let balance_changes = render_balance_changes(simulation, network, token_metadata);
     if balance_changes.is_empty() {
@@ -483,4 +529,37 @@ async fn transaction_approval_request(
         ));
     }
     Ok(request)
+}
+
+#[cfg(test)]
+mod calldata_display_tests {
+    use super::{CALLDATA_BYTES_PER_ROW, MAX_DISPLAYED_CALLDATA_BYTES, calldata_rows};
+
+    #[test]
+    fn the_calldata_a_reviewer_signs_is_on_the_screen() {
+        let calldata: Vec<u8> = (0..70_u8).collect();
+        let rows = calldata_rows(&calldata);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows.concat(), hex::encode(&calldata));
+        assert_eq!(rows[0].len(), CALLDATA_BYTES_PER_ROW * 2);
+    }
+
+    #[test]
+    fn oversized_calldata_says_what_it_is_not_showing() {
+        let calldata = vec![0xab_u8; MAX_DISPLAYED_CALLDATA_BYTES + 100];
+        let rows = calldata_rows(&calldata);
+        let note = rows.last().unwrap();
+        assert!(note.contains("100 of 612 bytes not shown"), "{note}");
+        // The digest covers the whole thing, so the part that was elided is
+        // still identifiable rather than merely absent.
+        assert!(
+            note.contains(&format!("{:x}", alloy::primitives::keccak256(&calldata))),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn empty_calldata_adds_no_rows() {
+        assert!(calldata_rows(&[]).is_empty());
+    }
 }
