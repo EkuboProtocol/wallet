@@ -835,6 +835,24 @@ impl PendingRow {
             self.serialized_transaction.is_some() == self.signed_transaction_hash.is_some(),
             "stored signed transaction is incomplete"
         );
+        // The pair has to agree, not merely both be present. Reconciliation
+        // decodes these bytes to recover the envelope's nonce, and a row whose
+        // bytes do not decode makes that fail — while the row keeps the one
+        // in-flight slot its wallet and chain are allowed. `reconcile_all`
+        // swallows the error to keep a listing rendering, so the slot is held
+        // for good and no further transaction can be signed for that wallet on
+        // that chain. Refusing the row here turns a permanent wedge into a
+        // read that fails loudly and names the request.
+        if let (Some(serialized), Some(hash)) =
+            (&self.serialized_transaction, &self.signed_transaction_hash)
+        {
+            let bytes = hex::decode(serialized.trim_start_matches("0x"))
+                .context("stored signed transaction is not hexadecimal")?;
+            ensure!(
+                format!("{:#x}", alloy::primitives::keccak256(&bytes)) == *hash,
+                "stored signed transaction does not hash to its recorded hash"
+            );
+        }
         let policy_revision =
             u64::try_from(self.policy_revision).context("stored policy revision is invalid")?;
         let approval_required = match self.approval_required {
@@ -1086,13 +1104,14 @@ mod tests {
             .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
             .unwrap();
         assert_eq!(request.status, PendingStatus::AwaitingApproval);
-        let hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let hash = hash_of(ORIGINAL_BYTES);
+        let hash = hash.as_str();
         let signed = store
             .store_signed(
                 request.request_id,
                 &request.digest,
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "0x0102",
+                ORIGINAL_BYTES,
                 hash,
             )
             .unwrap();
@@ -1123,9 +1142,18 @@ mod tests {
     #[test]
     fn automatic_signatures_are_recorded_but_never_enter_approval_queue() {
         let (_directory, mut store) = store();
-        let hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
+        let hash = hash_of(ORIGINAL_BYTES);
+        let hash = hash.as_str();
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                ORIGINAL_BYTES,
+                hash,
+            )
             .unwrap();
         assert_eq!(signed.status, PendingStatus::Signed);
         assert!(!signed.approval_required);
@@ -1141,8 +1169,10 @@ mod tests {
     #[test]
     fn only_one_signed_transaction_can_be_in_flight_per_wallet_and_chain() {
         let (_directory, mut store) = store();
-        let first_hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
-        let second_hash = "0x5555555555555555555555555555555555555555555555555555555555555555";
+        let first_hash = hash_of(ORIGINAL_BYTES);
+        let first_hash = first_hash.as_str();
+        let second_hash = hash_of(CANCEL_BYTES_ONE);
+        let second_hash = second_hash.as_str();
         let first = store
             .record_automatic_signed(
                 "primary",
@@ -1150,7 +1180,7 @@ mod tests {
                 &plan(),
                 None,
                 1,
-                "0x0102",
+                ORIGINAL_BYTES,
                 first_hash,
             )
             .unwrap();
@@ -1162,7 +1192,7 @@ mod tests {
                     &plan(),
                     None,
                     1,
-                    "0x0304",
+                    CANCEL_BYTES_ONE,
                     second_hash,
                 )
                 .is_err()
@@ -1179,7 +1209,7 @@ mod tests {
                     &plan(),
                     None,
                     1,
-                    "0x0304",
+                    CANCEL_BYTES_ONE,
                     second_hash,
                 )
                 .is_ok()
@@ -1199,8 +1229,8 @@ mod tests {
                 &plan(),
                 None,
                 1,
-                "0x0102",
-                "0x3333333333333333333333333333333333333333333333333333333333333333",
+                ORIGINAL_BYTES,
+                hash_of(ORIGINAL_BYTES).as_str(),
             )
             .unwrap();
         let error = store
@@ -1210,8 +1240,8 @@ mod tests {
                 &plan(),
                 None,
                 1,
-                "0x0304",
-                "0x5555555555555555555555555555555555555555555555555555555555555555",
+                CANCEL_BYTES_ONE,
+                hash_of(CANCEL_BYTES_ONE).as_str(),
             )
             .unwrap_err();
         let message = format!("{error:#}");
@@ -1229,9 +1259,18 @@ mod tests {
     #[test]
     fn settlement_records_what_the_transaction_actually_cost() {
         let (_directory, mut store) = store();
-        let hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
+        let hash = hash_of(ORIGINAL_BYTES);
+        let hash = hash.as_str();
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                ORIGINAL_BYTES,
+                hash,
+            )
             .unwrap();
         assert!(signed.mined_fee.is_none());
         store.claim_for_submission(signed.request_id).unwrap();
@@ -1252,9 +1291,18 @@ mod tests {
     #[test]
     fn ambiguous_broadcast_can_only_reclaim_the_same_signed_bytes() {
         let (_directory, mut store) = store();
-        let hash = "0x4444444444444444444444444444444444444444444444444444444444444444";
+        let hash = hash_of(ORIGINAL_BYTES);
+        let hash = hash.as_str();
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                ORIGINAL_BYTES,
+                hash,
+            )
             .unwrap();
         store.claim_for_submission(signed.request_id).unwrap();
         store.mark_broadcast(signed.request_id, hash).unwrap();
@@ -1274,8 +1322,10 @@ mod tests {
     #[test]
     fn replacement_is_terminal_and_frees_the_in_flight_slot() {
         let (_directory, mut store) = store();
-        let first_hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
-        let second_hash = "0x5555555555555555555555555555555555555555555555555555555555555555";
+        let first_hash = hash_of(ORIGINAL_BYTES);
+        let first_hash = first_hash.as_str();
+        let second_hash = hash_of(CANCEL_BYTES_ONE);
+        let second_hash = second_hash.as_str();
         let first = store
             .record_automatic_signed(
                 "primary",
@@ -1283,7 +1333,7 @@ mod tests {
                 &plan(),
                 None,
                 1,
-                "0x0102",
+                ORIGINAL_BYTES,
                 first_hash,
             )
             .unwrap();
@@ -1311,19 +1361,26 @@ mod tests {
                     &plan(),
                     None,
                     1,
-                    "0x0304",
+                    CANCEL_BYTES_ONE,
                     second_hash,
                 )
                 .is_ok()
         );
     }
 
-    const ORIGINAL_HASH: &str =
-        "0x3333333333333333333333333333333333333333333333333333333333333333";
-    const CANCEL_HASH_ONE: &str =
-        "0x6666666666666666666666666666666666666666666666666666666666666666";
-    const CANCEL_HASH_TWO: &str =
-        "0x7777777777777777777777777777777777777777777777777777777777777777";
+    /// The hash of some serialized bytes, as the store now requires the pair
+    /// to agree. Hard-coded constants would have to be recomputed by hand
+    /// every time a fixture's bytes change, and a fixture whose hash does not
+    /// match its bytes is a fixture that cannot occur in production.
+    fn hash_of(serialized: &str) -> String {
+        let bytes = hex::decode(serialized.trim_start_matches("0x")).expect("fixture hex");
+        format!("{:#x}", alloy::primitives::keccak256(bytes))
+    }
+
+    const ORIGINAL_BYTES: &str = "0x0102";
+    const CANCEL_BYTES_ONE: &str = "0x0304";
+    const CANCEL_BYTES_TWO: &str = "0x0506";
+    const CANCEL_BYTES_THREE: &str = "0x0708";
 
     fn broadcast_original(store: &mut PendingStore) -> Uuid {
         let signed = store
@@ -1333,13 +1390,13 @@ mod tests {
                 &plan(),
                 None,
                 1,
-                "0x0102",
-                ORIGINAL_HASH,
+                ORIGINAL_BYTES,
+                hash_of(ORIGINAL_BYTES).as_str(),
             )
             .unwrap();
         store.claim_for_submission(signed.request_id).unwrap();
         store
-            .mark_broadcast(signed.request_id, ORIGINAL_HASH)
+            .mark_broadcast(signed.request_id, hash_of(ORIGINAL_BYTES).as_str())
             .unwrap();
         signed.request_id
     }
@@ -1356,34 +1413,54 @@ mod tests {
                 &plan(),
                 None,
                 1,
-                "0x0102",
-                ORIGINAL_HASH,
+                ORIGINAL_BYTES,
+                hash_of(ORIGINAL_BYTES).as_str(),
             )
             .unwrap();
         assert!(
             store
-                .store_cancellation(signed.request_id, None, "0x0304", CANCEL_HASH_ONE)
+                .store_cancellation(
+                    signed.request_id,
+                    None,
+                    CANCEL_BYTES_ONE,
+                    hash_of(CANCEL_BYTES_ONE).as_str()
+                )
                 .is_err()
         );
         store.claim_for_submission(signed.request_id).unwrap();
         store
-            .mark_broadcast(signed.request_id, ORIGINAL_HASH)
+            .mark_broadcast(signed.request_id, hash_of(ORIGINAL_BYTES).as_str())
             .unwrap();
         let request_id = signed.request_id;
 
         // Repricing appends to the hash history, keeps only the newest bytes,
         // and refuses duplicates.
         let cancelling = store
-            .store_cancellation(request_id, None, "0x0304", CANCEL_HASH_ONE)
+            .store_cancellation(
+                request_id,
+                None,
+                CANCEL_BYTES_ONE,
+                hash_of(CANCEL_BYTES_ONE).as_str(),
+            )
             .unwrap();
         assert_eq!(cancelling.status, PendingStatus::Cancelling);
         assert!(
             store
-                .store_cancellation(request_id, Some(CANCEL_HASH_ONE), "0x0304", CANCEL_HASH_ONE)
+                .store_cancellation(
+                    request_id,
+                    Some(hash_of(CANCEL_BYTES_ONE).as_str()),
+                    CANCEL_BYTES_ONE,
+                    hash_of(CANCEL_BYTES_ONE).as_str()
+                )
                 .is_err()
         );
         let repriced = store
-            .store_cancellation(request_id, Some(CANCEL_HASH_ONE), "0x0506", CANCEL_HASH_TWO)
+            .store_cancellation(
+                request_id,
+                Some(hash_of(CANCEL_BYTES_ONE).as_str()),
+                CANCEL_BYTES_TWO,
+                hash_of(CANCEL_BYTES_TWO).as_str(),
+            )
             .unwrap();
         assert_eq!(
             repriced.cancel_serialized_transaction.as_deref(),
@@ -1391,7 +1468,10 @@ mod tests {
         );
         assert_eq!(
             repriced.cancel_transaction_hashes,
-            [CANCEL_HASH_ONE, CANCEL_HASH_TWO]
+            [
+                hash_of(CANCEL_BYTES_ONE).as_str(),
+                hash_of(CANCEL_BYTES_TWO).as_str()
+            ]
         );
 
         // A replacement is a replacement of the thing it outbid. This one was
@@ -1402,8 +1482,8 @@ mod tests {
         let stale = store
             .store_cancellation(
                 request_id,
-                Some(CANCEL_HASH_ONE),
-                "0x0708",
+                Some(hash_of(CANCEL_BYTES_ONE).as_str()),
+                CANCEL_BYTES_THREE,
                 "0x3333333333333333333333333333333333333333333333333333333333333333",
             )
             .unwrap_err()
@@ -1432,8 +1512,8 @@ mod tests {
                 &plan(),
                 None,
                 1,
-                "0x0102",
-                ORIGINAL_HASH,
+                ORIGINAL_BYTES,
+                hash_of(ORIGINAL_BYTES).as_str(),
             )
             .unwrap();
         assert_eq!(
@@ -1461,7 +1541,12 @@ mod tests {
         let (_directory, mut store) = store();
         let request_id = broadcast_original(&mut store);
         store
-            .store_cancellation(request_id, None, "0x0304", CANCEL_HASH_ONE)
+            .store_cancellation(
+                request_id,
+                None,
+                CANCEL_BYTES_ONE,
+                hash_of(CANCEL_BYTES_ONE).as_str(),
+            )
             .unwrap();
         assert_eq!(
             store
@@ -1479,7 +1564,12 @@ mod tests {
         let (_directory, mut store) = store();
         let request_id = broadcast_original(&mut store);
         store
-            .store_cancellation(request_id, None, "0x0304", CANCEL_HASH_ONE)
+            .store_cancellation(
+                request_id,
+                None,
+                CANCEL_BYTES_ONE,
+                hash_of(CANCEL_BYTES_ONE).as_str(),
+            )
             .unwrap();
         assert_eq!(
             store.mark_replaced(request_id).unwrap().status,
@@ -1493,13 +1583,14 @@ mod tests {
         let request = store
             .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
             .unwrap();
-        let hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
+        let hash = hash_of(ORIGINAL_BYTES);
+        let hash = hash.as_str();
         store
             .store_signed(
                 request.request_id,
                 &request.digest,
                 "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "0x0102",
+                ORIGINAL_BYTES,
                 hash,
             )
             .unwrap();
@@ -1515,7 +1606,15 @@ mod tests {
         assert!(store.claim_for_submission(request.request_id).is_err());
         assert!(
             store
-                .record_automatic_signed("primary", "ethereum", &plan(), None, 2, "0x0304", hash)
+                .record_automatic_signed(
+                    "primary",
+                    "ethereum",
+                    &plan(),
+                    None,
+                    2,
+                    CANCEL_BYTES_ONE,
+                    hash_of(CANCEL_BYTES_ONE).as_str(),
+                )
                 .is_ok()
         );
     }
@@ -1523,9 +1622,18 @@ mod tests {
     #[test]
     fn policy_change_preserves_a_claimed_submission_for_hash_reconciliation() {
         let (_directory, mut store) = store();
-        let hash = "0x6666666666666666666666666666666666666666666666666666666666666666";
+        let hash = hash_of(ORIGINAL_BYTES);
+        let hash = hash.as_str();
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                ORIGINAL_BYTES,
+                hash,
+            )
             .unwrap();
         store.claim_for_submission(signed.request_id).unwrap();
 
