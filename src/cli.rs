@@ -1266,11 +1266,11 @@ fn interactive_list_rows() -> usize {
 /// pick an entry to review right there.
 ///
 /// The browser is only ever navigation: choosing an entry leaves the
-/// alternate screen first, and the review itself runs in the ordinary
-/// scrollback flow, so the facts of what was approved stay in the terminal
-/// transcript exactly as `ekubo-wallet review <request-id>` would leave
-/// them. When that review finishes, the queues are reloaded and the browser
-/// returns, minus whatever was just resolved.
+/// alternate screen first and the review runs exactly as
+/// `ekubo-wallet review <request-id>` would — its JSON record prints into
+/// the terminal transcript, and signature reviews then take over the screen
+/// again for the scrollable document. When that review finishes, the queues
+/// are reloaded and the browser returns, minus whatever was just resolved.
 async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> {
     loop {
         let awaiting = PendingStore::production(config.data_dir())?.awaiting_approval(None)?;
@@ -1772,7 +1772,7 @@ async fn approve_typed_data(
         ApprovalKind::TypedDataSignature,
         "Approve typed-data signature",
         "Review and sign this exact EIP-712 payload with the wallet key. The complete payload is \
-         printed above this summary.",
+         shown at the end of this review.",
     )
     .fact("Wallet", &request.wallet_id)
     .fact("Chain ID", &request.chain_id)
@@ -1843,7 +1843,9 @@ async fn approve_typed_data(
     stderr.write_all(b"\n")?;
     stderr.flush()?;
     drop(stderr);
-    if !no_confirm && !reviewer_approved(approval).await? {
+    if !no_confirm
+        && !reviewer_approved(approval, typed_data_payload_lines(&request.typed_data)).await?
+    {
         let rejected = store.reject(request.request_id)?;
         return emit_rejected(
             mode,
@@ -1941,7 +1943,7 @@ async fn approve_message(
         ApprovalKind::MessageSignature,
         "Approve message signature",
         "Sign these exact bytes with the wallet key, prefixed as an EIP-191 personal message. \
-         The complete message is printed above this summary.",
+         The complete message is shown at the end of this review.",
     )
     .fact("Wallet", &request.wallet_id)
     .fact("Signer", wallet.address.to_checksum(None))
@@ -2010,8 +2012,8 @@ async fn approve_message(
             )
             .warning(
                 "This is not a recognized sign-in message. A message signature can authorize an \
-                 off-chain order, a delegation, or an account link; verify every byte printed \
-                 above against whatever asked for it.",
+                 off-chain order, a delegation, or an account link; verify every byte of the \
+                 complete message against whatever asked for it.",
             );
     }
     for warning in &display.warnings {
@@ -2040,7 +2042,13 @@ async fn approve_message(
     stderr.write_all(b"\n")?;
     stderr.flush()?;
     drop(stderr);
-    if !no_confirm && !reviewer_approved(approval).await? {
+    if !no_confirm
+        && !reviewer_approved(
+            approval,
+            message_payload_lines(&request.message_hex, &display),
+        )
+        .await?
+    {
         let rejected = store.reject(request.request_id)?;
         return emit_rejected(
             mode,
@@ -2101,15 +2109,15 @@ async fn approve_message(
     )
 }
 
-/// Keep one approval fact to a readable length; the exact bytes are always
-/// printed in full above the summary.
+/// Keep one approval fact to a readable length; the complete message always
+/// follows at the end of the review document.
 fn terminal_safe_excerpt(value: &str) -> String {
     const MAX_FACT_CHARACTERS: usize = 200;
     if value.chars().count() <= MAX_FACT_CHARACTERS {
         return value.to_owned();
     }
     let head: String = value.chars().take(MAX_FACT_CHARACTERS).collect();
-    format!("{head}… (full message printed above)")
+    format!("{head}… (complete message below)")
 }
 
 fn print_approval_review(approval: &ApprovalRequest, simulation: &SimulationResult) -> Result<()> {
@@ -2221,12 +2229,85 @@ fn resolve_starting_policy(flag: Option<StartingPolicy>) -> Result<Option<Starti
     .map(|index| choices[index]))
 }
 
-/// Ask for a decision and return it, for the queued requests where declining
-/// has somewhere to be written. Everything else uses [`require_approval`],
-/// which treats a decline as an abort because there is no queue entry to
-/// resolve.
-async fn reviewer_approved(request: ApprovalRequest) -> Result<bool> {
-    Ok(TerminalApprovalUi.review(&request).await? == ApprovalDecision::Approved)
+/// Ask for a decision and return it, for the queued signing requests where
+/// declining has somewhere to be written. Everything else uses
+/// [`require_approval`], which treats a decline as an abort because there is
+/// no queue entry to resolve.
+///
+/// These reviews run full screen: the complete payload scrolls inside the
+/// review itself rather than somewhere above the prompt, and the JSON record
+/// printed to the transcript beforehand stays in the scrollback for after
+/// the alternate screen closes.
+async fn reviewer_approved(
+    request: ApprovalRequest,
+    payload: Vec<crate::fullscreen::Line>,
+) -> Result<bool> {
+    Ok(
+        crate::approve_tui::review_signature_fullscreen(&request, payload).await?
+            == ApprovalDecision::Approved,
+    )
+}
+
+/// Payload text for the full-screen review: every control or bidirectional
+/// character becomes a visible `\u{..}` escape rather than a silent space,
+/// because in a payload being signed the tricky characters are exactly the
+/// ones the reviewer needs to see.
+fn escape_payload_line(line: &str) -> String {
+    use std::fmt::Write as _;
+    let mut escaped = String::with_capacity(line.len());
+    for character in line.chars() {
+        if crate::sanitize::is_disallowed(character) {
+            let _ = write!(escaped, "\\u{{{:04x}}}", character as u32);
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+/// The complete message, line by line, for the scrollable review document.
+fn message_payload_lines(
+    message_hex: &str,
+    display: &crate::message::MessageDisplay,
+) -> Vec<crate::fullscreen::Line> {
+    use crate::fullscreen::Span;
+    use crate::tui::Tone;
+    let mut lines = vec![
+        Vec::new(),
+        vec![Span::toned("Complete message", Tone::Emphasis)],
+    ];
+    if let Some(text) = &display.text {
+        lines.extend(
+            text.split('\n')
+                .map(|line| vec![Span::plain(escape_payload_line(line))]),
+        );
+    } else {
+        lines.push(vec![Span::toned(
+            "Not valid UTF-8; the exact bytes as hex:",
+            Tone::Muted,
+        )]);
+        lines.push(vec![Span::plain(message_hex)]);
+    }
+    lines
+}
+
+/// The complete EIP-712 payload, pretty-printed, for the scrollable review
+/// document.
+fn typed_data_payload_lines(typed_data: &serde_json::Value) -> Vec<crate::fullscreen::Line> {
+    use crate::fullscreen::Span;
+    use crate::tui::Tone;
+    let pretty =
+        serde_json::to_string_pretty(typed_data).unwrap_or_else(|_| typed_data.to_string());
+    let mut lines = vec![
+        Vec::new(),
+        vec![Span::toned("Complete EIP-712 payload", Tone::Emphasis)],
+    ];
+    lines.extend(
+        pretty
+            .split('\n')
+            .map(|line| vec![Span::plain(escape_payload_line(line))]),
+    );
+    lines
 }
 
 async fn require_approval(request: ApprovalRequest) -> Result<()> {

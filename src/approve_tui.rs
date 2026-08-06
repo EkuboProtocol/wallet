@@ -5,13 +5,29 @@
 //! security property this module owns is the shape of the picker — two named
 //! outcomes with the cursor starting on Reject, so approval always takes a
 //! deliberate movement.
+//!
+//! Two renderings share that shape. [`TerminalApprovalUi`] prints the
+//! document into the scrollback and asks inline; [`review_signature_fullscreen`]
+//! draws it on the alternate screen with its own scroll state, for the
+//! signing reviews whose payload is the thing being signed and must be
+//! readable in full — there, Approve additionally cannot be confirmed until
+//! the end of the document has been on screen.
 
 use crate::{
     approval::{ApprovalDecision, ApprovalRequest, ApprovalUi},
+    fullscreen::{self, Line, Screen, Span},
     sanitize::terminal_safe_line as terminal_safe,
+    tui::Tone,
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
+use ratatui::{
+    layout::{Constraint, Layout},
+    style::{Modifier, Style},
+    text::{Line as UiLine, Span as UiSpan},
+    widgets::Paragraph,
+};
 use std::{fmt::Write as _, io::IsTerminal};
 
 /// Polished terminal fallback for direct CLI use and MCP clients without app UI.
@@ -78,5 +94,351 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
     } else {
         crate::tui::outro_cancel("Rejected. Nothing was signed or submitted.");
         Ok(ApprovalDecision::Rejected)
+    }
+}
+
+/// Full-screen review of a signing request: the complete document — summary,
+/// facts, warnings, and the exact payload being signed — on the alternate
+/// screen with its own scroll state, ending in the same reject-default
+/// picker as the inline review.
+///
+/// The payload lines are appended after the authored document, so the whole
+/// review is one scrollable text and the position indicator counts the
+/// payload too. Approve cannot be confirmed until the end of the document
+/// has been on screen; Reject always can.
+pub async fn review_signature_fullscreen(
+    request: &ApprovalRequest,
+    payload: Vec<Line>,
+) -> Result<ApprovalDecision> {
+    let request = request.clone();
+    tokio::task::spawn_blocking(move || review_fullscreen_blocking(&request, payload))
+        .await
+        .context("terminal approval task failed")?
+}
+
+fn review_fullscreen_blocking(
+    request: &ApprovalRequest,
+    payload: Vec<Line>,
+) -> Result<ApprovalDecision> {
+    ensure!(
+        std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal(),
+        "approval requires an interactive terminal"
+    );
+    let mut review = ReviewScreen::new(review_document(request, payload));
+    let title = terminal_safe(&request.title);
+    let decision = {
+        let mut screen = Screen::enter()?;
+        loop {
+            screen
+                .terminal
+                .draw(|frame| draw(frame, &title, &mut review))?;
+            let key = match crossterm::event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => key,
+                // Anything else — a resize above all — just redraws against
+                // the new terminal size.
+                _ => continue,
+            };
+            if let Some(decision) = review.handle_key(key) {
+                break decision;
+            }
+        }
+        // `screen` drops here: raw mode off, main screen back, so the outro
+        // lands in the scrollback transcript.
+    };
+    match decision {
+        ApprovalDecision::Approved => {
+            crate::tui::outro("Approved; owner authentication is still required.");
+        }
+        ApprovalDecision::Rejected => {
+            crate::tui::outro_cancel("Rejected. Nothing was signed or submitted.");
+        }
+    }
+    Ok(decision)
+}
+
+/// The authored document plus the payload as one styled text. Every span is
+/// built through the sanitizing [`Span`] constructors, so stored text cannot
+/// draw chrome here any more than it can in the browsers.
+fn review_document(request: &ApprovalRequest, payload: Vec<Line>) -> Vec<Line> {
+    let mut lines: Vec<Line> = vec![vec![Span::plain(&request.summary)], Vec::new()];
+    for fact in &request.facts {
+        lines.push(vec![
+            Span::toned(format!("{}: ", fact.label), Tone::Muted),
+            Span::plain(&fact.value),
+        ]);
+    }
+    if let Some(digest) = &request.digest {
+        lines.push(vec![
+            Span::toned("Digest: ", Tone::Muted),
+            Span::plain(digest),
+        ]);
+    }
+    lines.push(vec![
+        Span::toned("Request: ", Tone::Muted),
+        Span::plain(request.id.to_string()),
+    ]);
+    for warning in &request.warnings {
+        lines.push(Vec::new());
+        lines.push(vec![Span::toned(format!("⚠ {warning}"), Tone::Warning)]);
+    }
+    lines.extend(payload);
+    lines
+}
+
+/// Scroll and decision state of one full-screen review. Layout-derived
+/// fields (`viewport`, `max_offset`, `reached_end`) are refreshed by
+/// [`draw`] each frame, so a resize that reveals the end counts as reaching
+/// it and one that hides it again does not un-count.
+struct ReviewScreen {
+    document: Vec<Line>,
+    offset: usize,
+    viewport: usize,
+    max_offset: usize,
+    /// The last line has been on screen at some point.
+    reached_end: bool,
+    /// The picker cursor; starts on Reject so approving takes a deliberate
+    /// movement, exactly like the inline picker.
+    on_approve: bool,
+    notice: Option<String>,
+}
+
+impl ReviewScreen {
+    fn new(document: Vec<Line>) -> Self {
+        Self {
+            document,
+            offset: 0,
+            viewport: 1,
+            max_offset: 0,
+            reached_end: false,
+            on_approve: false,
+            notice: None,
+        }
+    }
+
+    /// `Some` is the review's final answer. Esc, `q`, and Ctrl+C all read as
+    /// rejection: an approval must be explicit. The scrolling keys can never
+    /// decide, and Enter on Approve is refused until the end of the document
+    /// has been seen.
+    fn handle_key(&mut self, key: KeyEvent) -> Option<ApprovalDecision> {
+        self.notice = None;
+        if fullscreen::is_interrupt(key) {
+            return Some(ApprovalDecision::Rejected);
+        }
+        let page = self.viewport.max(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Some(ApprovalDecision::Rejected),
+            KeyCode::Enter => {
+                if !self.on_approve {
+                    return Some(ApprovalDecision::Rejected);
+                }
+                if self.reached_end {
+                    return Some(ApprovalDecision::Approved);
+                }
+                self.notice =
+                    Some("Scroll to the end of the document before approving.".to_owned());
+            }
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                self.on_approve = !self.on_approve;
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.offset = self.offset.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => self.offset = self.offset.saturating_add(1),
+            KeyCode::PageUp | KeyCode::Char('b') => self.offset = self.offset.saturating_sub(page),
+            KeyCode::PageDown | KeyCode::Char(' ' | 'f') => {
+                self.offset = self.offset.saturating_add(page);
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.offset = 0,
+            KeyCode::End | KeyCode::Char('G') => self.offset = usize::MAX,
+            _ => {}
+        }
+        None
+    }
+
+    fn position(&self) -> String {
+        if self.offset >= self.max_offset {
+            "end".to_owned()
+        } else {
+            format!("{}%", (self.offset * 100) / self.max_offset.max(1))
+        }
+    }
+}
+
+fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
+    let [header, body, decision, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+
+    frame.render_widget(fullscreen::title_line(title), header);
+
+    let columns = (body.width as usize).saturating_sub(2).max(10);
+    let wrapped = fullscreen::wrap_lines(&review.document, columns);
+    review.viewport = (body.height as usize).max(1);
+    review.max_offset = wrapped.len().saturating_sub(review.viewport);
+    review.offset = review.offset.min(review.max_offset);
+    if review.offset >= review.max_offset {
+        review.reached_end = true;
+    }
+    let visible: Vec<UiLine> = wrapped
+        .iter()
+        .skip(review.offset)
+        .take(review.viewport)
+        .map(|line| {
+            let mut spans = vec![UiSpan::raw(" ")];
+            spans.extend(line.iter().map(fullscreen::ui_span));
+            UiLine::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(visible), body);
+
+    let option = |selected: bool, text: String| {
+        let line = UiLine::from(UiSpan::raw(format!(
+            " {} {text} ",
+            if selected { "▸" } else { " " }
+        )));
+        if selected {
+            line.style(Style::new().add_modifier(Modifier::REVERSED))
+        } else {
+            line
+        }
+    };
+    let approve_label = if review.reached_end {
+        "Approve — sign this exact action".to_owned()
+    } else {
+        "Approve — scroll to the end of the document first".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            UiLine::default(),
+            option(
+                !review.on_approve,
+                "Reject — nothing is signed or submitted".to_owned(),
+            ),
+            option(review.on_approve, approve_label),
+        ]),
+        decision,
+    );
+
+    let hints = format!(
+        "{} · ↑↓ scroll · PgUp/PgDn page · Tab switch · Enter decide · Esc rejects",
+        review.position()
+    );
+    frame.render_widget(
+        fullscreen::footer_line(review.notice.as_deref(), &hints),
+        footer,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::ApprovalKind;
+    use crossterm::event::KeyModifiers;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn screen() -> ReviewScreen {
+        ReviewScreen::new(vec![vec![Span::plain("summary")]])
+    }
+
+    #[test]
+    fn the_cursor_starts_on_reject_and_enter_there_rejects() {
+        let mut review = screen();
+        assert!(!review.on_approve, "reject is the default");
+        assert_eq!(
+            review.handle_key(press(KeyCode::Enter)),
+            Some(ApprovalDecision::Rejected)
+        );
+    }
+
+    #[test]
+    fn every_way_out_reads_as_rejection() {
+        for key in [
+            press(KeyCode::Esc),
+            press(KeyCode::Char('q')),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        ] {
+            let mut review = screen();
+            review.on_approve = true;
+            review.reached_end = true;
+            assert_eq!(
+                review.handle_key(key),
+                Some(ApprovalDecision::Rejected),
+                "{key:?} must reject even with approve highlighted"
+            );
+        }
+    }
+
+    #[test]
+    fn approving_takes_a_deliberate_move_and_a_fully_seen_document() {
+        let mut review = screen();
+        review.handle_key(press(KeyCode::Tab));
+        assert!(review.on_approve);
+        // The end has not been on screen: Enter refuses and explains.
+        assert_eq!(review.handle_key(press(KeyCode::Enter)), None);
+        assert!(review.notice.is_some(), "the refusal says why");
+        review.reached_end = true;
+        assert_eq!(
+            review.handle_key(press(KeyCode::Enter)),
+            Some(ApprovalDecision::Approved)
+        );
+    }
+
+    #[test]
+    fn scrolling_keys_move_the_viewport_and_never_decide() {
+        let mut review = screen();
+        review.viewport = 5;
+        review.max_offset = 100;
+        for key in [
+            KeyCode::Down,
+            KeyCode::Char('j'),
+            KeyCode::PageDown,
+            KeyCode::Char(' '),
+            KeyCode::Char('f'),
+            KeyCode::End,
+            KeyCode::Char('G'),
+            KeyCode::Up,
+            KeyCode::PageUp,
+            KeyCode::Home,
+        ] {
+            assert_eq!(review.handle_key(press(key)), None, "{key:?} only scrolls");
+        }
+        review.handle_key(press(KeyCode::Down));
+        assert_eq!(review.offset, 1);
+        review.handle_key(press(KeyCode::PageDown));
+        assert_eq!(review.offset, 6);
+        review.handle_key(press(KeyCode::Home));
+        assert_eq!(review.offset, 0);
+    }
+
+    #[test]
+    fn the_document_carries_facts_warnings_digest_and_payload_sanitized() {
+        let request = ApprovalRequest::new(
+            ApprovalKind::MessageSignature,
+            "Approve message signature",
+            "Sign these exact bytes.",
+        )
+        .fact("Wallet", "main")
+        .warning("verify\u{1b}[2Jevery byte")
+        .digest("0xabc");
+        let payload = vec![vec![Span::plain("hello world")]];
+        let document = review_document(&request, payload);
+        let text = fullscreen::lines_to_text(&document, |text, _| text.to_owned());
+        assert!(text.contains("Sign these exact bytes."));
+        assert!(text.contains("Wallet: main"));
+        assert!(text.contains("Digest: 0xabc"));
+        assert!(text.contains(&format!("Request: {}", request.id)));
+        assert!(text.contains("hello world"), "the payload is appended");
+        assert!(
+            !text.contains('\u{1b}'),
+            "stored text cannot carry escapes into the review"
+        );
     }
 }
