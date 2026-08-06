@@ -91,15 +91,29 @@ impl SimulationStore {
         };
         self.recorded
             .insert(recorded.simulation_id, recorded.clone());
-        self.evict_oldest_while(|store| {
-            store
-                .recorded
-                .values()
-                .filter(|entry| entry.wallet_id == recorded.wallet_id)
-                .count()
-                > MAX_RECORDED_PER_WALLET
-                || store.recorded.len() > MAX_RECORDED_SIMULATIONS
-        });
+        // The per-wallet cap evicts that wallet's own oldest. Evicting the
+        // globally oldest to satisfy a per-wallet limit lets one wallet's
+        // traffic delete another wallet's recorded simulation — a cross-wallet
+        // effect a per-wallet limit should not have, and one an agent driving
+        // a busy wallet would trigger against a quiet one without trying.
+        let owner = recorded.wallet_id.clone();
+        self.evict_oldest_while(
+            |store| {
+                store
+                    .recorded
+                    .values()
+                    .filter(|entry| entry.wallet_id == owner)
+                    .count()
+                    > MAX_RECORDED_PER_WALLET
+            },
+            Some(&owner),
+            recorded.simulation_id,
+        );
+        self.evict_oldest_while(
+            |store| store.recorded.len() > MAX_RECORDED_SIMULATIONS,
+            None,
+            recorded.simulation_id,
+        );
         recorded
     }
 
@@ -131,11 +145,28 @@ impl SimulationStore {
         self.recorded.is_empty()
     }
 
-    fn evict_oldest_while(&mut self, over_cap: impl Fn(&Self) -> bool) {
+    /// Evict oldest-first until `over_cap` is satisfied.
+    ///
+    /// `keep` is never evicted. Entries recorded in the same instant tie on
+    /// `recorded_at` and fall back to comparing UUIDs, so without this the
+    /// row just inserted could be the one removed — and `record` would hand
+    /// back a `simulation_id` that no longer exists, which the caller learns
+    /// only when sending it fails.
+    ///
+    /// `wallet_id` scopes the eviction, so a per-wallet cap cannot reach
+    /// another wallet's entries.
+    fn evict_oldest_while(
+        &mut self,
+        over_cap: impl Fn(&Self) -> bool,
+        wallet_id: Option<&str>,
+        keep: Uuid,
+    ) {
         while over_cap(self) {
             let Some(oldest) = self
                 .recorded
                 .values()
+                .filter(|entry| entry.simulation_id != keep)
+                .filter(|entry| wallet_id.is_none_or(|wallet| entry.wallet_id == wallet))
                 .min_by_key(|entry| (entry.recorded_at, entry.simulation_id))
                 .map(|entry| entry.simulation_id)
             else {
@@ -208,6 +239,46 @@ mod tests {
         let plan = plan(value);
         let result = result(&plan);
         store.record("primary", "1", plan, None, result, now)
+    }
+
+    #[test]
+    fn a_recorded_simulation_id_is_always_usable_when_it_is_returned() {
+        // Every entry shares one timestamp, so the oldest-first ordering falls
+        // back to comparing UUIDs — which the newest row loses about half the
+        // time. Returning an id that eviction just removed hands the caller
+        // something that fails only when they try to send it.
+        let now = Utc::now();
+        let mut store = SimulationStore::new();
+        for index in 0..MAX_RECORDED_PER_WALLET * 3 {
+            let recorded = record(&mut store, &index.to_string(), now);
+            assert!(
+                store.take(recorded.simulation_id, now).is_ok(),
+                "record returned an id it had already evicted"
+            );
+            // Put it back so the cap keeps being exercised.
+            record(&mut store, &index.to_string(), now);
+        }
+    }
+
+    #[test]
+    fn one_wallet_cannot_evict_another_wallets_simulations() {
+        let now = Utc::now();
+        let mut store = SimulationStore::new();
+        let quiet_plan = plan("1");
+        let quiet_result = result(&quiet_plan);
+        let quiet = store.record("quiet", "1", quiet_plan, None, quiet_result, now);
+
+        // A busy wallet fills its own per-wallet allowance several times over.
+        for index in 2..MAX_RECORDED_PER_WALLET * 2 {
+            let plan = plan(&index.to_string());
+            let result = result(&plan);
+            store.record("busy", "1", plan, None, result, now);
+        }
+
+        assert!(
+            store.take(quiet.simulation_id, now).is_ok(),
+            "a busy wallet evicted a quiet wallet's simulation"
+        );
     }
 
     #[test]
