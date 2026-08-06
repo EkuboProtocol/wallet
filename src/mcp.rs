@@ -2883,6 +2883,10 @@ pub async fn serve(config: ConfigStore) -> Result<()> {
 }
 
 #[cfg(test)]
+#[path = "pipeline_tests.rs"]
+mod pipeline_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
