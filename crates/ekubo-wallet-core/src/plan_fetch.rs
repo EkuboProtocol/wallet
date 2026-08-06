@@ -30,6 +30,15 @@ use url::{Host, Url};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long name resolution may take before a reference fetch gives up.
+///
+/// `CONNECT_TIMEOUT` and `TOTAL_TIMEOUT` are configured on the HTTP client, so
+/// neither starts until an address exists. Without a deadline of its own, a
+/// caller who names a host served by a dead resolver holds the tool call open
+/// for as long as the platform stub resolver cares to retry — tens of seconds
+/// across several nameservers — and holds a blocking-pool thread with it.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// What transports `resolve_execution_plan` will accept.
 ///
 /// Production admits only public `https` and local `data:` URIs. Debug builds
@@ -246,10 +255,14 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
     // Resolve once, vet every address, and pin the connection to the vetted
     // set so a rebinding resolver cannot answer differently for the actual
     // connect. The admission decision and the connection use the same bytes.
-    let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host_text.as_str(), port))
-        .await
-        .with_context(|| format!("{noun} host did not resolve"))?
-        .collect();
+    let resolved: Vec<SocketAddr> = tokio::time::timeout(
+        RESOLVE_TIMEOUT,
+        tokio::net::lookup_host((host_text.as_str(), port)),
+    )
+    .await
+    .with_context(|| format!("{noun} host did not resolve within {RESOLVE_TIMEOUT:?}"))?
+    .with_context(|| format!("{noun} host did not resolve"))?
+    .collect();
     ensure!(!resolved.is_empty(), "{noun} host did not resolve");
     ensure!(
         policy.allow_insecure || resolved.iter().all(|address| is_public_ip(address.ip())),
