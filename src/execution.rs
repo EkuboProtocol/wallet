@@ -1,6 +1,6 @@
 use crate::{
     config::{NetworkConfig, WalletMetadata},
-    core::{execution_plan::ExecutionPlan, policy::FindingSeverity},
+    core::{execution_plan::ExecutionPlan, policy::policy_denies},
     custody::KeyStore,
     rpc::{sanitize_rpc_message, sanitized_rpc_error, transaction_receipt, verify_chain_id},
     simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
@@ -308,11 +308,8 @@ fn validate_preflight(
         simulation.digest == format!("{:#x}", plan.digest()),
         "simulation digest does not match execution plan"
     );
-    let policy_blocked = simulation.policy_findings.iter().any(|finding| {
-        finding.severity == FindingSeverity::Error && finding.code != "simulation_failed"
-    });
     ensure!(
-        !policy_blocked || overrides.allow_policy_override,
+        !policy_denies(&simulation.policy_findings) || overrides.allow_policy_override,
         "transaction was denied by the active wallet policy"
     );
     ensure!(

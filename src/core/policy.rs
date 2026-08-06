@@ -420,6 +420,23 @@ pub fn policy_allows(findings: &[PolicyFinding]) -> bool {
         .all(|finding| finding.severity != FindingSeverity::Error)
 }
 
+/// The code on the finding that records a failed simulation. It is the one
+/// error finding that is not a policy decision, so preflight can separate
+/// "the policy denied this" from "the simulation did not succeed" and require
+/// an explicit human override for each.
+pub const SIMULATION_FAILED_CODE: &str = "simulation_failed";
+
+/// True when the findings carry a policy denial: any error finding other than
+/// the simulation-failure record. Contrast [`policy_allows`], which treats
+/// every error finding, simulation failure included, as blocking the
+/// automatic path.
+#[must_use]
+pub fn policy_denies(findings: &[PolicyFinding]) -> bool {
+    findings.iter().any(|finding| {
+        finding.severity == FindingSeverity::Error && finding.code != SIMULATION_FAILED_CODE
+    })
+}
+
 fn evaluate_approval(
     chain: &ChainPolicy,
     token: Address,

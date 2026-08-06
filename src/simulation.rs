@@ -20,7 +20,10 @@ use crate::{
     config::{NetworkConfig, WalletMetadata},
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
-        policy::{FindingSeverity, PolicyFinding, TokenSpends, evaluate_policy, policy_allows},
+        policy::{
+            FindingSeverity, PolicyFinding, SIMULATION_FAILED_CODE, TokenSpends, evaluate_policy,
+            policy_allows,
+        },
     },
     fork::{ForkContext, ForkParent, ForkPreface, validate_replay},
     policy_store::StoredPolicy,
@@ -649,7 +652,7 @@ pub async fn simulate_execution(
     if !simulation.success {
         findings.push(PolicyFinding {
             severity: FindingSeverity::Error,
-            code: "simulation_failed".into(),
+            code: SIMULATION_FAILED_CODE.into(),
             message: "eth_simulateV1 execution did not succeed".into(),
             step: None,
         });
@@ -1233,7 +1236,7 @@ fn base_failure_result(
     let mut findings = evaluate_policy(plan, &stored_policy.policy, None);
     findings.push(PolicyFinding {
         severity: FindingSeverity::Error,
-        code: "simulation_failed".into(),
+        code: SIMULATION_FAILED_CODE.into(),
         message: "eth_simulateV1 simulation did not succeed".into(),
         step: None,
     });
