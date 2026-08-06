@@ -89,10 +89,18 @@ impl AddressBookStore {
             .context("inserted address book entry missing")
     }
 
+    /// Delete one entry.
+    ///
+    /// Deliberately does not validate the alias. Validation is a rule about
+    /// what may be *written*, and applying it on the way out means a row that
+    /// predates the rule — or arrived some other way — cannot be deleted,
+    /// because every command that could remove it refuses to name it first.
+    /// The owner is then stuck with an entry they can see and cannot get rid
+    /// of, which is the wrong direction for a cleanup path to fail in.
+    /// Deleting by exact stored text can only ever remove something.
     pub fn remove(&mut self, chain_id: u64, alias: &str) -> Result<AddressBookEntry> {
-        validate_alias(alias)?;
         let existing = self
-            .get(chain_id, alias)?
+            .read(chain_id, alias)?
             .with_context(|| format!("no address book entry {alias} on chain {chain_id}"))?;
         self.database.connection.execute(
             "DELETE FROM address_book WHERE chain_id = ?1 AND alias = ?2",
@@ -106,6 +114,13 @@ impl AddressBookStore {
 
     pub fn get(&self, chain_id: u64, alias: &str) -> Result<Option<AddressBookEntry>> {
         validate_alias(alias)?;
+        self.read(chain_id, alias)
+    }
+
+    /// Read by exact stored alias, without the write-time validity rule. The
+    /// removal path needs this so a row that no longer satisfies that rule is
+    /// still reachable for deletion.
+    fn read(&self, chain_id: u64, alias: &str) -> Result<Option<AddressBookEntry>> {
         self.database
             .connection
             .query_row(
@@ -234,6 +249,32 @@ mod tests {
         AddressBookStore::new(
             PolicyStore::open(&directory.join("policies.db"), &DatabaseKey::new([6; 32])).unwrap(),
         )
+    }
+
+    #[test]
+    fn an_alias_that_would_be_refused_today_can_still_be_deleted() {
+        // A row written before a validity rule, or by something else, must
+        // stay removable. Enforcing a write-time rule on the way out leaves
+        // the owner able to see an entry and unable to get rid of it.
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = open(directory.path());
+        store
+            .database
+            .connection
+            .execute(
+                "INSERT INTO address_book(chain_id, alias, address, note, added_at, updated_at)
+                 VALUES (1, 'not a valid alias!', '0x1111111111111111111111111111111111111111',
+                         NULL, 't0', 't0')",
+                [],
+            )
+            .unwrap();
+
+        // The write-time rule still refuses it as input.
+        assert!(store.get(1, "not a valid alias!").is_err());
+        // Removal reaches it anyway, and returns what it deleted.
+        let removed = store.remove(1, "not a valid alias!").unwrap();
+        assert_eq!(removed.alias, "not a valid alias!");
+        assert!(store.remove(1, "not a valid alias!").is_err());
     }
 
     fn store() -> (tempfile::TempDir, AddressBookStore) {

@@ -118,10 +118,19 @@ pub(crate) fn display_width(text: &str) -> usize {
 
 /// `0x1234567890…12345678`: the head and tail of a long hex identifier.
 pub(crate) fn short_hex(value: &str) -> String {
-    if value.len() <= 19 {
+    // Character boundaries, not byte offsets. This wallet writes addresses as
+    // ASCII hex, but the function renders *stored* text, and a row that
+    // predates a constraint or was written by something else can hold
+    // anything. Slicing a multi-byte character in half panics, and this runs
+    // inside the address-book browser's draw loop — so one malformed row would
+    // take down the whole screen the owner needs in order to delete it.
+    let characters: Vec<char> = value.chars().collect();
+    if characters.len() <= 19 {
         return value.to_owned();
     }
-    format!("{}…{}", &value[..10], &value[value.len() - 8..])
+    let head: String = characters[..10].iter().collect();
+    let tail: String = characters[characters.len() - 8..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 /// `text` cut to at most `columns` columns, ellipsized when anything is lost.
