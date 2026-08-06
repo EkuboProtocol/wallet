@@ -8,16 +8,25 @@
 //! key material is touched.
 
 use crate::{
+    approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ReviewPresenter},
+    approval_summary::{
+        TokenMetadataMap, interpret_steps, plan_token_metadata, render_balance_changes,
+    },
     config::{ConfigStore, NetworkConfig, WalletMetadata},
-    core::execution_plan::ExecutionPlan,
+    core::{execution_plan::ExecutionPlan, policy::FindingSeverity},
     custody::KeyStore,
-    execution::{SigningOverrides, sign_execution},
-    pending::{PendingStore, PendingTransaction},
+    execution::{
+        PreparedExecution, SigningOverrides, prepare_execution, sign_execution,
+        sign_prepared_execution,
+    },
+    human_presence::{HumanPresence, PresenceRequest},
+    pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::StoredPolicy,
-    simulation::SimulationResult,
+    simulation::{SimulationResult, simulate_execution},
 };
 use anyhow::{Result, ensure};
-use std::sync::Mutex;
+use num_bigint::BigUint;
+use std::{str::FromStr, sync::Mutex};
 
 /// What the automatic path did with a simulated plan.
 pub enum SendDisposition {
@@ -130,4 +139,309 @@ pub async fn execute_automatic(
         &signed.transaction_hash,
     )?;
     Ok(SendDisposition::Signed(record))
+}
+
+/// What the human-gated path decided.
+pub enum ApprovalOutcome {
+    /// The reviewer rejected: recorded, nothing signed.
+    Rejected(PendingTransaction),
+    /// Reviewed, authenticated, signed, and stored for submission.
+    Signed(PendingTransaction),
+}
+
+/// The human-gated path: from a queued pending row to a recorded decision.
+///
+/// In order: the row's own invariants (approval required, still awaiting,
+/// wallet/network/chain/sender unchanged); the active policy at the exact
+/// revision the row was queued under; the wallet+chain in-flight slot settled
+/// against the chain; a fresh simulation and preparation; the server-authored
+/// review document presented through `presenter`; on approval, OS owner
+/// authentication through `presence`; then a full re-read of every mutable
+/// input — pending row, wallet, network, policy revision and content, and the
+/// review digest — before the key is loaded. Signing is synchronous and
+/// performs no RPC after authentication, and the final SQL write in
+/// `store_signed` repeats the row and policy checks atomically.
+///
+/// `read_policy` is called once before review and once after authentication,
+/// so the decision and the signature bind the same policy.
+#[allow(clippy::too_many_lines)]
+pub async fn approve_transaction(
+    config: &ConfigStore,
+    pending: PendingStore,
+    read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
+    request: PendingTransaction,
+    presenter: &dyn ReviewPresenter,
+    presence: &dyn HumanPresence,
+    keys: &dyn KeyStore,
+) -> Result<ApprovalOutcome> {
+    ensure!(
+        request.approval_required,
+        "transaction did not require approval"
+    );
+    ensure!(
+        request.status == PendingStatus::AwaitingApproval,
+        "pending request is not awaiting approval"
+    );
+    let wallet = config.wallet(&request.wallet_id)?;
+    let network = config.network(&request.network_name)?;
+    ensure!(
+        network.chain_id.to_string() == request.chain_id,
+        "pending request network chain changed"
+    );
+    ensure!(
+        request.execution_plan.sender == wallet.address,
+        "pending request sender no longer matches wallet"
+    );
+    let stored_policy = read_policy()?;
+    ensure!(
+        stored_policy.revision == request.policy_revision,
+        "active policy changed while approval was pending"
+    );
+
+    let pending = Mutex::new(pending);
+    // A predecessor that already mined, cancelled, or was replaced must never
+    // block storing this approval's signature: settle the wallet+chain
+    // in-flight slot against the chain before the human reads anything.
+    let in_flight = lock(&pending)?.in_flight(&wallet.id, &request.chain_id)?;
+    if let Some(previous) = in_flight {
+        crate::reconcile::reconcile_record(&pending, &network, previous, true).await?;
+    }
+
+    let simulation = simulate_execution(
+        &wallet,
+        &network,
+        &request.execution_plan,
+        &stored_policy,
+        None,
+    )
+    .await?;
+    let overrides = SigningOverrides {
+        allow_policy_override: true,
+        allow_simulation_failure: true,
+    };
+    let prepared = prepare_execution(
+        &wallet,
+        &network,
+        &request.execution_plan,
+        &simulation,
+        overrides,
+    )
+    .await?;
+    // Display metadata only. A failed or slow lookup degrades the review text
+    // to exact base units; it never blocks or alters the approval decision.
+    let token_metadata = plan_token_metadata(&network, &request.execution_plan.ordered_steps).await;
+    let approval =
+        transaction_approval_request(&request, &simulation, &prepared, &network, &token_metadata)?;
+    // Rejecting here is a decision, not an abort: it is recorded, so the
+    // agent waiting on this request learns the answer.
+    if presenter.review_transaction(&approval, &simulation).await? != ApprovalDecision::Approved {
+        let rejected = lock(&pending)?.reject(request.request_id)?;
+        return Ok(ApprovalOutcome::Rejected(rejected));
+    }
+
+    let review_digest = prepared.review_digest();
+    presence
+        .confirm(&PresenceRequest::SignTransaction {
+            wallet: wallet.id.clone(),
+        })
+        .await?;
+
+    // Re-read all mutable local authority after the potentially long human
+    // review. Signing below is synchronous and performs no RPC requests. The
+    // final SQL write repeats the pending/policy checks atomically, so a race
+    // cannot put a stale signature into the submission queue.
+    let current = lock(&pending)?.get(request.request_id)?;
+    ensure!(
+        current.status == PendingStatus::AwaitingApproval,
+        "pending request changed during approval"
+    );
+    ensure!(
+        current.digest == request.digest,
+        "pending request digest changed during approval"
+    );
+    ensure!(
+        config.wallet(&request.wallet_id)? == wallet,
+        "wallet configuration changed during approval"
+    );
+    ensure!(
+        config.network(&request.network_name)? == network,
+        "network configuration changed during approval"
+    );
+    let current_policy = read_policy()?;
+    ensure!(
+        current_policy.revision == request.policy_revision
+            && current_policy.policy == stored_policy.policy,
+        "active policy changed during approval"
+    );
+    ensure!(
+        prepared.review_digest() == review_digest,
+        "prepared transaction changed during approval"
+    );
+    let signed = sign_prepared_execution(
+        &wallet,
+        &network,
+        &request.execution_plan,
+        &simulation,
+        &prepared,
+        keys,
+        overrides,
+    )?;
+    let approved = lock(&pending)?.store_signed(
+        request.request_id,
+        &request.digest,
+        &review_digest,
+        &signed.serialized_transaction,
+        &signed.transaction_hash,
+    )?;
+    Ok(ApprovalOutcome::Signed(approved))
+}
+
+/// The complete server-authored review document for one queued transaction:
+/// every fact a reviewer decides on, none authored by the presenter.
+#[allow(clippy::too_many_lines)]
+fn transaction_approval_request(
+    pending: &PendingTransaction,
+    simulation: &SimulationResult,
+    prepared: &PreparedExecution,
+    network: &NetworkConfig,
+    token_metadata: &TokenMetadataMap,
+) -> Result<ApprovalRequest> {
+    let total_native = pending
+        .execution_plan
+        .ordered_steps
+        .iter()
+        .map(|step| BigUint::from_str(step.transaction.value.as_str()))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .sum::<BigUint>();
+    let mut request = ApprovalRequest::new(
+        ApprovalKind::PolicyException,
+        "Approve policy exception",
+        "Review and sign this exact execution plan despite policy or simulation findings.",
+    )
+    .fact("Wallet", &pending.wallet_id)
+    .fact("Network", &pending.network_name)
+    .fact("Chain ID", &pending.chain_id)
+    .fact("Sender", format!("{:#x}", pending.execution_plan.sender))
+    .fact(
+        "Ordered calls",
+        pending.execution_plan.ordered_steps.len().to_string(),
+    )
+    .fact("Total native value", total_native.to_string())
+    .fact("Policy revision", pending.policy_revision.to_string())
+    .fact("Plan digest", &pending.digest)
+    .fact("Simulation parent block", &simulation.block_number)
+    .fact("Transaction type", prepared.transaction_type())
+    .fact("Transaction nonce", prepared.nonce().to_string())
+    .fact("Gas limit", prepared.gas_limit().to_string())
+    .fact(
+        "Max fee per gas (wei)",
+        prepared.max_fee_per_gas().to_string(),
+    )
+    .fact(
+        "Max priority fee per gas (wei)",
+        prepared.max_priority_fee_per_gas().to_string(),
+    )
+    .fact("Maximum transaction fee (wei)", prepared.maximum_fee_wei())
+    .digest(prepared.review_digest());
+    request.id = pending.request_id;
+    let interpretations = interpret_steps(&pending.execution_plan.ordered_steps, token_metadata);
+    for (step, interpretation) in pending
+        .execution_plan
+        .ordered_steps
+        .iter()
+        .zip(&interpretations)
+    {
+        let calldata = step.transaction.data.as_ref();
+        let selector = if calldata.is_empty() {
+            "none".into()
+        } else {
+            format!("0x{}", hex::encode(&calldata[..calldata.len().min(4)]))
+        };
+        request = request.fact(
+            format!("Call {}", step.step),
+            format!(
+                "kind={:?}; condition={:?}; target={:#x}; value={} wei; selector={selector}; calldata={} bytes",
+                step.kind,
+                step.submit_condition,
+                step.transaction.to,
+                step.transaction.value,
+                calldata.len(),
+            ),
+        );
+        // The exact fields above are authoritative; these lines are a
+        // supplemental reading from a vendored ERC-7730 descriptor or from
+        // recognized standard calldata.
+        request = request.fact(
+            format!("Call {} reads as", step.step),
+            interpretation.description.clone().unwrap_or_else(|| {
+                "no matching descriptor or standard token operation; verify the target and selector directly"
+                    .into()
+            }),
+        );
+        for detail in &interpretation.details {
+            request = request.fact(format!("Call {} ·", step.step), detail);
+        }
+    }
+    let balance_changes = render_balance_changes(simulation, network, token_metadata);
+    if balance_changes.is_empty() {
+        request = request.fact(
+            "Simulated net balance changes",
+            if simulation.simulation.success {
+                "none detected"
+            } else {
+                "unavailable because simulation failed"
+            },
+        );
+    } else {
+        for (index, line) in balance_changes.iter().enumerate() {
+            request = request.fact(
+                if index == 0 {
+                    "Simulated net balance change (excludes live gas)".to_string()
+                } else {
+                    format!("Simulated net balance change {}", index + 1)
+                },
+                line,
+            );
+        }
+    }
+    if let Some(authorization_nonce) = prepared.authorization_nonce() {
+        request = request.fact(
+            "EIP-7702 authorization",
+            format!(
+                "implementation={}; nonce={authorization_nonce}",
+                simulation.implementation.as_deref().unwrap_or("missing")
+            ),
+        );
+    }
+    if let Some(replaced) = &simulation.replaces_delegated_implementation {
+        request = request.warning(format!(
+            "This replaces the wallet's current EIP-7702 delegation to {replaced}."
+        ));
+    }
+    for warning in interpretations
+        .iter()
+        .flat_map(|interpretation| &interpretation.warnings)
+    {
+        request = request.warning(warning);
+    }
+    for finding in &simulation.policy_findings {
+        if finding.severity != FindingSeverity::Info {
+            request = request.warning(format!(
+                "{}: {}{}",
+                finding.code,
+                finding.message,
+                finding
+                    .step
+                    .map_or_else(String::new, |step| format!(" (step {step})"))
+            ));
+        }
+    }
+    if let Some(failure) = &simulation.simulation.failure {
+        request = request.warning(format!(
+            "Simulation {:?}: {} Recommended action: {:?}.",
+            failure.category, failure.message, failure.recommended_action
+        ));
+    }
+    Ok(request)
 }

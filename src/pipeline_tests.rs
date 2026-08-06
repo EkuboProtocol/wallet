@@ -9,12 +9,28 @@
 
 use super::*;
 use crate::{
+    approval::{ApprovalDecision, ApprovalRequest, ReviewPresenter},
     config::{NetworkConfig, WalletMetadata, WalletSource},
     custody::{MemoryKeyStore, PrivateKeyMaterial},
-    execution::{SigningOverrides, prepare_execution, sign_prepared_execution},
+    human_presence::TestHumanPresence,
     policy_store::DatabaseKey,
-    simulation::simulate_execution,
+    simulation::SimulationResult,
 };
+
+/// A presenter that approves whatever it is shown: the handoff test's stand-in
+/// for the terminal review.
+struct ApproveEverything;
+
+#[async_trait::async_trait]
+impl ReviewPresenter for ApproveEverything {
+    async fn review_transaction(
+        &self,
+        _request: &ApprovalRequest,
+        _simulation: &SimulationResult,
+    ) -> anyhow::Result<ApprovalDecision> {
+        Ok(ApprovalDecision::Approved)
+    }
+}
 use alloy::primitives::{Address, B256, keccak256};
 use base64::Engine as _;
 use std::{collections::HashSet, net::SocketAddr, sync::Mutex as StdMutex};
@@ -364,7 +380,7 @@ async fn automatic_path_signs_broadcasts_and_confirms_through_the_stub() {
 #[tokio::test(flavor = "multi_thread")]
 async fn policy_denial_queues_and_the_approved_row_broadcasts_by_request_id() {
     let (address, chain) = start_stub().await;
-    let (_directory, server, wallet) =
+    let (directory, server, wallet) =
         pipeline_server(address, &WalletPolicy::require_approval_for_everything());
 
     // Agent leg: the policy denies, so the plan queues instead of signing.
@@ -389,66 +405,42 @@ async fn policy_denial_queues_and_the_approved_row_broadcasts_by_request_id() {
     assert!(chain.mined.lock().unwrap().is_empty(), "nothing signed yet");
     let request_id = output.request_id;
 
-    // Human leg: what `ekubo-wallet review` does after the reviewer approves —
-    // fresh simulation, preparation, signing with explicit overrides, and the
-    // transaction-wrapped store_signed that re-checks digest, status, and
-    // policy revision.
+    // Human leg: the real approval path — orchestrator::approve_transaction —
+    // driven by a test presenter and test presence instead of a terminal and
+    // the OS dialog. Fresh simulation, preparation, review document,
+    // presence, the re-read ladder, signing, and the transaction-wrapped
+    // store_signed all execute exactly as `ekubo-wallet review` runs them.
     let record = server.pending.lock().unwrap().get(request_id).unwrap();
-    let network = server
-        .config
-        .network_by_chain_id(&CHAIN_ID.to_string())
-        .unwrap();
-    let stored_policy = server
-        .policies
-        .lock()
-        .unwrap()
-        .get("primary")
-        .unwrap()
-        .expect("policy exists");
-    let simulation = simulate_execution(
-        &wallet,
-        &network,
-        &record.execution_plan,
-        &stored_policy,
-        None,
-    )
-    .await
-    .unwrap();
-    let overrides = SigningOverrides {
-        allow_policy_override: true,
-        allow_simulation_failure: true,
+    let read_policy = || -> anyhow::Result<crate::policy_store::StoredPolicy> {
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .get("primary")?
+            .context("policy exists")
     };
-    let prepared = prepare_execution(
-        &wallet,
-        &network,
-        &record.execution_plan,
-        &simulation,
-        overrides,
+    let outcome = crate::orchestrator::approve_transaction(
+        &server.config,
+        PendingStore::new(
+            PolicyStore::open(
+                &directory.path().join("policies.db"),
+                &DatabaseKey::new([9; 32]),
+            )
+            .unwrap(),
+        ),
+        &read_policy,
+        record,
+        &ApproveEverything,
+        &TestHumanPresence { allow: true },
+        &*server.keys,
     )
     .await
     .unwrap();
-    let signed = sign_prepared_execution(
-        &wallet,
-        &network,
-        &record.execution_plan,
-        &simulation,
-        &prepared,
-        &*server.keys,
-        overrides,
-    )
-    .unwrap();
-    server
-        .pending
-        .lock()
-        .unwrap()
-        .store_signed(
-            request_id,
-            &signed.digest,
-            &prepared.review_digest(),
-            &signed.serialized_transaction,
-            &signed.transaction_hash,
-        )
-        .unwrap();
+    let crate::orchestrator::ApprovalOutcome::Signed(signed_record) = outcome else {
+        panic!("presenter approved, so the outcome must be Signed");
+    };
+    assert_eq!(signed_record.status, PendingStatus::Signed);
+    assert!(signed_record.review_digest.is_some(), "review digest bound");
 
     // Agent leg again: resubmitting by request id broadcasts the exact stored
     // bytes and settles the record.

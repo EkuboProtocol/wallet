@@ -90,6 +90,21 @@ pub trait ApprovalUi: Send + Sync {
     async fn review(&self, request: &ApprovalRequest) -> Result<ApprovalDecision>;
 }
 
+/// Presents one transaction review — the complete server-authored document
+/// plus the fresh simulation — and returns the decision. UI-neutral: the
+/// terminal is one implementation; a future approval surface is another
+/// adapter. A presenter never receives key material or store handles, and
+/// never authors review content — the orchestrator builds the document, the
+/// presenter only shows it.
+#[async_trait]
+pub trait ReviewPresenter: Send + Sync {
+    async fn review_transaction(
+        &self,
+        request: &ApprovalRequest,
+        simulation: &crate::simulation::SimulationResult,
+    ) -> Result<ApprovalDecision>;
+}
+
 /// Polished terminal fallback for direct CLI use and MCP clients without app UI.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TerminalApprovalUi;

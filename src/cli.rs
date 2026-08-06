@@ -2,16 +2,12 @@ use crate::{
     VERSION,
     address_book::AddressBookStore,
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi, TerminalApprovalUi},
-    approval_summary::{
-        TokenMetadataMap, interpret_steps, plan_token_metadata, render_balance_changes,
-    },
     config::{
         ConfigStore, NativeCurrency, NetworkConfig, default_networks, remove_configured_network,
         replace_configured_network,
     },
-    core::policy::{FindingSeverity, WalletPolicy},
+    core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial, load_matching_signer},
-    execution::{PreparedExecution, SigningOverrides, prepare_execution, sign_prepared_execution},
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceRequest},
     legal::{self, LegalDocument, LegalStore},
     message::{
@@ -22,7 +18,7 @@ use crate::{
     policy_store::PolicyStore,
     render::{OutputMode, described_time, emit, print_json, relative_time},
     rpc::verify_chain_id,
-    simulation::{SimulationResult, simulate_execution},
+    simulation::SimulationResult,
     tx_browser::status_label,
     typed_data::{
         PendingTypedData, TypedDataStatus, TypedDataStore, interpret_permit_approvals,
@@ -1661,7 +1657,7 @@ async fn run_approve(
 ) -> Result<()> {
     require_interactive("transaction approval")?;
     legal::require_current_acceptance(config.data_dir())?;
-    let mut pending = PendingStore::production(config.data_dir())?;
+    let pending = PendingStore::production(config.data_dir())?;
     let request = match pending.get(request_id) {
         Ok(request) => request,
         Err(transaction_error) => {
@@ -1677,162 +1673,79 @@ async fn run_approve(
             return approve_typed_data(config, typed_data, request, no_confirm, mode).await;
         }
     };
-    ensure!(
-        request.approval_required,
-        "transaction did not require approval"
-    );
-    ensure!(
-        request.status == PendingStatus::AwaitingApproval,
-        "pending request is not awaiting approval"
-    );
-    let wallet = config.wallet(&request.wallet_id)?;
-    let network = config.network(&request.network_name)?;
-    ensure!(
-        network.chain_id.to_string() == request.chain_id,
-        "pending request network chain changed"
-    );
-    ensure!(
-        request.execution_plan.sender == wallet.address,
-        "pending request sender no longer matches wallet"
-    );
-    let stored_policy = PolicyStore::production(config.data_dir())?
-        .get(&wallet.id)?
-        .with_context(|| format!("wallet {} has no local policy", wallet.id))?;
-    ensure!(
-        stored_policy.revision == request.policy_revision,
-        "active policy changed while approval was pending"
-    );
-
-    // A predecessor that already mined, cancelled, or was replaced must never
-    // block storing this approval's signature: settle the wallet+chain
-    // in-flight slot against the chain before the human reads anything.
-    if let Some(previous) = pending.in_flight(&wallet.id, &request.chain_id)? {
-        let shared = std::sync::Mutex::new(pending);
-        crate::reconcile::reconcile_record(&shared, &network, previous, true).await?;
-        pending = shared
-            .into_inner()
-            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?;
-    }
-
-    let simulation = simulate_execution(
-        &wallet,
-        &network,
-        &request.execution_plan,
-        &stored_policy,
-        None,
-    )
-    .await?;
-    let overrides = SigningOverrides {
-        allow_policy_override: true,
-        allow_simulation_failure: true,
+    let data_dir = config.data_dir().to_path_buf();
+    let wallet_id = request.wallet_id.clone();
+    let read_policy = move || -> Result<crate::policy_store::StoredPolicy> {
+        PolicyStore::production(&data_dir)?
+            .get(&wallet_id)?
+            .with_context(|| format!("wallet {wallet_id} has no local policy"))
     };
-    let prepared = prepare_execution(
-        &wallet,
-        &network,
-        &request.execution_plan,
-        &simulation,
-        overrides,
+    let outcome = crate::orchestrator::approve_transaction(
+        config,
+        pending,
+        &read_policy,
+        request,
+        &CliTransactionPresenter { no_confirm },
+        &PlatformHumanPresence,
+        &OsKeyStore,
     )
     .await?;
-    // Display metadata only. A failed or slow lookup degrades the review text to
-    // exact base units; it never blocks or alters the approval decision.
-    let token_metadata = plan_token_metadata(&network, &request.execution_plan.ordered_steps).await;
-    let approval =
-        transaction_approval_request(&request, &simulation, &prepared, &network, &token_metadata)?;
-    print_approval_review(&approval, &simulation)?;
-    // Rejecting here is a decision, not an abort: it is recorded through the
-    // store already open, so the agent waiting on this request learns the
-    // answer instead of waiting out the expiry.
-    if !no_confirm && !reviewer_approved(approval).await? {
-        let rejected = pending.reject(request_id)?;
-        return emit_rejected(
+    match outcome {
+        crate::orchestrator::ApprovalOutcome::Rejected(rejected) => emit_rejected(
             mode,
             "request",
             rejected.request_id,
             &rejected.digest,
             rejected.rejected_at,
-        );
+        ),
+        crate::orchestrator::ApprovalOutcome::Signed(approved) => {
+            eprintln!(
+                "Approved and signed. An MCP agent waiting on this request detects the approval \
+                 and submits automatically; nothing further is needed here."
+            );
+            emit(
+                mode,
+                &serde_json::json!({
+                    "approved": approved.request_id,
+                    "digest": approved.digest,
+                    "transaction_hash": approved.signed_transaction_hash,
+                    "approved_at": approved.approved_at,
+                }),
+                || {
+                    Ok(format!(
+                        "Approved request {} — signed transaction {}.",
+                        approved.request_id,
+                        approved
+                            .signed_transaction_hash
+                            .as_deref()
+                            .unwrap_or("<missing>"),
+                    ))
+                },
+            )
+        }
     }
+}
 
-    let review_digest = prepared.review_digest();
-    PlatformHumanPresence
-        .confirm(&PresenceRequest::SignTransaction {
-            wallet: wallet.id.clone(),
-        })
-        .await?;
+/// The terminal implementation of the review seam: print the full review to
+/// stderr, then run the reject-default picker. `no_confirm` skips only the
+/// picker — owner authentication still follows in the orchestrator.
+struct CliTransactionPresenter {
+    no_confirm: bool,
+}
 
-    // Re-read all mutable local authority after the potentially long human
-    // review. Signing below is synchronous and performs no RPC requests. The
-    // final SQL write repeats the pending/policy checks atomically, so a race
-    // cannot put a stale signature into the submission queue.
-    let current = pending.get(request_id)?;
-    ensure!(
-        current.status == PendingStatus::AwaitingApproval,
-        "pending request changed during approval"
-    );
-    ensure!(
-        current.digest == request.digest,
-        "pending request digest changed during approval"
-    );
-    ensure!(
-        config.wallet(&request.wallet_id)? == wallet,
-        "wallet configuration changed during approval"
-    );
-    ensure!(
-        config.network(&request.network_name)? == network,
-        "network configuration changed during approval"
-    );
-    let current_policy = PolicyStore::production(config.data_dir())?
-        .get(&wallet.id)?
-        .with_context(|| format!("wallet {} has no local policy", wallet.id))?;
-    ensure!(
-        current_policy.revision == request.policy_revision
-            && current_policy.policy == stored_policy.policy,
-        "active policy changed during approval"
-    );
-    ensure!(
-        prepared.review_digest() == review_digest,
-        "prepared transaction changed during approval"
-    );
-    let signed = sign_prepared_execution(
-        &wallet,
-        &network,
-        &request.execution_plan,
-        &simulation,
-        &prepared,
-        &OsKeyStore,
-        overrides,
-    )?;
-    let approved = pending.store_signed(
-        request_id,
-        &request.digest,
-        &review_digest,
-        &signed.serialized_transaction,
-        &signed.transaction_hash,
-    )?;
-    eprintln!(
-        "Approved and signed. An MCP agent waiting on this request detects the approval and \
-         submits automatically; nothing further is needed here."
-    );
-    emit(
-        mode,
-        &serde_json::json!({
-            "approved": approved.request_id,
-            "digest": approved.digest,
-            "transaction_hash": approved.signed_transaction_hash,
-            "approved_at": approved.approved_at,
-        }),
-        || {
-            Ok(format!(
-                "Approved request {} — signed transaction {}.",
-                approved.request_id,
-                approved
-                    .signed_transaction_hash
-                    .as_deref()
-                    .unwrap_or("<missing>"),
-            ))
-        },
-    )
+#[async_trait::async_trait]
+impl crate::approval::ReviewPresenter for CliTransactionPresenter {
+    async fn review_transaction(
+        &self,
+        request: &ApprovalRequest,
+        simulation: &SimulationResult,
+    ) -> Result<ApprovalDecision> {
+        print_approval_review(request, simulation)?;
+        if self.no_confirm {
+            return Ok(ApprovalDecision::Approved);
+        }
+        TerminalApprovalUi.review(request).await
+    }
 }
 
 async fn approve_typed_data(
@@ -2187,153 +2100,6 @@ fn terminal_safe_excerpt(value: &str) -> String {
     }
     let head: String = value.chars().take(MAX_FACT_CHARACTERS).collect();
     format!("{head}… (full message printed above)")
-}
-
-fn transaction_approval_request(
-    pending: &PendingTransaction,
-    simulation: &SimulationResult,
-    prepared: &PreparedExecution,
-    network: &NetworkConfig,
-    token_metadata: &TokenMetadataMap,
-) -> Result<ApprovalRequest> {
-    let total_native = pending
-        .execution_plan
-        .ordered_steps
-        .iter()
-        .map(|step| BigUint::from_str(step.transaction.value.as_str()))
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .sum::<BigUint>();
-    let mut request = ApprovalRequest::new(
-        ApprovalKind::PolicyException,
-        "Approve policy exception",
-        "Review and sign this exact execution plan despite policy or simulation findings.",
-    )
-    .fact("Wallet", &pending.wallet_id)
-    .fact("Network", &pending.network_name)
-    .fact("Chain ID", &pending.chain_id)
-    .fact("Sender", format!("{:#x}", pending.execution_plan.sender))
-    .fact(
-        "Ordered calls",
-        pending.execution_plan.ordered_steps.len().to_string(),
-    )
-    .fact("Total native value", total_native.to_string())
-    .fact("Policy revision", pending.policy_revision.to_string())
-    .fact("Plan digest", &pending.digest)
-    .fact("Simulation parent block", &simulation.block_number)
-    .fact("Transaction type", prepared.transaction_type())
-    .fact("Transaction nonce", prepared.nonce().to_string())
-    .fact("Gas limit", prepared.gas_limit().to_string())
-    .fact(
-        "Max fee per gas (wei)",
-        prepared.max_fee_per_gas().to_string(),
-    )
-    .fact(
-        "Max priority fee per gas (wei)",
-        prepared.max_priority_fee_per_gas().to_string(),
-    )
-    .fact("Maximum transaction fee (wei)", prepared.maximum_fee_wei())
-    .digest(prepared.review_digest());
-    request.id = pending.request_id;
-    let interpretations = interpret_steps(&pending.execution_plan.ordered_steps, token_metadata);
-    for (step, interpretation) in pending
-        .execution_plan
-        .ordered_steps
-        .iter()
-        .zip(&interpretations)
-    {
-        let calldata = step.transaction.data.as_ref();
-        let selector = if calldata.is_empty() {
-            "none".into()
-        } else {
-            format!("0x{}", hex::encode(&calldata[..calldata.len().min(4)]))
-        };
-        request = request.fact(
-            format!("Call {}", step.step),
-            format!(
-                "kind={:?}; condition={:?}; target={:#x}; value={} wei; selector={selector}; calldata={} bytes",
-                step.kind,
-                step.submit_condition,
-                step.transaction.to,
-                step.transaction.value,
-                calldata.len(),
-            ),
-        );
-        // The exact fields above are authoritative; these lines are a
-        // supplemental reading from a vendored ERC-7730 descriptor or from
-        // recognized standard calldata.
-        request = request.fact(
-            format!("Call {} reads as", step.step),
-            interpretation.description.clone().unwrap_or_else(|| {
-                "no matching descriptor or standard token operation; verify the target and selector directly"
-                    .into()
-            }),
-        );
-        for detail in &interpretation.details {
-            request = request.fact(format!("Call {} ·", step.step), detail);
-        }
-    }
-    let balance_changes = render_balance_changes(simulation, network, token_metadata);
-    if balance_changes.is_empty() {
-        request = request.fact(
-            "Simulated net balance changes",
-            if simulation.simulation.success {
-                "none detected"
-            } else {
-                "unavailable because simulation failed"
-            },
-        );
-    } else {
-        for (index, line) in balance_changes.iter().enumerate() {
-            request = request.fact(
-                if index == 0 {
-                    "Simulated net balance change (excludes live gas)".to_string()
-                } else {
-                    format!("Simulated net balance change {}", index + 1)
-                },
-                line,
-            );
-        }
-    }
-    if let Some(authorization_nonce) = prepared.authorization_nonce() {
-        request = request.fact(
-            "EIP-7702 authorization",
-            format!(
-                "implementation={}; nonce={authorization_nonce}",
-                simulation.implementation.as_deref().unwrap_or("missing")
-            ),
-        );
-    }
-    if let Some(replaced) = &simulation.replaces_delegated_implementation {
-        request = request.warning(format!(
-            "This replaces the wallet's current EIP-7702 delegation to {replaced}."
-        ));
-    }
-    for warning in interpretations
-        .iter()
-        .flat_map(|interpretation| &interpretation.warnings)
-    {
-        request = request.warning(warning);
-    }
-    for finding in &simulation.policy_findings {
-        if finding.severity != FindingSeverity::Info {
-            request = request.warning(format!(
-                "{}: {}{}",
-                finding.code,
-                finding.message,
-                finding
-                    .step
-                    .map_or_else(String::new, |step| format!(" (step {step})"))
-            ));
-        }
-    }
-    if let Some(failure) = &simulation.simulation.failure {
-        request = request.warning(format!(
-            "Simulation {:?}: {} Recommended action: {:?}.",
-            failure.category, failure.message, failure.recommended_action
-        ));
-    }
-    Ok(request)
 }
 
 fn print_approval_review(approval: &ApprovalRequest, simulation: &SimulationResult) -> Result<()> {
