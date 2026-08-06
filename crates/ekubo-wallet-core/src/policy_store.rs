@@ -301,6 +301,55 @@ impl PolicyStore {
         policy: &WalletPolicy,
         expected_revision: Option<u64>,
     ) -> Result<StoredPolicy> {
+        let transaction = self.connection.transaction()?;
+        let stored = Self::apply_policy(&transaction, wallet_id, policy, expected_revision)?;
+
+        transaction.commit()?;
+        Ok(stored)
+    }
+
+    /// Apply the exact proposal that was reviewed, and consume that same row.
+    ///
+    /// `put` plus `delete_proposal` could not express this: the revision check
+    /// guards the *active* policy, which does not move while a proposal sits
+    /// pending, so a proposal replaced during the human review passed every
+    /// check and was then deleted by wallet ID — applied never, seen never.
+    /// Matching on `created_at`, which `put_proposal` refreshes on every
+    /// replacement, makes the delete identify the row rather than the wallet.
+    ///
+    /// One transaction, so a proposal is applied exactly when it is consumed.
+    pub fn consume_proposal(&mut self, proposal: &PolicyProposal) -> Result<StoredPolicy> {
+        validate_wallet_id(&proposal.wallet_id)?;
+        let transaction = self.connection.transaction()?;
+        let consumed = transaction.execute(
+            "DELETE FROM policy_proposals WHERE wallet_id = ?1 AND created_at = ?2",
+            params![proposal.wallet_id, proposal.created_at.to_rfc3339()],
+        )?;
+        ensure!(
+            consumed == 1,
+            "the proposal you reviewed was replaced by a newer one; nothing was applied. \
+             Run the review again to decide on the current proposal."
+        );
+        let stored = Self::apply_policy(
+            &transaction,
+            &proposal.wallet_id,
+            &proposal.policy,
+            Some(proposal.source_revision),
+        )?;
+        transaction.commit()?;
+        Ok(stored)
+    }
+
+    /// The policy write both entry points share, run inside a transaction the
+    /// caller owns. That is what lets `consume_proposal` make applying a
+    /// proposal and consuming it one step: two separate calls could not be
+    /// made atomic from outside.
+    fn apply_policy(
+        transaction: &rusqlite::Transaction<'_>,
+        wallet_id: &str,
+        policy: &WalletPolicy,
+        expected_revision: Option<u64>,
+    ) -> Result<StoredPolicy> {
         validate_wallet_id(wallet_id)?;
         // Round-trip through the strict parser before persisting, including
         // policies constructed directly by Rust callers.
@@ -308,7 +357,6 @@ impl PolicyStore {
         let policy = WalletPolicy::parse(canonical)?;
         let policy_json = serde_json::to_string(&policy)?;
         let updated_at = Utc::now();
-        let transaction = self.connection.transaction()?;
         let current: Option<i64> = transaction
             .query_row(
                 "SELECT revision FROM wallet_policies WHERE wallet_id = ?1",
@@ -340,7 +388,6 @@ impl PolicyStore {
                AND status IN ('awaiting_approval', 'signed')",
             params![wallet_id, revision, updated_at.to_rfc3339()],
         )?;
-        transaction.commit()?;
         Ok(StoredPolicy {
             wallet_id: wallet_id.into(),
             policy,
@@ -1396,6 +1443,55 @@ mod tests {
         assert_eq!(applied.revision, active.revision + 1);
         assert!(store.delete_proposal("primary").unwrap());
         assert!(!store.delete_proposal("primary").unwrap());
+        assert!(store.proposal("primary").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_proposal_replaced_during_review_is_refused_not_discarded() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let mut store = PolicyStore::open(&path, &key(11)).unwrap();
+        let active = store
+            .put(
+                "primary",
+                &WalletPolicy::require_approval_for_everything(),
+                None,
+            )
+            .unwrap();
+        let reviewed = store
+            .put_proposal(
+                "primary",
+                active.revision,
+                &WalletPolicy::allow_all_with_approval(),
+                "the one a human is looking at",
+            )
+            .unwrap();
+
+        // The active revision never moves while a proposal is pending, so the
+        // revision check cannot see this. Without matching the row itself, the
+        // reviewed policy applied and the newer one was deleted unseen.
+        store
+            .put_proposal(
+                "primary",
+                active.revision,
+                &WalletPolicy::require_approval_for_everything(),
+                "arrived while the screen was up",
+            )
+            .unwrap();
+        assert!(store.consume_proposal(&reviewed).is_err());
+
+        // Nothing was applied and nothing was consumed: the newer proposal is
+        // still there to be reviewed on its own terms.
+        assert_eq!(
+            store.get("primary").unwrap().unwrap().revision,
+            active.revision
+        );
+        let pending = store.proposal("primary").unwrap().unwrap();
+        assert_eq!(pending.rationale, "arrived while the screen was up");
+
+        // And the ordinary path still applies and consumes in one step.
+        let applied = store.consume_proposal(&pending).unwrap();
+        assert_eq!(applied.revision, active.revision + 1);
         assert!(store.proposal("primary").unwrap().is_none());
     }
 

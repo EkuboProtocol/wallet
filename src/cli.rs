@@ -1375,10 +1375,12 @@ async fn review_policy_proposal(
         })
         .await?;
 
-    // put() enforces the expected revision atomically, so a policy change
-    // during the human review fails closed rather than applying stale rules.
-    let stored = policies.put(wallet_id, &proposal.policy, Some(proposal.source_revision))?;
-    policies.delete_proposal(wallet_id)?;
+    // Applies and consumes the exact row that was reviewed, in one
+    // transaction. The revision check inside it still makes a policy change
+    // during the review fail closed; matching the proposal itself covers the
+    // case that check cannot see, where a newer proposal arrived while the
+    // active revision never moved.
+    let stored = policies.consume_proposal(&proposal)?;
     eprintln!(
         "Applied. An agent can observe the new revision through wallet_get_policy; nothing \
          further is needed here."
