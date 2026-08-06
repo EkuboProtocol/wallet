@@ -35,6 +35,13 @@ need() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
 
+# Single-quote a value so it survives being pasted into a shell. Quoting this
+# script's own uses of a path does nothing for a command line printed for an
+# operator to copy: that text is reparsed by their shell, not by this one.
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 need uname
 need tar
 
@@ -359,7 +366,7 @@ if [ "$OS" = Linux ] && [ -f "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.
   mkdir -p "$POLKIT_STAGE"
   install -m 0644 "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.policy" "$POLKIT_STAGE/"
   log "owner authentication needs the polkit action installed once:"
-  log "  sudo install -m 0644 $POLKIT_STAGE/com.ekubo.wallet.policy /usr/share/polkit-1/actions/"
+  log "  sudo install -m 0644 $(shell_quote "$POLKIT_STAGE/com.ekubo.wallet.policy") /usr/share/polkit-1/actions/"
 fi
 
 log "installation complete; restart active agent and shell sessions"
