@@ -235,6 +235,33 @@ fn cli_replacement_still_rejects_an_identifier_taken_by_another_chain() {
 }
 
 #[test]
+fn owner_configuration_admits_a_loopback_node() {
+    // Running your own node is the one configuration with no RPC trust
+    // assumption left in it, so a local endpoint an owner types must stay
+    // configurable. `http` and loopback are admitted here on purpose: the
+    // owner is naming a machine they already control. The stricter rules an
+    // agent's proposal meets live in `plan_fetch::ensure_public_endpoint`,
+    // and the two paths are deliberately not the same one.
+    for endpoint in [
+        "http://127.0.0.1:8545",
+        "http://localhost:8545",
+        "http://[::1]:8545",
+    ] {
+        let mut candidate = default_networks().remove(0);
+        candidate.rpc_url = endpoint.parse().unwrap();
+        assert!(
+            validate_network(&candidate).is_ok(),
+            "owner configuration rejected {endpoint}"
+        );
+    }
+
+    // The scheme is still the one thing an RPC URL must get right.
+    let mut candidate = default_networks().remove(0);
+    candidate.rpc_url = "file:///etc/passwd".parse().unwrap();
+    assert!(validate_network(&candidate).is_err());
+}
+
+#[test]
 fn network_identifiers_cannot_inject_terminal_or_completion_controls() {
     let mut candidate = default_networks().remove(0);
     candidate.aliases.push("bad\nvalue".into());

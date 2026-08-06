@@ -91,3 +91,40 @@ Transaction gas never comes from an agent or execution plan. The wallet doubles
 the gas reported by `eth_simulateV1`, adds the EIP-7702 authorization cost when
 needed, and caps the signed limit at the lower of the network profile's
 `max_gas_limit` and the simulated block gas limit.
+
+## Running your own node
+
+The configured endpoint executes every simulation, so it decides whether a plan
+appears to succeed, what gas it carries, and what predicted effects a human is
+shown before approving. No policy predicate reads any of that — every rule is
+decided from the plan's own bytes — but availability, correct pricing, and the
+truthfulness of the approval screen still rest on the endpoint. Pointing the
+wallet at a node you run yourself is the one configuration with no RPC trust
+assumption left in it, and it is the right answer for a wallet holding value
+you would mind losing.
+
+A loopback endpoint is accepted from your own configuration:
+
+```sh
+ekubo-wallet network add ethereum --rpc-url http://127.0.0.1:8545
+```
+
+`http` and loopback are admitted here deliberately. An owner configuring a local
+node from their own terminal is naming a machine they already control, so the
+scheme and address rules that apply to an endpoint an *agent* proposes do not
+apply to one you type yourself: `wallet_propose_network` still requires public
+`https` with no credentials and no private or reserved address, because an MCP
+caller is not the owner. The two paths are separate on purpose, and pinned by
+test.
+
+The requirement your node must meet is `eth_simulateV1`, including sequential
+calls, logs, native-transfer tracing, and state overrides. That is the whole
+signing path — there is no local EVM and no `eth_call` fallback — so verify the
+method exists on your client and version before relying on it. A node that does
+not implement it is not unusable, but nothing will sign automatically: every
+plan fails simulation and queues for explicit approval.
+
+Note that running your own node removes trust in *whoever answers the socket*,
+not trust in consensus. A node still follows whichever chain its peers and
+configuration point it at; what it removes is a third party in a position to
+answer your queries differently from everyone else's.
