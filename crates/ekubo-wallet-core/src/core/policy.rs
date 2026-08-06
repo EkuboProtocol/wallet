@@ -339,10 +339,12 @@ pub fn evaluate_policy(
             );
         } else if data.len() >= 68 && data[..4] == [0xa9, 0x05, 0x9c, 0xbb] {
             let recipient = Address::from_slice(&data[16..36]);
+            let amount = U256::from_be_slice(&data[36..68]);
             evaluate_transfer(
                 chain,
                 step.transaction.to,
                 recipient,
+                amount,
                 plan,
                 step.step,
                 &mut findings,
@@ -491,6 +493,7 @@ fn evaluate_transfer(
     chain: &ChainPolicy,
     token: Address,
     recipient: Address,
+    amount: U256,
     plan: &ExecutionPlan,
     step: u32,
     findings: &mut Vec<PolicyFinding>,
@@ -511,6 +514,24 @@ fn evaluate_transfer(
             format!(
                 "{recipient} is not an allowed recipient for {token} on chain {}",
                 plan.chain_id
+            ),
+            Some(step),
+        ));
+    }
+    // The spend checked after simulation is whatever the token reported about
+    // itself, through its balance or its logs. A direct transfer also states
+    // its amount in calldata, which is the one number the token contract does
+    // not author, so the limit is enforced against that too. For a token
+    // covered only by a `*` rule this is the sole spend check there is: the
+    // wildcard is excluded from balance probes, and a token that emits no
+    // canonical Transfer log produces no observation to evaluate.
+    let declared = BigUint::from_bytes_be(&amount.to_be_bytes::<32>());
+    if exceeds_limit(&declared, &rule.max_spend_per_transaction) {
+        findings.push(error(
+            "token_spend_limit",
+            format!(
+                "{token} transfer of {declared} exceeds {} on chain {}",
+                rule.max_spend_per_transaction, plan.chain_id
             ),
             Some(step),
         ));
@@ -1030,6 +1051,13 @@ mod tests {
     use serde_json::json;
 
     fn transfer_plan() -> ExecutionPlan {
+        transfer_plan_of(U256::from(1_u8))
+    }
+
+    fn transfer_plan_of(amount: U256) -> ExecutionPlan {
+        let data = format!(
+            "0xa9059cbb0000000000000000000000003333333333333333333333333333333333333333{amount:064x}"
+        );
         ExecutionPlan::parse(json!({
             "schema_version": "1",
             "chain_id": "1",
@@ -1043,11 +1071,62 @@ mod tests {
                     "chain_id": "1",
                     "from": "0x1111111111111111111111111111111111111111",
                     "to": "0x2222222222222222222222222222222222222222",
-                    "data": "0xa9059cbb00000000000000000000000033333333333333333333333333333333333333330000000000000000000000000000000000000000000000000000000000000001",
+                    "data": data,
                     "value": "0"
                 }
             }]
-        })).unwrap()
+        }))
+        .unwrap()
+    }
+
+    fn wildcard_token_policy(limit: &str) -> WalletPolicy {
+        WalletPolicy::parse(json!({
+            "chains": {
+                "1": {
+                    "targets": { "*": { "allow_any_calldata": true } },
+                    "tokens": {
+                        "*": {
+                            "max_spend_per_transaction": limit,
+                            "transfer_recipients": { "*": {} }
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_wildcard_token_rule_bounds_what_a_transfer_declares() {
+        // A token whose Transfer event is not the canonical three-topic shape
+        // produces no observed spend, and `*` is excluded from the balance
+        // probes, so there was nothing for the limit to be measured against.
+        // That made naming a token strictly stronger than covering it with a
+        // wildcard — the opposite of what writing `*` reads like.
+        let policy = wildcard_token_policy("1000000");
+        let findings = evaluate_policy(
+            &transfer_plan_of(U256::from(2_000_000_u64)),
+            &policy,
+            Some(&BTreeMap::new()),
+        );
+        assert!(!policy_allows(&findings), "{findings:?}");
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "token_spend_limit"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_transfer_within_the_wildcard_limit_still_passes() {
+        let policy = wildcard_token_policy("1000000");
+        let findings = evaluate_policy(
+            &transfer_plan_of(U256::from(1_000_000_u64)),
+            &policy,
+            Some(&BTreeMap::new()),
+        );
+        assert!(policy_allows(&findings), "{findings:?}");
     }
 
     #[test]
