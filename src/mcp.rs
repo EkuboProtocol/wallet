@@ -2464,8 +2464,22 @@ fn still_awaiting_instruction(wait_tool: &str, request_id: impl std::fmt::Displa
     )
 }
 
+/// The longest error this server hands back over MCP.
+///
+/// A tool error is read by a model and written into a transcript, and the text
+/// it carries can be a whole RPC or plan-producer response body: alloy embeds
+/// the complete body in its deserialization and HTTP error variants, and
+/// nothing upstream caps it. Past a kilobyte there is no diagnosis left, only
+/// an unbounded write into somebody else's context window.
+const MAX_TOOL_ERROR_CHARS: usize = 1_024;
+
 fn tool_error(error: &impl std::fmt::Display) -> ErrorData {
-    ErrorData::internal_error(error.to_string(), None)
+    // Stripped as well as capped: the text is untrusted — an RPC or a plan
+    // producer chose it — and a transcript is something a person reads.
+    ErrorData::internal_error(
+        crate::sanitize::stripped_capped(&error.to_string(), MAX_TOOL_ERROR_CHARS),
+        None,
+    )
 }
 
 const fn default_true() -> bool {
@@ -2749,6 +2763,23 @@ mod tests {
     };
     use alloy::primitives::Address;
     use std::str::FromStr;
+
+    #[test]
+    fn tool_errors_are_capped_and_stripped() {
+        // An RPC or plan producer chooses this text and alloy embeds whole
+        // response bodies in it, so neither its length nor its bytes are the
+        // wallet's to trust.
+        let error = tool_error(&format!("upstream said \u{1b}[31m{}", "y".repeat(50_000)));
+        assert!(
+            error.message.chars().count() <= MAX_TOOL_ERROR_CHARS,
+            "{} characters survived",
+            error.message.chars().count()
+        );
+        assert!(!error.message.contains('\u{1b}'), "{}", error.message);
+        // The head of the message is what carries the diagnosis, so it must
+        // survive intact rather than being truncated from the front.
+        assert!(error.message.starts_with("upstream said"));
+    }
 
     fn server() -> (tempfile::TempDir, WalletMcpServer) {
         let directory = tempfile::tempdir().unwrap();
