@@ -618,8 +618,17 @@ pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<Str
                 }
             }
             (Some(previous), None) => {
-                for grant in chain_grants(previous) {
-                    lines.push(format!("- chain {label}: {grant}"));
+                if let Some(fallback) = wildcard_successor(&proposed.chains, key) {
+                    lines.push(format!(
+                        "~ chain {label}: loses its own rules and falls back to every chain (*)"
+                    ));
+                    for grant in chain_grants(fallback) {
+                        lines.push(format!("~ chain {label}: now covered by (*): {grant}"));
+                    }
+                } else {
+                    for grant in chain_grants(previous) {
+                        lines.push(format!("- chain {label}: {grant}"));
+                    }
                 }
             }
             (Some(previous), Some(next)) if previous != next => {
@@ -740,7 +749,14 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
                 lines.push(format!("+ chain {label}: {}", target_grant(target, rule)));
             }
             (Some(rule), None) => {
-                lines.push(format!("- chain {label}: {}", target_grant(target, rule)));
+                if let Some(fallback) = wildcard_successor(&next.targets, target) {
+                    lines.push(format!(
+                        "~ chain {label}: target {target} falls back to (*): {}",
+                        target_grant("*", fallback)
+                    ));
+                } else {
+                    lines.push(format!("- chain {label}: {}", target_grant(target, rule)));
+                }
             }
             (Some(old), Some(new)) if old != new => lines.push(format!(
                 "~ chain {label}: {} (was: {})",
@@ -802,7 +818,14 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
                 lines.push(format!("+ chain {label}: {}", token_grant(token, rule)));
             }
             (Some(rule), None) => {
-                lines.push(format!("- chain {label}: {}", token_grant(token, rule)));
+                if let Some(fallback) = wildcard_successor(&next.tokens, token) {
+                    lines.push(format!(
+                        "~ chain {label}: token {token} falls back to (*): {}",
+                        token_grant("*", fallback)
+                    ));
+                } else {
+                    lines.push(format!("- chain {label}: {}", token_grant(token, rule)));
+                }
             }
             (Some(old), Some(new)) if old != new => {
                 if old.max_spend_per_transaction != new.max_spend_per_transaction {
@@ -958,6 +981,20 @@ fn exact_or_wildcard<'a, T>(map: &'a BTreeMap<String, T>, key: &str) -> Option<&
     map.get(key).or_else(|| map.get("*"))
 }
 
+/// The rule a removed key would resolve to instead, if any.
+///
+/// Every lookup in this module goes through `exact_or_wildcard`, so an exact
+/// entry disappearing while a `*` entry survives does not withdraw authority —
+/// it hands the key to the wildcard, which is usually broader than the rule it
+/// replaces. Rendering that as a removal tells the reviewer the opposite of
+/// what they are approving, in the one artifact they are told to trust.
+fn wildcard_successor<'a, T>(proposed: &'a BTreeMap<String, T>, key: &str) -> Option<&'a T> {
+    if key == "*" {
+        return None;
+    }
+    proposed.get("*")
+}
+
 fn find_spend<'a>(spends: &'a TokenSpends, token: &str) -> Option<&'a BigUint> {
     spends.get(token).or_else(|| {
         spends
@@ -1093,6 +1130,68 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn removing_a_rule_under_a_wildcard_reads_as_widening_not_narrowing() {
+        // Dropping the exact entry for a target while `*` survives does not
+        // take the permission away — `exact_or_wildcard` hands the target to
+        // the wildcard, which here allows any calldata rather than one
+        // selector. A `-` line would tell the reviewer they were tightening
+        // the policy while they approved the opposite.
+        let current = WalletPolicy::parse(json!({
+            "chains": {
+                "1": {
+                    "targets": {
+                        "0x2222222222222222222222222222222222222222": {
+                            "allowed_selectors": { "0xa9059cbb": {} }
+                        },
+                        "*": { "allow_any_calldata": true }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let proposed = WalletPolicy::parse(json!({
+            "chains": {
+                "1": { "targets": { "*": { "allow_any_calldata": true } } }
+            }
+        }))
+        .unwrap();
+
+        let diff = diff_policies(&current, &proposed);
+        assert!(
+            diff.iter().any(|line| line.contains("falls back to (*)")),
+            "{diff:?}"
+        );
+        assert!(
+            !diff
+                .iter()
+                .any(|line| line.starts_with("- chain 1: target 0x2222")),
+            "a widening was rendered as a removal: {diff:?}"
+        );
+    }
+
+    #[test]
+    fn removing_a_rule_with_no_wildcard_is_still_a_removal() {
+        let current = WalletPolicy::parse(json!({
+            "chains": {
+                "1": {
+                    "targets": {
+                        "0x2222222222222222222222222222222222222222": {
+                            "allow_any_calldata": true
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let proposed = WalletPolicy::parse(json!({ "chains": { "1": {} } })).unwrap();
+        let diff = diff_policies(&current, &proposed);
+        assert!(
+            diff.iter().any(|line| line.starts_with("- chain 1:")),
+            "{diff:?}"
+        );
     }
 
     #[test]
