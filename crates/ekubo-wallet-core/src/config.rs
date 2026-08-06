@@ -198,17 +198,28 @@ impl ConfigStore {
     }
 
     pub fn load(&self) -> Result<WalletConfig> {
-        if !self.file.exists() {
-            return Ok(WalletConfig {
-                version: 2,
-                wallets: Vec::new(),
-                networks: default_networks(),
-            });
-        }
-        let reader = BufReader::new(
-            File::open(&self.file)
-                .with_context(|| format!("failed to open {}", self.file.display()))?,
-        );
+        // Only a genuine absence starts from defaults. `Path::exists` answers
+        // false for every stat failure — a permission error on the directory,
+        // a symlink loop, an exhausted descriptor table — so an unreadable
+        // configuration used to load as an empty one, and the next `update`
+        // would write that empty one back over the file that was there all
+        // along, taking the wallet roster and every configured RPC with it.
+        // Failing to read is not the same as having nothing to read.
+        let file = match File::open(&self.file) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(WalletConfig {
+                    version: 2,
+                    wallets: Vec::new(),
+                    networks: default_networks(),
+                });
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to open {}", self.file.display()));
+            }
+        };
+        let reader = BufReader::new(file);
         let stored: StoredConfig = serde_json::from_reader(reader)
             .with_context(|| format!("failed to parse {}", self.file.display()))?;
         let config = WalletConfig::try_from(stored)
@@ -724,6 +735,44 @@ fn sync_parent(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_configuration_is_an_error_not_an_empty_one() {
+        // The dangerous confusion is between "there is nothing here" and "I
+        // could not look". The first starts a fresh wallet; the second, if it
+        // reads as the first, gets the real file overwritten by the defaults
+        // on the next save.
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        store
+            .save(&WalletConfig {
+                version: 2,
+                wallets: Vec::new(),
+                networks: default_networks(),
+            })
+            .unwrap();
+        std::fs::set_permissions(store.file(), std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = store.load();
+        // Running as root defeats the permission bit, so only assert when the
+        // file is genuinely unreadable.
+        if std::fs::read(store.file()).is_err() {
+            assert!(result.is_err(), "an unreadable configuration loaded as one");
+        }
+        std::fs::set_permissions(store.file(), std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A directory with no configuration in it still starts fresh.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(
+            ConfigStore::new(empty.path())
+                .load()
+                .unwrap()
+                .wallets
+                .is_empty()
+        );
+    }
 
     #[test]
     fn default_networks_have_unique_chain_ids_and_identifiers() {
