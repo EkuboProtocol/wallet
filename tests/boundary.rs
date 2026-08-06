@@ -161,6 +161,44 @@ fn the_mcp_server_cannot_write_stored_metadata() {
     }
 }
 
+/// No policy decision may consult what the RPC reported.
+///
+/// The configured endpoint is the only witness to a simulation, so any
+/// predicate scored against observed balances or transfer logs is a rule a
+/// dishonest endpoint can relax by misreporting what a transaction did — while
+/// still reading, to whoever wrote the policy, like a limit that binds. The
+/// policy therefore decides everything from the execution plan's own bytes.
+///
+/// `evaluate_policy` taking exactly the plan and the policy is what enforces
+/// that: with no channel for an observation to arrive through, the property is
+/// structural rather than a rule someone has to remember. This pins the
+/// signature so restoring such a channel has to be a deliberate act.
+#[test]
+fn no_policy_predicate_can_consult_a_simulation() {
+    let policy =
+        fs::read_to_string(repository_root().join("crates/ekubo-wallet-core/src/core/policy.rs"))
+            .unwrap();
+
+    let signature = policy
+        .lines()
+        .find(|line| line.starts_with("pub fn evaluate_policy"))
+        .expect("evaluate_policy must remain a single-line signature in policy.rs");
+    assert_eq!(
+        signature,
+        "pub fn evaluate_policy(plan: &ExecutionPlan, policy: &WalletPolicy) -> Vec<PolicyFinding> {",
+        "evaluate_policy grew a parameter; a policy decision takes the plan and the policy and \
+         nothing the RPC reported"
+    );
+
+    for forbidden in ["TokenSpends", "token_spends", "crate::simulation"] {
+        assert!(
+            !policy.contains(forbidden),
+            "policy.rs references {forbidden}; simulation observations must not reach a policy \
+             predicate"
+        );
+    }
+}
+
 /// One implementation redacts RPC credentials, and it lives in `rpc.rs`.
 ///
 /// An endpoint URL can carry a key in its userinfo, its path, or its query,

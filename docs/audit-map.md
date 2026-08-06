@@ -69,6 +69,7 @@ broadcast.
 | Fetch admission: https, default port, public pinned addresses, no redirects, 16 MiB cap, no body echo | `plan_fetch::fetch_remote`, `plan_fetch::is_public_ip` |
 | Plan shape and size bounds | `core::execution_plan::ExecutionPlan::{parse, validate}` and its `MAX_*` constants |
 | Policy evaluation is the sole automatic gate | `core::policy::evaluate_policy`, verdict via `core::policy::policy_allows`; the denial/failure distinction via `core::policy::policy_denies` and `SIMULATION_FAILED_CODE` |
+| No policy predicate reads a simulation: every rule is decided from the plan's own bytes | `core::policy::evaluate_policy` takes only the plan and the policy; pinned by `tests/boundary.rs::no_policy_predicate_can_consult_a_simulation` |
 | Simulation response is linked to the pinned parent | `fork::validate_replay` (used by both real-state and fork simulation) |
 | Gas never comes from an agent or plan | `execution::signing_gas_limit` |
 | Post-signature envelope validation (signer, chain, fields, EIP-7702 authority) | `execution::validate_signed_execution`, called from `execution::sign_prepared_execution` |

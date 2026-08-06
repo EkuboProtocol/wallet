@@ -7,21 +7,37 @@ an address on one chain never applies to that address on another chain. Each
 chain policy independently configures the maximum calls in one atomic batch,
 native value per transaction, non-token targets with allowed four-byte selectors
 or an explicit any-calldata opt-in, approval spenders with per-token ceilings,
-and token policies with per-transaction spend limits and direct-transfer
-recipient maps. Exact address entries always take precedence over wildcards.
+and token policies with a direct-transfer amount limit and recipient maps. Exact
+address entries always take precedence over wildcards.
 
 Amounts are decimal strings in the asset's smallest unit: `10000000000` is
 10,000 units of a six-decimal token. There is no amount wildcard; use a
 deliberately large integer for an effectively unbounded ceiling. A wildcard
-token budget applies its limits separately to each observed token rather than
+token rule applies its limit separately to each token it covers rather than
 pooling unlike raw units.
 
-Token spend is measured during the exact RPC simulation. For every concretely
-configured token the wallet conservatively uses the larger of the wallet's net
-balance decrease and the sum of outgoing standard `Transfer` events, and it
-discovers outgoing transfers from other token contracts so a `"*"` token rule
-covers them. This catches tokens pulled by routers or pre-existing allowances,
-not only direct `transfer` calldata.
+Every predicate is decided from the execution plan's own bytes. Nothing the RPC
+reports — observed balances, transfer logs, gas, or whether the simulation
+succeeded — reaches a policy decision. That is deliberate: the configured
+endpoint is the only witness to a simulation, so a rule scored against what it
+reported is one a dishonest endpoint can relax by misreporting what a
+transaction did, while still reading like a limit that binds. A limit that
+silently stops binding is worse than no limit, because the author trusts it.
+
+The cost is a real gap, and it is better known than discovered. A token moved
+without appearing in calldata — pulled by a router, or spent by a counterparty
+under an allowance granted earlier — is not bounded by `max_transfer_amount`,
+because nothing in the plan declares that amount. What bounds it is whatever
+authorized the call in the first place: the `targets` entry and selector that
+permitted the router, and the `approval_spenders` ceiling that decided how much
+that spender could ever pull. Write those two as the real limit on a routed
+spend; `max_transfer_amount` bounds a direct `transfer` and nothing else.
+
+Simulation still runs, and still gates signing. A plan that does not simulate
+successfully is refused whatever the policy says, and the balance changes a
+simulation reports are shown at approval time so a human sees the predicted
+effect. Neither of those is a policy predicate: one is a precondition, the other
+is a display.
 
 Simulation is not a policy setting. Every plan is simulated before it can sign,
 and a simulation that does not succeed is an error finding of its own, so a

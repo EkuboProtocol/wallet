@@ -183,15 +183,33 @@ validation detect structural mismatches, not a coherently dishonest endpoint.
 Use a trusted authenticated provider—or an independently designed quorum
 boundary—for funded production wallets.
 
-**This is a trust assumption, stated as one.** The endpoint is not merely a
-data source the wallet double-checks; for the automatic path it is the only
-witness to everything the policy decides on. Balances, the simulated result, a
-token's existence, the gas a transaction will burn, whether a receipt exists —
-all of it arrives from one party, and a coherently dishonest one can satisfy
-every structural check this process makes. The policy engine then scores that
-account of reality faithfully, which is the problem: it will approve a
-transaction whose simulated effect was fabricated to look like something the
-policy permits. Nothing else in this design has that shape.
+**This is a trust assumption, stated as one**, and its shape is worth being
+precise about, because it is narrower than it used to be.
+
+No policy predicate reads anything the endpoint reported. Every rule — targets
+and selectors, approval spenders and their ceilings, the declared amount and
+recipient of a direct transfer, native value, batch size — is decided from the
+execution plan's own bytes, which the caller submitted and the digest pins. A
+dishonest endpoint cannot relax a rule by misreporting what a transaction did,
+because no rule is scored against what it says. `evaluate_policy` takes the plan
+and the policy and nothing else, and `tests/boundary.rs` pins that signature so
+restoring such a channel has to be deliberate.
+
+What the endpoint still decides is everything around the policy. It says whether
+the simulation succeeded, and a plan that does not succeed is refused — so a
+lying endpoint can withhold a signature the policy would have allowed, or let
+through one that will revert on chain. It supplies the gas the transaction
+carries, the balances and predicted effects a human reads at approval time, and
+whether a receipt exists afterwards. Availability, correct pricing, and the
+truthfulness of what a human is shown all still rest on it, so the practical
+advice is unchanged: use a trusted provider, and prefer your own node for a
+wallet holding real value.
+
+What changed is that a coherently dishonest endpoint can no longer cause an
+automatic signature the policy would otherwise have denied. It can deny, mislead
+a human, or misprice — it cannot widen the automatic path. The residual risk is
+bounded by the calldata rules the owner wrote, which is the point of writing
+them there.
 
 Two ways out exist, and both cost more than they first appear:
 
@@ -214,6 +232,9 @@ Two ways out exist, and both cost more than they first appear:
 
 Neither is planned for this release, and saying "trusted RPC is required" is
 the honest description of what is shipping rather than a placeholder for them.
+Removing simulation-derived predicates from the policy was the cheap part of
+this problem, and it is done; what these two would buy is a truthful account of
+gas, of what a human is shown, and of whether a plan really executes.
 The tradeoff is real in both directions: a wallet that verified everything and
 took ten seconds to answer would be a different product, and the reason to
 write this down is so the choice stays visible rather than becoming an
@@ -283,7 +304,7 @@ replenish because no such accounting exists.
 | Race a policy change | Revision checks cancel or reject stale signing/lifecycle transitions. |
 | Flood denied requests | Identical plans deduplicate; awaiting approvals are capped at 64 per wallet. Historical terminal rows still consume disk. |
 | Concurrent transactions reuse a nonce | Only one signed/submitting/broadcast row is allowed per wallet and chain. External use of the same key can still invalidate the chosen nonce. |
-| Malicious RPC fabricates state | Structural pin/link checks help, but a coherent lie remains possible, and the policy engine will faithfully score a fabricated simulation. Trusted RPC is an assumption of this release, not a residual detail; see the RPC boundary section for what verifying instead would cost. |
+| Malicious RPC fabricates state | No policy predicate reads a simulation, so a fabricated one cannot widen the automatic path: every rule is decided from the plan's own bytes. A coherent lie can still refuse a signature, misprice gas, or mislead a human at approval time. Trusted RPC remains an assumption of this release for availability and for what a human is shown; see the RPC boundary section. |
 | RPC or network fails after send | Bytes/hash were stored first; status remains reconcilable and only exact bytes can be retried. |
 | Same-user process accesses credential APIs | Platform isolation and prompts vary; OS compromise or process injection is out of scope. |
 | Agent forges a token name or alias to misdescribe a transfer | Both are proposals; becoming a stored name takes terminal confirmation plus OS presence. Symbols are re-sanitized at render time and refused if they contain `0x`. An unnamed token renders by address in base units — readable, not trusted. |
