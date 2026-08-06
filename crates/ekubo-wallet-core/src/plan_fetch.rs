@@ -225,37 +225,7 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
         .host()
         .with_context(|| format!("{noun} URL has no host"))?;
     let is_domain = matches!(&host, Host::Domain(_));
-    let host_text = match &host {
-        Host::Domain(domain) => {
-            let domain = domain.trim_end_matches('.');
-            let lowered = domain.to_ascii_lowercase();
-            ensure!(
-                policy.allow_insecure
-                    || (domain.contains('.')
-                        && !lowered.ends_with(".local")
-                        && !lowered.ends_with(".internal")
-                        && !lowered.ends_with(".localhost")
-                        && !lowered.ends_with(".onion")
-                        && !lowered.ends_with(".home.arpa")),
-                "{noun} URLs must name a public host"
-            );
-            domain.to_owned()
-        }
-        Host::Ipv4(address) => {
-            ensure!(
-                policy.allow_insecure || is_public_ip(IpAddr::V4(*address)),
-                "{noun} URLs must not target private or reserved addresses"
-            );
-            address.to_string()
-        }
-        Host::Ipv6(address) => {
-            ensure!(
-                policy.allow_insecure || is_public_ip(IpAddr::V6(*address)),
-                "{noun} URLs must not target private or reserved addresses"
-            );
-            address.to_string()
-        }
-    };
+    let host_text = vetted_host(&host, policy.allow_insecure, noun)?;
     let port = parsed.port_or_known_default().unwrap_or(443);
 
     // Everything below — the lookup, the vetting, and the address override —
@@ -274,15 +244,7 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
     // Resolve once, vet every address, and pin the connection to the vetted
     // set so a rebinding resolver cannot answer differently for the actual
     // connect. The admission decision and the connection use the same bytes.
-    let resolved: Vec<SocketAddr> = tokio::time::timeout(
-        RESOLVE_TIMEOUT,
-        tokio::net::lookup_host((host_text.as_str(), port)),
-    )
-    .await
-    .with_context(|| format!("{noun} host did not resolve within {RESOLVE_TIMEOUT:?}"))?
-    .with_context(|| format!("{noun} host did not resolve"))?
-    .collect();
-    ensure!(!resolved.is_empty(), "{noun} host did not resolve");
+    let resolved = resolve_with_deadline(&host_text, port, noun).await?;
     ensure!(
         policy.allow_insecure || resolved.iter().all(|address| is_public_ip(address.ip())),
         "{noun} host resolves to a private or reserved address"
@@ -353,6 +315,89 @@ fn verify_digest(bytes: &[u8], expected: &str, subject: FetchSubject) -> Result<
         subject.noun,
         normalized.to_ascii_lowercase(),
         subject.mismatch_consequence
+    );
+    Ok(())
+}
+
+/// The hostname to resolve and pin, once the host itself has been admitted.
+///
+/// Shared by the reference fetch and by [`ensure_public_endpoint`] so the two
+/// cannot drift: an endpoint an MCP caller names is admitted by exactly the
+/// rules a referenced plan URL is.
+// The suffix checks run on an already-lowercased copy of the hostname; the
+// lint pattern-matches them as file-extension comparisons, which they are not.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn vetted_host(host: &Host<&str>, allow_insecure: bool, noun: &str) -> Result<String> {
+    Ok(match host {
+        Host::Domain(domain) => {
+            let domain = domain.trim_end_matches('.');
+            let lowered = domain.to_ascii_lowercase();
+            ensure!(
+                allow_insecure
+                    || (domain.contains('.')
+                        && !lowered.ends_with(".local")
+                        && !lowered.ends_with(".internal")
+                        && !lowered.ends_with(".localhost")
+                        && !lowered.ends_with(".onion")
+                        && !lowered.ends_with(".home.arpa")),
+                "{noun} must name a public host"
+            );
+            domain.to_owned()
+        }
+        Host::Ipv4(address) => {
+            ensure!(
+                allow_insecure || is_public_ip(IpAddr::V4(*address)),
+                "{noun} must not target private or reserved addresses"
+            );
+            address.to_string()
+        }
+        Host::Ipv6(address) => {
+            ensure!(
+                allow_insecure || is_public_ip(IpAddr::V6(*address)),
+                "{noun} must not target private or reserved addresses"
+            );
+            address.to_string()
+        }
+    })
+}
+
+async fn resolve_with_deadline(host: &str, port: u16, noun: &str) -> Result<Vec<SocketAddr>> {
+    let resolved: Vec<SocketAddr> =
+        tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, port)))
+            .await
+            .with_context(|| format!("{noun} host did not resolve within {RESOLVE_TIMEOUT:?}"))?
+            .with_context(|| format!("{noun} host did not resolve"))?
+            .collect();
+    ensure!(!resolved.is_empty(), "{noun} host did not resolve");
+    Ok(resolved)
+}
+
+/// Whether an endpoint a caller named over MCP may be contacted at all.
+///
+/// `validate_network` deliberately admits `http` and loopback, because an
+/// owner configuring a local devnet from their own terminal is naming a
+/// machine they already control. An MCP caller is not that owner. An endpoint
+/// it proposes therefore passes the same admission a referenced plan URL does
+/// — public `https`, no credentials, no private or reserved address — before
+/// this process sends it a single byte.
+///
+/// This cannot be as tight as the reference fetch: the URL is stored and used
+/// later, so there is no connection to pin the vetted addresses to, and a
+/// resolver that answers differently afterwards is not caught here. What backs
+/// it up is that the stored endpoint is visible to the owner in `network list`.
+pub async fn ensure_public_endpoint(url: &Url, noun: &str) -> Result<()> {
+    ensure!(url.scheme() == "https", "{noun} must use https");
+    ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{noun} must not carry credentials in the URL"
+    );
+    let host = url.host().with_context(|| format!("{noun} has no host"))?;
+    let host_text = vetted_host(&host, false, noun)?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    let resolved = resolve_with_deadline(&host_text, port, noun).await?;
+    ensure!(
+        resolved.iter().all(|address| is_public_ip(address.ip())),
+        "{noun} resolves to a private or reserved address"
     );
     Ok(())
 }

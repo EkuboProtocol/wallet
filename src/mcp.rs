@@ -1477,9 +1477,24 @@ impl WalletMcpServer {
             .networks;
         add_configured_network(&mut prospective, candidate.clone())
             .map_err(|error| tool_error(&error))?;
-        verify_chain_id(&candidate)
+        // `validate_network` admits http and loopback so an owner can point
+        // their own terminal at a devnet. This caller is not the owner, and
+        // the probe below is the only request this process makes to an address
+        // an MCP client chose, so the endpoint passes the same admission a
+        // referenced plan URL does first.
+        ekubo_wallet_core::plan_fetch::ensure_public_endpoint(&candidate.rpc_url, "RPC URL")
             .await
             .map_err(|error| tool_error(&error))?;
+        // The probe's own failure never reaches the caller. An RPC error
+        // carries the response body verbatim, which would turn a chain-ID
+        // check into a way to read whatever answered.
+        verify_chain_id(&candidate).await.map_err(|_| {
+            tool_error(&format!(
+                "the proposed RPC at {} did not answer eth_chainId with chain {}",
+                ekubo_wallet_core::rpc::rpc_origin(&candidate.rpc_url),
+                candidate.chain_id
+            ))
+        })?;
         self.config
             .update(|state| {
                 add_configured_network(&mut state.networks, candidate.clone())?;
@@ -3220,6 +3235,52 @@ mod tests {
             "rejected for the wrong reason: {}",
             error.message
         );
+    }
+
+    #[tokio::test]
+    async fn network_add_refuses_an_rpc_endpoint_that_is_not_public() {
+        // This is the only tool that sends a request to an address an MCP
+        // caller chose, so the address is admitted before the request, not by
+        // whether the request happens to succeed.
+        let (_directory, server) = server();
+        for (rpc_url, reason) in [
+            ("http://mainnet.example.invalid/rpc", "https"),
+            ("https://127.0.0.1/rpc", "private or reserved"),
+            (
+                "https://169.254.169.254/latest/meta-data/",
+                "private or reserved",
+            ),
+            ("https://[::1]/rpc", "private or reserved"),
+            ("https://localhost/rpc", "public host"),
+            ("https://vault.internal/rpc", "public host"),
+            ("https://key@mainnet.example.invalid/rpc", "credentials"),
+        ] {
+            let result = server
+                .wallet_add_network(Parameters(AddNetworkInput {
+                    name: "untrusted".into(),
+                    display_name: "Untrusted Test".into(),
+                    aliases: vec![],
+                    chain_id: "999999".into(),
+                    rpc_url: rpc_url.parse().unwrap(),
+                    max_gas_limit: "30000000".into(),
+                    native_currency: NativeCurrency {
+                        name: "Test Ether".into(),
+                        symbol: "TETH".into(),
+                        decimals: 18,
+                    },
+                    block_explorer_url: "https://explorer.example.invalid".parse().unwrap(),
+                    documentation_url: "https://docs.example.invalid".parse().unwrap(),
+                }))
+                .await;
+            let Err(error) = result else {
+                panic!("{rpc_url} was accepted");
+            };
+            assert!(
+                error.message.contains(reason),
+                "{rpc_url} rejected for the wrong reason: {}",
+                error.message
+            );
+        }
     }
 
     #[test]

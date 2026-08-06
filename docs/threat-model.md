@@ -167,11 +167,26 @@ Use a trusted authenticated provider—or an independently designed quorum
 boundary—for funded production wallets.
 
 RPC URLs can contain credentials. They are never returned by MCP inventory, and
-known URL strings are redacted from surfaced errors, but `config.json` stores
-them locally. Use credentials whose disclosure scope is appropriate for the
-local MCP host. For `wallet_add_network`, complete local validation and OS owner
-authentication happen before the process makes its first request to the
-proposed URL; the chain ID is verified after authentication and before storage.
+the configured endpoint's userinfo, path, and query are each redacted from
+surfaced errors, but `config.json` stores them locally. Use credentials whose
+disclosure scope is appropriate for the local MCP host.
+
+`wallet_add_network` is the one MCP tool that makes this process send a request
+to an address its caller chose, so the address is admitted before the request
+rather than judged by whether the request succeeds: public `https` only, no
+credentials in the URL, and no host that resolves to a private or reserved
+address — the same admission a referenced plan URL passes. The CLI path is
+deliberately laxer, since an owner naming a loopback devnet from their own
+terminal is describing a machine they already control. The chain ID is then
+verified before storage, and that probe's own failure never reaches the caller:
+an RPC error carries the response body verbatim, so returning it would make a
+chain-ID check into a way to read whatever answered. This admission cannot pin
+what it vetted the way a plan fetch does — the URL is stored and used later, so
+a resolver that answers differently afterwards is not caught — and the backstop
+is that the stored endpoint is visible to the owner in `network list`.
+
+Adding a network is not authenticated against the OS, consistent with invariant
+6 above: it grants no signing authority.
 
 ## Rollback decision
 
