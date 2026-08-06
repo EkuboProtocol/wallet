@@ -15,7 +15,7 @@ _ekubo-wallet() {
       network) _values "network command" list presets reset add edit remove delete ;;
       policy) _values "policy command" show set allow-all require-approval validate schema review ;;
       transaction|tx) _values "transaction command" list show cancel rebroadcast discard ;;
-      token) _values "token command" list ;;
+      token) _values "token command" list search review import ;;
       address-book) _values "address book command" list add remove delete ;;
       legal) _values "legal command" status show accept ;;
       review)

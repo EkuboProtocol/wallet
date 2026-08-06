@@ -377,6 +377,27 @@ struct TokenListOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SearchTokensInput {
+    /// A symbol, part of a name, or a full token address.
+    query: String,
+    #[serde(default)]
+    chain_id: Option<crate::token_store::ChainIdInput>,
+    #[serde(default = "default_search_limit")]
+    limit: usize,
+}
+
+const fn default_search_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct TokenSearchOutput {
+    matches: u64,
+    tokens: Vec<StoredToken>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ProposeTokenItem {
     /// Accepts a canonical decimal string or the bare number used by
     /// standard token-list files.
@@ -1075,7 +1096,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_list_tokens",
-        description = "List tokens from the local token database, optionally filtered by decimal chain ID, with limit/offset paging. Token metadata is public display data verified on-chain at insert time; it never affects signing decisions.",
+        description = "List tokens the owner has confirmed in the local token database, optionally filtered by decimal chain ID, with limit/offset paging. These are the only tokens the wallet will name when the owner reviews a transaction; anything absent is shown by address alone. Tokens merely proposed and not yet confirmed are not listed. Token metadata is public display data and never affects signing decisions.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_list_tokens(
@@ -1097,6 +1118,34 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         let total = store.count(chain_id).map_err(|error| tool_error(&error))?;
         Ok(Json(TokenListOutput { total, tokens }))
+    }
+
+    #[tool(
+        name = "wallet_search_tokens",
+        description = "Search the tokens the owner has confirmed, by symbol, name, or address, optionally within one decimal chain ID. Use this to resolve a symbol a user typed into the exact address to act on, and to check whether the wallet can name a token before proposing it. Symbol and name match case-insensitively on substring; an address matches exactly, because a partial address match would answer a question about one token with a different one. Exact symbol matches are returned first. Only confirmed tokens are searched: a token still awaiting the owner's review is not one the wallet will name. An empty result means the wallet has no confirmed name for it, not that the token does not exist.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn wallet_search_tokens(
+        &self,
+        Parameters(input): Parameters<SearchTokensInput>,
+    ) -> Result<Json<TokenSearchOutput>, ErrorData> {
+        let chain_id = input
+            .chain_id
+            .as_ref()
+            .map(crate::token_store::ChainIdInput::value)
+            .transpose()
+            .map_err(|error| tool_error(&error))?;
+        let store = self
+            .tokens
+            .lock()
+            .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
+        let tokens = store
+            .search(&input.query, chain_id, input.limit)
+            .map_err(|error| tool_error(&error))?;
+        Ok(Json(TokenSearchOutput {
+            matches: tokens.len() as u64,
+            tokens,
+        }))
     }
 
     #[tool(
@@ -3058,6 +3107,7 @@ mod tests {
                 "wallet_list_tokens",
                 "wallet_propose_policy",
                 "wallet_propose_tokens",
+                "wallet_search_tokens",
                 "wallet_send_execution_plan",
                 "wallet_send_transfers",
                 "wallet_sign_message",

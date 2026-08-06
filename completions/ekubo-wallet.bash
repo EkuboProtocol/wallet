@@ -21,7 +21,7 @@ _ekubo_wallet() {
         network) choices="list presets reset add edit remove delete" ;;
         policy) choices="show set allow-all require-approval validate schema review" ;;
         transaction|tx) choices="list show cancel rebroadcast discard" ;;
-        token) choices="list" ;;
+        token) choices="list search review import" ;;
         address-book) choices="list add remove delete" ;;
         legal) choices="status show accept" ;;
         review) choices="$(ekubo-wallet __complete approvals 2>/dev/null)" ;;

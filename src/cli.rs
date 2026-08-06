@@ -365,6 +365,16 @@ enum TokenCommand {
         #[arg(long, default_value_t = 0)]
         offset: usize,
     },
+    /// Search confirmed tokens by symbol, name, or address.
+    Search {
+        /// A symbol, part of a name, or a full token address.
+        query: String,
+        /// Restrict to one decimal chain ID.
+        #[arg(long)]
+        chain_id: Option<u64>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Review tokens an agent suggested, and confirm the ones to trust.
     ///
     /// Confirming a token is what lets the wallet show its symbol when
@@ -655,6 +665,40 @@ async fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMod
                         "{total} token(s) stored, showing {}:",
                         tokens.len()
                     )];
+                    for token in &tokens {
+                        lines.push(format!(
+                            "  chain {} · {} · {}{} · via {}",
+                            token.chain_id,
+                            token.address,
+                            token.symbol.as_deref().unwrap_or("<no symbol>"),
+                            token.decimals.map_or_else(String::new, |decimals| format!(
+                                " ({decimals} decimals)"
+                            )),
+                            token.source,
+                        ));
+                    }
+                    Ok(lines.join("\n"))
+                },
+            )
+        }
+        TokenCommand::Search {
+            query,
+            chain_id,
+            limit,
+        } => {
+            let store = crate::token_store::TokenStore::production(config.data_dir())?;
+            let tokens = store.search(query, *chain_id, *limit)?;
+            emit(
+                mode,
+                &serde_json::json!({ "matches": tokens.len(), "tokens": tokens }),
+                || {
+                    if tokens.is_empty() {
+                        return Ok(format!(
+                            "No confirmed token matches {query:?}. The wallet shows \
+                             unconfirmed tokens by address alone."
+                        ));
+                    }
+                    let mut lines = vec![format!("{} match(es):", tokens.len())];
                     for token in &tokens {
                         lines.push(format!(
                             "  chain {} · {} · {}{} · via {}",

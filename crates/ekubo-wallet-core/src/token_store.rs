@@ -450,6 +450,62 @@ impl TokenStore {
         Ok(map)
     }
 
+    /// Find confirmed tokens by symbol, name, or address.
+    ///
+    /// An address query matches exactly rather than as a substring: addresses
+    /// share long hex runs, and a partial match would answer a question about
+    /// one token with a different one. Symbol and name match on substring,
+    /// case-insensitively, which is how a person actually remembers a token.
+    ///
+    /// Only confirmed rows are searched. A pending suggestion is not yet a
+    /// token as far as anything outside the review screen is concerned.
+    pub fn search(
+        &self,
+        query: &str,
+        chain_id: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<StoredToken>> {
+        let query = query.trim();
+        ensure!(!query.is_empty(), "a search needs something to search for");
+        let limit = i64::try_from(limit.min(1_000)).unwrap_or(1_000);
+        // An address is matched as itself, in the lowercase form stored.
+        let address = Address::from_str(query)
+            .ok()
+            .map(|address| format!("{address:#x}"));
+        let pattern = format!("%{}%", escape_like(&query.to_lowercase()));
+        let chain = chain_id
+            .map(|chain| i64::try_from(chain).context("chain ID out of range"))
+            .transpose()?;
+        let mut statement = self.database.connection.prepare(
+            "SELECT chain_id, address, symbol, name, decimals, source, added_at
+             FROM tokens
+             WHERE (?1 IS NULL OR chain_id = ?1)
+               AND (
+                     address = ?2
+                  OR lower(symbol) LIKE ?3 ESCAPE '\\'
+                  OR lower(name) LIKE ?3 ESCAPE '\\'
+               )
+             ORDER BY
+               -- Exact symbol matches first: someone typing USDC wants USDC,
+               -- not every token whose name happens to contain it.
+               CASE WHEN lower(symbol) = ?4 THEN 0
+                    WHEN address = ?2 THEN 0
+                    ELSE 1 END,
+               length(symbol),
+               chain_id, address
+             LIMIT ?5",
+        )?;
+        let mapped = statement.query_map(
+            params![chain, address, pattern, query.to_lowercase(), limit],
+            row_to_token,
+        )?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row?);
+        }
+        Ok(rows)
+    }
+
     /// List tokens, optionally filtered by chain, ordered deterministically.
     pub fn list(
         &self,
@@ -976,6 +1032,15 @@ fn nonempty_sanitized(text: &str) -> Option<String> {
 
 /// Token names and symbols are attacker-controlled contract output; strip
 /// control characters and cap length before they reach any display or store.
+/// Neutralize `LIKE` wildcards in user input, so a query of `%` searches for a
+/// literal percent sign instead of returning the whole database.
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn sanitize(text: &str) -> String {
     crate::sanitize::stripped_capped(text, MAX_TEXT_LEN)
         .trim()
@@ -1262,6 +1327,73 @@ mod tests {
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0].token.symbol, "IMPOSTOR");
         assert_eq!(proposals[0].source, "second-list");
+    }
+
+    #[test]
+    fn search_finds_tokens_by_symbol_name_and_address() {
+        let (_directory, mut store) = store();
+        let usdc_address = Address::repeat_byte(0x11);
+        store.add(&usdc(1, usdc_address), "list").unwrap();
+        store
+            .add(
+                &ListedToken {
+                    chain_id: 1,
+                    address: Address::repeat_byte(0x22),
+                    symbol: "WETH".into(),
+                    name: Some("Wrapped Ether".into()),
+                    decimals: 18,
+                },
+                "list",
+            )
+            .unwrap();
+        store.add(&usdc(8453, usdc_address), "list").unwrap();
+
+        // Case-insensitive symbol substring.
+        assert_eq!(store.search("usd", None, 10).unwrap().len(), 2);
+        // Name substring finds a token whose symbol does not match.
+        let wrapped = store.search("wrapped", None, 10).unwrap();
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].symbol.as_deref(), Some("WETH"));
+        // Chain filter narrows it.
+        assert_eq!(store.search("usdc", Some(8453), 10).unwrap().len(), 1);
+        // Address matches exactly, in either case, on every chain it is on.
+        assert_eq!(
+            store
+                .search(&usdc_address.to_checksum(None), None, 10)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            store
+                .search("nothing-like-this", None, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A query is data, not syntax: `%` must search for a percent sign rather
+    /// than matching every row in the database.
+    #[test]
+    fn search_wildcards_are_literal() {
+        let (_directory, mut store) = store();
+        store
+            .add(&usdc(1, Address::repeat_byte(0x11)), "list")
+            .unwrap();
+        assert!(store.search("%", None, 10).unwrap().is_empty());
+        assert!(store.search("_", None, 10).unwrap().is_empty());
+        assert!(store.search("   ", None, 10).is_err());
+    }
+
+    /// A suggestion is not a token: search must not surface something the
+    /// owner has not confirmed, or the answer implies a trust that is absent.
+    #[test]
+    fn search_never_returns_unconfirmed_suggestions() {
+        let (_directory, mut store) = store();
+        store
+            .propose(&[usdc(1, Address::repeat_byte(0x99))], "some-list")
+            .unwrap();
+        assert!(store.search("USDC", None, 10).unwrap().is_empty());
     }
 
     #[test]
