@@ -15,17 +15,24 @@
 //! it. The `0x19` prefix is what makes the human-review promise keepable: a
 //! prefixed message can never collide with an RLP transaction preimage.
 
-use crate::{policy_store::PolicyStore, sanitize::is_bidirectional_control};
+use crate::{
+    policy_store::PolicyStore,
+    sanitize::is_bidirectional_control,
+    signature_requests::{SignatureQueue, parse_time, validate_signature_hex},
+};
 use alloy::primitives::{Address, B256, eip191_hash_message};
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Write as _, path::Path, str::FromStr};
 use uuid::Uuid;
 
-const MAX_AWAITING_PER_WALLET: i64 = 64;
+const QUEUE: SignatureQueue = SignatureQueue {
+    table: "pending_messages",
+    noun: "message request",
+};
 /// A human has to read every byte at approval time, so the ceiling sits far
 /// below the typed-data limit. An oversized message is refused rather than
 /// truncated: what the approver sees is always exactly what is hashed.
@@ -478,57 +485,37 @@ impl MessageStore {
         message: &[u8],
         encoding: MessageEncoding,
     ) -> Result<PendingMessage> {
-        crate::config::validate_wallet_id(wallet_id)?;
         validate_message_length(message)?;
         let message_hex = encode_message_hex(message);
         let digest = format!("{:#x}", message_digest(message));
         // The empty string, not NULL, stands for "no chain declared": SQLite
         // treats NULLs as distinct in a unique index, which would silently
-        // disable the awaiting-request deduplication below.
+        // disable the awaiting-request deduplication in the shared queue.
         let chain_id = chain_id.unwrap_or_default();
-        let created_at = Utc::now();
-        let transaction = self.database.connection.transaction()?;
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT request_id FROM pending_messages
-                 WHERE wallet_id = ?1 AND chain_id = ?2 AND digest = ?3
-                   AND status = 'awaiting_approval'",
-                params![wallet_id, chain_id, digest],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(existing) = existing {
-            transaction.commit()?;
-            return self.get(Uuid::parse_str(&existing).context("stored request ID is invalid")?);
-        }
-        let awaiting: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM pending_messages
-             WHERE wallet_id = ?1 AND status = 'awaiting_approval'",
-            [wallet_id],
-            |row| row.get(0),
+        let request_id = QUEUE.create_or_reuse(
+            &mut self.database.connection,
+            wallet_id,
+            chain_id,
+            &digest,
+            |transaction, request_id, now| {
+                transaction.execute(
+                    "INSERT INTO pending_messages(
+                        request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
+                        status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?7)",
+                    params![
+                        request_id.to_string(),
+                        wallet_id,
+                        chain_id,
+                        message_hex,
+                        encoding.as_str(),
+                        digest,
+                        now,
+                    ],
+                )?;
+                Ok(())
+            },
         )?;
-        ensure!(
-            awaiting < MAX_AWAITING_PER_WALLET,
-            "wallet already has {MAX_AWAITING_PER_WALLET} message requests awaiting approval"
-        );
-
-        let request_id = Uuid::new_v4();
-        transaction.execute(
-            "INSERT INTO pending_messages(
-                request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
-                status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?7)",
-            params![
-                request_id.to_string(),
-                wallet_id,
-                chain_id,
-                message_hex,
-                encoding.as_str(),
-                digest,
-                created_at.to_rfc3339(),
-            ],
-        )?;
-        transaction.commit()?;
         self.get(request_id)
     }
 
@@ -542,14 +529,7 @@ impl MessageStore {
             current.status == MessageStatus::AwaitingApproval,
             "message request is not awaiting approval"
         );
-        let now = Utc::now().to_rfc3339();
-        let changed = self.database.connection.execute(
-            "UPDATE pending_messages
-             SET status = 'rejected', rejected_at = ?2, updated_at = ?2
-             WHERE request_id = ?1 AND status = 'awaiting_approval'",
-            params![request_id.to_string(), now],
-        )?;
-        ensure!(changed == 1, "message request changed during rejection");
+        QUEUE.reject(&self.database.connection, request_id)?;
         self.get(request_id)
     }
 
@@ -561,50 +541,20 @@ impl MessageStore {
         expected_digest: &str,
         signature: &str,
     ) -> Result<PendingMessage> {
-        validate_signature_hex(signature)?;
-        let transaction = self.database.connection.transaction()?;
-        let (digest, status): (String, String) = transaction
-            .query_row(
-                "SELECT digest, status FROM pending_messages WHERE request_id = ?1",
-                [request_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .with_context(|| format!("unknown message request {request_id}"))?;
-        ensure!(digest == expected_digest, "message request digest mismatch");
-        ensure!(
-            MessageStatus::parse(&status)? == MessageStatus::AwaitingApproval,
-            "message request is not awaiting approval"
-        );
-        let now = Utc::now().to_rfc3339();
-        transaction.execute(
-            "UPDATE pending_messages SET
-                status = 'signed', approved_at = ?2, updated_at = ?2, signature = ?3
-             WHERE request_id = ?1 AND status = 'awaiting_approval'",
-            params![request_id.to_string(), now, signature],
+        QUEUE.store_signature(
+            &mut self.database.connection,
+            request_id,
+            expected_digest,
+            signature,
         )?;
-        transaction.commit()?;
         self.get(request_id)
     }
 
     pub fn awaiting_approval(&self, wallet_id: Option<&str>) -> Result<Vec<PendingMessage>> {
-        if let Some(wallet_id) = wallet_id {
-            crate::config::validate_wallet_id(wallet_id)?;
-        }
-        let mut statement = self.database.connection.prepare(
-            "SELECT request_id FROM pending_messages
-             WHERE status = 'awaiting_approval' AND (?1 IS NULL OR wallet_id = ?1)
-             ORDER BY created_at DESC",
-        )?;
-        let request_ids = statement
-            .query_map([wallet_id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        drop(statement);
-        request_ids
+        QUEUE
+            .awaiting_ids(&self.database.connection, wallet_id)?
             .into_iter()
-            .map(|value| {
-                let id = Uuid::parse_str(&value).context("stored request ID is invalid")?;
-                self.get(id)
-            })
+            .map(|id| self.get(id))
             .filter(|result| {
                 result.as_ref().map_or(true, |record| {
                     record.status == MessageStatus::AwaitingApproval
@@ -679,24 +629,6 @@ impl MessageStore {
             signature,
         })
     }
-}
-
-fn parse_time(value: &str) -> Result<DateTime<Utc>> {
-    Ok(DateTime::parse_from_rfc3339(value)
-        .context("stored timestamp is invalid")?
-        .with_timezone(&Utc))
-}
-
-fn validate_signature_hex(value: &str) -> Result<()> {
-    let encoded = value
-        .strip_prefix("0x")
-        .context("signature must start with 0x")?;
-    ensure!(
-        encoded.len() == 130 && encoded.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "signature must be 65 hexadecimal bytes"
-    );
-    B256::from_str(&format!("0x{}", &encoded[..64])).context("invalid signature encoding")?;
-    Ok(())
 }
 
 #[cfg(test)]
