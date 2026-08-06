@@ -1464,6 +1464,10 @@ async fn run_transaction(
             Ok(())
         }
         TransactionCommand::Cancel { identifier } => {
+            // Cancelling signs, so it takes the gate every other signing path
+            // takes. `wallet_attempt_cancel` already does; these CLI paths did
+            // not, which made acceptance depend on which door was used.
+            legal::require_current_acceptance(config.data_dir())?;
             let record = pending.get_by_identifier(&identifier)?;
             let wallet = config.wallet(&record.wallet_id)?;
             let network = config.network_by_chain_id(&record.chain_id)?;

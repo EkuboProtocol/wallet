@@ -750,6 +750,8 @@ async fn cancel_record(
     pending: &std::sync::Mutex<crate::pending::PendingStore>,
     record: PendingTransaction,
 ) -> Result<(PendingTransaction, String)> {
+    // Cancelling signs, so it takes the same gate as every other signing path.
+    crate::legal::require_current_acceptance(config.data_dir())?;
     let wallet = config.wallet(&record.wallet_id)?;
     let network = config.network_by_chain_id(&record.chain_id)?;
     let (updated, broadcast) = crate::reconcile::attempt_cancellation(

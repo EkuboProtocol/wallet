@@ -276,6 +276,17 @@ pub async fn approve_transaction(
         current.digest == request.digest,
         "pending request digest changed during approval"
     );
+    // The caller supplies both the plan and the digest it claims to be. That
+    // pair is checked against the stored record above, but nothing so far
+    // checks the pair against itself: a caller could hand over the digest of
+    // the record it read and the calldata of something else, and every
+    // comparison would pass while the bytes simulated and signed were the
+    // other plan's. `PendingRow::parse` binds the two on every durable read,
+    // so this closes the same gap at the API boundary.
+    ensure!(
+        format!("{:#x}", request.execution_plan.digest()) == request.digest,
+        "the request's plan does not hash to the digest it carries"
+    );
     ensure!(
         config.wallet(&request.wallet_id)? == wallet,
         "wallet configuration changed during approval"
