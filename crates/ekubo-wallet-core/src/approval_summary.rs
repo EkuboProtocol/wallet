@@ -240,6 +240,15 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
     }
 }
 
+/// Token balance changes listed at approval time.
+///
+/// Entries come from Transfer logs the simulation observed, so a plan controls
+/// how many there are. The review they appear in is inline and does not
+/// scroll, which makes a long list a way to push warnings off the screen
+/// rather than a way to inform. A plan touching more tokens than this is one
+/// whose balance effects cannot be read line by line anyway.
+const MAX_DISPLAYED_BALANCE_CHANGES: usize = 32;
+
 /// Render the simulated net balance changes with symbols and decimals when the
 /// wallet could read them, and always with exact base units.
 #[must_use]
@@ -270,7 +279,15 @@ pub fn render_balance_changes(
             changes.native.delta
         )),
     }
-    for (raw_token, change) in &changes.tokens {
+    // Bounded, and told when it is bounding. Token entries come from Transfer
+    // logs the simulation observed, and a plan can emit as many as it likes: a
+    // step that deploys contracts each emitting one 1-wei Transfer to the
+    // sender produces an entry apiece. This review is inline and does not
+    // scroll, so an unbounded list pushes the warnings and the balance changes
+    // that matter off the top of the screen — which is a way to hide the one
+    // line the reviewer needed to read.
+    let total = changes.tokens.len();
+    for (raw_token, change) in changes.tokens.iter().take(MAX_DISPLAYED_BALANCE_CHANGES) {
         let token = raw_token.parse::<Address>().ok();
         let display = token
             .and_then(|token| metadata.get(&token).cloned())
@@ -291,6 +308,12 @@ pub fn render_balance_changes(
             format!("; standard Transfer events: +{incoming} in, -{outgoing} out")
         };
         lines.push(format!("{label}: {delta_text}{transfers}"));
+    }
+    if total > MAX_DISPLAYED_BALANCE_CHANGES {
+        lines.push(format!(
+            "… and {} further token(s) with net changes, not shown",
+            total - MAX_DISPLAYED_BALANCE_CHANGES
+        ));
     }
     lines
 }
