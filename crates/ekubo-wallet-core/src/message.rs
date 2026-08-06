@@ -337,20 +337,39 @@ pub fn parse_siwe(message: &str) -> Option<SiweMessage> {
     let mut not_before = None;
     let mut request_id = None;
     let mut resources = Vec::new();
+    // ERC-4361 fixes the order of these fields and allows each at most once.
+    // Accepting them in any order, and letting a later one overwrite an
+    // earlier, means one message parses two ways: what this wallet renders for
+    // the reviewer, and what the verifier at the other end reads. A second
+    // `Expiration Time` that this parser keeps and a stricter verifier
+    // rejects — or the reverse — is a signature the owner approved against a
+    // description nobody else shares. Refusing is the only reading that cannot
+    // disagree with somebody.
+    let mut seen = 0_u8;
     while let Some(line) = lines.next() {
-        if let Some(value) = line.strip_prefix("Expiration Time: ") {
+        let field = if let Some(value) = line.strip_prefix("Expiration Time: ") {
             expiration_time = Some(value.to_owned());
+            1
         } else if let Some(value) = line.strip_prefix("Not Before: ") {
             not_before = Some(value.to_owned());
+            2
         } else if let Some(value) = line.strip_prefix("Request ID: ") {
             request_id = Some(value.to_owned());
+            3
         } else if line == "Resources:" {
             for resource in lines.by_ref() {
                 resources.push(resource.strip_prefix("- ")?.to_owned());
             }
+            4
         } else {
             return None;
+        };
+        // Strictly increasing: equal rejects a repeat, lower rejects a
+        // field that has come round again out of order.
+        if field <= seen {
+            return None;
         }
+        seen = field;
     }
 
     Some(SiweMessage {
@@ -790,6 +809,42 @@ mod tests {
         let siwe = parse_siwe(&statementless).unwrap();
         assert!(siwe.statement.is_none());
         assert_eq!(siwe.uri, "https://example.com/login");
+    }
+
+    #[test]
+    fn a_siwe_message_has_one_reading_or_none() {
+        // A repeated field used to be accepted with the last value winning, so
+        // this wallet showed one expiry and a stricter verifier could read the
+        // other — the owner approving a description nobody else shares.
+        let repeated = format!(
+            "{}\nExpiration Time: 2026-08-04T17:25:24Z\nExpiration Time: 2099-01-01T00:00:00Z",
+            siwe_payload()
+        );
+        assert!(parse_siwe(&repeated).is_none());
+
+        // Out of order is the same ambiguity: ERC-4361 fixes the sequence, so
+        // a message that does not follow it is one two parsers may disagree
+        // about.
+        let reordered = format!(
+            "{}\nRequest ID: abc\nExpiration Time: 2026-08-04T17:25:24Z",
+            siwe_payload()
+        );
+        assert!(parse_siwe(&reordered).is_none());
+
+        // Resources must still come last, and nothing may follow them.
+        let after_resources = format!(
+            "{}\nResources:\n- https://example.com/terms\nRequest ID: abc",
+            siwe_payload()
+        );
+        assert!(parse_siwe(&after_resources).is_none());
+
+        // The ordered form is unaffected.
+        let ordered = format!(
+            "{}\nExpiration Time: 2026-08-04T17:25:24Z\nNot Before: 2026-08-01T00:00:00Z\nRequest \
+             ID: abc",
+            siwe_payload()
+        );
+        assert!(parse_siwe(&ordered).is_some());
     }
 
     #[test]
