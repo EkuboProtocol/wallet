@@ -38,8 +38,21 @@ fn main() {
 
 fn collect(root: &Path, directory: &Path, files: &mut Vec<String>) {
     for entry in fs::read_dir(directory).expect("read clearsign directory") {
-        let path = entry.expect("directory entry").path();
-        if path.is_dir() {
+        let entry = entry.expect("directory entry");
+        let path = entry.path();
+        // `file_type` describes the entry itself rather than whatever it points
+        // at, so a link is refused here instead of being followed. `is_dir` and
+        // `include_str!` both resolve links, and between them a single symlink
+        // would put bytes from outside this tree into the artifact under a path
+        // that still looks vendored.
+        let file_type = entry.file_type().expect("directory entry type");
+        assert!(
+            !file_type.is_symlink(),
+            "clearsign/{} is a symlink; the vendored tree holds only regular \
+             files and directories so that what ships is what was reviewed",
+            path.strip_prefix(root).unwrap_or(&path).display()
+        );
+        if file_type.is_dir() {
             collect(root, &path, files);
         } else if path
             .extension()
