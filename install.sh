@@ -197,7 +197,21 @@ if command -v cosign >/dev/null 2>&1; then
       fail "Sigstore verification of SHA256SUMS failed; refusing to install"
     fi
   else
-    warn "no Sigstore bundle published for SHA256SUMS; falling back to checksum verification only"
+    # Every release this script installs publishes a bundle, so its absence is
+    # not "an older release" — it is a download that failed or was answered by
+    # something else. Falling back to the checksum alone here would let anyone
+    # who can fail one request choose which verification runs, which is the
+    # weaker one. Refuse instead, and make the downgrade an explicit decision
+    # the operator states rather than one an attacker makes for them.
+    if [ "${EKUBO_WALLET_ALLOW_UNSIGNED:-0}" = "1" ]; then
+      warn "no Sigstore bundle for SHA256SUMS; continuing on the checksum alone \
+because EKUBO_WALLET_ALLOW_UNSIGNED=1"
+    else
+      fail "no Sigstore bundle published for SHA256SUMS at $TAG. cosign is \
+installed, so this release should have one; a missing bundle means the download \
+failed or was tampered with. Retry, or set EKUBO_WALLET_ALLOW_UNSIGNED=1 to \
+install on the checksum alone."
+    fi
   fi
 else
   warn "cosign is not installed; verifying the checksum only. Install cosign to also verify the release signature."
@@ -387,12 +401,34 @@ fi
 
 # The polkit action must land in a root-owned system directory, so this script
 # only stages it where the user can install it with one deliberate sudo command.
+#
+# That staging directory is writable by the user, and the file sits in it until
+# the operator gets round to running the sudo line — possibly a long time. This
+# file decides how polkit authenticates the owner, so replacing it in that
+# window is a way to weaken the prompt that guards signing. The staged copy is
+# therefore read-only, and the printed command verifies a digest computed here
+# rather than trusting whatever is at the path when it finally runs.
 if [ "$OS" = Linux ] && [ -f "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.policy" ]; then
   POLKIT_STAGE="${XDG_DATA_HOME:-$HOME/.local/share}/ekubo-wallet/polkit"
+  POLKIT_FILE="$POLKIT_STAGE/com.ekubo.wallet.policy"
   mkdir -p "$POLKIT_STAGE"
-  install -m 0644 "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.policy" "$POLKIT_STAGE/"
+  install -m 0444 "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.policy" "$POLKIT_FILE"
+  POLKIT_DIGEST=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    POLKIT_DIGEST=$(sha256sum "$POLKIT_FILE" | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then
+    POLKIT_DIGEST=$(shasum -a 256 "$POLKIT_FILE" | cut -d' ' -f1)
+  fi
   log "owner authentication needs the polkit action installed once:"
-  log "  sudo install -m 0644 $(shell_quote "$POLKIT_STAGE/com.ekubo.wallet.policy") /usr/share/polkit-1/actions/"
+  if [ -n "$POLKIT_DIGEST" ]; then
+    log "  printf '%s  %s\\n' $(shell_quote "$POLKIT_DIGEST") $(shell_quote "$POLKIT_FILE") | sha256sum -c \\"
+    log "    && sudo install -m 0644 $(shell_quote "$POLKIT_FILE") /usr/share/polkit-1/actions/"
+    log "the digest is checked first so a file replaced since now cannot be installed"
+  else
+    log "  sudo install -m 0644 $(shell_quote "$POLKIT_FILE") /usr/share/polkit-1/actions/"
+    warn "no sha256sum or shasum available, so the command above cannot verify \
+the staged file; check it before running it"
+  fi
 fi
 
 log "installation complete; restart active agent and shell sessions"
