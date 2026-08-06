@@ -6,7 +6,10 @@
 //! tables so exact signed bytes can be recovered without becoming spend state.
 
 use crate::{
-    config::{create_private_dir, set_private_file_permissions, validate_wallet_id},
+    config::{
+        NetworkConfig, create_private_dir, set_private_file_permissions, validate_network,
+        validate_wallet_id,
+    },
     core::policy::WalletPolicy,
 };
 use anyhow::{Context, Result, ensure};
@@ -29,7 +32,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // derivation, and pending_transactions gained plan_source. Re-hashing rows
 // the owner already approved would re-label signed history, so pre-change
 // databases are refused instead of migrated.
-const SCHEMA_VERSION: i64 = 2;
+// Schema 3 (2026-08-06): network_proposals. An agent can no longer write a
+// network profile; it queues one for the owner to confirm, so the table has
+// to exist before the MCP surface will accept a proposal at all.
+const SCHEMA_VERSION: i64 = 3;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 /// The credential-store entry holding this database's key.
@@ -92,6 +98,19 @@ pub struct PolicyProposal {
 }
 
 pub const MAX_PROPOSAL_RATIONALE_LEN: usize = 2_000;
+
+/// A serialized network profile that could not plausibly describe a network.
+/// Every field is already length-validated; this bounds the document so a
+/// proposal cannot grow the database by the size of its aliases.
+pub const MAX_NETWORK_PROFILE_BYTES: usize = 8_192;
+
+/// Network suggestions that may await review at once.
+///
+/// The queue is a list of decisions a person has to make, and an agent that
+/// can lengthen it without bound does not gain a network — it makes the screen
+/// where networks are granted unreadable, which is the same thing. Small
+/// because a wallet needs a handful of chains, not a catalogue.
+pub const MAX_PENDING_NETWORK_PROPOSALS: u64 = 32;
 
 pub struct PolicyStore {
     pub(crate) connection: Connection,
@@ -446,6 +465,91 @@ impl PolicyStore {
         Ok(changed == 1)
     }
 
+    /// Queue a network profile for the owner to confirm, replacing any earlier
+    /// suggestion for the same chain. The latest suggestion is the only one
+    /// worth reviewing: an agent that has changed its mind has not left two
+    /// decisions to make.
+    pub fn put_network_proposal(&mut self, profile: &NetworkConfig) -> Result<()> {
+        validate_network(profile)?;
+        ensure!(profile.chain_id > 0, "network chain ID must be positive");
+        let profile_json = serde_json::to_string(profile)?;
+        ensure!(
+            profile_json.len() <= MAX_NETWORK_PROFILE_BYTES,
+            "network profile exceeds {MAX_NETWORK_PROFILE_BYTES} bytes"
+        );
+        let pending = self.count_network_proposals()?;
+        let replacing = self.network_proposal(profile.chain_id)?.is_some();
+        ensure!(
+            replacing || pending < MAX_PENDING_NETWORK_PROPOSALS,
+            "{pending} network suggestions already await review; the owner must run \
+             `ekubo-wallet network review` before more can be suggested"
+        );
+        self.connection.execute(
+            "INSERT INTO network_proposals(chain_id, profile_json, proposed_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(chain_id) DO UPDATE SET
+                 profile_json = excluded.profile_json,
+                 proposed_at = excluded.proposed_at",
+            params![
+                i64::try_from(profile.chain_id).context("chain ID out of range")?,
+                profile_json,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn network_proposal(&self, chain_id: u64) -> Result<Option<NetworkConfig>> {
+        let chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
+        let row: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT profile_json FROM network_proposals WHERE chain_id = ?1",
+                [chain_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        row.map(|json| {
+            serde_json::from_str(&json).context("stored network proposal is invalid JSON")
+        })
+        .transpose()
+    }
+
+    /// Every network suggestion awaiting the owner, oldest first so review
+    /// order matches the order they arrived in.
+    pub fn network_proposals(&self) -> Result<Vec<NetworkConfig>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT profile_json FROM network_proposals ORDER BY proposed_at, chain_id")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut proposals = Vec::new();
+        for row in rows {
+            proposals.push(
+                serde_json::from_str(&row?).context("stored network proposal is invalid JSON")?,
+            );
+        }
+        Ok(proposals)
+    }
+
+    pub fn count_network_proposals(&self) -> Result<u64> {
+        let count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM network_proposals", [], |row| {
+                    row.get(0)
+                })?;
+        u64::try_from(count).context("network proposal count is negative")
+    }
+
+    /// Remove a suggestion once it has been decided, either way.
+    pub fn discard_network_proposal(&mut self, chain_id: u64) -> Result<bool> {
+        let chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
+        let changed = self.connection.execute(
+            "DELETE FROM network_proposals WHERE chain_id = ?1",
+            [chain_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Erase every row this database holds under a wallet ID.
     ///
     /// A wallet ID is a name the owner chose, and names get reused. Everything
@@ -745,10 +849,30 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  created_at TEXT NOT NULL
              ) STRICT",
             TOKEN_PROPOSALS_TABLE,
+            NETWORK_PROPOSALS_TABLE,
             record_version.as_str(),
         ],
     )
 }
+
+/// Network profiles an agent has suggested, held apart from `config.json`
+/// until the owner confirms them.
+///
+/// Keyed on chain ID because that is what identifies a network: a proposal
+/// naming a chain already configured is an edit of it, and one naming a chain
+/// that is not is an addition. Nothing here is ever consulted when resolving a
+/// network for a request — a row becomes reachable only by being written into
+/// the configuration from the terminal.
+///
+/// The whole profile travels as JSON rather than as columns. The review screen
+/// has to show the owner exactly what would be stored, and a shape that can
+/// drift from `NetworkConfig` is a shape that eventually shows them something
+/// else.
+const NETWORK_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS network_proposals (
+     chain_id INTEGER PRIMARY KEY NOT NULL CHECK (chain_id > 0),
+     profile_json TEXT NOT NULL,
+     proposed_at TEXT NOT NULL
+ ) STRICT";
 
 /// Tokens an agent has suggested, held apart from `tokens` until the owner
 /// confirms them. Nothing here is ever read as a display name: a row only
@@ -943,6 +1067,73 @@ mod tests {
             connection.execute_batch(statement).unwrap();
         }
         drop(connection);
+    }
+
+    #[test]
+    fn a_network_suggestion_waits_and_the_latest_one_prevails() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let mut store = PolicyStore::open(&path, &key(9)).unwrap();
+        let mut profile = crate::config::default_networks().remove(0);
+
+        store.put_network_proposal(&profile).unwrap();
+        assert_eq!(store.count_network_proposals().unwrap(), 1);
+
+        // An agent that changed its mind has not left two decisions to make,
+        // so the newer suggestion for a chain replaces the older one.
+        profile.rpc_url = "https://second.example.invalid/rpc".parse().unwrap();
+        store.put_network_proposal(&profile).unwrap();
+        assert_eq!(store.count_network_proposals().unwrap(), 1);
+        assert_eq!(
+            store
+                .network_proposal(profile.chain_id)
+                .unwrap()
+                .unwrap()
+                .rpc_url
+                .as_str(),
+            "https://second.example.invalid/rpc"
+        );
+
+        // A suggestion is not a network. Nothing here reaches the
+        // configuration; the queue is the whole of its effect.
+        assert_eq!(store.network_proposals().unwrap().len(), 1);
+        assert!(store.discard_network_proposal(profile.chain_id).unwrap());
+        assert_eq!(store.count_network_proposals().unwrap(), 0);
+        assert!(!store.discard_network_proposal(profile.chain_id).unwrap());
+    }
+
+    #[test]
+    fn network_suggestions_cannot_grow_without_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let mut store = PolicyStore::open(&path, &key(10)).unwrap();
+        let template = crate::config::default_networks().remove(0);
+        for index in 0..MAX_PENDING_NETWORK_PROPOSALS {
+            let mut profile = template.clone();
+            profile.chain_id = 100_000 + index;
+            profile.name = format!("chain-{index}");
+            profile.aliases = Vec::new();
+            store.put_network_proposal(&profile).unwrap();
+        }
+        let mut overflow = template.clone();
+        overflow.chain_id = 999_999;
+        overflow.name = "one-too-many".into();
+        overflow.aliases = Vec::new();
+        let error = store
+            .put_network_proposal(&overflow)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("await review"), "{error}");
+
+        // Replacing an existing suggestion still works at the ceiling: the
+        // owner has that decision either way, and refusing the correction
+        // would strand them with the worse of two profiles.
+        let mut revised = template.clone();
+        revised.chain_id = 100_000;
+        revised.name = "chain-0".into();
+        revised.aliases = Vec::new();
+        revised.rpc_url = "https://revised.example.invalid/rpc".parse().unwrap();
+        store.put_network_proposal(&revised).unwrap();
     }
 
     #[test]

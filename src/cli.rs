@@ -4,8 +4,8 @@ use crate::{
     address_book::AddressBookStore,
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi},
     config::{
-        ConfigStore, NativeCurrency, NetworkConfig, default_networks, remove_configured_network,
-        replace_configured_network,
+        ConfigStore, NativeCurrency, NetworkConfig, add_configured_network, default_networks,
+        remove_configured_network, replace_configured_network,
     },
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial, load_matching_signer},
@@ -181,6 +181,10 @@ enum NetworkCommand {
     /// Remove a configured network by name or alias.
     #[command(alias = "delete")]
     Remove { name: String },
+    /// Review network profiles an agent has suggested, and accept or discard
+    /// each one. Nothing an agent proposes reaches the configuration until it
+    /// is accepted here.
+    Review,
 }
 
 #[derive(Debug, Args)]
@@ -2762,6 +2766,7 @@ async fn run_network(
             )
         }
         NetworkCommand::Edit { name } => run_network_edit(config, name, mode).await,
+        NetworkCommand::Review => run_network_review(config, mode).await,
         NetworkCommand::Remove { name } => {
             let mut prospective = config.load()?.networks;
             let removed = remove_configured_network(&mut prospective, &name)?;
@@ -3594,6 +3599,99 @@ fn normalize_aliases(aliases: Vec<String>) -> Result<Vec<String>> {
 /// and the change is undone by running the command again — so it is a yes or
 /// no with the endpoint spelled out, not the signing review. `Ok(false)`
 /// means leave the configuration alone.
+/// Decide each network an agent has suggested.
+///
+/// The endpoint in a network profile is the wallet's entire view of its chain:
+/// balances, gas, receipts, and the `eth_simulateV1` result every automatic
+/// signing decision is scored against. An agent can assemble a profile — that
+/// is tedious work it is good at — but pointing the wallet at an endpoint is a
+/// statement about who is trusted to describe reality, and only the owner
+/// makes it.
+async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()> {
+    let proposals = PolicyStore::production(config.data_dir())?.network_proposals()?;
+    if proposals.is_empty() {
+        return emit(mode, &serde_json::json!({ "reviewed": 0 }), || {
+            Ok("No network suggestions are waiting.".into())
+        });
+    }
+
+    let mut accepted = Vec::new();
+    let mut discarded = Vec::new();
+    for proposal in proposals {
+        let existing = config
+            .load()?
+            .networks
+            .into_iter()
+            .find(|network| network.chain_id == proposal.chain_id);
+        let mut facts = vec![
+            ("Network", proposal.name.clone()),
+            ("Chain ID", proposal.chain_id.to_string()),
+            ("RPC endpoint", proposal.rpc_url.to_string()),
+        ];
+        // An edit is the dangerous shape: the chain keeps working and its
+        // narrator changes. Say which endpoint is being replaced, because the
+        // difference between the two URLs is the entire decision.
+        let (title, summary) = if let Some(existing) = &existing {
+            facts.push(("Replaces endpoint", existing.rpc_url.to_string()));
+            facts.push(("Configured name", existing.name.clone()));
+            (
+                "Accept an edited network",
+                "An agent suggested changing how this wallet reaches a chain it already uses.",
+            )
+        } else {
+            (
+                "Accept a new network",
+                "An agent suggested a chain this wallet does not yet know how to reach.",
+            )
+        };
+
+        if !confirm_network_change(title, summary, "Accept this network?", facts)? {
+            let mut store = PolicyStore::production(config.data_dir())?;
+            store.discard_network_proposal(proposal.chain_id)?;
+            discarded.push(proposal.chain_id.to_string());
+            continue;
+        }
+
+        // Verified here rather than when it was proposed. What matters is that
+        // the endpoint being written answers for the chain it claims, checked
+        // immediately before writing it — a probe at proposal time would prove
+        // something about a moment that has since passed.
+        verify_chain_id(&proposal).await.map_err(|_| {
+            anyhow::anyhow!(
+                "the RPC at {} did not answer eth_chainId with chain {}; nothing was written",
+                ekubo_wallet_core::rpc::rpc_origin(&proposal.rpc_url),
+                proposal.chain_id
+            )
+        })?;
+        PlatformHumanPresence
+            .confirm(&PresenceRequest::ConfirmNetwork {
+                network: proposal.name.clone(),
+            })
+            .await?;
+        config.update(|state| {
+            if existing.is_some() {
+                replace_configured_network(&mut state.networks, proposal.clone())
+            } else {
+                add_configured_network(&mut state.networks, proposal.clone())
+            }
+        })?;
+        PolicyStore::production(config.data_dir())?.discard_network_proposal(proposal.chain_id)?;
+        accepted.push(proposal.name.clone());
+    }
+
+    emit(
+        mode,
+        &serde_json::json!({ "accepted": accepted, "discarded": discarded }),
+        || {
+            Ok(format!(
+                "Accepted {} network(s); discarded {}.",
+                accepted.len(),
+                discarded.len()
+            ))
+        },
+    )
+}
+
 fn confirm_network_change(
     title: &str,
     summary: &str,

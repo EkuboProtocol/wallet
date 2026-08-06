@@ -130,6 +130,39 @@ fn no_token_contract_is_asked_for_its_decimals() {
     }
 }
 
+/// The MCP server proposes metadata and never writes it.
+///
+/// Token names, address-book aliases, and network profiles are all supplied by
+/// an untrusted client and all decide what the owner reads when they approve a
+/// transaction — a name against an address, an amount's scale, and, for a
+/// network, which endpoint describes the chain at all. Each one reaches the
+/// database only through a terminal confirmation and an OS presence check, and
+/// the way that erodes is a write helper called from a tool body because it was
+/// right there. These are the names of those helpers.
+#[test]
+fn the_mcp_server_cannot_write_stored_metadata() {
+    let source = fs::read_to_string(repository_root().join("src/mcp.rs")).unwrap();
+    // Production code only. The test module below legitimately writes through
+    // the stores to set up state the read-only tools are then checked against,
+    // which is the CLI's job being stood in for rather than the server doing it.
+    let mcp = source
+        .split_once("#[cfg(test)]")
+        .map_or(source.as_str(), |(production, _)| production);
+    for forbidden in [
+        "add_configured_network",
+        "replace_configured_network",
+        "remove_configured_network",
+        "insert_if_absent",
+        "upsert",
+    ] {
+        assert!(
+            !mcp.contains(forbidden),
+            "src/mcp.rs references {forbidden}; an agent proposes metadata and the owner \
+             confirms it, so no tool body writes it"
+        );
+    }
+}
+
 /// One implementation redacts RPC credentials, and it lives in `rpc.rs`.
 ///
 /// An endpoint URL can carry a key in its userinfo, its path, or its query,

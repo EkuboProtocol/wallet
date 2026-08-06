@@ -28,6 +28,7 @@ pub enum PresenceRequest {
     SaveAddressBookEntry { alias: String },
     RemoveAddressBookEntry { alias: String },
     ConfirmTokenNames { count: usize },
+    ConfirmNetwork { network: String },
 }
 
 /// How much of a name the platform dialog will carry. The dialog is a single
@@ -71,6 +72,9 @@ impl PresenceRequest {
             }
             Self::ConfirmTokenNames { count } => {
                 format!("name {count} token(s) shown when approving transfers")
+            }
+            Self::ConfirmNetwork { network } => {
+                format!("trust the RPC endpoint for network {}", subject(network))
             }
         }
     }

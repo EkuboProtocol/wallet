@@ -3,7 +3,7 @@
 | Tool | Purpose |
 | --- | --- |
 | `wallet_list` | Public wallet metadata plus configured network names and chain IDs. Never key material or RPC URLs. |
-| `wallet_add_network` | The only MCP configuration mutation. Requires a complete profile, verifies the chain ID against the proposed RPC, and never replaces an existing network, name, or alias. |
+| `wallet_propose_network` | Suggest a complete network profile for the owner to accept in `ekubo-wallet network review`. Writes nothing: a proposal for a configured chain ID is an edit of that network, one for an unconfigured chain ID is an addition, and neither resolves until accepted. The endpoint is admitted when proposed and its chain ID verified when accepted. A name or alias belonging to a different chain is refused outright, since no confirmation could resolve it. |
 | `wallet_get_status` | Address, native balance, transaction count, and current EIP-7702 delegation. |
 | `wallet_get_policy` | The active policy and its revision. |
 | `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. Accepts a `fork_id` to read simulated state. |

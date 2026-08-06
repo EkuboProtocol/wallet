@@ -98,9 +98,13 @@ can still change the sentence being decided on. An alias turns an address into
 a familiar name; a token row turns base units into an amount. Both are supplied
 by an untrusted agent as a *proposal*, and both take a terminal confirmation
 and an OS presence check to become a name. Rejecting takes neither, so nobody
-is trained to authenticate their way past a prompt. The one path not yet moved
-onto this footing is `wallet_add_network`, which still writes directly; see
-[threat-model.md](threat-model.md).
+is trained to authenticate their way past a prompt.
+
+Network profiles work the same way and matter most: the RPC endpoint in one is
+the wallet's entire view of its chain, so accepting a profile is a statement
+about who is trusted to describe reality. `wallet_propose_network` queues it;
+`ekubo-wallet network review` shows which endpoint would be replaced, verifies
+the chain ID, and takes the presence check before writing.
 
 Owner authentication is in any case an application-level check in the CLI, not
 an operating-system gate on the key. Choose a wallet's policy on that basis,

@@ -2,10 +2,7 @@ use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
     address_book::{AddressBookEntry, AddressBookStore},
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call, resolve_read_input},
-    config::{
-        ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource,
-        add_configured_network,
-    },
+    config::{ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource},
     core::{
         execution_plan::{DecimalU256, ExecutionPlan},
         policy::WalletPolicy,
@@ -23,7 +20,7 @@ use crate::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     plan_fetch::{ArtifactReference, FetchPolicy, resolve_execution_plan_reference},
     policy_store::PolicyStore,
-    rpc::{WalletStatus, transaction_known, verify_chain_id, wallet_status},
+    rpc::{WalletStatus, transaction_known, wallet_status},
     simulation::{SimulationResult, simulate_execution},
     simulation_store::SimulationStore,
     token_store::{StoredToken, TokenStore},
@@ -312,19 +309,20 @@ struct AddNetworkInput {
     documentation_url: Url,
 }
 
+/// What a queued network suggestion tells the agent.
+///
+/// Deliberately thin. Echoing the profile back would read as confirmation that
+/// it is in effect, and it is not: nothing about this network resolves until
+/// the owner accepts it. `replaces` names the network this would edit, so an
+/// agent can tell the owner whether it is proposing a new chain or changing
+/// the endpoint of one they already use — which is the part worth saying out
+/// loud before a person decides.
 #[derive(Debug, Serialize, JsonSchema)]
-struct AddedNetworkOutput {
-    name: String,
-    display_name: String,
-    aliases: Vec<String>,
+struct ProposedNetworkOutput {
     chain_id: String,
-    max_gas_limit: String,
-    native_currency: NativeCurrency,
-    #[schemars(with = "String")]
-    block_explorer_url: Url,
-    #[schemars(with = "String")]
-    documentation_url: Url,
-    rpc_verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaces: Option<String>,
+    pending_review: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1447,19 +1445,19 @@ impl WalletMcpServer {
     }
 
     #[tool(
-        name = "wallet_add_network",
-        description = "Verify and add one complete server-wide EVM network. Fails without writing if its chain ID, name, or alias is already configured, and never replaces an existing network. RPC URLs are stored locally and never returned by wallet_list.",
+        name = "wallet_propose_network",
+        description = "Suggest one complete server-wide EVM network for the owner to confirm with `ekubo-wallet network review`. Adds nothing: a proposal naming a chain ID that is already configured is an edit of that network, one naming a chain ID that is not is an addition, and neither takes effect until the owner accepts it in the terminal. The RPC endpoint is admitted (public https, no credentials, no private address) when proposed and its chain ID is verified when accepted. RPC URLs are stored locally and never returned by wallet_list.",
         annotations(
             read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
             open_world_hint = true
         )
     )]
-    async fn wallet_add_network(
+    async fn wallet_propose_network(
         &self,
         Parameters(input): Parameters<AddNetworkInput>,
-    ) -> Result<Json<AddedNetworkOutput>, ErrorData> {
+    ) -> Result<Json<ProposedNetworkOutput>, ErrorData> {
         let chain_id = parse_chain_id(&input.chain_id).map_err(|error| tool_error(&error))?;
         let candidate = NetworkConfig {
             name: input.name,
@@ -1472,58 +1470,66 @@ impl WalletMcpServer {
             block_explorer_url: Some(input.block_explorer_url),
             documentation_url: Some(input.documentation_url),
         };
-        // Validate every local field and every conflict before the new
-        // endpoint is contacted at all, so a rejected profile never becomes an
-        // outbound request to an address the caller chose.
-        let mut prospective = self
-            .config
-            .load()
-            .map_err(|error| tool_error(&error))?
-            .networks;
-        add_configured_network(&mut prospective, candidate.clone())
-            .map_err(|error| tool_error(&error))?;
-        // Taken before the admission check, not just before the probe: that
-        // check resolves a hostname the caller chose, which is outbound work
-        // on its own. Refused rather than queued, because waiting would let a
-        // caller build a backlog worth an RPC timeout each — the thing being
-        // prevented.
+        // A proposal for a chain already configured is an edit of it; for one
+        // that is not, an addition. Both are refused the same way if the
+        // profile is malformed, so the agent hears about a bad field now
+        // rather than the owner hearing about it at review.
+        let configured = self.config.load().map_err(|error| tool_error(&error))?;
+        let replaces = configured
+            .networks
+            .iter()
+            .find(|network| network.chain_id == candidate.chain_id)
+            .map(|network| network.name.clone());
+        // A name or alias belonging to a *different* chain is a conflict no
+        // confirmation can resolve, so it fails here rather than becoming a
+        // decision the owner cannot act on.
+        for network in &configured.networks {
+            if network.chain_id == candidate.chain_id {
+                continue;
+            }
+            let taken = std::iter::once(&network.name).chain(network.aliases.iter());
+            let proposed: std::collections::BTreeSet<&String> = std::iter::once(&candidate.name)
+                .chain(candidate.aliases.iter())
+                .collect();
+            for identifier in taken {
+                ensure_tool(
+                    !proposed.contains(identifier),
+                    &format!(
+                        "{identifier} already names chain {}, so it cannot also name chain {}",
+                        network.chain_id, candidate.chain_id
+                    ),
+                )?;
+            }
+        }
+        // Taken before the admission check, because that check resolves a
+        // hostname the caller chose and DNS to an arbitrary name is outbound
+        // work. Refused rather than queued: waiting would let a caller build a
+        // backlog, which is the thing being prevented.
         let _probe = NETWORK_PROBE_SLOTS.try_acquire().map_err(|_| {
-            tool_error(&"another network is already being verified; retry once it finishes")
+            tool_error(&"another network proposal is already being checked; retry once it finishes")
         })?;
         // `validate_network` admits http and loopback so an owner can point
-        // their own terminal at a devnet. This caller is not the owner, and
-        // the probe below is the only request this process makes to an address
-        // an MCP client chose, so the endpoint passes the same admission a
-        // referenced plan URL does first.
+        // their own terminal at a devnet. This caller is not the owner, so the
+        // endpoint passes the same admission a referenced plan URL does.
+        //
+        // The chain ID is deliberately NOT probed here. Verifying it now would
+        // prove something about an endpoint at proposal time and store the
+        // result for the owner to read later, which is the weaker claim; the
+        // check that matters happens in `network review`, immediately before
+        // the profile is written. Not probing also keeps an unconfirmed agent
+        // action from producing a JSON-RPC request.
         ekubo_wallet_core::plan_fetch::ensure_public_endpoint(&candidate.rpc_url, "RPC URL")
             .await
             .map_err(|error| tool_error(&error))?;
-        // The probe's own failure never reaches the caller. An RPC error
-        // carries the response body verbatim, which would turn a chain-ID
-        // check into a way to read whatever answered.
-        verify_chain_id(&candidate).await.map_err(|_| {
-            tool_error(&format!(
-                "the proposed RPC at {} did not answer eth_chainId with chain {}",
-                ekubo_wallet_core::rpc::rpc_origin(&candidate.rpc_url),
-                candidate.chain_id
-            ))
-        })?;
-        self.config
-            .update(|state| {
-                add_configured_network(&mut state.networks, candidate.clone())?;
-                Ok(())
-            })
+        self.policies
+            .lock()
+            .map_err(|_| ErrorData::internal_error("policy store lock was poisoned", None))?
+            .put_network_proposal(&candidate)
             .map_err(|error| tool_error(&error))?;
-        Ok(Json(AddedNetworkOutput {
-            name: candidate.name,
-            display_name: candidate.display_name.expect("complete MCP network"),
-            aliases: candidate.aliases,
+        Ok(Json(ProposedNetworkOutput {
             chain_id: candidate.chain_id.to_string(),
-            max_gas_limit: candidate.max_gas_limit.expect("complete MCP network"),
-            native_currency: candidate.native_currency.expect("complete MCP network"),
-            block_explorer_url: candidate.block_explorer_url.expect("complete MCP network"),
-            documentation_url: candidate.documentation_url.expect("complete MCP network"),
-            rpc_verified: true,
+            replaces,
+            pending_review: true,
         }))
     }
 
@@ -3160,7 +3166,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "wallet_add_network",
+                "wallet_propose_network",
                 "wallet_address_book",
                 "wallet_attempt_cancel",
                 "wallet_batch_eth_call",
@@ -3214,25 +3220,33 @@ mod tests {
     }
 
     #[test]
-    fn network_add_is_marked_destructive() {
+    fn proposing_a_network_is_not_destructive_and_is_idempotent() {
+        // The annotations are how a client decides whether to ask its user
+        // before calling. Proposing destroys nothing and changes nothing an
+        // existing request depends on: a repeat replaces the suggestion for
+        // that chain, and the configuration is untouched either way. The
+        // destructive act is accepting it, which has no tool at all.
         let router = WalletMcpServer::tool_router();
-        let tool = router.get("wallet_add_network").unwrap();
-        assert_eq!(
-            tool.annotations.as_ref().unwrap().destructive_hint,
-            Some(true)
-        );
+        let tool = router.get("wallet_propose_network").unwrap();
+        let annotations = tool.annotations.as_ref().unwrap();
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
+        assert_eq!(annotations.read_only_hint, Some(false));
     }
 
-    /// The chain-ID probe is an outbound request to an address the caller
-    /// chose, so every local conflict has to be settled before it is sent: a
-    /// profile that could never be stored must not become a network request
-    /// on its way to being rejected.
+    /// Endpoint admission resolves a hostname the caller chose, so a name
+    /// collision has to be settled before it: a profile that could never be
+    /// stored must not become outbound work on its way to being rejected.
+    ///
+    /// A name already belonging to a *different* chain is the one conflict no
+    /// confirmation can resolve, so it fails at proposal time rather than
+    /// becoming a decision the owner cannot act on.
     #[tokio::test]
-    async fn network_add_settles_local_conflicts_before_contacting_the_proposed_rpc() {
+    async fn proposing_a_network_settles_name_conflicts_before_contacting_anything() {
         let (_directory, server) = server();
         let existing = server.config.load().unwrap().networks[0].clone();
         let result = server
-            .wallet_add_network(Parameters(AddNetworkInput {
+            .wallet_propose_network(Parameters(AddNetworkInput {
                 name: existing.name.clone(),
                 display_name: "Untrusted Test".into(),
                 aliases: vec!["untrusted-testnet".into()],
@@ -3254,7 +3268,7 @@ mod tests {
             panic!("a conflicting network was added");
         };
         assert!(
-            error.message.contains("conflicts"),
+            error.message.contains("already names chain"),
             "rejected for the wrong reason: {}",
             error.message
         );
@@ -3291,7 +3305,7 @@ mod tests {
             .try_acquire()
             .expect("the only permit is free");
         let result = server
-            .wallet_add_network(Parameters(add_network_input(
+            .wallet_propose_network(Parameters(add_network_input(
                 "https://rpc.example.invalid/",
             )))
             .await;
@@ -3299,7 +3313,7 @@ mod tests {
             panic!("a second probe ran while one was in flight");
         };
         assert!(
-            error.message.contains("already being verified"),
+            error.message.contains("already being checked"),
             "refused for the wrong reason: {}",
             error.message
         );
@@ -3320,7 +3334,7 @@ mod tests {
             ("https://key@mainnet.example.invalid/rpc", "credentials"),
         ] {
             let result = server
-                .wallet_add_network(Parameters(add_network_input(rpc_url)))
+                .wallet_propose_network(Parameters(add_network_input(rpc_url)))
                 .await;
             let Err(error) = result else {
                 panic!("{rpc_url} was accepted");

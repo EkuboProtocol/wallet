@@ -553,7 +553,7 @@ pub fn validate_wallet_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_network(network: &NetworkConfig) -> Result<()> {
+pub(crate) fn validate_network(network: &NetworkConfig) -> Result<()> {
     validate_network_identifier(&network.name, "network name")?;
     let mut identifiers = BTreeSet::from([&network.name]);
     for alias in &network.aliases {

@@ -224,7 +224,7 @@ the configured endpoint's userinfo, path, and query are each redacted from
 surfaced errors, but `config.json` stores them locally. Use credentials whose
 disclosure scope is appropriate for the local MCP host.
 
-`wallet_add_network` is the one MCP tool that makes this process send a request
+`wallet_propose_network` is the one MCP tool that makes this process send a request
 to an address its caller chose, so the address is admitted before the request
 rather than judged by whether the request succeeds: public `https` only, no
 credentials in the URL, and no host that resolves to a private or reserved
@@ -238,15 +238,21 @@ what it vetted the way a plan fetch does — the URL is stored and used later, s
 a resolver that answers differently afterwards is not caught — and the backstop
 is that the stored endpoint is visible to the owner in `network list`.
 
-**Known gap, being closed.** `wallet_add_network` still writes a network
-profile directly, with neither terminal confirmation nor OS presence. That
-predates invariant 6 as stated above and contradicts it: a network profile is
-metadata an MCP client supplies, and the RPC endpoint in it is the wallet's
-entire view of the chain — balances, gas, receipts, and every simulation the
-policy engine scores. The admission checks above bound *where* that endpoint
-may be, not *whether the owner agreed to it*. Until this moves to the
-propose-and-confirm path the other metadata uses, treat the set of configured
-networks as agent-writable and check it with `ekubo-wallet network list`.
+A network profile is metadata an MCP client supplies, and the endpoint in it is
+the wallet's entire view of its chain, so it moves like the rest of the
+metadata: `wallet_propose_network` queues a profile and writes nothing.
+`ekubo-wallet network review` shows the owner what would be stored — naming the
+endpoint being replaced, when the proposal edits a chain they already use,
+because the difference between two URLs is the whole decision — verifies the
+chain ID against that endpoint, and takes an OS presence check before the
+write. A name or alias belonging to a different chain is refused at proposal
+time rather than becoming a decision nobody can act on.
+
+The chain ID is deliberately verified at acceptance rather than at proposal.
+Proving something about an endpoint when it was suggested, and storing that
+result for the owner to read later, is the weaker claim; the check that matters
+is the one taken immediately before the profile is written. It also keeps an
+unconfirmed agent action from producing a JSON-RPC request.
 
 ## Rollback decision
 
@@ -280,7 +286,7 @@ replenish because no such accounting exists.
 | RPC or network fails after send | Bytes/hash were stored first; status remains reconcilable and only exact bytes can be retried. |
 | Same-user process accesses credential APIs | Platform isolation and prompts vary; OS compromise or process injection is out of scope. |
 | Agent forges a token name or alias to misdescribe a transfer | Both are proposals; becoming a stored name takes terminal confirmation plus OS presence. Symbols are re-sanitized at render time and refused if they contain `0x`. An unnamed token renders by address in base units — readable, not trusted. |
-| Agent points the wallet at an RPC it controls | Endpoint admission refuses non-public and credential-bearing URLs and verifies the chain ID before storage, but the write itself is still unconfirmed. Open gap; see the RPC boundary section. |
+| Agent points the wallet at an RPC it controls | It can only propose one. Endpoint admission refuses non-public and credential-bearing URLs, and acceptance takes a terminal confirmation naming the endpoint being replaced, a chain-ID verification, and an OS presence check. |
 
 Any future stateful allowance or daily accounting requires a new threat model
 and an external rollback defense. It must not be added under this design.
