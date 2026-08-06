@@ -32,6 +32,14 @@ pub const SIMULATION_TTL_SECONDS: i64 = 120;
 pub const MAX_RECORDED_PER_WALLET: usize = 16;
 /// Recorded simulations this process may hold across every wallet.
 pub const MAX_RECORDED_SIMULATIONS: usize = 64;
+/// Serialized plan bytes every recorded simulation may retain between them.
+///
+/// The count caps alone bound entries, not size, and a plan may be up to
+/// `MAX_SERIALIZED_PLAN_BYTES` — so sixty-four of them is a gigabyte held in a
+/// process that otherwise uses megabytes. Nothing legitimate approaches this:
+/// a plan a person would send is kilobytes, and the cache exists to save an
+/// RPC round trip rather than to hold a corpus.
+pub const MAX_RECORDED_PLAN_BYTES: usize = 64 * 1024 * 1024;
 
 /// One simulation result that has not been sent or expired yet.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,6 +57,9 @@ pub struct RecordedSimulation {
     pub result: SimulationResult,
     pub recorded_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Serialized size of `plan`, measured once when recorded. Kept on the
+    /// entry so the byte cap does not re-serialize every plan on every insert.
+    pub plan_bytes: usize,
 }
 
 /// Recorded simulations, held only in this process.
@@ -79,6 +90,7 @@ impl SimulationStore {
         now: DateTime<Utc>,
     ) -> RecordedSimulation {
         self.prune(now);
+        let plan_bytes = serde_json::to_vec(&plan).map_or(0, |bytes| bytes.len());
         let recorded = RecordedSimulation {
             simulation_id: Uuid::new_v4(),
             wallet_id: wallet_id.to_owned(),
@@ -88,6 +100,7 @@ impl SimulationStore {
             result,
             recorded_at: now,
             expires_at: now + TimeDelta::seconds(SIMULATION_TTL_SECONDS),
+            plan_bytes,
         };
         self.recorded
             .insert(recorded.simulation_id, recorded.clone());
@@ -111,6 +124,16 @@ impl SimulationStore {
         );
         self.evict_oldest_while(
             |store| store.recorded.len() > MAX_RECORDED_SIMULATIONS,
+            None,
+            recorded.simulation_id,
+        );
+        // Bytes, not just entries. One large plan can be worth thousands of
+        // ordinary ones, so a cache bounded only by count is not bounded by
+        // memory. The newest entry survives even when it alone exceeds the
+        // budget: refusing to record a simulation the RPC has already executed
+        // would throw away exactly the work this cache exists to save.
+        self.evict_oldest_while(
+            |store| store.retained_plan_bytes() > MAX_RECORDED_PLAN_BYTES,
             None,
             recorded.simulation_id,
         );
@@ -138,6 +161,15 @@ impl SimulationStore {
     #[must_use]
     pub fn len(&self) -> usize {
         self.recorded.len()
+    }
+
+    /// Serialized plan bytes currently retained across every entry.
+    #[must_use]
+    pub fn retained_plan_bytes(&self) -> usize {
+        self.recorded
+            .values()
+            .map(|entry| entry.plan_bytes)
+            .sum::<usize>()
     }
 
     #[must_use]
@@ -258,6 +290,28 @@ mod tests {
             // Put it back so the cap keeps being exercised.
             record(&mut store, &index.to_string(), now);
         }
+    }
+
+    #[test]
+    fn the_cache_is_bounded_by_bytes_and_not_only_by_count() {
+        // Sixteen entries is well under every count cap, so only the byte
+        // budget can bound what this retains.
+        let now = Utc::now();
+        let mut store = SimulationStore::new();
+        for index in 1..=MAX_RECORDED_PER_WALLET {
+            let plan = plan(&index.to_string());
+            let result = result(&plan);
+            store.record("primary", "1", plan, None, result, now);
+        }
+        assert!(store.len() <= MAX_RECORDED_PER_WALLET);
+        assert!(
+            store.retained_plan_bytes() <= MAX_RECORDED_PLAN_BYTES,
+            "retained {} bytes",
+            store.retained_plan_bytes()
+        );
+        // Every entry measured something, so the budget is being computed from
+        // real sizes rather than from a zero that would never trip it.
+        assert!(store.retained_plan_bytes() > 0);
     }
 
     #[test]
