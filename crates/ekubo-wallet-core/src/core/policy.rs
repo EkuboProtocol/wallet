@@ -1053,6 +1053,15 @@ fn validate_decimal(value: &str) -> Result<()> {
         value == "0" || (!value.starts_with('0') && value.bytes().all(|b| b.is_ascii_digit())),
         "invalid canonical decimal quantity {value}"
     );
+    // Length before value. `BigUint::from_str` is superlinear in radix 10, and
+    // a canonical uint256 is at most `MAX_UINT256.len()` digits — so anything
+    // longer is refused by the comparison below anyway, after being parsed.
+    // There is one of these per token, per spender-token, and per chain in a
+    // policy document, so the parse is not paid once.
+    ensure!(
+        value.len() <= MAX_UINT256.len(),
+        "decimal quantity must fit uint256"
+    );
     let parsed = BigUint::from_str(value).context("invalid decimal quantity")?;
     let maximum = BigUint::from_str(MAX_UINT256).unwrap();
     ensure!(parsed <= maximum, "decimal quantity must fit uint256");
@@ -1434,6 +1443,21 @@ mod tests {
                     || line.starts_with("- chain"))
         );
         assert!(shrink.iter().any(|line| line.contains("unlimited")));
+    }
+
+    #[test]
+    fn a_decimal_quantity_is_bounded_by_length_before_it_is_parsed() {
+        // The largest canonical uint256 is 78 digits, so anything longer is
+        // refused either way. What changes is the cost: `BigUint::from_str` is
+        // superlinear in radix 10, and a policy carries one of these per token,
+        // per spender-token, and per chain.
+        assert!(validate_decimal(MAX_UINT256).is_ok());
+        assert!(validate_decimal("0").is_ok());
+        assert!(validate_decimal(&"9".repeat(MAX_UINT256.len() + 1)).is_err());
+        // A value of the maximum length that is still above the ceiling is
+        // caught by the comparison, as before.
+        let over = "9".repeat(MAX_UINT256.len());
+        assert!(validate_decimal(&over).is_err());
     }
 
     #[test]

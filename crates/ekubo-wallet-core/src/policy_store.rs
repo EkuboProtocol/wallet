@@ -113,6 +113,16 @@ pub struct PolicyProposal {
 
 pub const MAX_PROPOSAL_RATIONALE_LEN: usize = 2_000;
 
+/// A serialized policy document that could not plausibly describe a wallet's
+/// permissions.
+///
+/// Every field inside one is already validated; this bounds the document as a
+/// whole. Without it the only limit on a policy was how many allowlist entries
+/// an agent cared to write — and each one is a row the database keeps, a diff
+/// line the owner has to read, and work every `parse` repeats. Generous: a real
+/// policy naming a few hundred tokens and spenders is a few tens of kilobytes.
+pub const MAX_POLICY_BYTES: usize = 262_144;
+
 /// A serialized network profile that could not plausibly describe a network.
 /// Every field is already length-validated; this bounds the document so a
 /// proposal cannot grow the database by the size of its aliases.
@@ -356,6 +366,10 @@ impl PolicyStore {
         let canonical = serde_json::to_value(policy)?;
         let policy = WalletPolicy::parse(canonical)?;
         let policy_json = serde_json::to_string(&policy)?;
+        ensure!(
+            policy_json.len() <= MAX_POLICY_BYTES,
+            "policy document exceeds {MAX_POLICY_BYTES} bytes"
+        );
         let updated_at = Utc::now();
         let current: Option<i64> = transaction
             .query_row(
@@ -417,6 +431,10 @@ impl PolicyStore {
         let canonical = serde_json::to_value(policy)?;
         let policy = WalletPolicy::parse(canonical)?;
         let policy_json = serde_json::to_string(&policy)?;
+        ensure!(
+            policy_json.len() <= MAX_POLICY_BYTES,
+            "policy document exceeds {MAX_POLICY_BYTES} bytes"
+        );
         let source = i64::try_from(source_revision).context("source revision is too large")?;
         let transaction = self.connection.transaction()?;
         let current: Option<i64> = transaction
