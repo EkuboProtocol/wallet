@@ -152,6 +152,14 @@ fn strong(style: Style) -> Style {
 /// at the cursor. Closing erases the rows, so the one answered line printed
 /// after is all that lands in the scrollback. Raw mode is undone on drop so
 /// an error or panic mid-prompt still hands the terminal back.
+/// The marker every prompt line opens with.
+///
+/// A constant rather than a literal at each site because the cursor position
+/// is computed from its width: when the two were written separately, the
+/// arithmetic assumed three columns for what renders as two, and the caret sat
+/// one column right of the character it was supposed to be under.
+const PROMPT_MARKER: &str = "◆ ";
+
 struct Inline {
     terminal: Terminal<CrosstermBackend<io::Stderr>>,
 }
@@ -234,7 +242,7 @@ pub fn confirm(message: &str) -> Result<bool> {
     let answer = loop {
         terminal.terminal.draw(|frame| {
             let line = Line::from(vec![
-                Span::styled("◆ ", accent(Style::new())),
+                Span::styled(PROMPT_MARKER, accent(Style::new())),
                 Span::styled(message.clone(), strong(Style::new())),
                 Span::styled(" (y/N)", dimmed(Style::new())),
             ]);
@@ -369,7 +377,7 @@ pub fn pick(prompt: &str, labels: Vec<String>, page_size: usize) -> Result<Optio
         terminal.terminal.draw(|frame| {
             let mut lines = Vec::with_capacity(rows + 1);
             let mut header = vec![
-                Span::styled("◆ ", accent(Style::new())),
+                Span::styled(PROMPT_MARKER, accent(Style::new())),
                 Span::styled(message.clone(), strong(Style::new())),
             ];
             if filter.is_empty() {
@@ -553,11 +561,15 @@ impl<'a> TextPrompt<'a> {
                     value.clone()
                 };
                 let mut input = vec![
-                    Span::styled("◆ ", accent(Style::new())),
+                    Span::styled(PROMPT_MARKER, accent(Style::new())),
                     Span::styled(self.message.clone(), strong(Style::new())),
                     Span::raw(" "),
                 ];
-                let prefix_width = 3 + display_width(&self.message) + 1;
+                // Measured, not assumed: this has to match the spans
+                // pushed above exactly, or the caret drifts from the text.
+                let prefix_width = display_width(PROMPT_MARKER)
+                    + display_width(&self.message)
+                    + display_width(" ");
                 if shown.is_empty() {
                     if let Some(placeholder) = &self.placeholder {
                         input.push(Span::styled(placeholder.clone(), dimmed(Style::new())));
@@ -776,6 +788,28 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_caret_sits_under_the_character_being_typed() {
+        // The prompt draws marker + message + one space, then places the caret
+        // at that width plus what has been typed. The bug this pins was a
+        // hardcoded 3 for a marker that renders as 2 columns, which put the
+        // caret one column right of the text on every text prompt in the
+        // product — visible as typing appearing to the left of the cursor.
+        assert_eq!(display_width(PROMPT_MARKER), 2);
+
+        for message in ["Alias", "Address", "Note", ""] {
+            let prefix_width =
+                display_width(PROMPT_MARKER) + display_width(message) + display_width(" ");
+            // What the rendered line actually occupies before the value.
+            let rendered = format!("{PROMPT_MARKER}{message} ");
+            assert_eq!(
+                prefix_width,
+                display_width(&rendered),
+                "caret would drift for message {message:?}"
+            );
+        }
+    }
 
     #[test]
     fn tones_map_to_distinct_ansi_styles() {
