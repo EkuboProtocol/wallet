@@ -129,3 +129,31 @@ fn no_token_contract_is_asked_for_its_decimals() {
         );
     }
 }
+
+/// One implementation redacts RPC credentials, and it lives in `rpc.rs`.
+///
+/// An endpoint URL can carry a key in its userinfo, its path, or its query,
+/// and getting all three right is fiddly enough that a second copy will drift
+/// from the first. One did: `token_store.rs` grew a hand-rolled
+/// `replace(rpc_url.as_str(), …)` that reproduced only the whole-URL case and
+/// leaked every credential form the shared helper had learned to strip. The
+/// tripwire is the literal that opens such a copy.
+#[test]
+fn rpc_credentials_are_redacted_in_exactly_one_place() {
+    let core = repository_root().join("crates/ekubo-wallet-core/src");
+    for entry in fs::read_dir(&core).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "rs")
+            || path.file_name().is_some_and(|name| name == "rpc.rs")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&path).unwrap();
+        assert!(
+            !source.contains("\"<rpc-url>\""),
+            "{} redacts an RPC URL itself; every module surfaces RPC errors through \
+             rpc::sanitized_rpc_error so the credential forms are stripped in one place",
+            path.display()
+        );
+    }
+}

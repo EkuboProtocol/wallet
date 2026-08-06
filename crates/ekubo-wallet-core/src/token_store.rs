@@ -958,11 +958,7 @@ async fn aggregate<P: Provider>(
         .await
         .context("Multicall3 request timed out")?
         .map_err(|error| {
-            let raw = error.to_string();
-            anyhow::anyhow!(
-                "Multicall3 request failed: {}",
-                raw.replace(network.rpc_url.as_str(), "<rpc-url>")
-            )
+            crate::rpc::sanitized_rpc_error(network, &error).context("Multicall3 request failed")
         })?;
     aggregate3Call::abi_decode_returns(&bytes).context("Multicall3 returned undecodable data")
 }
