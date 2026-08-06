@@ -18,10 +18,11 @@ The one SQLCipher file contains separate `wallet_policies`,
 aliases, and legal acceptance deliberately live inside the authenticated
 encrypted database rather than in plain files: they carry no signing
 authority, but a file edit outside this process must not be able to forge
-acceptance, retarget an alias, or misrepresent a token. A pre-existing plain
-`tokens.db` is imported once (constraint-checked, never overwriting) and
-removed; leftover `address_book.db` or `legal.json` files from unreleased
-builds are deleted without being trusted. A pending row stores its normalized execution
+acceptance, retarget an alias, or misrepresent a token. Leftover `tokens.db`,
+`address_book.db`, or `legal.json` files from unreleased builds are deleted
+without being trusted: a plain file in the data directory has no curator
+behind it, so importing one would be an unauthenticated write into the table
+the review screen presents as confirmed. A pending row stores its normalized execution
 plan and digest, policy revision, and lifecycle status; once signed it
 also stores the exact serialized transaction and hash before the first RPC
 submission. An exceptional approval additionally records the digest of its

@@ -99,8 +99,10 @@ else; a token with no row is shown as `0xaddress (unlisted token)` and its
 amounts stay in base units. Nothing in the signing or policy path reads it,
 but a name the owner trusts is worth forging, so the rows live **inside the
 encrypted policy database** (`policies.db`) where a file edit outside this
-process cannot alter them. A pre-existing plain `tokens.db` from older
-releases is imported once and removed.
+process cannot alter them. A leftover plain `tokens.db` from an unreleased
+build is deleted on sight rather than imported — a file anyone can write is
+not a curator, and the whole point of the table is that someone the owner
+chose put every row in it.
 
 Names come from token lists, never from token contracts. A contract's
 `symbol()` returns whatever its author wrote, so reading it would let any

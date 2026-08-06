@@ -39,14 +39,13 @@ use alloy::{
 };
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
 
 /// Plain-SQLite file used before the table moved into the encrypted
-/// database. Rows are imported once (constraint-checked, never overwriting)
-/// and the file is then removed.
+/// database. Never trusted or imported: deleted on sight.
 const LEGACY_DATABASE_FILE: &str = "tokens.db";
 /// Tokens verified per Multicall3 request; three calls each.
 const METADATA_CHUNK: usize = 100;
@@ -181,63 +180,22 @@ pub struct TokenStore {
 
 impl TokenStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
-        let store = Self {
+        // Deleted on sight rather than imported, exactly as the address book
+        // treats its own legacy file. A plain file in the data directory has
+        // no curator behind it: the filesystem is untrusted, so anything that
+        // reads one is an unauthenticated writer to the table the review
+        // screen believes the owner confirmed.
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
+        }
+        Ok(Self {
             database: PolicyStore::production(data_dir)?,
-        };
-        store.import_legacy_database(data_dir);
-        Ok(store)
+        })
     }
 
     #[must_use]
     pub const fn new(database: PolicyStore) -> Self {
         Self { database }
-    }
-
-    /// One-time import of the pre-encryption plain-SQLite token file. Rows
-    /// pass through the encrypted table's CHECK constraints (`INSERT OR
-    /// IGNORE`, so malformed or duplicate rows are dropped rather than
-    /// trusted), and the legacy file is removed only after a full pass.
-    /// A failed import leaves the file for a later retry and never blocks
-    /// opening the store.
-    fn import_legacy_database(&self, data_dir: &Path) {
-        let legacy_path = data_dir.join(LEGACY_DATABASE_FILE);
-        if !legacy_path.exists() {
-            return;
-        }
-        let import = (|| -> Result<()> {
-            let legacy =
-                Connection::open_with_flags(&legacy_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            let mut statement = legacy.prepare(
-                "SELECT chain_id, address, symbol, name, decimals, source, added_at FROM tokens",
-            )?;
-            let rows = statement.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                ))
-            })?;
-            for row in rows {
-                let (chain_id, address, symbol, name, decimals, source, added_at) = row?;
-                self.database.connection.execute(
-                    "INSERT OR IGNORE INTO tokens(
-                        chain_id, address, symbol, name, decimals, source, added_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![chain_id, address, symbol, name, decimals, source, added_at],
-                )?;
-            }
-            Ok(())
-        })();
-        if import.is_ok() {
-            for suffix in ["", "-wal", "-shm"] {
-                let _ =
-                    std::fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
-            }
-        }
     }
 
     /// Insert one listed token. Fails if the (chain, address) pair exists.
@@ -1013,6 +971,7 @@ impl ChainIdInput {
 mod tests {
     use super::*;
     use crate::policy_store::DatabaseKey;
+    use rusqlite::Connection;
 
     fn open(directory: &Path) -> TokenStore {
         TokenStore::new(
@@ -1386,7 +1345,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plain_database_is_imported_once_and_removed() {
+    fn a_legacy_plain_database_names_nothing_and_is_deleted() {
+        // A file anyone can write is not a curator. Planting one must not put
+        // a single name into the table the review screen trusts, however
+        // well-formed its rows are.
         let directory = tempfile::tempdir().unwrap();
         let legacy_path = directory.path().join(LEGACY_DATABASE_FILE);
         let legacy = Connection::open(&legacy_path).unwrap();
@@ -1401,27 +1363,15 @@ mod tests {
                  );
                  INSERT INTO tokens VALUES
                      (1, '0x1111111111111111111111111111111111111111',
-                      'USDC', 'USD Coin', 6, 'manual', '2026-01-01T00:00:00Z'),
-                     (0, '0xbad', 'EVIL', 'Constraint Violator', 6,
-                      'manual', '2026-01-01T00:00:00Z');",
+                      'USDC', 'USD Coin', 6, 'manual', '2026-01-01T00:00:00Z');",
             )
             .unwrap();
         drop(legacy);
 
-        let store = open(directory.path());
-        store.import_legacy_database(directory.path());
-        // The valid row imports; the row violating the encrypted table's
-        // constraints is dropped rather than trusted; the file is removed.
-        assert_eq!(store.count(None).unwrap(), 1);
-        assert_eq!(
-            store
-                .get(1, Address::repeat_byte(0x11))
-                .unwrap()
-                .unwrap()
-                .symbol
-                .as_deref(),
-            Some("USDC")
-        );
+        let store = TokenStore::production(directory.path()).unwrap();
+        assert_eq!(store.count(None).unwrap(), 0);
+        assert!(store.get(1, Address::repeat_byte(0x11)).unwrap().is_none());
+        assert_eq!(store.count_proposals().unwrap(), 0);
         assert!(!legacy_path.exists());
     }
 }
