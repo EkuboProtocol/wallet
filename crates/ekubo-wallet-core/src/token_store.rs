@@ -13,11 +13,16 @@
 //! claim by someone the owner chose to trust; a contract's own answer is a
 //! claim by the counterparty they are being protected from.
 //!
-//! The chain still gets a vote, but only a veto. [`verify_listings`] confirms
-//! a token-like contract exists at the address and that its `decimals` agrees
-//! with the list — `decimals` scales every amount ever displayed for the
-//! token, so a disagreement is refused rather than resolved. Neither check can
-//! put a contract-chosen string in front of a reviewer.
+//! The chain is asked exactly one question, and it is not about identity:
+//! [`verify_listings`] checks that *something* at the address behaves like a
+//! token, so a typo or a dead entry cannot become a named row. Only whether it
+//! answers is used; what it answers is never decoded.
+//!
+//! In particular `decimals()` is never called. Every value a contract returns
+//! is chosen by whoever deployed it, `decimals` no less than `symbol`, so
+//! checking the list against it would let the counterparty overrule the
+//! curator the owner picked. The list is the authority on both the name and
+//! the scale of every amount displayed for a token.
 
 use crate::{
     config::NetworkConfig,
@@ -81,7 +86,6 @@ sol! {
 
     function symbol() external view returns (string);
     function name() external view returns (string);
-    function decimals() external view returns (uint8);
     function balanceOf(address account) external view returns (uint256);
     function getEthBalance(address addr) external view returns (uint256);
     function getBlockNumber() external view returns (uint256);
@@ -116,25 +120,13 @@ pub struct StoredToken {
     pub added_at: String,
 }
 
-/// Metadata read from the token contract through Multicall3.
-///
-/// This is never what gets stored as a token's name. A contract's `symbol()`
-/// answers with whatever its author wrote, so it is evidence about the
-/// contract, not about the token's identity — see [`ListedToken`].
-#[derive(Clone, Debug, Default)]
-pub struct OnchainTokenMetadata {
-    pub symbol: Option<String>,
-    pub name: Option<String>,
-    pub decimals: Option<u8>,
-}
-
 /// What a token list says about one token, and the only thing the wallet will
 /// ever display as a token's name.
 ///
-/// The distinction from [`OnchainTokenMetadata`] is the whole point: a list is
-/// a claim by whoever curated it, and the owner decides whether to trust that
-/// curator. A contract's own answer is a claim by the counterparty, which is
-/// exactly the party a reviewer is being protected from.
+/// Nothing a contract returns is stored or displayed. A list is a claim by
+/// whoever curated it, and the owner decides whether to trust that curator; a
+/// contract's own answer is a claim by the counterparty, which is exactly the
+/// party a reviewer is being protected from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListedToken {
     pub chain_id: u64,
@@ -167,26 +159,18 @@ pub struct ProposalSummary {
 /// Why a listed token was refused at import.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListingRejection {
-    /// The contract answered neither `symbol()` nor `decimals()`, so there is
-    /// no evidence a token lives at this address at all.
+    /// The address answered neither `symbol()` nor `name()`, so there is no
+    /// evidence a token lives there at all. Only the fact that it answered is
+    /// used; what it answered is never read.
     NotATokenContract,
-    /// The list and the contract disagree about `decimals`. One of them is
-    /// wrong, and since `decimals` scales every amount the owner will ever be
-    /// shown for this token, guessing which would risk misrendering an amount
-    /// by orders of magnitude.
-    DecimalsMismatch { listed: u8, onchain: u8 },
 }
 
 impl std::fmt::Display for ListingRejection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotATokenContract => {
-                write!(formatter, "answered neither symbol() nor decimals()")
+                write!(formatter, "nothing at this address behaves like a token")
             }
-            Self::DecimalsMismatch { listed, onchain } => write!(
-                formatter,
-                "the list says {listed} decimals, the contract reports {onchain}"
-            ),
         }
     }
 }
@@ -582,12 +566,17 @@ fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredToken> {
     })
 }
 
-/// Read `symbol`, `name`, and `decimals` for each token from the chain, in
-/// Multicall3 chunks. Tokens whose calls fail map to empty metadata.
-pub async fn fetch_onchain_metadata(
+/// Ask each address whether it behaves like a token, in Multicall3 chunks.
+///
+/// Only *whether* it answers is used. The answers themselves are discarded
+/// without being decoded: what a token calls itself is not evidence of
+/// anything, and a value read here would be one substitution away from
+/// becoming the name a reviewer trusts. `decimals()` is not called at all —
+/// the list's decimals are the wallet's decimals.
+async fn responds_as_token(
     network: &NetworkConfig,
     tokens: &[Address],
-) -> Result<BTreeMap<Address, OnchainTokenMetadata>> {
+) -> Result<BTreeMap<Address, bool>> {
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let mut out = BTreeMap::new();
     for chunk in tokens.chunks(METADATA_CHUNK) {
@@ -597,36 +586,19 @@ pub async fn fetch_onchain_metadata(
                 [
                     call(*token, symbolCall {}.abi_encode()),
                     call(*token, nameCall {}.abi_encode()),
-                    call(*token, decimalsCall {}.abi_encode()),
                 ]
             })
             .collect();
-        // Token metadata is only ever verified against real chain state; a
-        // fork must never be able to influence what gets stored.
+        // Checked against real chain state; a fork must never influence what
+        // the owner is allowed to confirm.
         let results = aggregate(network, &provider, calls, None).await?;
         ensure!(
-            results.len() == chunk.len() * 3,
+            results.len() == chunk.len() * 2,
             "Multicall3 returned an unexpected result count"
         );
         for (index, token) in chunk.iter().enumerate() {
-            let symbol_result = &results[index * 3];
-            let name_result = &results[index * 3 + 1];
-            let decimals_result = &results[index * 3 + 2];
-            out.insert(
-                *token,
-                OnchainTokenMetadata {
-                    symbol: decode_string(symbol_result, |data| {
-                        symbolCall::abi_decode_returns(data).ok()
-                    }),
-                    name: decode_string(name_result, |data| {
-                        nameCall::abi_decode_returns(data).ok()
-                    }),
-                    decimals: decimals_result
-                        .success
-                        .then(|| decimalsCall::abi_decode_returns(&decimals_result.returnData).ok())
-                        .flatten(),
-                },
-            );
+            let answered = results[index * 2].success || results[index * 2 + 1].success;
+            out.insert(*token, answered);
         }
     }
     Ok(out)
@@ -635,48 +607,30 @@ pub async fn fetch_onchain_metadata(
 /// Check listed tokens against their contracts, returning each token with the
 /// reason it must be refused, if any.
 ///
-/// The chain is not consulted about what a token is *called* — that is the
-/// list's job and the reason the owner confirms a list at all. It is consulted
-/// about two things a list can get wrong without anyone noticing:
+/// The chain answers exactly one question here: is there something at this
+/// address that behaves like a token? That catches a typo or a dead entry
+/// before it becomes a named row, and it is all the chain is asked.
 ///
-/// - whether a contract that behaves like a token exists at the address, so a
-///   typo or a dead entry cannot become a named row; and
-/// - whether `decimals` agrees, because `decimals` silently scales every
-///   amount the owner will be shown for this token, and a list that is off by
-///   twelve would misrender an amount by a factor of a trillion.
-///
-/// Neither check can put a contract-chosen string in front of a reviewer.
+/// It is deliberately not asked what the token is called, and no longer asked
+/// what its `decimals` are. Every value a contract can return is chosen by
+/// whoever deployed it, `decimals` no less than `symbol`; treating one of them
+/// as a fact to check the list against would mean letting the counterparty
+/// veto the curator the owner picked. The list the owner confirmed is the
+/// authority on both the name and the scale of every amount shown for it.
 pub async fn verify_listings(
     network: &NetworkConfig,
     listed: &[ListedToken],
 ) -> Result<Vec<(ListedToken, Option<ListingRejection>)>> {
     let addresses: Vec<Address> = listed.iter().map(|token| token.address).collect();
-    let onchain = fetch_onchain_metadata(network, &addresses).await?;
+    let responds = responds_as_token(network, &addresses).await?;
     Ok(listed
         .iter()
         .map(|token| {
-            let found = onchain.get(&token.address).cloned().unwrap_or_default();
-            (token.clone(), listing_rejection(token, &found))
+            let rejection = (!responds.get(&token.address).copied().unwrap_or_default())
+                .then_some(ListingRejection::NotATokenContract);
+            (token.clone(), rejection)
         })
         .collect())
-}
-
-/// The rule [`verify_listings`] applies to one token, separated from the RPC
-/// so it can be read and tested as the decision it is.
-fn listing_rejection(
-    listed: &ListedToken,
-    onchain: &OnchainTokenMetadata,
-) -> Option<ListingRejection> {
-    if onchain.symbol.is_none() && onchain.decimals.is_none() {
-        return Some(ListingRejection::NotATokenContract);
-    }
-    match onchain.decimals {
-        Some(reported) if reported != listed.decimals => Some(ListingRejection::DecimalsMismatch {
-            listed: listed.decimals,
-            onchain: reported,
-        }),
-        _ => None,
-    }
 }
 
 /// One token balance line in a portfolio.
@@ -1013,23 +967,6 @@ async fn aggregate<P: Provider>(
     aggregate3Call::abi_decode_returns(&bytes).context("Multicall3 returned undecodable data")
 }
 
-fn decode_string<F>(result: &TokenResult3, decode: F) -> Option<String>
-where
-    F: Fn(&[u8]) -> Option<String>,
-{
-    if !result.success {
-        return None;
-    }
-    decode(&result.returnData)
-        .as_deref()
-        .and_then(nonempty_sanitized)
-}
-
-fn nonempty_sanitized(text: &str) -> Option<String> {
-    let cleaned = sanitize(text);
-    (!cleaned.is_empty()).then_some(cleaned)
-}
-
 /// Token names and symbols are attacker-controlled contract output; strip
 /// control characters and cap length before they reach any display or store.
 /// Neutralize `LIKE` wildcards in user input, so a query of `%` searches for a
@@ -1208,58 +1145,17 @@ mod tests {
     /// The rule `verify_listings` applies, exercised directly so it is pinned
     /// without needing an RPC: the contract may veto a listing, but it never
     /// gets to supply the name.
+    /// The list is the authority on decimals, so a contract that would have
+    /// disagreed changes nothing: what is stored, and therefore what scales
+    /// every displayed amount, is what the owner confirmed.
     #[test]
-    fn a_listing_is_vetoed_by_decimals_but_never_renamed() {
-        let listed = usdc(1, Address::repeat_byte(0x66));
-
-        // Agreement: accepted, and the stored symbol stays the list's even
-        // though the contract calls itself something else entirely.
+    fn stored_decimals_are_the_list_s_own() {
+        let (_directory, mut store) = store();
+        let token = Address::repeat_byte(0x66);
+        store.add(&usdc(1, token), "list").unwrap();
         assert_eq!(
-            listing_rejection(
-                &listed,
-                &OnchainTokenMetadata {
-                    symbol: Some("Definitely Not USDC".into()),
-                    name: None,
-                    decimals: Some(6),
-                }
-            ),
-            None
-        );
-
-        // Disagreement about decimals: refused rather than resolved.
-        assert_eq!(
-            listing_rejection(
-                &listed,
-                &OnchainTokenMetadata {
-                    symbol: Some("USDC".into()),
-                    name: None,
-                    decimals: Some(18),
-                }
-            ),
-            Some(ListingRejection::DecimalsMismatch {
-                listed: 6,
-                onchain: 18
-            })
-        );
-
-        // Nothing token-like at the address at all.
-        assert_eq!(
-            listing_rejection(&listed, &OnchainTokenMetadata::default()),
-            Some(ListingRejection::NotATokenContract)
-        );
-
-        // A contract that answers symbol() but not decimals() is still a
-        // token; the list's decimals stand because nothing contradicts them.
-        assert_eq!(
-            listing_rejection(
-                &listed,
-                &OnchainTokenMetadata {
-                    symbol: Some("USDC".into()),
-                    name: None,
-                    decimals: None,
-                }
-            ),
-            None
+            store.display_metadata(1, &[token]).unwrap()[&token].decimals,
+            Some(6)
         );
     }
 

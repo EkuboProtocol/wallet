@@ -891,9 +891,10 @@ async fn confirm_and_store(
         );
     }
 
-    // Accepting is where the chain finally gets its veto: confirm a token
-    // lives at each address and that decimals agree with what the owner just
-    // read, one Multicall3 pass per chain.
+    // Accepting is where the chain gets its one and only say: confirm
+    // something token-like lives at each address, so a typo cannot become a
+    // named row. One Multicall3 pass per chain, and it asks nothing about
+    // what the token is called or how it scales.
     let mut by_chain: std::collections::BTreeMap<u64, Vec<crate::token_store::ListedToken>> =
         std::collections::BTreeMap::new();
     for token in decision.accepted {

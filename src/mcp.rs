@@ -410,8 +410,9 @@ struct ProposeTokenItem {
     symbol: String,
     #[serde(default)]
     name: Option<String>,
-    /// The list's decimals. Checked against the contract when the owner
-    /// accepts, and refused there if the two disagree.
+    /// The list's decimals. This scales every amount the owner is ever shown
+    /// for the token, and the contract is never consulted about it, so take it
+    /// from the same list as the symbol rather than reading `decimals()`.
     decimals: u8,
 }
 
@@ -1150,7 +1151,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_tokens",
-        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet token review`, where they accept or reject them by list. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting is where contracts are checked, so a bad entry is caught then rather than here.",
+        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet token review`, where they accept or reject them by list. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. When the owner accepts, the only thing checked on-chain is that something token-like exists at the address, so a typo is caught then rather than here.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

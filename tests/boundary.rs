@@ -90,3 +90,42 @@ fn core_crate_has_no_presentation_dependencies() {
         );
     }
 }
+
+/// A token contract is never asked what it is called or how it scales.
+///
+/// The wallet displays a token's symbol at approval time and its decimals
+/// scale every amount shown, so both must come from a list the owner
+/// confirmed. Every value a contract returns is chosen by whoever deployed
+/// it — `decimals` no less than `symbol` — which makes reading one back a
+/// way for the counterparty to overrule the curator the owner picked.
+///
+/// `symbol()` and `name()` survive as a liveness probe: whether an address
+/// answers is evidence a token lives there, and that answer is never decoded.
+/// A `decimals()` call has no such innocent form, so its absence is the
+/// invariant worth pinning.
+#[test]
+fn no_token_contract_is_asked_for_its_decimals() {
+    let store =
+        fs::read_to_string(repository_root().join("crates/ekubo-wallet-core/src/token_store.rs"))
+            .unwrap();
+    for forbidden in ["decimalsCall", "function decimals()"] {
+        assert!(
+            !store.contains(forbidden),
+            "token_store.rs references {forbidden}; the list decides a token's decimals, \
+             never the contract"
+        );
+    }
+
+    // And nothing in the review path may read metadata off the chain either.
+    let summary = fs::read_to_string(
+        repository_root().join("crates/ekubo-wallet-core/src/approval_summary.rs"),
+    )
+    .unwrap();
+    for forbidden in ["symbolCall", "decimalsCall", "ProviderBuilder"] {
+        assert!(
+            !summary.contains(forbidden),
+            "approval_summary.rs references {forbidden}; names shown at approval time come \
+             from the owner's token database, not from the chain"
+        );
+    }
+}

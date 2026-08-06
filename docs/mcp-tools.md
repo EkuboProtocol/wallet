@@ -115,11 +115,17 @@ groups them by the list that vouched for them so a whole list is one decision
 rather than hundreds. The owner can also import a list themselves with
 `ekubo-wallet token import <file>`, which reads the standard token-list shape.
 
-The chain keeps a veto but has no voice. When the owner accepts, each token's
-contract is checked to confirm something token-like exists at the address and
-that its `decimals` matches the list — `decimals` scales every amount ever
-displayed for that token, so a disagreement is refused rather than resolved.
-Neither check can put a contract-chosen string in front of a reviewer.
+The chain is asked one question, and it is not about identity. When the owner
+accepts, each address is checked to confirm something token-like lives there,
+so a typo or a dead entry cannot become a named row. Only whether it answers
+is used; what it answers is never decoded.
+
+`decimals()` is never called. Every value a contract returns is chosen by
+whoever deployed it, `decimals` no less than `symbol`, so checking the list
+against it would let the counterparty overrule the curator the owner picked.
+The list is the authority on both the name and the scale of every amount
+displayed for a token. A tripwire test fails the build if a `decimals()` call
+reappears.
 
 Integrity rules are structural. The `(chain_id, address)` pair is the primary
 key, so an entry is never overwritten and a second list cannot rename a token
