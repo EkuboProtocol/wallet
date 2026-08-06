@@ -2132,17 +2132,10 @@ async fn approve_typed_data(
         );
     }
 
-    let mut stderr = io::stderr().lock();
-    serde_json::to_writer_pretty(
-        &mut stderr,
-        &serde_json::json!({
-            "approval": approval,
-            "typed_data": request.typed_data,
-        }),
-    )?;
-    stderr.write_all(b"\n")?;
-    stderr.flush()?;
-    drop(stderr);
+    print_review_transcript(&serde_json::json!({
+        "approval": approval,
+        "typed_data": request.typed_data,
+    }))?;
     if !no_confirm
         && !reviewer_approved(approval, typed_data_payload_lines(&request.typed_data)).await?
     {
@@ -2324,24 +2317,17 @@ async fn approve_message(
         .digest(&request.digest);
     approval.id = request.request_id;
 
-    let mut stderr = io::stderr().lock();
-    serde_json::to_writer_pretty(
-        &mut stderr,
-        &serde_json::json!({
-            "approval": approval,
-            "message": {
-                "hex": request.message_hex,
-                "text": display.text,
-                "escaped_text": display.escaped_text,
-                "byte_length": display.byte_length,
-                "encoding": request.encoding,
-                "siwe": siwe,
-            },
-        }),
-    )?;
-    stderr.write_all(b"\n")?;
-    stderr.flush()?;
-    drop(stderr);
+    print_review_transcript(&serde_json::json!({
+        "approval": approval,
+        "message": {
+            "hex": request.message_hex,
+            "text": display.text,
+            "escaped_text": display.escaped_text,
+            "byte_length": display.byte_length,
+            "encoding": request.encoding,
+            "siwe": siwe,
+        },
+    }))?;
     if !no_confirm
         && !reviewer_approved(
             approval,
@@ -2420,18 +2406,35 @@ fn terminal_safe_excerpt(value: &str) -> String {
     format!("{head}… (complete message below)")
 }
 
-fn print_approval_review(approval: &ApprovalRequest, simulation: &SimulationResult) -> Result<()> {
+/// Write a review transcript to stderr with nothing in it that can redraw the
+/// terminal it lands in.
+///
+/// `serde_json` escapes quotes, backslashes, and C0 control characters, and
+/// nothing else. A right-to-left override, an isolate, or a zero-width space —
+/// in a token symbol, a message body, a policy label, an RPC error — is
+/// perfectly valid JSON and reaches the approver's terminal verbatim. Every
+/// other surface that shows a human untrusted text routes through
+/// `sanitize`; these transcripts stream straight to a file descriptor and so
+/// did not, which is the one place it matters most.
+fn review_transcript_text(value: &serde_json::Value) -> Result<String> {
+    Ok(crate::sanitize::terminal_safe_multiline(
+        &serde_json::to_string_pretty(value)?,
+    ))
+}
+
+fn print_review_transcript(value: &serde_json::Value) -> Result<()> {
     let mut stderr = io::stderr().lock();
-    serde_json::to_writer_pretty(
-        &mut stderr,
-        &serde_json::json!({
-            "approval": approval,
-            "simulation": simulation,
-        }),
-    )?;
+    stderr.write_all(review_transcript_text(value)?.as_bytes())?;
     stderr.write_all(b"\n")?;
     stderr.flush()?;
     Ok(())
+}
+
+fn print_approval_review(approval: &ApprovalRequest, simulation: &SimulationResult) -> Result<()> {
+    print_review_transcript(&serde_json::json!({
+        "approval": approval,
+        "simulation": simulation,
+    }))
 }
 
 async fn replace_policy(
@@ -3817,6 +3820,29 @@ fn require_interactive(operation: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_transcript_carries_nothing_that_can_redraw_a_terminal() {
+        // serde_json escapes quotes, backslashes, and C0 controls. Everything
+        // below is valid JSON string content and would reach the approver's
+        // terminal intact: the override reverses what they read, the isolate
+        // and the zero-width space hide inside it.
+        let rendered = review_transcript_text(&serde_json::json!({
+            "message": {
+                "text": "pay \u{202e}0001\u{202c} to \u{2066}them\u{2069}",
+                "symbol": "US\u{200b}DC",
+            },
+        }))
+        .unwrap();
+        for hostile in ['\u{202e}', '\u{202c}', '\u{2066}', '\u{2069}', '\u{200b}'] {
+            assert!(
+                !rendered.contains(hostile),
+                "{hostile:?} survived into the transcript: {rendered}"
+            );
+        }
+        // The transcript is still JSON, and still readable.
+        assert!(rendered.contains("\"symbol\""));
+    }
 
     #[test]
     fn a_new_wallet_never_starts_permissive_by_accident() {
