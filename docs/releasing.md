@@ -124,24 +124,118 @@ should be enabled for GitHub Actions so those pins receive reviewed updates.
 An Apple Developer Program organization membership for **Ekubo, Inc.** is
 required for software distributed outside the Mac App Store.
 
-1. Have the Account Holder create a **Developer ID Application** certificate.
-   Export the certificate and private key as a password-protected `.p12` file.
-2. Have an Account Holder or Admin enable App Store Connect API access and
-   create a **team** API key usable by `notarytool`. An individual API key does
-   not support `notarytool`. Download the `.p8` file immediately; Apple permits
-   it to be downloaded only once.
-3. Add these `release` environment secrets:
-
-   - `APPLE_CODESIGN_IDENTITY`: the complete Developer ID Application identity,
-     including the team ID.
-   - `APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64`: base64 of the `.p12` bytes.
-   - `APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD`: the export password.
-   - `APPLE_NOTARY_API_KEY_P8_BASE64`: base64 of the team API `.p8` bytes.
-   - `APPLE_NOTARY_KEY_ID`: the App Store Connect key ID.
-   - `APPLE_NOTARY_ISSUER_ID`: the App Store Connect issuer UUID.
-
 The workflow uses hardened-runtime signing, a secure timestamp, and
 `xcrun notarytool --wait`. It fails closed if signing or notarization fails.
+Nothing is stapled: a stapled ticket can only be attached to an `.app`, `.dmg`,
+or `.pkg`, and these archives ship a bare executable, so Gatekeeper resolves the
+notarization online on first run.
+
+#### 1. Create the Developer ID Application certificate
+
+Certificate creation is bound to the machine that generates the key pair, so do
+this on the Mac that will hold the private key.
+
+1. **Keychain Access → Certificate Assistant → Request a Certificate From a
+   Certificate Authority.** Enter the membership email and `Ekubo, Inc.` as the
+   common name, leave the CA email empty, choose **Saved to disk**, and select
+   *Let me specify key pair information* → 2048 bits, RSA. This writes a
+   `.certSigningRequest` file.
+2. On [developer.apple.com](https://developer.apple.com/account/resources/certificates/list),
+   **Certificates → + → Developer ID Application**. Only the **Account Holder**
+   may create this type for an organization. When asked for a profile type,
+   choose the **G2 Sub-CA**. Upload the CSR and download the resulting `.cer`.
+
+   A team may hold only a small number of live Developer ID Application
+   certificates, and they cannot be deleted — only revoked — so do not generate
+   spares.
+3. Double-click the `.cer` to install it into the login keychain. Confirm the
+   private key came with it, and capture the exact identity string:
+
+   ```sh
+   security find-identity -v -p codesigning
+   ```
+
+   The quoted name — `Developer ID Application: Ekubo, Inc. (TEAMID1234)` — is
+   `APPLE_CODESIGN_IDENTITY` verbatim, team ID included.
+4. In **Keychain Access → login → My Certificates**, select that certificate,
+   **File → Export Items**, and save it as a Personal Information Exchange
+   (`.p12`) with a strong password. Export the certificate row, not the bare
+   key, so the `.p12` carries both halves.
+
+#### 2. Create the notarization API key
+
+1. In [App Store Connect → Users and Access → Integrations → App Store Connect
+   API](https://appstoreconnect.apple.com/access/integrations/api), select the
+   **Team Keys** tab. An individual key cannot notarize.
+2. Generate a key named for this workflow and give it the **Developer** role,
+   which is the least privilege `notarytool` accepts.
+3. Download the `.p8` **immediately** — Apple allows exactly one download — and
+   record the **Key ID** from its row and the **Issuer ID** shown above the
+   table.
+
+#### 3. Store the six values on the `release` environment
+
+`.p12` and `.p8` are binary, so both travel base64-encoded:
+
+```sh
+repo=EkuboProtocol/wallet-mcp-server
+
+base64 -i DeveloperID.p12 | tr -d '\n' |
+  gh secret set APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 --env release --repo "$repo"
+base64 -i AuthKey_XXXXXXXXXX.p8 | tr -d '\n' |
+  gh secret set APPLE_NOTARY_API_KEY_P8_BASE64 --env release --repo "$repo"
+
+gh secret set APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD --env release --repo "$repo"
+gh secret set APPLE_CODESIGN_IDENTITY --env release --repo "$repo"
+gh secret set APPLE_NOTARY_KEY_ID --env release --repo "$repo"
+gh secret set APPLE_NOTARY_ISSUER_ID --env release --repo "$repo"
+```
+
+The last four prompt for their value on stdin, which keeps it out of shell
+history. What each one holds:
+
+- `APPLE_CODESIGN_IDENTITY`: the complete Developer ID Application identity,
+  including the team ID.
+- `APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64`: base64 of the `.p12` bytes.
+- `APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD`: the export password.
+- `APPLE_NOTARY_API_KEY_P8_BASE64`: base64 of the team API `.p8` bytes.
+- `APPLE_NOTARY_KEY_ID`: the App Store Connect key ID.
+- `APPLE_NOTARY_ISSUER_ID`: the App Store Connect issuer UUID.
+
+Set all six in one sitting. The detection step treats any non-empty subset
+smaller than six as an operator error and fails the release, so a partially
+configured environment blocks every tag until it is completed or cleared.
+
+#### 4. Prove the credentials before tagging
+
+The signing path only runs on a `v*` tag push, and a tag cannot be reused, so
+verify the credentials locally first rather than discovering a typo mid-release.
+Both checks are read-only and submit nothing:
+
+```sh
+# The notary credentials, without submitting anything.
+xcrun notarytool history \
+  --key AuthKey_XXXXXXXXXX.p8 --key-id "$KEY_ID" --issuer "$ISSUER_ID"
+
+# The certificate and its private key, end to end, on a real build.
+cargo build --release
+codesign --force --options runtime --timestamp \
+  --sign "Developer ID Application: Ekubo, Inc. (TEAMID1234)" \
+  target/release/ekubo-wallet
+codesign --verify --strict --verbose=2 target/release/ekubo-wallet
+```
+
+A full rehearsal adds `ditto -c -k --sequesterRsrc --keepParent` over a staged
+directory and `xcrun notarytool submit --wait`, which is what the workflow does.
+Notarizing a throwaway build costs nothing and is the only way to see the
+Notary service's own verdict before a tag depends on it.
+
+#### Provisioning state
+
+The Apple Developer Program organization enrollment for Ekubo, Inc. was approved
+on 2026-08-06. None of the six `release` environment secrets are set yet, so
+releases still publish unsigned macOS archives and say so in their notes, which
+is the correct state until steps 1–3 are done.
 
 ### Microsoft Azure Artifact Signing
 

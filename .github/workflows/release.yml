@@ -159,7 +159,7 @@ jobs:
     # `v*` tag deployments, rather than exposing them at repository scope.
     environment: release
     outputs:
-      signed: ${{ steps.sign.outputs.signed }}
+      signed: ${{ steps.detect.outputs.signed }}
     steps:
       - name: Download Intel binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -177,8 +177,8 @@ jobs:
       # are Developer ID signed and notarized, and without any credential the
       # release still publishes, clearly labeled as unsigned. A partial
       # credential set is a configuration error and fails the release.
-      - name: Sign, verify, and notarize
-        id: sign
+      - name: Detect Apple signing configuration
+        id: detect
         shell: bash
         env:
           APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
@@ -211,10 +211,28 @@ jobs:
           fi
           printf 'signed=true\n' >> "$GITHUB_OUTPUT"
 
+      # Importing the certificate, signing, packaging, and notarizing share one
+      # step so the private key and the notary key exist for exactly as long as
+      # they are used. The cleanup trap fires when this step's shell exits, so
+      # anything that reads them has to run before it — a later step holding a
+      # path to the notary key would find the file already deleted.
+      - name: Sign, notarize, and package macOS archives
+        shell: bash
+        env:
+          SIGNED: ${{ steps.detect.outputs.signed }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_NOTARY_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+        run: |
+          set -euo pipefail
+
           keychain_path="$RUNNER_TEMP/ekubo-release-signing.keychain-db"
           certificate_path="$RUNNER_TEMP/developer-id-application.p12"
           api_key_path="$RUNNER_TEMP/AuthKey.p8"
-          keychain_password="ekubo-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           cleanup() {
             security delete-keychain "$keychain_path" >/dev/null 2>&1 || true
@@ -222,34 +240,30 @@ jobs:
           }
           trap cleanup EXIT
 
-          printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 -D > "$certificate_path"
-          printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
-          chmod 600 "$certificate_path" "$api_key_path"
+          if [ "$SIGNED" = "true" ]; then
+            keychain_password="ekubo-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
-          security list-keychains -d user -s "$keychain_path"
+            printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 -D > "$certificate_path"
+            printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
+            chmod 600 "$certificate_path" "$api_key_path"
 
-          for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            binary="unsigned/$target/ekubo-wallet"
-            codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$binary"
-            codesign --verify --strict --verbose=2 "$binary"
-          done
-          printf '%s' "$api_key_path" > "$RUNNER_TEMP/notary-key-path"
+            security create-keychain -p "$keychain_password" "$keychain_path"
+            security set-keychain-settings -lut 21600 "$keychain_path"
+            security unlock-keychain -p "$keychain_password" "$keychain_path"
+            security import "$certificate_path" -k "$keychain_path" -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+            security list-keychains -d user -s "$keychain_path"
 
-      - name: Package macOS archives
-        shell: bash
-        env:
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-        run: |
-          set -euo pipefail
+            for target in x86_64-apple-darwin aarch64-apple-darwin; do
+              binary="unsigned/$target/ekubo-wallet"
+              codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$binary"
+              codesign --verify --strict --verbose=2 "$binary"
+            done
+          fi
+
           mkdir -p dist
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            package="ekubo-wallet-${{ needs.validate.outputs.version }}-$target"
+            package="ekubo-wallet-$VERSION-$target"
             mkdir -p "dist/$package"
             install -m 0755 "unsigned/$target/ekubo-wallet" "dist/$package/ekubo-wallet"
             ln -s ekubo-wallet "dist/$package/ew"
@@ -258,9 +272,9 @@ jobs:
             cp -R "unsigned/$target/completions" "dist/$package/completions"
             cp -R "unsigned/$target/examples" "unsigned/$target/schemas" "dist/$package/"
             ditto -c -k --sequesterRsrc --keepParent "dist/$package" "dist/$package.zip"
-            if [ "${{ steps.sign.outputs.signed }}" = "true" ]; then
+            if [ "$SIGNED" = "true" ]; then
               xcrun notarytool submit "dist/$package.zip" \
-                --key "$(cat "$RUNNER_TEMP/notary-key-path")" \
+                --key "$api_key_path" \
                 --key-id "$APPLE_NOTARY_KEY_ID" \
                 --issuer "$APPLE_NOTARY_ISSUER_ID" \
                 --wait
