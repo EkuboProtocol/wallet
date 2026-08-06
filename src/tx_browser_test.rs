@@ -182,7 +182,11 @@ fn balance_changes_render_as_an_aligned_signed_table() {
     let lines = detail_lines(
         &record,
         Some(&ethereum()),
-        Some(&ReceiptSection::Ready { receipt, metadata }),
+        Some(&ReceiptSection::Ready {
+            receipt,
+            metadata,
+            native_delta: Some(BigInt::from(-71_000_000_000_000_i64)),
+        }),
     );
     let text = text_of(&lines);
     assert!(text.contains("succeeded in block 123"));
@@ -193,6 +197,11 @@ fn balance_changes_render_as_an_aligned_signed_table() {
     assert!(text.contains("+1.5"));
     assert!(text.contains("-25 base units"));
     assert!(text.contains("USDC 0xa0a0a0a0…a0a0a0a0"));
+    // The native change shares the table, scaled by the network currency,
+    // and states that it is a block-wide diff that includes gas.
+    assert!(text.contains("ETH (native)"));
+    assert!(text.contains("-0.000071"));
+    assert!(text.contains("net change across the block, gas fee included"));
     // The Received column is right-aligned: the header's edge and the
     // amount's edge land on the same display column. Edges are measured
     // in display columns, not bytes — the `…` in a shortened address is
@@ -204,6 +213,34 @@ fn balance_changes_render_as_an_aligned_signed_table() {
     let header = text.lines().find(|line| line.contains("Received")).unwrap();
     let usdc = text.lines().find(|line| line.contains("+1.5")).unwrap();
     assert_eq!(edge(header, "Received"), edge(usdc, "+1.5"));
+}
+
+#[test]
+fn an_unavailable_native_delta_is_said_not_shown_as_zero() {
+    let receipt = ReceiptDetails {
+        succeeded: true,
+        block_number: 123,
+        gas_used: 21_000,
+        effective_gas_price: 1_000_000_000,
+        logs: Vec::new(),
+    };
+    let mut record = record();
+    record.status = PendingStatus::Confirmed;
+    record.broadcast_transaction_hash = Some(format!("0x{}", "aa".repeat(32)));
+    let lines = detail_lines(
+        &record,
+        Some(&ethereum()),
+        Some(&ReceiptSection::Ready {
+            receipt,
+            metadata: TokenMetadataMap::new(),
+            native_delta: None,
+        }),
+    );
+    let text = text_of(&lines);
+    assert!(
+        text.contains("native change unavailable"),
+        "a failed lookup is reported, never rendered as no change: {text}"
+    );
 }
 
 #[test]

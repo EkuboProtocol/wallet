@@ -23,7 +23,7 @@ use std::time::Duration;
 use alloy::primitives::{Address, B256, U256, b256};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use num_bigint::BigUint;
+use num_bigint::{BigInt, BigUint, Sign};
 use ratatui::{layout::Constraint, text::Line as UiLine, widgets::Paragraph};
 
 use crate::{
@@ -178,6 +178,10 @@ enum ReceiptSection {
     Ready {
         receipt: ReceiptDetails,
         metadata: TokenMetadataMap,
+        /// The wallet's net native change across the receipt's block —
+        /// internal transfers included, gas included — or `None` when the
+        /// RPC could not serve the parent block's state.
+        native_delta: Option<BigInt>,
     },
     NotYetAvailable,
     Failed(String),
@@ -231,7 +235,14 @@ async fn load_receipt(
                     let metadata = tokens
                         .and_then(|tokens| tokens.display_metadata(network.chain_id, &moved).ok())
                         .unwrap_or_default();
-                    return ReceiptSection::Ready { receipt, metadata };
+                    let native_delta =
+                        native_delta(network, record.execution_plan.sender, receipt.block_number)
+                            .await;
+                    return ReceiptSection::Ready {
+                        receipt,
+                        metadata,
+                        native_delta,
+                    };
                 }
                 Ok(None) => {}
                 // A transport failure against one hash will fail for the rest
@@ -282,6 +293,24 @@ fn broadcast_hash(record: &PendingTransaction) -> Option<&str> {
         .broadcast_transaction_hash
         .as_deref()
         .or(record.signed_transaction_hash.as_deref())
+}
+
+/// Best-effort net native change for the wallet across the receipt's block:
+/// the balance at the block minus the balance at its parent. This is the
+/// only view standard RPC offers of native value received through internal
+/// transactions, which emit no log a receipt could carry. It spans the whole
+/// block and includes gas, and it is display-only, so an RPC that cannot
+/// serve the parent state degrades to `None` rather than an error.
+async fn native_delta(
+    network: &NetworkConfig,
+    wallet: Address,
+    block_number: u64,
+) -> Option<BigInt> {
+    let (before, after) = crate::rpc::native_balances_around_block(network, wallet, block_number)
+        .await
+        .ok()?;
+    let signed = |value: U256| BigInt::from_bytes_be(Sign::Plus, &value.to_be_bytes::<32>());
+    Some(signed(after) - signed(before))
 }
 
 /// Net standard Transfer activity for the sender from the receipt logs:
@@ -440,8 +469,18 @@ fn detail_lines(
         lines.push(Vec::new());
         lines.push(heading("Receipt"));
         match receipt {
-            ReceiptSection::Ready { receipt, metadata } => {
-                lines.extend(receipt_detail_lines(record, network, receipt, metadata));
+            ReceiptSection::Ready {
+                receipt,
+                metadata,
+                native_delta,
+            } => {
+                lines.extend(receipt_detail_lines(
+                    record,
+                    network,
+                    receipt,
+                    metadata,
+                    native_delta.as_ref(),
+                ));
             }
             ReceiptSection::NotYetAvailable => lines.push(fact(
                 "Result",
@@ -483,6 +522,7 @@ fn receipt_detail_lines(
     network: Option<&NetworkConfig>,
     receipt: &ReceiptDetails,
     metadata: &TokenMetadataMap,
+    native_delta: Option<&BigInt>,
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     let (result, tone) = if receipt.succeeded {
@@ -509,15 +549,55 @@ fn receipt_detail_lines(
     lines.push(Vec::new());
     lines.push(heading("Balance changes"));
     let activity = transfer_activity(record.execution_plan.sender, receipt);
-    if activity.is_empty() {
+    let mut rows = token_rows(&activity, metadata);
+    let native_row = native_delta
+        .filter(|delta| delta.sign() != Sign::NoSign)
+        .map(|delta| native_balance_row(delta, network));
+    if let Some(row) = native_row.clone() {
+        rows.insert(0, row);
+    }
+    if rows.is_empty() {
         lines.push(vec![Span::toned(
             "  none for this wallet in the receipt Transfer logs",
             Tone::Muted,
         )]);
-        return lines;
+    } else {
+        lines.extend(balance_table(&rows));
     }
-    lines.extend(balance_table(&activity, metadata));
+    // The native figure needs its provenance stated: it is a balance diff
+    // across the whole block, not a decoded event, so it includes the gas fee
+    // shown above and anything else the block did to this wallet.
+    if native_row.is_some() {
+        lines.push(vec![Span::toned(
+            "  native is the net change across the block, gas fee included",
+            Tone::Muted,
+        )]);
+    } else if native_delta.is_none() {
+        lines.push(vec![Span::toned(
+            "  native change unavailable: the RPC does not serve the parent block's state",
+            Tone::Muted,
+        )]);
+    }
     lines
+}
+
+/// The native delta as one balance-table row, in the Received or Sent column
+/// by its sign, scaled by the network currency when it is known.
+fn native_balance_row(delta: &BigInt, network: Option<&NetworkConfig>) -> BalanceRow {
+    let currency = network.and_then(|network| network.native_currency.as_ref());
+    let magnitude = delta.magnitude().to_string();
+    let (label, amount) = match currency {
+        Some(currency) => (
+            format!("{} (native)", terminal_safe_line(&currency.symbol)),
+            format_fixed_point(&magnitude, currency.decimals),
+        ),
+        None => ("Native".to_owned(), format!("{magnitude} wei")),
+    };
+    if delta.sign() == Sign::Minus {
+        (label, None, Some(format!("-{amount}")))
+    } else {
+        (label, Some(format!("+{amount}")), None)
+    }
 }
 
 /// A token amount for one table cell: the exact scaled value when decimals
@@ -536,11 +616,17 @@ fn short_address(address: Address) -> String {
     crate::render::short_hex(&format!("{address:#x}"))
 }
 
-/// The wallet's net token movements as an aligned table: one row per token,
-/// received amounts green, sent amounts red, columns sized to their content.
-fn balance_table(activity: &[(Address, (U256, U256))], metadata: &TokenMetadataMap) -> Vec<Line> {
-    use crate::fullscreen::display_width;
-    let rows: Vec<(String, Option<String>, Option<String>)> = activity
+/// One row of the balance table: an asset label, and what the wallet
+/// received and sent of it, already formatted and signed.
+type BalanceRow = (String, Option<String>, Option<String>);
+
+/// The wallet's net token movements from the receipt Transfer logs, as
+/// formatted rows.
+fn token_rows(
+    activity: &[(Address, (U256, U256))],
+    metadata: &TokenMetadataMap,
+) -> Vec<BalanceRow> {
+    activity
         .iter()
         .map(|(token, (received, sent))| {
             let display = metadata.get(token);
@@ -553,8 +639,13 @@ fn balance_table(activity: &[(Address, (U256, U256))], metadata: &TokenMetadataM
             };
             (label, cell(received, "+"), cell(sent, "-"))
         })
-        .collect();
+        .collect()
+}
 
+/// Balance rows as an aligned table: received amounts green, sent amounts
+/// red, columns sized to their content.
+fn balance_table(rows: &[BalanceRow]) -> Vec<Line> {
+    use crate::fullscreen::display_width;
     let token_width = rows
         .iter()
         .map(|(label, ..)| display_width(label))
@@ -597,7 +688,7 @@ fn balance_table(activity: &[(Address, (U256, U256))], metadata: &TokenMetadataM
         ),
         Tone::Muted,
     )]);
-    for (label, received, sent) in &rows {
+    for (label, received, sent) in rows {
         let mut line = vec![Span::plain(format!(
             "  {}  ",
             pad_right(label, token_width)
