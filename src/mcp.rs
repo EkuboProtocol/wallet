@@ -877,7 +877,7 @@ impl WalletMcpServer {
                 ),
             )?;
         }
-        let (execution_plan, _plan_source) =
+        let (execution_plan, plan_source) =
             resolve_execution_plan_reference(&input.reference, FetchPolicy::production())
                 .await
                 .map_err(|error| tool_error(&error))?;
@@ -930,6 +930,7 @@ impl WalletMcpServer {
                     &wallet.id,
                     &input.chain_id,
                     execution_plan.clone(),
+                    Some(plan_source.to_string()),
                     result.clone(),
                     Utc::now(),
                 );
@@ -1331,7 +1332,7 @@ impl WalletMcpServer {
         let plan = transfer_plan(&chain_id, wallet.address, input.transfers)
             .map_err(|error| tool_error(&error))?;
         Ok(Json(
-            Box::pin(self.send_new_plan(wallet, network, plan, input.on_simulation_failure))
+            Box::pin(self.send_new_plan(wallet, network, plan, None, input.on_simulation_failure))
                 .await
                 .map_err(|error| tool_error(&error))?,
         ))
@@ -1370,12 +1371,18 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         let output = match (input.reference, input.simulation_id, input.request_id) {
             (Some(reference), None, None) => {
-                let (plan, _plan_source) =
+                let (plan, plan_source) =
                     resolve_execution_plan_reference(&reference, FetchPolicy::production())
                         .await
                         .map_err(|error| tool_error(&error))?;
-                Box::pin(self.send_new_plan(wallet, network, plan, input.on_simulation_failure))
-                    .await
+                Box::pin(self.send_new_plan(
+                    wallet,
+                    network,
+                    plan,
+                    Some(plan_source.to_string()),
+                    input.on_simulation_failure,
+                ))
+                .await
             }
             (None, Some(simulation_id), None) => {
                 Box::pin(self.send_recorded_simulation(
@@ -2066,6 +2073,7 @@ impl WalletMcpServer {
         wallet: WalletMetadata,
         network: NetworkConfig,
         plan: ExecutionPlan,
+        plan_source: Option<String>,
         on_simulation_failure: OnSimulationFailure,
     ) -> Result<ExecutionStatusOutput> {
         self.require_legal_acceptance()?;
@@ -2079,6 +2087,7 @@ impl WalletMcpServer {
             wallet,
             network,
             plan,
+            plan_source,
             simulation,
             stored_policy,
             on_simulation_failure,
@@ -2132,6 +2141,7 @@ impl WalletMcpServer {
             wallet,
             network,
             recorded.plan,
+            recorded.plan_source,
             recorded.result,
             stored_policy,
             on_simulation_failure,
@@ -2141,11 +2151,13 @@ impl WalletMcpServer {
 
     /// Everything a send does once its plan has been simulated exactly once,
     /// whether that happened in this call or in an earlier recorded one.
+    #[allow(clippy::too_many_arguments)]
     async fn send_simulated_plan(
         &self,
         wallet: WalletMetadata,
         network: NetworkConfig,
         plan: ExecutionPlan,
+        plan_source: Option<String>,
         mut simulation: SimulationResult,
         stored_policy: crate::policy_store::StoredPolicy,
         on_simulation_failure: OnSimulationFailure,
@@ -2180,6 +2192,7 @@ impl WalletMcpServer {
             &network,
             &stored_policy,
             &plan,
+            plan_source.as_deref(),
             &simulation,
         )
         .await?;
@@ -3600,6 +3613,7 @@ mod tests {
             "primary",
             "1",
             plan.clone(),
+            Some("mcp.ekubo.org".into()),
             recorded_failure(&plan, 1),
             Utc::now(),
         );
@@ -3642,6 +3656,7 @@ mod tests {
             "primary",
             "1",
             plan.clone(),
+            Some("mcp.ekubo.org".into()),
             recorded_failure(&plan, 1),
             Utc::now(),
         );
@@ -3688,6 +3703,7 @@ mod tests {
             "primary",
             "1",
             plan,
+            None,
             hypothetical,
             Utc::now(),
         );

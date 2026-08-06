@@ -42,6 +42,10 @@ pub struct RecordedSimulation {
     /// The exact plan that was simulated. The send takes the plan from here
     /// rather than from the caller, so there is no second copy to disagree.
     pub plan: ExecutionPlan,
+    /// Where the plan's bytes came from — the vetted https host or
+    /// "inline data URI" — carried through to approval-time display. None for
+    /// plans this process built itself.
+    pub plan_source: Option<String>,
     pub result: SimulationResult,
     pub recorded_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -70,6 +74,7 @@ impl SimulationStore {
         wallet_id: &str,
         chain_id: &str,
         plan: ExecutionPlan,
+        plan_source: Option<String>,
         result: SimulationResult,
         now: DateTime<Utc>,
     ) -> RecordedSimulation {
@@ -79,6 +84,7 @@ impl SimulationStore {
             wallet_id: wallet_id.to_owned(),
             chain_id: chain_id.to_owned(),
             plan,
+            plan_source,
             result,
             recorded_at: now,
             expires_at: now + TimeDelta::seconds(SIMULATION_TTL_SECONDS),
@@ -201,7 +207,7 @@ mod tests {
     fn record(store: &mut SimulationStore, value: &str, now: DateTime<Utc>) -> RecordedSimulation {
         let plan = plan(value);
         let result = result(&plan);
-        store.record("primary", "1", plan, result, now)
+        store.record("primary", "1", plan, None, result, now)
     }
 
     #[test]
@@ -266,7 +272,7 @@ mod tests {
         result.policy_revision = stored.revision;
         let mut store = SimulationStore::new();
         let now = Utc::now();
-        let recorded = store.record("primary", "1", plan, result, now);
+        let recorded = store.record("primary", "1", plan, None, result, now);
         assert_eq!(recorded.result.policy_revision, 7);
         assert_eq!(
             recorded.chain_id,

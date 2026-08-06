@@ -97,13 +97,19 @@ pub async fn execute_automatic(
     network: &NetworkConfig,
     stored_policy: &StoredPolicy,
     plan: &ExecutionPlan,
+    plan_source: Option<&str>,
     simulation: &SimulationResult,
 ) -> Result<SendDisposition> {
     validate_send(wallet, network, plan, simulation)?;
 
     if !simulation.allowed || !simulation.simulation.success {
-        let request =
-            lock(pending)?.create(&wallet.id, &network.name, plan, stored_policy.revision)?;
+        let request = lock(pending)?.create(
+            &wallet.id,
+            &network.name,
+            plan,
+            plan_source,
+            stored_policy.revision,
+        )?;
         return Ok(SendDisposition::Queued(request));
     }
 
@@ -136,6 +142,7 @@ pub async fn execute_automatic(
         &wallet.id,
         &network.name,
         plan,
+        plan_source,
         stored_policy.revision,
         &signed.serialized_transaction,
         &signed.transaction_hash,
@@ -332,6 +339,17 @@ async fn transaction_approval_request(
     .fact("Wallet", &pending.wallet_id)
     .fact("Network", &pending.network_name)
     .fact("Chain ID", &pending.chain_id)
+    // The vetted TLS host the plan body was fetched from, or "inline data
+    // URI" for an agent-held plan. A plan this wallet built itself shows
+    // that plainly, so a reviewer always knows which producer they are
+    // trusting.
+    .fact(
+        "Plan source",
+        pending
+            .plan_source
+            .as_deref()
+            .unwrap_or("constructed locally by this wallet"),
+    )
     .fact("Sender", format!("{:#x}", pending.execution_plan.sender))
     .fact(
         "Ordered calls",

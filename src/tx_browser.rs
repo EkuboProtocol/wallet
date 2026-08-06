@@ -907,6 +907,7 @@ mod tests {
         .unwrap();
         let now = chrono::Utc::now();
         PendingTransaction {
+            plan_source: None,
             request_id: uuid::Uuid::nil(),
             wallet_id: "primary".into(),
             network_name: "ethereum".into(),

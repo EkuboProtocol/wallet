@@ -65,6 +65,11 @@ pub struct PendingTransaction {
     pub network_name: String,
     pub chain_id: String,
     pub execution_plan: ExecutionPlan,
+    /// Where the plan's bytes came from — the TLS-vetted https host that
+    /// served them or "inline data URI" — shown as an approval fact. None for
+    /// plans this process built itself (transfers, CLI).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_source: Option<String>,
     pub digest: String,
     /// Digest of exact nonce, gas, fee, call, and delegation fields reviewed
     /// for an exceptional approval. Automatic transactions do not have one.
@@ -124,8 +129,10 @@ impl PendingStore {
         wallet_id: &str,
         network_name: &str,
         plan: &ExecutionPlan,
+        plan_source: Option<&str>,
         policy_revision: u64,
     ) -> Result<PendingTransaction> {
+        validate_plan_source(plan_source)?;
         validate_wallet_id(wallet_id)?;
         ensure!(
             !network_name.trim().is_empty(),
@@ -178,8 +185,8 @@ impl PendingStore {
         transaction.execute(
             "INSERT INTO pending_transactions(
                 request_id, wallet_id, network_name, chain_id, plan_json,
-                plan_digest, policy_revision, status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'awaiting_approval', ?8, ?8)",
+                plan_digest, plan_source, policy_revision, status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'awaiting_approval', ?9, ?9)",
             params![
                 request_id.to_string(),
                 wallet_id,
@@ -187,6 +194,7 @@ impl PendingStore {
                 plan.chain_id.as_str(),
                 plan_json,
                 digest,
+                plan_source,
                 policy_revision,
                 created_at.to_rfc3339(),
             ],
@@ -198,15 +206,18 @@ impl PendingStore {
     /// Persist an automatically authorized signature before the first RPC
     /// submission. It is recorded in the same lifecycle table but never
     /// appears in the exceptional-approval queue.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_automatic_signed(
         &mut self,
         wallet_id: &str,
         network_name: &str,
         plan: &ExecutionPlan,
+        plan_source: Option<&str>,
         policy_revision: u64,
         serialized_transaction: &str,
         transaction_hash: &str,
     ) -> Result<PendingTransaction> {
+        validate_plan_source(plan_source)?;
         validate_wallet_id(wallet_id)?;
         ensure!(
             !network_name.trim().is_empty(),
@@ -236,9 +247,9 @@ impl PendingStore {
             .execute(
                 "INSERT INTO pending_transactions(
                 request_id, wallet_id, network_name, chain_id, plan_json,
-                plan_digest, policy_revision, status, created_at, updated_at,
+                plan_digest, plan_source, policy_revision, status, created_at, updated_at,
                 serialized_transaction, signed_transaction_hash, approval_required
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'signed', ?8, ?8, ?9, ?10, 0)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'signed', ?9, ?9, ?10, ?11, 0)",
                 params![
                     request_id.to_string(),
                     wallet_id,
@@ -246,6 +257,7 @@ impl PendingStore {
                     plan.chain_id.as_str(),
                     serde_json::to_string(plan)?,
                     format!("{:#x}", plan.digest()),
+                    plan_source,
                     policy_revision,
                     created_at.to_rfc3339(),
                     serialized_transaction,
@@ -717,7 +729,7 @@ impl PendingStore {
                         approved_at, rejected_at, serialized_transaction,
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
                         approval_required, review_digest, cancel_serialized_transaction,
-                        cancel_transaction_hashes, gas_used, effective_gas_price
+                        cancel_transaction_hashes, gas_used, effective_gas_price, plan_source
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id.to_string()],
                 |row| {
@@ -743,6 +755,7 @@ impl PendingStore {
                         cancel_transaction_hashes: row.get(18)?,
                         gas_used: row.get(19)?,
                         effective_gas_price: row.get(20)?,
+                        plan_source: row.get(21)?,
                     })
                 },
             )
@@ -773,6 +786,7 @@ struct PendingRow {
     cancel_transaction_hashes: Option<String>,
     gas_used: Option<String>,
     effective_gas_price: Option<String>,
+    plan_source: Option<String>,
 }
 
 impl PendingRow {
@@ -787,6 +801,7 @@ impl PendingRow {
             "stored pending chain ID mismatch"
         );
         validate_hex(&self.digest, Some(32))?;
+        validate_plan_source(self.plan_source.as_deref())?;
         if let Some(bytes) = &self.serialized_transaction {
             validate_hex(bytes, None)?;
         }
@@ -852,6 +867,7 @@ impl PendingRow {
             network_name: self.network_name,
             chain_id: self.chain_id,
             execution_plan,
+            plan_source: self.plan_source,
             digest: self.digest,
             review_digest: self.review_digest,
             policy_revision,
@@ -873,6 +889,26 @@ impl PendingRow {
 }
 
 const MAX_CANCELLATION_ATTEMPTS: usize = 8;
+
+/// A stored plan source must be exactly what the fetch layer produces — the
+/// literal "inline data URI" or a lowercase vetted hostname — so a tampered
+/// database cannot inject terminal escapes or misleading text into the
+/// approval screen.
+fn validate_plan_source(value: Option<&str>) -> Result<()> {
+    let Some(value) = value else { return Ok(()) };
+    ensure!(value.len() <= 255, "stored plan source exceeds 255 bytes");
+    ensure!(
+        value == "inline data URI"
+            || (!value.is_empty()
+                && value.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || byte == b'.'
+                    || byte == b'-'
+                    || byte == b':')),
+        "stored plan source is not a vetted host name"
+    );
+    Ok(())
+}
 
 fn parse_cancel_hashes(value: &str) -> Result<Vec<String>> {
     let hashes: Vec<String> =
@@ -1022,7 +1058,9 @@ mod tests {
     #[test]
     fn persists_exact_plan_and_lifecycle_without_spend_state() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
+        let request = store
+            .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+            .unwrap();
         assert_eq!(request.status, PendingStatus::AwaitingApproval);
         let hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
         let signed = store
@@ -1063,7 +1101,7 @@ mod tests {
         let (_directory, mut store) = store();
         let hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", hash)
+            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
             .unwrap();
         assert_eq!(signed.status, PendingStatus::Signed);
         assert!(!signed.approval_required);
@@ -1082,11 +1120,27 @@ mod tests {
         let first_hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
         let second_hash = "0x5555555555555555555555555555555555555555555555555555555555555555";
         let first = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", first_hash)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                "0x0102",
+                first_hash,
+            )
             .unwrap();
         assert!(
             store
-                .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0304", second_hash,)
+                .record_automatic_signed(
+                    "primary",
+                    "ethereum",
+                    &plan(),
+                    None,
+                    1,
+                    "0x0304",
+                    second_hash,
+                )
                 .is_err()
         );
 
@@ -1095,7 +1149,15 @@ mod tests {
         store.finalize(first.request_id, true, "123", None).unwrap();
         assert!(
             store
-                .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0304", second_hash,)
+                .record_automatic_signed(
+                    "primary",
+                    "ethereum",
+                    &plan(),
+                    None,
+                    1,
+                    "0x0304",
+                    second_hash,
+                )
                 .is_ok()
         );
     }
@@ -1111,6 +1173,7 @@ mod tests {
                 "primary",
                 "ethereum",
                 &plan(),
+                None,
                 1,
                 "0x0102",
                 "0x3333333333333333333333333333333333333333333333333333333333333333",
@@ -1121,6 +1184,7 @@ mod tests {
                 "primary",
                 "ethereum",
                 &plan(),
+                None,
                 1,
                 "0x0304",
                 "0x5555555555555555555555555555555555555555555555555555555555555555",
@@ -1143,7 +1207,7 @@ mod tests {
         let (_directory, mut store) = store();
         let hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", hash)
+            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
             .unwrap();
         assert!(signed.mined_fee.is_none());
         store.claim_for_submission(signed.request_id).unwrap();
@@ -1166,7 +1230,7 @@ mod tests {
         let (_directory, mut store) = store();
         let hash = "0x4444444444444444444444444444444444444444444444444444444444444444";
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", hash)
+            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
             .unwrap();
         store.claim_for_submission(signed.request_id).unwrap();
         store.mark_broadcast(signed.request_id, hash).unwrap();
@@ -1189,7 +1253,15 @@ mod tests {
         let first_hash = "0x3333333333333333333333333333333333333333333333333333333333333333";
         let second_hash = "0x5555555555555555555555555555555555555555555555555555555555555555";
         let first = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", first_hash)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                "0x0102",
+                first_hash,
+            )
             .unwrap();
 
         // Not yet in flight: a signed-but-never-submitted envelope cannot have
@@ -1209,7 +1281,15 @@ mod tests {
         // The wallet+chain in-flight slot is free for the next transaction.
         assert!(
             store
-                .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0304", second_hash,)
+                .record_automatic_signed(
+                    "primary",
+                    "ethereum",
+                    &plan(),
+                    None,
+                    1,
+                    "0x0304",
+                    second_hash,
+                )
                 .is_ok()
         );
     }
@@ -1223,7 +1303,15 @@ mod tests {
 
     fn broadcast_original(store: &mut PendingStore) -> Uuid {
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", ORIGINAL_HASH)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                "0x0102",
+                ORIGINAL_HASH,
+            )
             .unwrap();
         store.claim_for_submission(signed.request_id).unwrap();
         store
@@ -1238,7 +1326,15 @@ mod tests {
 
         // A cancellation may only race an envelope that reached the network.
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", ORIGINAL_HASH)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                "0x0102",
+                ORIGINAL_HASH,
+            )
             .unwrap();
         assert!(
             store
@@ -1290,7 +1386,15 @@ mod tests {
         assert!(store.in_flight("primary", "1").unwrap().is_none());
 
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", ORIGINAL_HASH)
+            .record_automatic_signed(
+                "primary",
+                "ethereum",
+                &plan(),
+                None,
+                1,
+                "0x0102",
+                ORIGINAL_HASH,
+            )
             .unwrap();
         assert_eq!(
             store
@@ -1346,7 +1450,9 @@ mod tests {
     #[test]
     fn policy_change_cancels_signed_transaction_before_submission() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
+        let request = store
+            .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+            .unwrap();
         let hash = "0x2222222222222222222222222222222222222222222222222222222222222222";
         store
             .store_signed(
@@ -1369,7 +1475,7 @@ mod tests {
         assert!(store.claim_for_submission(request.request_id).is_err());
         assert!(
             store
-                .record_automatic_signed("primary", "ethereum", &plan(), 2, "0x0304", hash)
+                .record_automatic_signed("primary", "ethereum", &plan(), None, 2, "0x0304", hash)
                 .is_ok()
         );
     }
@@ -1379,7 +1485,7 @@ mod tests {
         let (_directory, mut store) = store();
         let hash = "0x6666666666666666666666666666666666666666666666666666666666666666";
         let signed = store
-            .record_automatic_signed("primary", "ethereum", &plan(), 1, "0x0102", hash)
+            .record_automatic_signed("primary", "ethereum", &plan(), None, 1, "0x0102", hash)
             .unwrap();
         store.claim_for_submission(signed.request_id).unwrap();
 
@@ -1397,7 +1503,9 @@ mod tests {
     #[test]
     fn rejection_is_terminal() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
+        let request = store
+            .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+            .unwrap();
         assert_eq!(
             store.reject(request.request_id).unwrap().status,
             PendingStatus::Rejected
@@ -1408,9 +1516,29 @@ mod tests {
     #[test]
     fn duplicate_pending_plan_reuses_request_and_queue_is_bounded() {
         let (_directory, mut store) = store();
-        let first = store.create("primary", "ethereum", &plan(), 1).unwrap();
-        let duplicate = store.create("primary", "ethereum", &plan(), 1).unwrap();
+        let first = store
+            .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+            .unwrap();
+        // Provenance round-trips: the vetted producer host survives storage
+        // so the approval screen can display it.
+        assert_eq!(first.plan_source.as_deref(), Some("mcp.ekubo.org"));
+        let duplicate = store
+            .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+            .unwrap();
         assert_eq!(duplicate.request_id, first.request_id);
+        // A source that is neither the inline literal nor a plain host is
+        // refused before it can reach a terminal.
+        assert!(
+            store
+                .create(
+                    "primary",
+                    "ethereum",
+                    &plan_with_value("999"),
+                    Some("evil\u{1b}[31mhost"),
+                    1,
+                )
+                .is_err()
+        );
 
         for value in 2..=MAX_AWAITING_APPROVALS_PER_WALLET {
             store
@@ -1418,6 +1546,7 @@ mod tests {
                     "primary",
                     "ethereum",
                     &plan_with_value(&value.to_string()),
+                    None,
                     1,
                 )
                 .unwrap();
@@ -1428,6 +1557,7 @@ mod tests {
                     "primary",
                     "ethereum",
                     &plan_with_value(&(MAX_AWAITING_APPROVALS_PER_WALLET + 1).to_string()),
+                    None,
                     1,
                 )
                 .is_err()
@@ -1437,7 +1567,9 @@ mod tests {
     #[test]
     fn policy_change_replaces_stale_duplicate_approval_request() {
         let (_directory, mut store) = store();
-        let stale = store.create("primary", "ethereum", &plan(), 1).unwrap();
+        let stale = store
+            .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+            .unwrap();
         let current = store.database.get("primary").unwrap().unwrap();
         store
             .database
@@ -1448,7 +1580,9 @@ mod tests {
             store.get(stale.request_id).unwrap().status,
             PendingStatus::Cancelled
         );
-        let replacement = store.create("primary", "ethereum", &plan(), 2).unwrap();
+        let replacement = store
+            .create("primary", "ethereum", &plan(), None, 2)
+            .unwrap();
         assert_ne!(replacement.request_id, stale.request_id);
         assert_eq!(replacement.policy_revision, 2);
     }
@@ -1456,7 +1590,9 @@ mod tests {
     #[test]
     fn wallet_state_removal_cancels_pending_requests() {
         let (_directory, mut store) = store();
-        let request = store.create("primary", "ethereum", &plan(), 1).unwrap();
+        let request = store
+            .create("primary", "ethereum", &plan(), Some("mcp.ekubo.org"), 1)
+            .unwrap();
         store.database.delete("primary", 1).unwrap();
         assert_eq!(
             store.get(request.request_id).unwrap().status,

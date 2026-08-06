@@ -897,6 +897,25 @@ async fn confirm_and_store(
         );
     }
 
+    // Naming a token is the last step in a chain that started with an agent,
+    // and every earlier link is untrusted: the list, the symbol, the decimals,
+    // and the suggestion to look at them at all. What comes out of it decides
+    // what the owner reads when they approve a transfer — `USDC` against an
+    // address, and an amount scaled by decimals this row supplied. So the
+    // terminal picker establishes intent and this establishes presence, the
+    // same OS-backed check that guards replacing a policy.
+    //
+    // Only acceptance is gated. Rejecting deletes a suggestion, which can
+    // mislead nobody, and asking for a fingerprint to say "no" would teach
+    // people to authenticate their way through prompts.
+    if !decision.accepted.is_empty() {
+        PlatformHumanPresence
+            .confirm(&PresenceRequest::ConfirmTokenNames {
+                count: decision.accepted.len(),
+            })
+            .await?;
+    }
+
     // Accepting is where the chain gets its one and only say: confirm
     // something token-like lives at each address, so a typo cannot become a
     // named row. One Multicall3 pass per chain, and it asks nothing about
@@ -3902,6 +3921,7 @@ mod tests {
         .unwrap();
         let now = chrono::Utc::now();
         let record = PendingTransaction {
+            plan_source: None,
             request_id: Uuid::nil(),
             wallet_id: "primary".into(),
             network_name: "ethereum".into(),

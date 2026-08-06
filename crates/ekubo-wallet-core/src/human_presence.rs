@@ -27,6 +27,7 @@ pub enum PresenceRequest {
     ReplacePolicy { wallet: String },
     SaveAddressBookEntry { alias: String },
     RemoveAddressBookEntry { alias: String },
+    ConfirmTokenNames { count: usize },
 }
 
 /// How much of a name the platform dialog will carry. The dialog is a single
@@ -67,6 +68,9 @@ impl PresenceRequest {
             }
             Self::RemoveAddressBookEntry { alias } => {
                 format!("remove the address book alias {}", subject(alias))
+            }
+            Self::ConfirmTokenNames { count } => {
+                format!("name {count} token(s) shown when approving transfers")
             }
         }
     }
