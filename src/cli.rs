@@ -608,10 +608,12 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
             let result = custody.remove(&wallet_id).await;
             match result {
                 Ok(wallet) => {
+                    // The key is gone, so every row under this name describes
+                    // a wallet that cannot exist again. Purging covers the
+                    // queues and the proposal as well as the policy: the old
+                    // revision-checked delete left all three behind.
                     let mut policies = PolicyStore::production(config.data_dir())?;
-                    if let Some(policy) = policies.get(&wallet.id)? {
-                        policies.delete(&wallet.id, policy.revision)?;
-                    }
+                    policies.purge(&wallet.id)?;
                     progress.stop("Wallet removed");
                     emit(mode, &wallet, || {
                         Ok(format!(
@@ -635,10 +637,14 @@ fn initialize_wallet_policy(
     policy: &WalletPolicy,
 ) -> Result<()> {
     let mut policies = PolicyStore::production(config.data_dir())?;
-    ensure!(
-        policies.get(wallet_id)?.is_none(),
-        "policy state already exists for wallet {wallet_id}"
-    );
+    // Anything already stored under this name belongs to a wallet that no
+    // longer exists: `CustodyService::add` refuses an ID the configuration
+    // already lists, so reaching here means the inventory has no entry for it.
+    // Those rows are the remains of an earlier wallet, and inheriting them
+    // would hand a brand-new key the policy — and the queued requests — of the
+    // one it replaced. Erasing beats refusing: refusing would leave the name
+    // permanently unusable with no way to clear it.
+    policies.purge(wallet_id)?;
     policies.put(wallet_id, policy, None)?;
     Ok(())
 }

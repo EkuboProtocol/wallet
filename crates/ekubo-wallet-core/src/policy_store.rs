@@ -425,6 +425,37 @@ impl PolicyStore {
         Ok(changed == 1)
     }
 
+    /// Erase every row this database holds under a wallet ID.
+    ///
+    /// A wallet ID is a name the owner chose, and names get reused. Everything
+    /// here is keyed on that name rather than on the key it stood for: the
+    /// policy that decides what signs without asking, the proposal waiting to
+    /// replace it, and every queued transaction, message, and typed-data
+    /// request. A wallet's key exists once and cannot come back, so when it
+    /// goes, all of that describes a wallet that no longer exists — and a
+    /// later wallet created under the same name would otherwise inherit it
+    /// while holding a completely different key.
+    ///
+    /// One transaction: either the name is clear or nothing was touched.
+    pub fn purge(&mut self, wallet_id: &str) -> Result<()> {
+        validate_wallet_id(wallet_id)?;
+        let transaction = self.connection.transaction()?;
+        for table in [
+            "wallet_policies",
+            "policy_proposals",
+            "pending_transactions",
+            "pending_typed_data",
+            "pending_messages",
+        ] {
+            transaction.execute(
+                &format!("DELETE FROM {table} WHERE wallet_id = ?1"),
+                params![wallet_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Deletes a policy only if it still has the revision reviewed by the
     /// caller. This is used when removing the corresponding wallet.
     pub fn delete(&mut self, wallet_id: &str, expected_revision: u64) -> Result<()> {
@@ -890,6 +921,74 @@ mod tests {
             connection.execute_batch(statement).unwrap();
         }
         drop(connection);
+    }
+
+    #[test]
+    fn purging_a_wallet_leaves_nothing_for_the_next_one_to_inherit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let mut store = PolicyStore::open(&path, &key(5)).unwrap();
+        store
+            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .unwrap();
+        store
+            .put_proposal(
+                "primary",
+                1,
+                &WalletPolicy::require_approval_for_everything(),
+                "widen it",
+            )
+            .unwrap();
+        for statement in [
+            "INSERT INTO pending_transactions(
+                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
+                 policy_revision, status, created_at, updated_at
+             ) VALUES ('tx', 'primary', 'mainnet', '1', '{}', '0xaa', 1,
+                       'awaiting_approval', 't0', 't0')",
+            "INSERT INTO pending_typed_data(
+                 request_id, wallet_id, chain_id, typed_data_json, digest, status,
+                 created_at, updated_at
+             ) VALUES ('td', 'primary', '1', '{}', '0xbb', 'awaiting_approval', 't0', 't0')",
+            "INSERT INTO pending_messages(
+                 request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
+                 status, created_at, updated_at
+             ) VALUES ('msg', 'primary', '1', '0x6869', 'text', '0xcc',
+                       'awaiting_approval', 't0', 't0')",
+        ] {
+            store.connection.execute_batch(statement).unwrap();
+        }
+
+        store.purge("primary").unwrap();
+
+        assert!(store.get("primary").unwrap().is_none());
+        assert!(store.proposal("primary").unwrap().is_none());
+        for table in [
+            "pending_transactions",
+            "pending_typed_data",
+            "pending_messages",
+        ] {
+            let remaining: i64 = store
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE wallet_id = 'primary'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(remaining, 0, "{table} kept a row across a purge");
+        }
+
+        // The next wallet to take this name starts at revision 1 with the
+        // policy it was given. Revisions restarting is exactly why a stale
+        // proposal used to apply: it recorded source_revision 1 and found a 1.
+        let restarted = store
+            .put(
+                "primary",
+                &WalletPolicy::require_approval_for_everything(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(restarted.revision, 1);
     }
 
     #[test]
