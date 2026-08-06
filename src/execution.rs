@@ -2,7 +2,7 @@ use crate::{
     config::{NetworkConfig, WalletMetadata},
     core::{execution_plan::ExecutionPlan, policy::FindingSeverity},
     custody::KeyStore,
-    rpc::{transaction_receipt, verify_chain_id},
+    rpc::{sanitize_rpc_message, sanitized_rpc_error, transaction_receipt, verify_chain_id},
     simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
 };
 use alloy::{
@@ -801,7 +801,7 @@ async fn send_exact_bytes(
             match tokio::time::timeout(RPC_TIMEOUT, provider.send_raw_transaction(&bytes)).await {
                 Ok(Ok(pending)) if pending.tx_hash() == &hash => None,
                 Ok(Ok(_)) => Some("RPC returned an unexpected transaction hash".to_owned()),
-                Ok(Err(error)) => Some(sanitize_message(network, &error.to_string())),
+                Ok(Err(error)) => Some(sanitize_rpc_message(network, &error.to_string())),
                 Err(_) => Some("transaction submission RPC timed out".to_owned()),
             };
         if let Some(failure) = failure {
@@ -913,17 +913,6 @@ fn decode_envelope(bytes: &[u8]) -> Result<TxEnvelope> {
         "signed transaction contains trailing bytes"
     );
     Ok(envelope)
-}
-
-fn sanitized_rpc_error(network: &NetworkConfig, error: &impl std::fmt::Display) -> anyhow::Error {
-    anyhow::anyhow!(
-        "RPC request failed: {}",
-        sanitize_message(network, &error.to_string())
-    )
-}
-
-fn sanitize_message(network: &NetworkConfig, message: &str) -> String {
-    message.replace(network.rpc_url.as_str(), "<rpc-url>")
 }
 
 #[cfg(test)]

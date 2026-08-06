@@ -5,6 +5,7 @@ use crate::{
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
     plan_fetch::{FetchPolicy, READ_CALLS_SUBJECT, fetch_verified_bytes},
+    rpc::sanitized_rpc_error,
 };
 use alloy::{
     consensus::BlockHeader,
@@ -671,13 +672,6 @@ fn validate_hex_bytes(value: &str, label: &str) -> Result<()> {
         "{label} must be 0x-prefixed whole bytes"
     );
     Ok(())
-}
-
-fn sanitized_rpc_error(network: &NetworkConfig, error: &impl std::fmt::Display) -> anyhow::Error {
-    let redacted = error
-        .to_string()
-        .replace(network.rpc_url.as_str(), "<rpc-url>");
-    anyhow::anyhow!("RPC request failed: {redacted}")
 }
 
 fn default_block_parameter() -> String {

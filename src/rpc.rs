@@ -355,10 +355,37 @@ where
     with_timeout(network, future).await
 }
 
-fn sanitized_rpc_error(network: &NetworkConfig, error: &impl std::fmt::Display) -> anyhow::Error {
-    let raw = error.to_string();
-    let redacted = raw.replace(network.rpc_url.as_str(), "<rpc-url>");
-    anyhow::anyhow!("RPC request failed: {redacted}")
+/// Strips the configured RPC endpoint from text before it can reach an agent
+/// or a log. The exact URL collapses to `<rpc-url>`, and because some
+/// providers carry credentials as URL userinfo, any `user:password@host` form
+/// collapses to the bare host as well. Every module that surfaces an RPC
+/// error goes through this one implementation.
+#[must_use]
+pub fn sanitize_rpc_message(network: &NetworkConfig, message: &str) -> String {
+    let mut sanitized = message.replace(network.rpc_url.as_str(), "<rpc-url>");
+    if let Some(host) = network.rpc_url.host_str()
+        && (!network.rpc_url.username().is_empty() || network.rpc_url.password().is_some())
+    {
+        sanitized = sanitized.replace(
+            &format!(
+                "{}:{}@{host}",
+                network.rpc_url.username(),
+                network.rpc_url.password().unwrap_or_default()
+            ),
+            host,
+        );
+    }
+    sanitized
+}
+
+pub fn sanitized_rpc_error(
+    network: &NetworkConfig,
+    error: &impl std::fmt::Display,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "RPC request failed: {}",
+        sanitize_rpc_message(network, &error.to_string())
+    )
 }
 
 fn delegated_implementation(code: &Bytes) -> Option<Address> {
@@ -393,6 +420,16 @@ mod tests {
         let message = error.to_string();
         assert!(!message.contains("secret"));
         assert!(message.contains("<rpc-url>"));
+
+        // Providers also echo the credential-bearing authority without the
+        // full URL around it; the bare userinfo form is stripped too.
+        let bare = sanitized_rpc_error(
+            &network,
+            &format_args!("connect to user:secret@example.invalid refused"),
+        )
+        .to_string();
+        assert!(!bare.contains("secret"), "{bare}");
+        assert!(bare.contains("example.invalid"), "{bare}");
     }
 
     #[test]

@@ -24,6 +24,7 @@ use crate::{
     },
     fork::{ForkContext, ForkParent, ForkPreface, validate_replay},
     policy_store::StoredPolicy,
+    rpc::sanitize_rpc_message,
 };
 use alloy::{
     consensus::BlockHeader,
@@ -1082,7 +1083,7 @@ fn failure(
         .and_then(|inspection| inspection.decoded_error.as_ref())
         .and_then(|error| error.message.as_deref())
         .unwrap_or(message);
-    let message = sanitize_error(message, network);
+    let message = sanitize_rpc_message(network, message);
     SimulationFailure {
         category,
         message,
@@ -1326,23 +1327,6 @@ fn setup_failure_result_at_block(
         ),
         block_number,
     )
-}
-
-fn sanitize_error(message: &str, network: &NetworkConfig) -> String {
-    let mut sanitized = message.replace(network.rpc_url.as_str(), "<rpc-url>");
-    if let Some(host) = network.rpc_url.host_str()
-        && (!network.rpc_url.username().is_empty() || network.rpc_url.password().is_some())
-    {
-        sanitized = sanitized.replace(
-            &format!(
-                "{}:{}@{host}",
-                network.rpc_url.username(),
-                network.rpc_url.password().unwrap_or_default()
-            ),
-            host,
-        );
-    }
-    sanitized
 }
 
 #[cfg(test)]
