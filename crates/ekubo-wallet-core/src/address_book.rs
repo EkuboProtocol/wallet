@@ -191,9 +191,16 @@ pub fn validate_alias(alias: &str) -> Result<()> {
 }
 
 fn sanitize_note(note: &str) -> Result<String> {
+    // The shared predicate, not `char::is_control`. A note is stored text that
+    // labels an address at review time, so it is refused for the same reasons
+    // every other displayed string is: a bidirectional control reorders what
+    // is read, and a zero-width character makes two notes a person cannot
+    // distinguish into two different notes. Rendering strips these anyway;
+    // refusing them here means they are never stored to begin with, and the
+    // owner finds out while typing rather than never.
     ensure!(
-        !note.chars().any(char::is_control),
-        "note cannot contain control characters"
+        !note.chars().any(crate::sanitize::is_disallowed),
+        "note cannot contain control, bidirectional, or zero-width characters"
     );
     ensure!(
         note.len() <= MAX_NOTE_LEN,

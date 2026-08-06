@@ -47,6 +47,20 @@ use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
 /// Plain-SQLite file used before the table moved into the encrypted
 /// database. Never trusted or imported: deleted on sight.
 const LEGACY_DATABASE_FILE: &str = "tokens.db";
+
+/// Remove any pre-encryption token file, exactly as the address book treats
+/// its own. A plain file in the data directory has no curator behind it: the
+/// filesystem is untrusted, so anything that read one would be an
+/// unauthenticated writer to the table the review screen presents as
+/// owner-confirmed.
+///
+/// Separate from `production` so it can be tested without opening the
+/// encrypted database, which needs the OS credential store.
+fn discard_legacy_database(data_dir: &Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
+    }
+}
 /// Tokens verified per Multicall3 request; three calls each.
 const METADATA_CHUNK: usize = 100;
 /// Balance reads per Multicall3 request.
@@ -180,14 +194,7 @@ pub struct TokenStore {
 
 impl TokenStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
-        // Deleted on sight rather than imported, exactly as the address book
-        // treats its own legacy file. A plain file in the data directory has
-        // no curator behind it: the filesystem is untrusted, so anything that
-        // reads one is an unauthenticated writer to the table the review
-        // screen believes the owner confirmed.
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
-        }
+        discard_legacy_database(data_dir);
         Ok(Self {
             database: PolicyStore::production(data_dir)?,
         })
@@ -1368,7 +1375,10 @@ mod tests {
             .unwrap();
         drop(legacy);
 
-        let store = TokenStore::production(directory.path()).unwrap();
+        // What `production` does before it opens the encrypted database. Called
+        // directly so the test does not touch the OS credential store.
+        discard_legacy_database(directory.path());
+        let store = open(directory.path());
         assert_eq!(store.count(None).unwrap(), 0);
         assert!(store.get(1, Address::repeat_byte(0x11)).unwrap().is_none());
         assert_eq!(store.count_proposals().unwrap(), 0);
