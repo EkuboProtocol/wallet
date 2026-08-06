@@ -105,7 +105,11 @@ it is not a control against in-process execution.
    Changes that grant no signing authority — networks, the address book,
    token lists — are confirmed in the local terminal and are not
    authenticated against the OS, so an owner is never asked to authenticate
-   for something no signature depends on. The MCP has no approval operation.
+   for something no signature depends on. Token names are confirmed for a
+   different reason than they are not authenticated: naming a token steers
+   what the owner reads at approval time, so an agent may only propose one,
+   while no signature depends on the name, so the OS is not involved. The MCP
+   has no approval operation.
 7. Exact signed bytes and their hash are durably stored before first
    submission. An ambiguous submission can only rebroadcast those bytes.
 8. An export timestamp is committed before raw key material is returned, so a

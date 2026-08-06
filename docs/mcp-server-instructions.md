@@ -22,7 +22,10 @@ Everything a fork returns is hypothetical and carries a fork block saying so: po
 Forks cannot advance blocks or time, expire quickly, and are lost on restart; discard one early with wallet_discard_fork.
 Private keys never enter MCP.
 Wallet creation, import/export, policy changes, network replacement/removal, and exceptional transaction approvals are separate human CLI operations. wallet_add_network is the only MCP configuration mutation; it verifies the proposed RPC's chain ID and never replaces an existing network.
-The token database is display-only data kept inside the encrypted database: wallet_add_token and wallet_import_token_list verify symbol, name, and decimals against the token contracts through Multicall3 before storing, a chain_id/address pair can never be overwritten, and wallet_get_portfolio reads native plus known-token balances for any address through Multicall3.
+The token database decides what a token is called when the user reviews a transaction that moves it, so only the user can name one: wallet_propose_tokens records a suggestion and never a name, and the user confirms it with `ekubo-wallet token review`, which groups suggestions by the list that vouched for them so a whole list is one decision.
+Cite the real list you took the symbol, name, and decimals from, because the user is deciding whether to trust that curator, and pass the list's values rather than reading symbol() from the contract, which returns whatever its author wrote and so lets any address call itself USDC on the screen where the user decides.
+A token the user has not confirmed is shown by address alone with its amounts in base units, which is a readable transaction rather than a failed one, so do not treat an unnamed token as an error or re-propose it in a loop.
+Use wallet_search_tokens to resolve a symbol the user typed into an address and to check whether a token is already named before proposing it; a miss means the wallet has no confirmed name for it, not that the token does not exist.
 Nothing in the signing path reads the token database.
 Never invoke or automate the approval CLI for the user.
 Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint.

@@ -7,9 +7,9 @@
 | `wallet_get_status` | Address, native balance, transaction count, and current EIP-7702 delegation. |
 | `wallet_get_policy` | The active policy and its revision. |
 | `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. Accepts a `fork_id` to read simulated state. |
-| `wallet_list_tokens` | Page through the local token database, optionally per chain. |
-| `wallet_add_token` | Verify one token's symbol/name/decimals on-chain via Multicall3 and store it. Duplicate chain/address pairs fail. |
-| `wallet_import_token_list` | Bulk-import up to 1000 tokens; each new token is verified on-chain, existing pairs are skipped, never overwritten. |
+| `wallet_list_tokens` | Page through the tokens the owner has confirmed, optionally per chain. |
+| `wallet_search_tokens` | Find confirmed tokens by symbol, name, or exact address, optionally within one chain. |
+| `wallet_propose_tokens` | Suggest up to 1000 tokens, with the list's own symbol/name/decimals, for the owner to confirm in the CLI. Writes no names. |
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
@@ -93,22 +93,40 @@ tool for freshly prepared calldata.
 
 ## Token database and portfolio
 
-The wallet keeps its token database **inside the encrypted policy database**
-(`policies.db`), so a file edit outside this process cannot misrepresent a
-token; a pre-existing plain `tokens.db` from older releases is imported once
-and removed. Token metadata is public display data: MCP tools may write it
-without a prompt of any kind, and nothing in the signing or policy path ever
-reads it.
+The token database is where a token's **name** comes from. When the owner
+reviews a transaction, the symbol they read is looked up here and nowhere
+else; a token with no row is shown as `0xaddress (unlisted token)` and its
+amounts stay in base units. Nothing in the signing or policy path reads it,
+but a name the owner trusts is worth forging, so the rows live **inside the
+encrypted policy database** (`policies.db`) where a file edit outside this
+process cannot alter them. A pre-existing plain `tokens.db` from older
+releases is imported once and removed.
 
-Its integrity rules are structural rather than procedural. The
-`(chain_id, address)` pair is the primary key, so a conflicting entry is
-impossible: `wallet_add_token` fails on a duplicate, and
-`wallet_import_token_list` skips existing pairs and reports counts — an entry
-is never overwritten. Every new token's `symbol`, `name`, and `decimals` are
-read from the token contract itself through Multicall3 on the configured
-chain's RPC, not trusted from the submitted list, and contracts that answer
-neither `symbol()` nor `decimals()` are rejected. Hostile metadata is
-control-stripped and length-capped before storage.
+Names come from token lists, never from token contracts. A contract's
+`symbol()` returns whatever its author wrote, so reading it would let any
+deployed address call itself `USDC` on the screen where the owner decides. A
+curated list is a claim by someone the owner chose to trust; a contract's own
+answer is a claim by the counterparty they are being protected from.
+
+**Only the owner can name a token.** `wallet_propose_tokens` writes to a
+separate proposals table that no display path reads. Suggestions become names
+only when the owner confirms them with `ekubo-wallet token review`, which
+groups them by the list that vouched for them so a whole list is one decision
+rather than hundreds. The owner can also import a list themselves with
+`ekubo-wallet token import <file>`, which reads the standard token-list shape.
+
+The chain keeps a veto but has no voice. When the owner accepts, each token's
+contract is checked to confirm something token-like exists at the address and
+that its `decimals` matches the list — `decimals` scales every amount ever
+displayed for that token, so a disagreement is refused rather than resolved.
+Neither check can put a contract-chosen string in front of a reviewer.
+
+Integrity rules are structural. The `(chain_id, address)` pair is the primary
+key, so an entry is never overwritten and a second list cannot rename a token
+the owner already confirmed. Hostile metadata is control-stripped and
+length-capped before storage, and again at render time: a stored symbol keeps
+only the characters real symbols use and is dropped entirely if it still
+contains `0x`, so it cannot forge the `SYMBOL (0xaddress)` suffix.
 
 `wallet_get_portfolio` turns the database into a portfolio reader for **any**
 address, not just configured wallets: one Multicall3 batch per 200 tokens
@@ -118,7 +136,8 @@ Multicall3 is deployed — which is effectively all of them. Zero balances are
 omitted unless requested; balances are raw smallest-unit decimal strings with
 the stored decimals/symbols attached.
 
-Inspect the database from the CLI with `ekubo-wallet token list [chain-id]`.
+Inspect the database from the CLI with `ekubo-wallet token list [chain-id]`,
+or find one with `ekubo-wallet token search <query>`.
 
 ## Simulation forks
 
