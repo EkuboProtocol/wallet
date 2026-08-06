@@ -240,6 +240,33 @@ impl TokenStore {
             .context("failed to read token")
     }
 
+    /// Display metadata for the tokens a plan names, drawn only from rows the
+    /// owner confirmed. A token with no row gets no entry, so the reviewer is
+    /// shown its address rather than a name the wallet cannot vouch for.
+    ///
+    /// This is the only source of names in the review path, and it reads
+    /// nothing but the local database: a token contract never gets to say what
+    /// it is called at the moment the owner is deciding.
+    pub fn display_metadata(
+        &self,
+        chain_id: u64,
+        tokens: &[Address],
+    ) -> Result<crate::approval_summary::TokenMetadataMap> {
+        let mut map = crate::approval_summary::TokenMetadataMap::new();
+        for token in tokens {
+            if let Some(stored) = self.get(chain_id, *token)? {
+                map.insert(
+                    *token,
+                    crate::approval_summary::TokenMetadata {
+                        symbol: stored.symbol,
+                        decimals: stored.decimals,
+                    },
+                );
+            }
+        }
+        Ok(map)
+    }
+
     /// List tokens, optionally filtered by chain, ordered deterministically.
     pub fn list(
         &self,

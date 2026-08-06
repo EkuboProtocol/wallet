@@ -1682,6 +1682,7 @@ async fn run_approve(
     let outcome = crate::orchestrator::approve_transaction(
         config,
         pending,
+        &crate::token_store::TokenStore::production(config.data_dir())?,
         &read_policy,
         request,
         crate::approval::InteractiveProof::from_terminal()?,

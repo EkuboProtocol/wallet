@@ -26,7 +26,7 @@ use num_bigint::BigUint;
 use ratatui::{layout::Constraint, text::Line as UiLine, widgets::Paragraph};
 
 use crate::{
-    approval_summary::{TokenMetadataMap, format_fixed_point, load_token_metadata},
+    approval_summary::{TokenMetadataMap, format_fixed_point},
     config::{ConfigStore, NetworkConfig},
     fullscreen::{
         Line, Screen, SearchableTable, Span, TableColumn, TableEvent, TableRow, chrome,
@@ -186,12 +186,17 @@ enum ReceiptSection {
 /// display work: an unreachable RPC degrades to the stored data.
 pub async fn load_detail(config: &ConfigStore, record: &PendingTransaction) -> Vec<Line> {
     let network = config.network_by_chain_id(&record.chain_id).ok();
-    let receipt = load_receipt(network.as_ref(), record).await;
+    // A receipt is history, but it is read on the same screen and by the same
+    // eye as a pending review, so it names tokens by the same rule: only the
+    // owner's confirmed database, never the token contract.
+    let tokens = crate::token_store::TokenStore::production(config.data_dir()).ok();
+    let receipt = load_receipt(network.as_ref(), tokens.as_ref(), record).await;
     detail_lines(record, network.as_ref(), receipt.as_ref())
 }
 
 async fn load_receipt(
     network: Option<&NetworkConfig>,
+    tokens: Option<&crate::token_store::TokenStore>,
     record: &PendingTransaction,
 ) -> Option<ReceiptSection> {
     let network = network?;
@@ -203,12 +208,13 @@ async fn load_receipt(
     for hash in hashes {
         match transaction_receipt_details(network, hash).await {
             Ok(Some(receipt)) => {
-                let tokens: Vec<Address> =
-                    transfer_activity(record.execution_plan.sender, &receipt)
-                        .into_iter()
-                        .map(|(token, _)| token)
-                        .collect();
-                let metadata = load_token_metadata(network, &tokens).await;
+                let moved: Vec<Address> = transfer_activity(record.execution_plan.sender, &receipt)
+                    .into_iter()
+                    .map(|(token, _)| token)
+                    .collect();
+                let metadata = tokens
+                    .and_then(|tokens| tokens.display_metadata(network.chain_id, &moved).ok())
+                    .unwrap_or_default();
                 return Some(ReceiptSection::Ready { receipt, metadata });
             }
             Ok(None) => {}

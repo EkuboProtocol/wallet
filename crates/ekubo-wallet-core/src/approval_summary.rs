@@ -2,9 +2,16 @@
 //!
 //! Every interpretation here is supplemental. The review digest binds the exact
 //! ordered calldata; a reviewer must still verify targets, selectors, and
-//! values. Decoding is deterministic and local. Token symbol and decimal
-//! lookups are bounded, best-effort reads against the configured RPC, and a
-//! failed or missing lookup degrades to raw base units rather than to a guess.
+//! values. Decoding is deterministic and local.
+//!
+//! Token names never come from the token contract. `symbol()` is a string the
+//! token's own author chooses, so any address can answer `"USDC"`; a reviewer
+//! shown that answer would read a label the attacker wrote. Display metadata is
+//! therefore drawn only from the local token database, whose rows come from
+//! token lists the owner confirmed. A token absent from it is rendered by
+//! address alone and its amounts stay in base units: an unnamed token is a
+//! reviewable inconvenience, whereas a wrongly named one is a successful
+//! forgery.
 
 use crate::{
     config::{NativeCurrency, NetworkConfig},
@@ -13,29 +20,16 @@ use crate::{
 };
 use alloy::{
     dyn_abi::{DynSolType, DynSolValue},
-    network::TransactionBuilder,
     primitives::{Address, Bytes, U256},
-    providers::{Provider, ProviderBuilder},
-    rpc::types::TransactionRequest,
-    sol,
-    sol_types::SolCall,
 };
 use num_bigint::{BigInt, Sign};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
-    time::Duration,
 };
 
-/// Bounded so a plan with many distinct tokens cannot fan out into unbounded
-/// RPC work during an interactive review.
-const MAX_TOKEN_METADATA_LOOKUPS: usize = 16;
 /// A nested `multicall` is summarized, not expanded without limit.
 const MAX_DISPLAYED_NESTED_CALLS: usize = 16;
-/// Metadata is decoration; a slow RPC must not stall the approval prompt.
-const METADATA_TIMEOUT: Duration = Duration::from_secs(3);
-const MULTICALL3_ADDRESS: Address =
-    alloy::primitives::address!("cA11bde05977b3631167028862bE2a173976CA11");
 
 const APPROVE_SELECTOR: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3];
 const TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
@@ -43,26 +37,9 @@ const TRANSFER_FROM_SELECTOR: [u8; 4] = [0x23, 0xb8, 0x72, 0xdd];
 const SET_APPROVAL_FOR_ALL_SELECTOR: [u8; 4] = [0xa2, 0x2c, 0xb4, 0x65];
 const MULTICALL_SELECTOR: [u8; 4] = [0xac, 0x96, 0x50, 0xd8];
 
-sol! {
-    struct MetadataCall3 {
-        address target;
-        bool allowFailure;
-        bytes callData;
-    }
-
-    struct MetadataResult3 {
-        bool success;
-        bytes returnData;
-    }
-
-    function aggregate3(MetadataCall3[] calls) external payable returns (MetadataResult3[] returnData);
-
-    function symbol() external view returns (string);
-    function decimals() external view returns (uint8);
-}
-
-/// Locally cached ERC-20 display metadata. Both fields stay optional because a
-/// non-conforming or unreachable token must render as raw base units.
+/// Display metadata for one token, drawn from the owner-confirmed token
+/// database. Both fields stay optional because a row may omit either, and a
+/// token with no row at all must render as raw base units.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TokenMetadata {
     pub symbol: Option<String>,
@@ -111,8 +88,11 @@ pub struct StepInterpretation {
 
 /// Collect the token contracts a plan names through standard token calldata
 /// or through the token references of a matching ERC-7730 descriptor.
+///
+/// The caller resolves these against the token database. Collection contacts
+/// no network: which addresses a plan names is decided by its calldata alone.
 #[must_use]
-async fn token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
+pub async fn plan_token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
     let mut targets = BTreeSet::new();
     for step in steps {
         if matches!(
@@ -142,70 +122,6 @@ async fn token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
     targets.into_iter().collect()
 }
 
-/// Read `symbol()` and `decimals()` for up to [`MAX_TOKEN_METADATA_LOOKUPS`]
-/// tokens. Failures are silent: the caller renders base units instead.
-pub async fn load_token_metadata(network: &NetworkConfig, tokens: &[Address]) -> TokenMetadataMap {
-    let tokens: Vec<Address> = tokens
-        .iter()
-        .copied()
-        .take(MAX_TOKEN_METADATA_LOOKUPS)
-        .collect();
-    if tokens.is_empty() {
-        return TokenMetadataMap::new();
-    }
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let calls: Vec<MetadataCall3> = tokens
-        .iter()
-        .flat_map(|token| {
-            [
-                MetadataCall3 {
-                    target: *token,
-                    allowFailure: true,
-                    callData: symbolCall {}.abi_encode().into(),
-                },
-                MetadataCall3 {
-                    target: *token,
-                    allowFailure: true,
-                    callData: decimalsCall {}.abi_encode().into(),
-                },
-            ]
-        })
-        .collect();
-    let request = TransactionRequest::default()
-        .with_to(MULTICALL3_ADDRESS)
-        .with_input(aggregate3Call { calls }.abi_encode());
-    let Ok(Ok(bytes)) = tokio::time::timeout(METADATA_TIMEOUT, provider.call(request)).await else {
-        return TokenMetadataMap::new();
-    };
-    let Ok(results) = aggregate3Call::abi_decode_returns(&bytes) else {
-        return TokenMetadataMap::new();
-    };
-    if results.len() != tokens.len() * 2 {
-        return TokenMetadataMap::new();
-    }
-    tokens
-        .iter()
-        .enumerate()
-        .map(|(index, token)| {
-            let symbol_result = &results[index * 2];
-            let decimals_result = &results[index * 2 + 1];
-            (
-                *token,
-                TokenMetadata {
-                    symbol: symbol_result
-                        .success
-                        .then(|| decode_symbol(&symbol_result.returnData))
-                        .flatten(),
-                    decimals: decimals_result
-                        .success
-                        .then(|| decode_decimals(&decimals_result.returnData))
-                        .flatten(),
-                },
-            )
-        })
-        .collect()
-}
-
 /// Interpret every step of an execution plan without contacting the network.
 #[must_use]
 pub async fn interpret_steps(
@@ -217,14 +133,6 @@ pub async fn interpret_steps(
         interpretations.push(interpret_step(step, metadata).await);
     }
     interpretations
-}
-
-/// Collect the token contracts named by a plan and read their display metadata.
-pub async fn plan_token_metadata(
-    network: &NetworkConfig,
-    steps: &[ExecutionStep],
-) -> TokenMetadataMap {
-    load_token_metadata(network, &token_targets(steps).await).await
 }
 
 /// The step's native value as a U256; display-only, zero on parse failure.
@@ -439,11 +347,42 @@ pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenM
     )
 }
 
+/// A token is named only when the owner's token database names it. Anything
+/// else is rendered by address and marked, so a reviewer can never read the
+/// absence of a name as the presence of a familiar one.
 pub(crate) fn token_label(token: Address, display: &TokenMetadata) -> String {
-    display.symbol.as_ref().map_or_else(
-        || format!("{token:#x}"),
-        |symbol| format!("{symbol} ({token:#x})"),
-    )
+    display
+        .symbol
+        .as_deref()
+        .and_then(display_symbol)
+        .map_or_else(
+            || format!("{token:#x} (unlisted token)"),
+            |symbol| format!("{symbol} ({token:#x})"),
+        )
+}
+
+/// A stored symbol is still text the wallet did not author: it reaches the
+/// database from a token list, and a list is only as careful as whoever wrote
+/// it. A label renders as `SYMBOL (0xaddress)`, so the danger is a symbol that
+/// forges that suffix and points the reviewer at a contract the plan never
+/// names.
+///
+/// Stripping the punctuation is not enough — `"USDC (0x2222…)"` merely becomes
+/// `"USDC 0x2222…"`, which reads the same at a glance. So this keeps only the
+/// characters real symbols actually use, which drops the brackets and the
+/// separating spaces, and then refuses any symbol still containing `0x`.
+/// Nothing that survives can look like a second address.
+fn display_symbol(symbol: &str) -> Option<String> {
+    let cleaned: String = crate::sanitize::stripped_capped(symbol, 32)
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '+')
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned.to_ascii_lowercase().contains("0x") {
+        return None;
+    }
+    Some(cleaned)
 }
 
 /// Render a decimal base-unit string as a fixed-point quantity without any
@@ -567,34 +506,6 @@ fn word_address(word: &[u8]) -> Option<Address> {
         return None;
     }
     Some(Address::from_slice(&word[12..]))
-}
-
-fn decode_symbol(data: &Bytes) -> Option<String> {
-    if let Ok(symbol) = symbolCall::abi_decode_returns(data) {
-        return sanitize_symbol(&symbol);
-    }
-    // Pre-standard tokens such as MKR return a right-padded bytes32.
-    if data.len() == 32 {
-        let trimmed: Vec<u8> = data.iter().copied().take_while(|byte| *byte != 0).collect();
-        return sanitize_symbol(std::str::from_utf8(&trimmed).ok()?);
-    }
-    None
-}
-
-/// A token symbol is attacker-controlled text. Keep it short and printable so
-/// it cannot forge additional lines or fields in the review output.
-fn sanitize_symbol(symbol: &str) -> Option<String> {
-    let cleaned: String = symbol
-        .chars()
-        .filter(|character| !character.is_control() && *character != '(' && *character != ')')
-        .take(32)
-        .collect();
-    let cleaned = cleaned.trim().to_string();
-    (!cleaned.is_empty()).then_some(cleaned)
-}
-
-fn decode_decimals(data: &Bytes) -> Option<u8> {
-    decimalsCall::abi_decode_returns(data).ok()
 }
 
 #[cfg(test)]
@@ -848,7 +759,7 @@ mod tests {
             ),
             step(2, other, vec![0xde, 0xad, 0xbe, 0xef]),
         ];
-        assert_eq!(token_targets(&steps).await, vec![token]);
+        assert_eq!(plan_token_targets(&steps).await, vec![token]);
     }
 
     #[tokio::test]
@@ -936,17 +847,50 @@ mod tests {
     #[test]
     fn token_symbols_cannot_forge_review_structure() {
         assert_eq!(
-            sanitize_symbol("US\u{1b}[31mDC\n(spoof)").as_deref(),
-            Some("US[31mDCspoof")
+            display_symbol("US\u{1b}[31mDC\n(spoof)").as_deref(),
+            Some("US31mDCspoof")
         );
-        assert_eq!(sanitize_symbol("   ").as_deref(), None);
-        assert_eq!(sanitize_symbol(&"A".repeat(64)).unwrap().len(), 32);
+        assert_eq!(display_symbol("   ").as_deref(), None);
+        assert_eq!(display_symbol(&"A".repeat(64)).unwrap().len(), 32);
+        // The symbols real token lists carry survive intact.
+        for symbol in ["USDC", "WETH", "USDC.e", "wstETH", "1INCH", "USD+", "sDAI"] {
+            assert_eq!(display_symbol(symbol).as_deref(), Some(symbol), "{symbol}");
+        }
     }
 
+    /// A symbol that carries its own parenthesized address must not be able to
+    /// impersonate the real `SYMBOL (0xaddress)` suffix and point a reviewer at
+    /// a contract the plan never names.
     #[test]
-    fn decodes_bytes32_style_symbols() {
-        let mut word = vec![0_u8; 32];
-        word[..3].copy_from_slice(b"MKR");
-        assert_eq!(decode_symbol(&word.into()).as_deref(), Some("MKR"));
+    fn a_stored_symbol_cannot_forge_the_address_suffix() {
+        let real = Address::repeat_byte(0x11);
+        let decoy = Address::repeat_byte(0x22);
+        let label = token_label(
+            real,
+            &TokenMetadata {
+                symbol: Some(format!("USDC ({decoy:#x})")),
+                decimals: Some(6),
+            },
+        );
+        // A symbol that tries to carry an address is refused outright, so the
+        // token falls back to being named by its own address and nothing else.
+        assert!(label.starts_with(&format!("{real:#x}")), "{label}");
+        assert!(!label.contains("2222"), "{label}");
+        assert_eq!(label.matches("0x").count(), 1, "{label}");
+    }
+
+    /// The whole point of the change: a token the owner never confirmed is
+    /// never given a name, however convincingly its contract answers.
+    #[test]
+    fn an_unlisted_token_is_named_by_address_alone() {
+        let token = Address::repeat_byte(0xab);
+        let label = token_label(token, &TokenMetadata::default());
+        assert_eq!(label, format!("{token:#x} (unlisted token)"));
+
+        // And its amounts stay in base units rather than being scaled by a
+        // decimals value no confirmed list vouched for.
+        let amount =
+            format_token_amount(U256::from(1_000_000_u64), token, &TokenMetadata::default());
+        assert!(amount.starts_with("1000000 base units of"), "{amount}");
     }
 }

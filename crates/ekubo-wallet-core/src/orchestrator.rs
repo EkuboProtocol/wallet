@@ -12,7 +12,7 @@ use crate::{
         ApprovalDecision, ApprovalKind, ApprovalRequest, InteractiveProof, ReviewPresenter,
     },
     approval_summary::{
-        TokenMetadataMap, interpret_steps, plan_token_metadata, render_balance_changes,
+        TokenMetadataMap, interpret_steps, plan_token_targets, render_balance_changes,
     },
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     core::{execution_plan::ExecutionPlan, policy::FindingSeverity},
@@ -171,6 +171,7 @@ pub enum ApprovalOutcome {
 pub async fn approve_transaction(
     config: &ConfigStore,
     pending: PendingStore,
+    tokens: &crate::token_store::TokenStore,
     read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
     request: PendingTransaction,
     proof: InteractiveProof,
@@ -228,9 +229,16 @@ pub async fn approve_transaction(
         overrides,
     )
     .await?;
-    // Display metadata only. A failed or slow lookup degrades the review text
-    // to exact base units; it never blocks or alters the approval decision.
-    let token_metadata = plan_token_metadata(&network, &request.execution_plan.ordered_steps).await;
+    // Display metadata only, and only ever from the owner's token database: a
+    // token contract must not get to name itself on the screen where the owner
+    // decides. A token with no confirmed row renders by address in base units,
+    // which never blocks or alters the approval decision.
+    let token_metadata = tokens
+        .display_metadata(
+            network.chain_id,
+            &plan_token_targets(&request.execution_plan.ordered_steps).await,
+        )
+        .unwrap_or_default();
     let approval =
         transaction_approval_request(&request, &simulation, &prepared, &network, &token_metadata)
             .await?;

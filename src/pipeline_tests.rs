@@ -428,6 +428,13 @@ async fn policy_denial_queues_and_the_approved_row_broadcasts_by_request_id() {
             )
             .unwrap(),
         ),
+        &TokenStore::new(
+            PolicyStore::open(
+                &directory.path().join("policies.db"),
+                &DatabaseKey::new([9; 32]),
+            )
+            .unwrap(),
+        ),
         &read_policy,
         record,
         crate::approval::InteractiveProof::for_tests(),
