@@ -905,7 +905,14 @@ impl PendingRow {
     }
 }
 
-const MAX_CANCELLATION_ATTEMPTS: usize = 8;
+/// Distinct cancellation envelopes one record may accumulate.
+///
+/// Every one of them can still mine, so reconciliation has to recognize all of
+/// them and the list is stored forever. Eight is generous for a fee war and
+/// small enough that the history stays readable. Reaching it does not end the
+/// attempt: [`crate::reconcile::attempt_cancellation`] falls back to
+/// rebroadcasting the newest stored envelope, which adds no hash.
+pub const MAX_CANCELLATION_ATTEMPTS: usize = 8;
 
 /// A stored plan source must be exactly what the fetch layer produces — the
 /// literal "inline data URI" or a lowercase vetted hostname — so a tampered

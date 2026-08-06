@@ -22,7 +22,7 @@ use crate::{
         broadcast_signed_cancellation, broadcast_signed_execution, sign_cancellation,
         signed_transaction_nonce,
     },
-    pending::{PendingStatus, PendingStore, PendingTransaction},
+    pending::{MAX_CANCELLATION_ATTEMPTS, PendingStatus, PendingStore, PendingTransaction},
     rpc::{ReceiptStatus, mined_transaction_count, transaction_known, transaction_receipt},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -338,6 +338,55 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
             bail!("nothing to cancel on chain: the request has no broadcast transaction")
         }
     }
+    // At the ceiling, repricing stops and rebroadcasting takes over rather
+    // than the whole attempt failing.
+    //
+    // The cap exists to bound a list that is stored forever — every hash in it
+    // can still mine, so reconciliation has to keep recognizing all of them.
+    // It was never meant to be the point at which the owner stops being able
+    // to cancel, but that is what it did: `wallet_attempt_cancel` is
+    // agent-callable, an attempt is consumed even when the broadcast then
+    // fails, and nothing prunes. Eight failed sends left the owner permanently
+    // unable to push a cancellation through a fee spike, and the transaction
+    // they were trying to stop mines.
+    //
+    // Resending the newest stored envelope is exact-byte, so it cannot expand
+    // what was authorized — the same argument that lets a stuck broadcast be
+    // retried — and it records no new hash.
+    if record.cancel_transaction_hashes.len() >= MAX_CANCELLATION_ATTEMPTS {
+        let bytes = record
+            .cancel_serialized_transaction
+            .clone()
+            .context("cancellation history exists without its newest envelope")?;
+        let hash = record
+            .cancel_transaction_hashes
+            .last()
+            .cloned()
+            .expect("non-empty by the check above");
+        let resend = SignedExecution {
+            digest: record.digest.clone(),
+            serialized_transaction: bytes,
+            transaction_hash: hash,
+        };
+        let broadcast = broadcast_signed_cancellation(&resend, wallet, network).await?;
+        let record = match broadcast.receipt_status {
+            BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => lock(pending)?
+                .mark_cancelled(
+                    record.request_id,
+                    broadcast
+                        .block_number
+                        .as_deref()
+                        .context("mined cancellation is missing a block number")?,
+                    broadcast.mined_fee.as_ref(),
+                )?,
+            BroadcastReceiptStatus::Pending if broadcast.broadcast_error.is_some() => {
+                reconcile_record(pending, network, record, false).await?
+            }
+            BroadcastReceiptStatus::Pending => record,
+        };
+        return Ok((record, broadcast));
+    }
+
     let signed = sign_cancellation(
         wallet,
         network,
