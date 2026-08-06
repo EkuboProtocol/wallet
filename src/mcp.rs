@@ -888,18 +888,6 @@ impl WalletMcpServer {
             .config
             .network_by_chain_id(&input.chain_id)
             .map_err(|error| tool_error(&error))?;
-        // Cheap envelope sanity check before any outbound fetch: the summary
-        // is what the agent showed the human, so a chain that disagrees with
-        // the tool call is refused without spending the fetch.
-        if let Some(summary_chain) = &input.reference.summary.chain_id {
-            ensure_tool(
-                *summary_chain == input.chain_id,
-                &format!(
-                    "the reference summary says chain {summary_chain} but this call names chain {}",
-                    input.chain_id
-                ),
-            )?;
-        }
         let (execution_plan, plan_source) =
             resolve_execution_plan_reference(&input.reference, FetchPolicy::production())
                 .await

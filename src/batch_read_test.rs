@@ -129,7 +129,6 @@ fn reference_for(url: impl Into<String>, body: Option<&str>) -> ArtifactReferenc
             value: format!("0x{:x}", alloy::primitives::keccak256(body.as_bytes())),
         }),
         bytes: body.map(|body| body.len() as u64),
-        summary: crate::plan_fetch::ArtifactSummary::default(),
         instruction: None,
     }
 }
@@ -196,17 +195,6 @@ async fn resolve_read_input_enforces_reference_exclusivity_before_fetching() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("its own block_parameter"));
-
-    // A summary that names a different chain is refused before any fetch.
-    let mut wrong_chain = inline_input();
-    wrong_chain.calls.clear();
-    let mut reference = reference_for(url, Some("{}"));
-    reference.summary.chain_id = Some("8453".into());
-    wrong_chain.reference = Some(reference);
-    let error = resolve_read_input(wrong_chain, FetchPolicy::production())
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("chain 8453"));
 }
 
 #[tokio::test]

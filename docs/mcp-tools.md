@@ -49,15 +49,15 @@ code path in this process treats a plan's origin as meaningful.
 Plans arrive by reference rather than as inline tool arguments, because the
 agent relaying a producer's tool result into a wallet tool call pays for
 every byte of it as model output. A producer returns an `artifact_reference`
-envelope — the https URL holding the plan body, an `integrity` block
-(keccak256 of its exact bytes plus their count), and a `summary` for sanity
-checks — and the agent passes the whole envelope through unchanged as the
-tool's `reference` argument. The wallet fetches the body itself (public https
-only: default port, no credentials, fragments, or redirects, no private or
-reserved addresses even after DNS resolution, 16 MiB cap), recomputes the
-digest and byte count, refuses a mismatch, cross-checks any summary fields
-against the parsed plan, and then validates the plan exactly as if it had
-been supplied inline. The envelope tolerates additive producer fields;
+envelope — the https URL holding the plan body and an `integrity` block
+(keccak256 of its exact bytes plus their count) — and the agent passes the
+whole envelope through unchanged as the tool's `reference` argument. The
+wallet fetches the body itself (public https only: default port, no
+credentials, fragments, or redirects, no private or reserved addresses even
+after DNS resolution, 16 MiB cap), recomputes the digest and byte count,
+refuses a mismatch, and then validates the plan exactly as if it had been
+supplied inline. The body is the only source of truth: the envelope carries
+no descriptive duplicate of its contents for anyone to trust or cross-check. The envelope tolerates additive producer fields;
 `integrity` is strict, and both it and `bytes` are mandatory for anything
 fetched over the network. A plan held locally travels as an envelope whose
 URL is a `data:application/json;base64` URI of its exact bytes and touches no

@@ -47,7 +47,6 @@ fn reference_for(
             value: digest_of(body),
         }),
         bytes: body.map(|body| body.len() as u64),
-        summary: ArtifactSummary::default(),
         instruction: None,
     }
 }
@@ -154,28 +153,22 @@ async fn refuses_a_wrong_artifact_type_or_kind() {
 }
 
 #[tokio::test]
-async fn refuses_a_summary_that_disagrees_with_the_plan() {
+async fn tolerates_a_producer_summary_field() {
+    // Producers that still emit the retired `summary` object stay accepted:
+    // the envelope tolerates additive fields, and summary was never load-
+    // bearing — the fetched body is the only source of truth.
     let body = plan_json();
-    let mut reference = reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
-    reference.summary.chain_id = Some("8453".into());
-    let error = resolve(&reference, FetchPolicy::production())
+    let envelope = serde_json::json!({
+        "kind": "artifact_reference",
+        "artifact_type": "execution_plan",
+        "url": data_uri_of(&body),
+        "summary": { "chain_id": "8453", "sender": "0x0", "step_count": 7 },
+    });
+    let reference: ArtifactReference = serde_json::from_value(envelope).unwrap();
+    let (plan, _) = resolve(&reference, FetchPolicy::production())
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("chain 8453"));
-
-    let mut reference = reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
-    reference.summary.step_count = Some(7);
-    let error = resolve(&reference, FetchPolicy::production())
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("7 steps"));
-
-    let mut reference = reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
-    reference.summary.sender = Some("0x3333333333333333333333333333333333333333".into());
-    let error = resolve(&reference, FetchPolicy::production())
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("sender"));
+        .unwrap();
+    assert_eq!(plan.chain_id.as_str(), "1");
 }
 
 #[tokio::test]

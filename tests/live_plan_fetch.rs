@@ -18,7 +18,7 @@
 //! MCP preparation tool's result.
 
 use ekubo_wallet::plan_fetch::{
-    ArtifactReference, ArtifactSummary, ArtifactType, FetchPolicy, resolve_execution_plan_reference,
+    ArtifactReference, ArtifactType, FetchPolicy, resolve_execution_plan_reference,
 };
 
 fn live_enabled() -> bool {
@@ -40,7 +40,6 @@ async fn an_unknown_reference_reports_expiry_without_leaking_the_response() {
             value: format!("0x{}", "11".repeat(32)),
         }),
         bytes: Some(2),
-        summary: ArtifactSummary::default(),
         instruction: None,
     };
     let error = resolve_execution_plan_reference(&reference, FetchPolicy::production())

@@ -325,7 +325,6 @@ fn plan_reference(sender: Address) -> ekubo_wallet_core::plan_fetch::ArtifactRef
         url: plan_data_uri(sender),
         integrity: None,
         bytes: None,
-        summary: ekubo_wallet_core::plan_fetch::ArtifactSummary::default(),
         instruction: None,
     }
 }

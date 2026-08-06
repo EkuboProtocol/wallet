@@ -145,13 +145,6 @@ pub async fn resolve_read_input(
         input.block_parameter == default_block_parameter(),
         "a referenced bundle carries its own block_parameter; leave it at latest"
     );
-    if let Some(summary_chain) = &reference.summary.chain_id {
-        ensure!(
-            *summary_chain == input.chain_id,
-            "the reference summary says chain {summary_chain} but this call names chain {}",
-            input.chain_id
-        );
-    }
     let fetched = fetch_reference(&reference, ArtifactType::ReadCalls, policy).await?;
     let body: ReadCallsBody = serde_json::from_slice(&fetched.bytes)
         .context("read-call bundle is not a valid wallet_batch_eth_call argument object")?;
@@ -162,13 +155,6 @@ pub async fn resolve_read_input(
         body.chain_id,
         input.chain_id
     );
-    if let Some(call_count) = reference.summary.call_count {
-        ensure!(
-            call_count as usize == body.calls.len(),
-            "the reference summary says {call_count} calls but the bundle has {}",
-            body.calls.len()
-        );
-    }
     Ok(BatchEthCallInput {
         chain_id: input.chain_id,
         block_parameter: body.block_parameter,

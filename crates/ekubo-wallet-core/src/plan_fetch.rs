@@ -3,8 +3,8 @@
 //!
 //! Producers such as the Ekubo MCP server return one `artifact_reference`
 //! envelope per stored wallet payload: the `https` URL where the body is
-//! stored, an integrity block (keccak256 of its exact bytes plus their
-//! count), and a summary for sanity checks. The agent between the producer
+//! stored and an integrity block (keccak256 of its exact bytes plus their
+//! count). The agent between the producer
 //! and this wallet relays the envelope verbatim as a single `reference`
 //! argument instead of re-emitting kilobytes of calldata. Two artifact kinds
 //! travel this way: execution plans and read-call bundles (exact
@@ -147,18 +147,6 @@ pub struct ArtifactIntegrity {
 /// Producer-supplied facts about the referenced body, for sanity checks
 /// before and after fetching. Additive-tolerant: fields present are
 /// cross-checked, absent or unknown ones are ignored.
-#[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
-pub struct ArtifactSummary {
-    #[serde(default)]
-    pub chain_id: Option<String>,
-    #[serde(default)]
-    pub sender: Option<String>,
-    #[serde(default)]
-    pub step_count: Option<u32>,
-    #[serde(default)]
-    pub call_count: Option<u32>,
-}
-
 /// One producer `artifact_reference` envelope, accepted VERBATIM as a tool
 /// argument.
 ///
@@ -181,8 +169,6 @@ pub struct ArtifactReference {
     /// length is refused.
     #[serde(default)]
     pub bytes: Option<u64>,
-    #[serde(default)]
-    pub summary: ArtifactSummary,
     #[serde(default)]
     pub instruction: Option<String>,
 }
@@ -221,34 +207,6 @@ pub async fn resolve_execution_plan_reference(
     let value: serde_json::Value =
         serde_json::from_slice(&fetched.bytes).context("execution plan body is not valid JSON")?;
     let plan = ExecutionPlan::parse(value)?;
-    // The summary is what the agent showed the human before this wallet ever
-    // fetched the body, so any present field that disagrees with the parsed
-    // plan is a hard failure, not a warning.
-    let summary = &reference.summary;
-    if let Some(chain_id) = &summary.chain_id {
-        ensure!(
-            chain_id == plan.chain_id.as_str(),
-            "the reference summary says chain {chain_id} but the plan is for chain {}",
-            plan.chain_id
-        );
-    }
-    if let Some(sender) = &summary.sender {
-        let summary_sender: alloy::primitives::Address = sender
-            .parse()
-            .context("the reference summary's sender is not an EVM address")?;
-        ensure!(
-            summary_sender == plan.sender,
-            "the reference summary says sender {summary_sender} but the plan's sender is {}",
-            plan.sender
-        );
-    }
-    if let Some(step_count) = summary.step_count {
-        ensure!(
-            step_count as usize == plan.ordered_steps.len(),
-            "the reference summary says {step_count} steps but the plan has {}",
-            plan.ordered_steps.len()
-        );
-    }
     Ok((plan, fetched.source))
 }
 

@@ -999,7 +999,6 @@ async fn simulate_refuses_a_mismatched_plan_digest_before_simulating() {
                     value: format!("0x{}", "11".repeat(32)),
                 }),
                 bytes: Some(body.len() as u64),
-                summary: ekubo_wallet_core::plan_fetch::ArtifactSummary::default(),
                 instruction: None,
             },
             fork_id: None,
