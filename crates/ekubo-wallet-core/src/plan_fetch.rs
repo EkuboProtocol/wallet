@@ -243,6 +243,14 @@ async fn fetch_remote(url: &str, policy: FetchPolicy, subject: FetchSubject) -> 
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        // A proxy resolves the hostname itself and connects on this process's
+        // behalf, so the override below would pin nothing and the addresses
+        // vetted above would never be the ones dialled. Admission only means
+        // something if this process makes the connection, so the ambient
+        // HTTPS_PROXY/ALL_PROXY environment is ignored here. The chain RPC is
+        // a different case: that endpoint is one the owner configured, and
+        // reaching it through their proxy is their decision to make.
+        .no_proxy()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(TOTAL_TIMEOUT)
         .resolve_to_addrs(&host_text, &resolved)
