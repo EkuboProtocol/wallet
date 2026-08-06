@@ -382,6 +382,24 @@ pub fn sanitize_rpc_message(network: &NetworkConfig, message: &str) -> String {
     // The whole URL first: once a component has been replaced, the full string
     // can no longer match.
     let mut sanitized = message.replace(url.as_str(), "<rpc-url>");
+    // A provider echoes fragments of the endpoint far more often than the
+    // whole of it, and the whole-URL replace above only fires on this
+    // process's exact spelling — a re-normalized form, an added query, or a
+    // path quoted on its own all miss it. The path and query are where keys
+    // usually live: `/v3/<KEY>` is the most common provider layout there is,
+    // and `?apikey=` the next. Neither can be told apart from an innocent
+    // path, so both are redacted whole. `rpc_origin` already documents scheme,
+    // host, and port as the most that may be shown; this brings the sanitizer
+    // in line with that.
+    if let Some(query) = url.query()
+        && !query.is_empty()
+    {
+        sanitized = sanitized.replace(query, "<redacted>");
+    }
+    let path = url.path();
+    if path.len() > 1 {
+        sanitized = sanitized.replace(path, "<redacted>");
+    }
     let username = url.username();
     let password = url.password();
     if (!username.is_empty() || password.is_some())
@@ -480,6 +498,28 @@ mod tests {
             let sanitized = sanitized.to_string();
             assert!(!sanitized.contains("KEYMATERIAL"), "{sanitized}");
         }
+
+        // The commonest layout of all puts the key in the path, and a provider
+        // that quotes only the path it rejected never repeats the whole URL.
+        let mut path_key = crate::config::default_networks().remove(0);
+        path_key.rpc_url = "https://example.invalid/v3/PROJECTSECRET".parse().unwrap();
+        let sanitized = sanitized_rpc_error(
+            &path_key,
+            &format_args!("404 Not Found for /v3/PROJECTSECRET"),
+        )
+        .to_string();
+        assert!(!sanitized.contains("PROJECTSECRET"), "{sanitized}");
+
+        let mut query_key = crate::config::default_networks().remove(0);
+        query_key.rpc_url = "https://example.invalid/rpc?apikey=QUERYSECRET"
+            .parse()
+            .unwrap();
+        let sanitized = sanitized_rpc_error(
+            &query_key,
+            &format_args!("rejected request with apikey=QUERYSECRET"),
+        )
+        .to_string();
+        assert!(!sanitized.contains("QUERYSECRET"), "{sanitized}");
     }
 
     #[test]
