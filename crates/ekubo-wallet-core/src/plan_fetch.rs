@@ -344,14 +344,22 @@ fn is_public_ip(address: IpAddr) -> bool {
                 || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64)
                 // 192.0.0.0/24 IETF protocol assignments
                 || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                // 192.88.99.0/24 deprecated 6to4 relay anycast
+                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
                 // 198.18.0.0/15 benchmarking
                 || (octets[0] == 198 && (octets[1] & 0b1111_1110) == 18)
                 // 240.0.0.0/4 reserved
                 || octets[0] >= 240)
         }
         IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_public_ip(IpAddr::V4(mapped));
+            // `to_ipv4` covers the IPv4-mapped `::ffff:a.b.c.d` form and the
+            // deprecated IPv4-compatible `::a.b.c.d` form alike. Both carry an
+            // IPv4 address that is exactly as reachable as the literal would
+            // be, so both are judged as that address rather than as an opaque
+            // v6 one. `::1` and `::` fall out of this as 0.0.0.1 and 0.0.0.0,
+            // which the v4 arm already refuses.
+            if let Some(v4) = v6.to_ipv4() {
+                return is_public_ip(IpAddr::V4(v4));
             }
             let segments = v6.segments();
             !(v6.is_unspecified()
@@ -361,6 +369,23 @@ fn is_public_ip(address: IpAddr) -> bool {
                 || (segments[0] & 0xfe00) == 0xfc00
                 // fe80::/10 link local
                 || (segments[0] & 0xffc0) == 0xfe80
+                // 100::/64 discard-only
+                || (segments[0] == 0x0100
+                    && segments[1] == 0
+                    && segments[2] == 0
+                    && segments[3] == 0)
+                // 64:ff9b::/96 and 64:ff9b:1::/48 NAT64. A translator on the
+                // path turns the embedded IPv4 into a v4 packet this vetting
+                // never saw, so the prefix is refused outright: a translator
+                // that is not there costs nothing, and one that is would carry
+                // a v6 literal straight to 10.0.0.1.
+                || (segments[0] == 0x0064 && segments[1] == 0xff9b)
+                // 2001::/32 Teredo, which tunnels to an arbitrary IPv4 host
+                || (segments[0] == 0x2001 && segments[1] == 0x0000)
+                // 2001:20::/28 ORCHIDv2
+                || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
+                // 2002::/16 6to4, whose next 32 bits are an embedded IPv4
+                || segments[0] == 0x2002
                 // 2001:db8::/32 documentation
                 || (segments[0] == 0x2001 && segments[1] == 0x0db8))
         }
@@ -606,17 +631,33 @@ mod tests {
             "192.168.1.1",
             "198.18.0.1",
             "255.255.255.255",
+            "192.88.99.1",
             "::1",
             "fe80::1",
             "fd12::1",
             "::ffff:10.0.0.1",
+            // Forms that carry an IPv4 destination inside a v6 literal.
+            "::10.0.0.1",
+            "64:ff9b::a00:1",
+            "64:ff9b:1::a00:1",
+            "2002:a00:1::",
+            "2001:0:53aa:64c:c:c7f2:f5ff:fffe",
+            "2001:20::1",
+            "100::1",
         ] {
             assert!(
                 !is_public_ip(private.parse().unwrap()),
                 "{private} should be reserved"
             );
         }
-        for public in ["1.1.1.1", "104.16.0.1", "2606:4700::1111"] {
+        // Ordinary global addresses that the masks above must not swallow.
+        for public in [
+            "1.1.1.1",
+            "104.16.0.1",
+            "2606:4700::1111",
+            "2001:4860:4860::8888",
+            "2003::1",
+        ] {
             assert!(
                 is_public_ip(public.parse().unwrap()),
                 "{public} should be public"
