@@ -67,6 +67,13 @@ const METADATA_CHUNK: usize = 100;
 const BALANCE_CHUNK: usize = 200;
 /// One import may verify at most this many new tokens.
 pub const MAX_IMPORT_TOKENS: usize = 1_000;
+
+/// Token suggestions that may await review at once.
+///
+/// Sized to hold several full imports, so the ordinary case of proposing a
+/// couple of curated lists back to back is never refused, while an agent
+/// cannot make `token review` an unbounded scroll of decisions.
+pub const MAX_PENDING_TOKEN_PROPOSALS: u64 = 5_000;
 /// A portfolio read checks at most this many known tokens.
 pub const MAX_PORTFOLIO_TOKENS: usize = 2_000;
 /// One explicit balances read accepts at most this many token addresses.
@@ -279,6 +286,18 @@ impl TokenStore {
     pub fn propose(&mut self, tokens: &[ListedToken], source: &str) -> Result<ProposalSummary> {
         let source = sanitize(source);
         ensure!(!source.is_empty(), "a proposal needs a source list name");
+        // The queue is a list of decisions a person has to make. Repeats for
+        // the same address are idempotent, but an agent calling with a
+        // thousand fresh addresses each time grows it without bound — and does
+        // not thereby gain a name, it makes the screen where names are granted
+        // unreadable, which is the same thing. `token review` loads the whole
+        // queue and renders one row per token.
+        let pending = self.count_proposals()?;
+        ensure!(
+            pending < MAX_PENDING_TOKEN_PROPOSALS,
+            "{pending} tokens already await review; the owner must run \
+             `ekubo-wallet token review` before more can be suggested"
+        );
         let mut summary = ProposalSummary::default();
         for token in tokens {
             ensure!(token.chain_id > 0, "chain ID must be positive");
@@ -826,7 +845,25 @@ pub async fn read_token_balances(
             balances.clear();
             break;
         };
+        // The lens was asked about a bounded list, so it cannot answer with
+        // more entries than were asked about, and it cannot answer about a
+        // token nobody asked about. An endpoint that says otherwise is not
+        // returning a lens result — this is a structural mismatch, which is
+        // the class the threat model expects local validation to catch, as
+        // distinct from a coherent lie about a balance it was asked for.
+        let requested: std::collections::BTreeSet<Address> = chunk.iter().copied().collect();
+        ensure!(
+            decoded.balances.len() <= chunk.len(),
+            "TokenDataFetcher returned {} balances for {} requested tokens",
+            decoded.balances.len(),
+            chunk.len()
+        );
         for entry in decoded.balances {
+            ensure!(
+                requested.contains(&entry.token),
+                "TokenDataFetcher returned a balance for {}, which was not requested",
+                entry.token.to_checksum(None)
+            );
             balances.push(TokenBalance {
                 token: entry.token.to_checksum(None),
                 balance: entry.amount.to_string(),
