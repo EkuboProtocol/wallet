@@ -335,7 +335,7 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
       COMPLETION_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/ekubo-wallet"
       install_completion_file bash "$COMPLETION_FILE"
       install_completion_alias "$COMPLETION_FILE" "$(dirname "$COMPLETION_FILE")/ew"
-      append_once "$HOME/.bashrc" "# ekubo-wallet completion" "[ -r \"$COMPLETION_FILE\" ] && . \"$COMPLETION_FILE\""
+      append_once "$HOME/.bashrc" "# ekubo-wallet completion" "[ -r $(shell_quote "$COMPLETION_FILE") ] && . $(shell_quote "$COMPLETION_FILE")"
       log "installed Bash completion"
       ;;
     zsh)
@@ -344,7 +344,7 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
       install_completion_file zsh "$COMPLETION_FILE"
       install_completion_alias "$COMPLETION_FILE" "$COMPLETION_DIRECTORY/_ew"
       ZSH_RC="${ZDOTDIR:-$HOME}/.zshrc"
-      append_once "$ZSH_RC" "# ekubo-wallet completion" "fpath=(\"$COMPLETION_DIRECTORY\" \$fpath)" "autoload -Uz compinit && compinit"
+      append_once "$ZSH_RC" "# ekubo-wallet completion" "fpath=($(shell_quote "$COMPLETION_DIRECTORY") \$fpath)" "autoload -Uz compinit && compinit"
       log "installed Zsh completion"
       ;;
     fish)
