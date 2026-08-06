@@ -57,7 +57,10 @@ fn interactive_proof_has_exactly_one_production_origin() {
                     && !line.trim_start().starts_with("//")
                     && !line.contains("pub fn from_terminal")
                 {
-                    call_sites.push(format!("{}:{}", path.display(), number + 1));
+                    // Forward slashes on every platform, so the assertions
+                    // below hold on Windows too.
+                    let display = path.display().to_string().replace('\\', "/");
+                    call_sites.push(format!("{display}:{}", number + 1));
                 }
             }
         }
