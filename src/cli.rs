@@ -1612,9 +1612,9 @@ fn plan_native_total(record: &PendingTransaction) -> BigUint {
 /// The browser is only ever navigation: choosing an entry leaves the
 /// alternate screen first and the review runs exactly as
 /// `ekubo-wallet review <request-id>` would — its JSON record prints into
-/// the terminal transcript, and signature reviews then take over the screen
-/// again for the scrollable document. When that review finishes, the queues
-/// are reloaded and the browser returns, minus whatever was just resolved.
+/// the terminal transcript, and the review then takes over the screen again
+/// for the scrollable document. When that review finishes, the queues are
+/// reloaded and the browser returns, minus whatever was just resolved.
 async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Result<()> {
     loop {
         let awaiting = PendingStore::production(config.data_dir())?.awaiting_approval(None)?;
@@ -2071,9 +2071,12 @@ async fn run_approve(
     }
 }
 
-/// The terminal implementation of the review seam: print the full review to
-/// stderr, then run the reject-default picker. `no_confirm` skips only the
-/// picker — owner authentication still follows in the orchestrator.
+/// The terminal implementation of the review seam: print the JSON record to
+/// the transcript, then draw the orchestrator-authored document in the same
+/// full-screen scrollable review the signing requests use — Approve stays
+/// unreachable until the end of the document has been on screen. `no_confirm`
+/// skips only the review — owner authentication still follows in the
+/// orchestrator.
 struct CliTransactionPresenter {
     no_confirm: bool,
 }
@@ -2089,7 +2092,9 @@ impl crate::approval::ReviewPresenter for CliTransactionPresenter {
         if self.no_confirm {
             return Ok(ApprovalDecision::Approved);
         }
-        TerminalApprovalUi.review(request).await
+        // The plan's calldata already lives in the document's call sections,
+        // so there is no separate payload to append.
+        crate::approve_tui::review_fullscreen(request, Vec::new()).await
     }
 }
 
@@ -2591,7 +2596,7 @@ async fn reviewer_approved(
     payload: Vec<crate::fullscreen::Line>,
 ) -> Result<bool> {
     Ok(
-        crate::approve_tui::review_signature_fullscreen(&request, payload).await?
+        crate::approve_tui::review_fullscreen(&request, payload).await?
             == ApprovalDecision::Approved,
     )
 }

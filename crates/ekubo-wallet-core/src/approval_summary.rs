@@ -243,20 +243,20 @@ async fn interpret_step(step: &ExecutionStep, metadata: &TokenMetadataMap) -> St
 /// Token balance changes listed at approval time.
 ///
 /// Entries come from Transfer logs the simulation observed, so a plan controls
-/// how many there are. The review they appear in is inline and does not
-/// scroll, which makes a long list a way to push warnings off the screen
-/// rather than a way to inform. A plan touching more tokens than this is one
-/// whose balance effects cannot be read line by line anyway.
+/// how many there are. Past this many, nobody is reading them line by line —
+/// an unbounded list is a way to bury the one entry that matters, not a way
+/// to inform — so the tail is summarized and counted instead.
 const MAX_DISPLAYED_BALANCE_CHANGES: usize = 32;
 
-/// Render the simulated net balance changes with symbols and decimals when the
-/// wallet could read them, and always with exact base units.
+/// Render the simulated net balance changes as `(label, change)` pairs —
+/// which asset, then its delta — with symbols and decimals when the wallet
+/// could read them, and always with exact base units.
 #[must_use]
 pub fn render_balance_changes(
     simulation: &SimulationResult,
     network: &NetworkConfig,
     metadata: &TokenMetadataMap,
-) -> Vec<String> {
+) -> Vec<(String, String)> {
     let Some(changes) = &simulation.balance_changes else {
         return Vec::new();
     };
@@ -268,24 +268,19 @@ pub fn render_balance_changes(
         Some(native) if native.sign() == Sign::NoSign => {}
         Some(native) => {
             let currency = native_currency(network);
-            lines.push(format!(
-                "Native {}: {}",
-                currency.symbol,
-                format_signed_amount(&native, Some(currency.decimals), Some(&currency.symbol))
+            lines.push((
+                format!("{} (native)", currency.symbol),
+                format_signed_amount(&native, Some(currency.decimals), Some(&currency.symbol)),
             ));
         }
-        None => lines.push(format!(
-            "Native: unparseable net change reported as {:?}",
-            changes.native.delta
+        None => lines.push((
+            "Native".to_string(),
+            format!(
+                "unparseable net change reported as {:?}",
+                changes.native.delta
+            ),
         )),
     }
-    // Bounded, and told when it is bounding. Token entries come from Transfer
-    // logs the simulation observed, and a plan can emit as many as it likes: a
-    // step that deploys contracts each emitting one 1-wei Transfer to the
-    // sender produces an entry apiece. This review is inline and does not
-    // scroll, so an unbounded list pushes the warnings and the balance changes
-    // that matter off the top of the screen — which is a way to hide the one
-    // line the reviewer needed to read.
     let total = changes.tokens.len();
     for (raw_token, change) in changes.tokens.iter().take(MAX_DISPLAYED_BALANCE_CHANGES) {
         let token = raw_token.parse::<Address>().ok();
@@ -307,12 +302,15 @@ pub fn render_balance_changes(
         } else {
             format!("; standard Transfer events: +{incoming} in, -{outgoing} out")
         };
-        lines.push(format!("{label}: {delta_text}{transfers}"));
+        lines.push((label, format!("{delta_text}{transfers}")));
     }
     if total > MAX_DISPLAYED_BALANCE_CHANGES {
-        lines.push(format!(
-            "… and {} further token(s) with net changes, not shown",
-            total - MAX_DISPLAYED_BALANCE_CHANGES
+        lines.push((
+            "…".to_string(),
+            format!(
+                "and {} further token(s) with net changes, not shown",
+                total - MAX_DISPLAYED_BALANCE_CHANGES
+            ),
         ));
     }
     lines

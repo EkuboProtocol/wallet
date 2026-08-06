@@ -66,6 +66,24 @@ fn calldata_rows(calldata: &[u8]) -> Vec<String> {
     rows
 }
 
+/// A native value in the network's currency with the exact wei in reach —
+/// "0.05 ETH (50000000000000000 wei)" — or the raw wei alone when the
+/// network does not name its currency or the value is not a number.
+fn native_value(wei: &str, network: &NetworkConfig) -> String {
+    if BigUint::from_str(wei).is_err() {
+        return format!("value {wei}");
+    }
+    match network.native_currency.as_ref() {
+        Some(currency) if wei != "0" => format!(
+            "{} {} ({wei} wei)",
+            crate::approval_summary::format_fixed_point(wei, currency.decimals),
+            currency.symbol
+        ),
+        Some(currency) => format!("0 {}", currency.symbol),
+        None => format!("{wei} wei"),
+    }
+}
+
 /// What the automatic path did with a simulated plan.
 pub enum SendDisposition {
     /// The policy allowed and the simulation succeeded: the exact envelope is
@@ -378,6 +396,7 @@ async fn transaction_approval_request(
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .sum::<BigUint>();
+    let steps = &pending.execution_plan.ordered_steps;
     let mut request = ApprovalRequest::new(
         ApprovalKind::PolicyException,
         "Approve policy exception",
@@ -399,97 +418,32 @@ async fn transaction_approval_request(
     )
     .fact("Sender", format!("{:#x}", pending.execution_plan.sender))
     .fact(
-        "Ordered calls",
-        pending.execution_plan.ordered_steps.len().to_string(),
+        "Total native value",
+        native_value(&total_native.to_string(), network),
     )
-    .fact("Total native value", total_native.to_string())
     .fact("Policy revision", pending.policy_revision.to_string())
     .fact("Plan digest", &pending.digest)
     .fact("Simulation parent block", &simulation.block_number)
-    .fact("Transaction type", prepared.transaction_type())
-    .fact("Transaction nonce", prepared.nonce().to_string())
-    .fact("Gas limit", prepared.gas_limit().to_string())
-    .fact(
-        "Max fee per gas (wei)",
-        prepared.max_fee_per_gas().to_string(),
-    )
-    .fact(
-        "Max priority fee per gas (wei)",
-        prepared.max_priority_fee_per_gas().to_string(),
-    )
-    .fact("Maximum transaction fee (wei)", prepared.maximum_fee_wei())
     .digest(prepared.review_digest());
     request.id = pending.request_id;
-    let interpretations =
-        interpret_steps(&pending.execution_plan.ordered_steps, token_metadata).await;
-    for (step, interpretation) in pending
-        .execution_plan
-        .ordered_steps
-        .iter()
-        .zip(&interpretations)
-    {
-        let calldata = step.transaction.data.as_ref();
-        let selector = if calldata.is_empty() {
-            "none".into()
-        } else {
-            format!("0x{}", hex::encode(&calldata[..calldata.len().min(4)]))
-        };
-        request = request.fact(
-            format!("Call {}", step.step),
-            format!(
-                "kind={:?}; target={:#x}; value={} wei; selector={selector}; calldata={} bytes",
-                step.kind,
-                step.transaction.to,
-                step.transaction.value,
-                calldata.len(),
-            ),
+
+    request = request
+        .section("Prepared transaction")
+        .fact("Type", prepared.transaction_type())
+        .fact("Nonce", prepared.nonce().to_string())
+        .fact("Gas limit", prepared.gas_limit().to_string())
+        .fact(
+            "Max fee per gas",
+            format!("{} wei", prepared.max_fee_per_gas()),
+        )
+        .fact(
+            "Max priority fee per gas",
+            format!("{} wei", prepared.max_priority_fee_per_gas()),
+        )
+        .fact(
+            "Maximum transaction fee",
+            native_value(&prepared.maximum_fee_wei(), network),
         );
-        // The exact fields above are authoritative; these lines are a
-        // supplemental reading from a vendored ERC-7730 descriptor or from
-        // recognized standard calldata.
-        request = request.fact(
-            format!("Call {} reads as", step.step),
-            interpretation.description.clone().unwrap_or_else(|| {
-                "no matching descriptor or standard token operation; verify the target and selector directly"
-                    .into()
-            }),
-        );
-        for detail in &interpretation.details {
-            request = request.fact(format!("Call {} ·", step.step), detail);
-        }
-        // The bytes themselves. Every line above is a description of them —
-        // the selector is the first four, the "reads as" line is a descriptor's
-        // account of the rest — and the fallback for an unrecognized call tells
-        // the reviewer to "verify the target and selector directly", which they
-        // could not do because the calldata appeared on no screen. A summary a
-        // reviewer cannot check against the thing it summarizes is a claim,
-        // not a review.
-        for row in calldata_rows(calldata) {
-            request = request.fact(format!("Call {} calldata", step.step), row);
-        }
-    }
-    let balance_changes = render_balance_changes(simulation, network, token_metadata);
-    if balance_changes.is_empty() {
-        request = request.fact(
-            "Simulated net balance changes",
-            if simulation.simulation.success {
-                "none detected"
-            } else {
-                "unavailable because simulation failed"
-            },
-        );
-    } else {
-        for (index, line) in balance_changes.iter().enumerate() {
-            request = request.fact(
-                if index == 0 {
-                    "Simulated net balance change (excludes live gas)".to_string()
-                } else {
-                    format!("Simulated net balance change {}", index + 1)
-                },
-                line,
-            );
-        }
-    }
     if let Some(authorization_nonce) = prepared.authorization_nonce() {
         request = request.fact(
             "EIP-7702 authorization",
@@ -498,6 +452,73 @@ async fn transaction_approval_request(
                 simulation.implementation.as_deref().unwrap_or("missing")
             ),
         );
+    }
+
+    let interpretations = interpret_steps(steps, token_metadata).await;
+    for (step, interpretation) in steps.iter().zip(&interpretations) {
+        let calldata = step.transaction.data.as_ref();
+        request = request
+            .section(format!(
+                "Call {} of {} — {:?}",
+                step.step,
+                steps.len(),
+                step.kind
+            ))
+            .fact("Target", format!("{:#x}", step.transaction.to))
+            .fact(
+                "Value",
+                native_value(step.transaction.value.as_str(), network),
+            )
+            // The exact fields here are authoritative; the reading is a
+            // supplemental interpretation from a vendored ERC-7730 descriptor
+            // or from recognized standard calldata.
+            .fact(
+                "Reads as",
+                interpretation.description.clone().unwrap_or_else(|| {
+                    "no matching descriptor or standard token operation; verify the target and selector directly"
+                        .into()
+                }),
+            );
+        for detail in &interpretation.details {
+            request = request.fact("·", detail);
+        }
+        let summary = if calldata.is_empty() {
+            "none".to_string()
+        } else {
+            format!(
+                "{} bytes; selector 0x{}",
+                calldata.len(),
+                hex::encode(&calldata[..calldata.len().min(4)])
+            )
+        };
+        request = request.fact("Calldata", summary);
+        // The bytes themselves. Every line above is a description of them —
+        // the selector is the first four, the "reads as" line is a descriptor's
+        // account of the rest — and the fallback for an unrecognized call tells
+        // the reviewer to "verify the target and selector directly", which they
+        // could not do because the calldata appeared on no screen. A summary a
+        // reviewer cannot check against the thing it summarizes is a claim,
+        // not a review.
+        for row in calldata_rows(calldata) {
+            request = request.fact("", row);
+        }
+    }
+
+    request = request.section("Simulated net balance changes (excludes live gas)");
+    let balance_changes = render_balance_changes(simulation, network, token_metadata);
+    if balance_changes.is_empty() {
+        request = request.fact(
+            "Result",
+            if simulation.simulation.success {
+                "none detected"
+            } else {
+                "unavailable because simulation failed"
+            },
+        );
+    } else {
+        for (label, value) in balance_changes {
+            request = request.fact(label, value);
+        }
     }
     if let Some(replaced) = &simulation.replaces_delegated_implementation {
         request = request.warning(format!(

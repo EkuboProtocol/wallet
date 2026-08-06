@@ -102,12 +102,64 @@ fn the_document_carries_facts_warnings_digest_and_payload_sanitized() {
     let document = review_document(&request, payload);
     let text = fullscreen::lines_to_text(&document, |text, _| text.to_owned());
     assert!(text.contains("Sign these exact bytes."));
-    assert!(text.contains("Wallet: main"));
-    assert!(text.contains("Digest: 0xabc"));
-    assert!(text.contains(&format!("Request: {}", request.id)));
+    assert!(text.contains("Wallet   main"), "labels align in a column");
+    assert!(text.contains("Digest   0xabc"));
+    assert!(text.contains(&format!("Request  {}", request.id)));
     assert!(text.contains("hello world"), "the payload is appended");
     assert!(
         !text.contains('\u{1b}'),
         "stored text cannot carry escapes into the review"
     );
+    let line_with = |needle: &str| {
+        document
+            .iter()
+            .position(|line| line.iter().any(|span| span.text.contains(needle)))
+            .expect(needle)
+    };
+    assert!(
+        line_with("⚠") > line_with("hello world"),
+        "warnings come last, where the end-gate guarantees they are seen"
+    );
+}
+
+#[test]
+fn sections_render_headings_aligned_facts_and_sign_toned_amounts() {
+    let request = ApprovalRequest::new(
+        ApprovalKind::PolicyException,
+        "Approve policy exception",
+        "Review this plan.",
+    )
+    .fact("Wallet", "main")
+    .section("Simulated net balance changes (excludes live gas)")
+    .fact("ETH (native)", "-0.05 ETH (-50000000000000000 base units)")
+    .fact("USDC (0xa0b8)", "+1.5 USDC (+1500000 base units)")
+    .section("Call 1 of 1 — Normal")
+    .fact("Calldata", "36 bytes; selector 0xa9059cbb")
+    .fact("", "a9059cbb00000000");
+    let document = review_document(&request, Vec::new());
+    let text = fullscreen::lines_to_text(&document, |text, _| text.to_owned());
+    assert!(text.contains("Simulated net balance changes"));
+    assert!(text.contains("Call 1 of 1"));
+
+    let toned = |needle: &str| {
+        document
+            .iter()
+            .flatten()
+            .find(|span| span.text.contains(needle))
+            .and_then(|span| span.tone)
+    };
+    assert_eq!(toned("-0.05 ETH"), Some(Tone::Danger), "outflows read red");
+    assert_eq!(
+        toned("+1.5 USDC"),
+        Some(Tone::Success),
+        "inflows read green"
+    );
+    assert_eq!(
+        toned("Call 1 of 1"),
+        Some(Tone::Emphasis),
+        "headings are emphasized"
+    );
+    // The continuation row (empty label) starts at the value column, under
+    // the calldata summary rather than at the label column.
+    assert!(text.contains("   a9059cbb00000000"), "{text}");
 }

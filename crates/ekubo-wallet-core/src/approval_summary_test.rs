@@ -358,7 +358,7 @@ fn unparseable_deltas_are_reported_rather_than_shown_as_zero() {
     let network = crate::config::default_networks().remove(0);
     let lines = render_balance_changes(&simulation, &network, &TokenMetadataMap::new());
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].contains("unparseable"), "{lines:?}");
+    assert!(lines[0].1.contains("unparseable"), "{lines:?}");
 }
 
 #[test]

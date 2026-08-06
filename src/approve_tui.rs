@@ -7,14 +7,15 @@
 //! deliberate movement.
 //!
 //! Two renderings share that shape. [`TerminalApprovalUi`] prints the
-//! document into the scrollback and asks inline; [`review_signature_fullscreen`]
-//! draws it on the alternate screen with its own scroll state, for the
-//! signing reviews whose payload is the thing being signed and must be
-//! readable in full — there, Approve additionally cannot be confirmed until
-//! the end of the document has been on screen.
+//! document into the scrollback and asks inline, for the short local
+//! confirmations; [`review_fullscreen`] draws it on the alternate screen
+//! with its own scroll state, for every review of something being signed —
+//! transactions, typed data, messages — whose document must be readable in
+//! full. There, Approve additionally cannot be confirmed until the end of
+//! the document has been on screen.
 
 use crate::{
-    approval::{ApprovalDecision, ApprovalRequest, ApprovalUi},
+    approval::{ApprovalDecision, ApprovalFact, ApprovalRequest, ApprovalUi},
     fullscreen::{self, Line, Screen, Span},
     sanitize::terminal_safe_line as terminal_safe,
     tui::Tone,
@@ -67,6 +68,21 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
         write!(body, "\nDigest: {}", terminal_safe(digest))?;
     }
     write!(body, "\nRequest: {}", request.id)?;
+    for section in &request.sections {
+        write!(body, "\n\n{}", terminal_safe(&section.heading))?;
+        for fact in &section.facts {
+            if fact.label.is_empty() {
+                write!(body, "\n  {}", terminal_safe(&fact.value))?;
+            } else {
+                write!(
+                    body,
+                    "\n{}: {}",
+                    terminal_safe(&fact.label),
+                    terminal_safe(&fact.value)
+                )?;
+            }
+        }
+    }
 
     crate::tui::note(terminal_safe(&request.title), body);
     for warning in &request.warnings {
@@ -98,15 +114,15 @@ fn review_in_terminal(request: &ApprovalRequest) -> Result<ApprovalDecision> {
 }
 
 /// Full-screen review of a signing request: the complete document — summary,
-/// facts, warnings, and the exact payload being signed — on the alternate
-/// screen with its own scroll state, ending in the same reject-default
-/// picker as the inline review.
+/// facts, sections, the exact payload being signed, and the warnings — on
+/// the alternate screen with its own scroll state, ending in the same
+/// reject-default picker as the inline review.
 ///
-/// The payload lines are appended after the authored document, so the whole
+/// The payload lines are appended after the authored sections, so the whole
 /// review is one scrollable text and the position indicator counts the
 /// payload too. Approve cannot be confirmed until the end of the document
 /// has been on screen; Reject always can.
-pub async fn review_signature_fullscreen(
+pub async fn review_fullscreen(
     request: &ApprovalRequest,
     payload: Vec<Line>,
 ) -> Result<ApprovalDecision> {
@@ -158,33 +174,90 @@ fn review_fullscreen_blocking(
     Ok(decision)
 }
 
-/// The authored document plus the payload as one styled text. Every span is
-/// built through the sanitizing [`Span`] constructors, so stored text cannot
-/// draw chrome here any more than it can in the browsers.
+/// The authored document plus the payload as one styled text, in the same
+/// visual language as the transaction browser's detail view: aligned muted
+/// label columns, emphasized section headings, signed amounts toned by their
+/// sign. Every span is built through the sanitizing [`Span`] constructors,
+/// so stored text cannot draw chrome here any more than it can in the
+/// browsers.
+///
+/// The warnings come last, after the sections and the payload: the decision
+/// pane refuses Approve until the end of the document has been on screen, so
+/// last is the one position a long document can never scroll them away from.
 fn review_document(request: &ApprovalRequest, payload: Vec<Line>) -> Vec<Line> {
     let mut lines: Vec<Line> = vec![vec![Span::plain(&request.summary)], Vec::new()];
-    for fact in &request.facts {
-        lines.push(vec![
-            Span::toned(format!("{}: ", fact.label), Tone::Muted),
-            Span::plain(&fact.value),
-        ]);
-    }
+    let mut header = request.facts.clone();
     if let Some(digest) = &request.digest {
-        lines.push(vec![
-            Span::toned("Digest: ", Tone::Muted),
-            Span::plain(digest),
-        ]);
+        header.push(ApprovalFact {
+            label: "Digest".into(),
+            value: digest.clone(),
+        });
     }
-    lines.push(vec![
-        Span::toned("Request: ", Tone::Muted),
-        Span::plain(request.id.to_string()),
-    ]);
+    header.push(ApprovalFact {
+        label: "Request".into(),
+        value: request.id.to_string(),
+    });
+    lines.extend(fact_block(&header, ""));
+    for section in &request.sections {
+        lines.push(Vec::new());
+        lines.push(vec![Span::toned(&section.heading, Tone::Emphasis)]);
+        lines.extend(fact_block(&section.facts, "  "));
+    }
+    lines.extend(payload);
     for warning in &request.warnings {
         lines.push(Vec::new());
         lines.push(vec![Span::toned(format!("⚠ {warning}"), Tone::Warning)]);
     }
-    lines.extend(payload);
     lines
+}
+
+/// Labels wider than this stop stretching the value column for everyone
+/// else; such a row simply runs long, and its value follows inline.
+const MAX_LABEL_COLUMNS: usize = 32;
+
+/// One aligned label/value block: muted labels padded to a shared column,
+/// values beside them. A fact with an empty label continues the fact above
+/// it — calldata rows — and starts at the value column.
+fn fact_block(facts: &[ApprovalFact], indent: &str) -> Vec<Line> {
+    use crate::fullscreen::display_width;
+    let width = facts
+        .iter()
+        .map(|fact| display_width(&fact.label))
+        .filter(|width| *width <= MAX_LABEL_COLUMNS)
+        .max()
+        .unwrap_or_default();
+    facts
+        .iter()
+        .map(|fact| {
+            let padding = width.saturating_sub(display_width(&fact.label));
+            vec![
+                Span::toned(
+                    format!("{indent}{}{}  ", fact.label, " ".repeat(padding)),
+                    Tone::Muted,
+                ),
+                value_span(&fact.value),
+            ]
+        })
+        .collect()
+}
+
+/// Signed amounts — a leading `+` or `-` on a digit — read green or red, the
+/// same rule the transaction browser's balance table uses. A presentation
+/// rule about number formatting, not knowledge of any particular fact.
+fn value_span(value: &str) -> Span {
+    let signed = value
+        .strip_prefix(['+', '-'])
+        .is_some_and(|rest| rest.starts_with(|character: char| character.is_ascii_digit()));
+    if signed {
+        let tone = if value.starts_with('+') {
+            Tone::Success
+        } else {
+            Tone::Danger
+        };
+        Span::toned(value, tone)
+    } else {
+        Span::plain(value)
+    }
 }
 
 /// Scroll and decision state of one full-screen review. Layout-derived

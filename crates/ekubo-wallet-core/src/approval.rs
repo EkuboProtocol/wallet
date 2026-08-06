@@ -23,11 +23,24 @@ pub enum ApprovalKind {
     MessageSignature,
 }
 
-/// One label/value pair in a human-readable approval summary.
+/// One label/value pair in a human-readable approval summary. An empty label
+/// continues the fact above it — calldata rows, for example — so a renderer
+/// can indent continuations under one label instead of repeating it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalFact {
     pub label: String,
     pub value: String,
+}
+
+/// One titled group of facts in a review document: the calls of a plan, the
+/// prepared transaction, the simulated balance changes. Sections exist so a
+/// presenter can lay the document out — headings, aligned label columns —
+/// without ever parsing labels; the content is still entirely
+/// orchestrator-authored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalSection {
+    pub heading: String,
+    pub facts: Vec<ApprovalFact>,
 }
 
 /// A server-authored snapshot of exactly what the user is being asked to approve.
@@ -37,7 +50,10 @@ pub struct ApprovalRequest {
     pub kind: ApprovalKind,
     pub title: String,
     pub summary: String,
+    /// Header facts that identify the request, before any section.
     pub facts: Vec<ApprovalFact>,
+    #[serde(default)]
+    pub sections: Vec<ApprovalSection>,
     pub warnings: Vec<String>,
     pub digest: Option<String>,
 }
@@ -51,16 +67,34 @@ impl ApprovalRequest {
             title: title.into(),
             summary: summary.into(),
             facts: Vec::new(),
+            sections: Vec::new(),
             warnings: Vec::new(),
             digest: None,
         }
     }
 
+    /// Add a fact to the open section, or to the header facts while no
+    /// section has been started. The builder reads top to bottom like the
+    /// finished document does.
     #[must_use]
     pub fn fact(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
-        self.facts.push(ApprovalFact {
+        let fact = ApprovalFact {
             label: label.into(),
             value: value.into(),
+        };
+        match self.sections.last_mut() {
+            Some(section) => section.facts.push(fact),
+            None => self.facts.push(fact),
+        }
+        self
+    }
+
+    /// Start a new titled section; subsequent facts belong to it.
+    #[must_use]
+    pub fn section(mut self, heading: impl Into<String>) -> Self {
+        self.sections.push(ApprovalSection {
+            heading: heading.into(),
+            facts: Vec::new(),
         });
         self
     }

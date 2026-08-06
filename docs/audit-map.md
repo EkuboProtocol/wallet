@@ -9,8 +9,9 @@ function names, which `grep` finds after any refactor.
 The audit scope is **`crates/ekubo-wallet-core`** plus one binary-crate file,
 **`src/approve_tui.rs`** (the terminal approval presenter: the reject-default
 picker between the review document and the human's decision, in both its
-inline rendering and the full-screen signature review, where Approve is
-additionally refused until the end of the document has been on screen).
+inline rendering and the full-screen review every signing request —
+transaction, typed data, message — is read in, where Approve is additionally
+refused until the end of the document has been on screen).
 
 Everything else in the binary crate is presentation and adaptation — CLI
 argument handling, the MCP tool surface and its DTOs, TUI browsers, tables,
