@@ -651,6 +651,224 @@ pub(crate) fn is_interrupt(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'd'))
 }
 
+/// The two-option decision row every confirmation screen ends with.
+///
+/// `accept` is the affirmative option and always sits second, so the cursor
+/// starting on the refusal means the affirmative answer is the one that has to
+/// be reached for. Shared so three screens cannot style the same decision
+/// differently.
+pub(crate) fn decision_pane<'a>(
+    cancel_label: &'a str,
+    accept_label: &'a str,
+    accepting: bool,
+) -> Paragraph<'a> {
+    let option = |selected: bool, text: &str| {
+        let line = UiLine::from(UiSpan::raw(format!(
+            " {} {text} ",
+            if selected { "▸" } else { " " }
+        )));
+        if selected {
+            line.style(Style::new().add_modifier(Modifier::REVERSED))
+        } else {
+            line
+        }
+    };
+    Paragraph::new(vec![
+        UiLine::default(),
+        option(!accepting, cancel_label),
+        option(accepting, accept_label),
+    ])
+}
+
+/// One labelled value in an [`edit_form`].
+pub(crate) struct FormField {
+    pub label: String,
+    /// The one line shown under the form while this field has the cursor.
+    pub help: String,
+    pub value: String,
+}
+
+/// Edit a set of labelled values in one full-screen form.
+///
+/// `Ok(None)` means the user backed out and nothing should change. `validate`
+/// runs on save and reports `(index, reason)` for the field that is wrong, so
+/// the cursor lands on it with the reason under the form — rather than the
+/// caller discovering it after the screen is gone, which is where a rejected
+/// value used to surface.
+///
+/// Owns its own screen, exactly like [`pick_table`], so a command composed of
+/// a pick and then a form never drops to the scrollback in between.
+pub(crate) fn edit_form(
+    title: &str,
+    mut fields: Vec<FormField>,
+    mut validate: impl FnMut(&[String]) -> std::result::Result<(), (usize, String)>,
+) -> Result<Option<Vec<String>>> {
+    if fields.is_empty() || !crate::tui::interactive() {
+        return Ok(None);
+    }
+    let mut editors: Vec<TextField> = fields
+        .iter_mut()
+        .map(|field| {
+            TextField::new(field.label.clone()).with_value(std::mem::take(&mut field.value))
+        })
+        .collect();
+    let mut focus = 0_usize;
+    let mut error: Option<String> = None;
+    let mut screen = Screen::enter()?;
+    loop {
+        screen.terminal.draw(|frame| {
+            let (header, body, footer) = chrome(frame.area());
+            frame.render_widget(title_line(title), header);
+            let rows = Layout::vertical(
+                std::iter::repeat_n(Constraint::Length(1), editors.len() + 2)
+                    .chain(std::iter::once(Constraint::Fill(1)))
+                    .collect::<Vec<_>>(),
+            )
+            .split(body);
+            for (index, editor) in editors.iter().enumerate() {
+                editor.draw(frame, rows[index], index == focus);
+            }
+            let status = error.as_deref().unwrap_or(&fields[focus].help);
+            frame.render_widget(
+                Paragraph::new(UiLine::from(UiSpan::styled(
+                    terminal_safe_line(status),
+                    tone_style(if error.is_some() {
+                        Tone::Warning
+                    } else {
+                        Tone::Muted
+                    }),
+                ))),
+                rows[editors.len() + 1],
+            );
+            frame.render_widget(
+                footer_line(
+                    None,
+                    "Tab/↑↓ move · Ctrl+S save · Esc cancel · Ctrl+U clear",
+                ),
+                footer,
+            );
+        })?;
+        let key = match crossterm::event::read()? {
+            crossterm::event::Event::Key(key)
+                if key.kind == crossterm::event::KeyEventKind::Press =>
+            {
+                key
+            }
+            _ => continue,
+        };
+        if is_interrupt(key) {
+            return Ok(None);
+        }
+        // The focused editor gets first refusal, so a typed character is never
+        // navigation. It declines exactly the keys used below.
+        if editors[focus].handle_key(key) {
+            error = None;
+            continue;
+        }
+        let save =
+            matches!(key.code, KeyCode::Char('s')) && key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => return Ok(None),
+            KeyCode::Tab | KeyCode::Down => focus = (focus + 1) % editors.len(),
+            KeyCode::BackTab | KeyCode::Up => {
+                focus = (focus + editors.len() - 1) % editors.len();
+            }
+            KeyCode::Enter if focus + 1 < editors.len() => focus += 1,
+            _ if !save && key.code != KeyCode::Enter => continue,
+            _ => {}
+        }
+        if save || key.code == KeyCode::Enter {
+            let values: Vec<String> = editors
+                .iter()
+                .map(|editor| editor.value().to_owned())
+                .collect();
+            match validate(&values) {
+                Ok(()) => return Ok(Some(values)),
+                Err((index, reason)) => {
+                    focus = index.min(editors.len() - 1);
+                    error = Some(reason);
+                }
+            }
+        }
+    }
+}
+
+/// One full-screen confirmation: the same facts a `crate::tui::Confirmation`
+/// prints to the scrollback, drawn as a document with a decision row.
+///
+/// For a command that has already shown a full-screen surface. Dropping to an
+/// inline prompt to ask the question is what leaves a half-finished exchange
+/// in the terminal after the command ends.
+pub(crate) fn confirm_review(
+    title: &str,
+    document: &[Line],
+    question: &str,
+    cancel_label: &str,
+) -> Result<bool> {
+    if !crate::tui::interactive() {
+        return Ok(false);
+    }
+    let mut accepting = false;
+    let mut offset = 0_usize;
+    let mut screen = Screen::enter()?;
+    loop {
+        screen.terminal.draw(|frame| {
+            let [header, body, decision, footer] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Fill(1),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ])
+            .areas(frame.area());
+            frame.render_widget(title_line(title), header);
+            let columns = (body.width as usize).saturating_sub(2).max(10);
+            let wrapped = wrap_lines(document, columns);
+            let viewport = (body.height as usize).max(1);
+            offset = offset.min(wrapped.len().saturating_sub(viewport));
+            let visible: Vec<UiLine> = wrapped
+                .iter()
+                .skip(offset)
+                .take(viewport)
+                .map(|line| {
+                    let mut spans = vec![UiSpan::raw(" ")];
+                    spans.extend(line.iter().map(ui_span));
+                    UiLine::from(spans)
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(visible), body);
+            frame.render_widget(decision_pane(cancel_label, question, accepting), decision);
+            frame.render_widget(
+                footer_line(
+                    None,
+                    "↑↓/Tab choose · PgUp/PgDn scroll · Enter confirm · Esc cancel",
+                ),
+                footer,
+            );
+        })?;
+        let key = match crossterm::event::read()? {
+            crossterm::event::Event::Key(key)
+                if key.kind == crossterm::event::KeyEventKind::Press =>
+            {
+                key
+            }
+            _ => continue,
+        };
+        if is_interrupt(key) {
+            return Ok(false);
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(false),
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+                accepting = !accepting;
+            }
+            KeyCode::PageDown => offset = offset.saturating_add(1),
+            KeyCode::PageUp => offset = offset.saturating_sub(1),
+            KeyCode::Enter => return Ok(accepting),
+            _ => {}
+        }
+    }
+}
+
 /// One full-screen pick: draw the table until the user chooses a row
 /// (`Ok(Some(index))`) or backs out (`Ok(None)`).
 ///

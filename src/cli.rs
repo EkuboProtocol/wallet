@@ -1176,8 +1176,30 @@ fn run_legal(config: &ConfigStore, command: &LegalCommand, mode: OutputMode) -> 
                     ));
                     return Ok(false);
                 }
-                crate::tui::info(format!("Document digest: {digest}"));
-                let accepted = crate::tui::confirm(prompt)?;
+                // Asked in a screen of its own rather than an inline prompt.
+                // The pager has just held the terminal; dropping to the
+                // scrollback for the one question that matters put the digest
+                // and the answer in a different place from the document they
+                // are about.
+                let accepted = crate::fullscreen::confirm_review(
+                    document.title(),
+                    &[
+                        vec![crate::fullscreen::Span::toned(
+                            "You have read this document to the end.",
+                            crate::tui::Tone::Muted,
+                        )],
+                        Vec::new(),
+                        vec![
+                            crate::fullscreen::Span::toned(
+                                "Document digest: ",
+                                crate::tui::Tone::Muted,
+                            ),
+                            crate::fullscreen::Span::plain(&digest),
+                        ],
+                    ],
+                    prompt,
+                    "Decline — signing stays disabled",
+                )?;
                 if accepted {
                     store.record_acceptance(document, &digest)?;
                 }
@@ -1578,16 +1600,6 @@ fn plan_native_total(record: &PendingTransaction) -> BigUint {
         .iter()
         .filter_map(|step| BigUint::from_str(step.transaction.value.as_str()).ok())
         .sum()
-}
-
-/// The visible page size for an interactive list in this CLI.
-///
-/// The prompt draws a header, a footer, and a blank separator around the list,
-/// and the shell prompt returns underneath it; leaving that many rows free
-/// keeps the whole prompt on one screen.
-fn interactive_list_rows() -> usize {
-    const PROMPT_CHROME_ROWS: usize = 6;
-    crate::render::interactive_list_rows(PROMPT_CHROME_ROWS)
 }
 
 /// Show what awaits review, and — on an interactive terminal — let the user
@@ -3102,76 +3114,64 @@ async fn run_network_edit(
         networks[index].clone()
     };
 
-    crate::tui::intro(format!(
-        "Edit network {} (chain {})",
-        original.name, original.chain_id
-    ));
+    // One full-screen form, opened straight from the full-screen picker above.
+    // This used to be an inline menu of fields with an inline prompt behind
+    // each one, so editing four values flipped the terminal between the
+    // alternate screen and the scrollback nine times and left the answered
+    // line of every prompt behind.
+    let fields = CUSTOM_NETWORK_FIELDS
+        .iter()
+        .map(|field| crate::fullscreen::FormField {
+            label: field.prompt.to_owned(),
+            help: format!("{} · example: {}", field.help, field.example),
+            value: network_field_value(&original, field.flag),
+        })
+        .collect();
+    // Validated against the same per-flag rules the inline prompt used, but on
+    // save and for the whole form, so the reason names the field it belongs to
+    // and the cursor lands there instead of the value being refused after the
+    // screen is gone.
+    let Some(values) = crate::fullscreen::edit_form(
+        &format!(
+            "Edit network {} (chain {})",
+            original.name, original.chain_id
+        ),
+        fields,
+        |values| {
+            for (index, (field, value)) in CUSTOM_NETWORK_FIELDS.iter().zip(values).enumerate() {
+                validate_network_field(field.flag, value).map_err(|reason| (index, reason))?;
+            }
+            Ok(())
+        },
+    )?
+    else {
+        crate::tui::outro_cancel("Nothing edited.");
+        return Ok(());
+    };
     let mut draft = original.clone();
-    loop {
-        // Field rows are two aligned columns rather than "label: value": the
-        // values here are URLs and comma-separated lists that read as prose
-        // otherwise, so a name and its contents are told apart by position
-        // instead of by punctuation buried mid-line. The `*` column marks a
-        // field the draft has changed, which a suffix could not do without
-        // hiding at the far end of a long value.
-        let name_columns = CUSTOM_NETWORK_FIELDS
-            .iter()
-            .map(|field| field.prompt.chars().count())
-            .max()
-            .unwrap_or_default();
-        let mut labels = vec!["Save and authorize".to_owned()];
-        labels.extend(CUSTOM_NETWORK_FIELDS.iter().map(|field| {
-            let value = network_field_value(&draft, field.flag);
-            let marker = if value == network_field_value(&original, field.flag) {
-                ' '
-            } else {
-                '*'
-            };
-            let shown = if value.is_empty() {
-                "(not set)"
-            } else {
-                &value
-            };
-            format!(
-                "{marker} {:<name_columns$} │ {shown}",
-                field.prompt,
-                name_columns = name_columns
-            )
-        }));
-        labels.push("Discard changes".to_owned());
-        let choice = crate::tui::pick(
-            "Edit which field? (* = changed)",
-            labels,
-            interactive_list_rows(),
-        )?;
-        match choice {
-            Some(0) => break,
-            Some(index) if index <= CUSTOM_NETWORK_FIELDS.len() => {
-                let field = &CUSTOM_NETWORK_FIELDS[index - 1];
-                let current = network_field_value(&draft, field.flag);
-                let value = prompt_network_field(field, Some(&current))?;
-                set_network_field(&mut draft, field.flag, &value)?;
-            }
-            _ => {
-                crate::tui::outro_cancel("Nothing edited.");
-                return Ok(());
-            }
-        }
+    for (field, value) in CUSTOM_NETWORK_FIELDS.iter().zip(&values) {
+        set_network_field(&mut draft, field.flag, value)?;
     }
     if draft == original {
         crate::tui::outro("No changes to save.");
         return Ok(());
     }
 
-    if !confirm_network_change(
+    // Asked in a full-screen document, like the form it follows. The inline
+    // confirmation this replaced was the last step that dropped to the
+    // scrollback mid-command.
+    if !crate::fullscreen::confirm_review(
         "Save network changes",
-        "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
-        "Save these changes?",
-        vec![
-            ("Network", draft.name.clone()),
-            ("Chain ID", draft.chain_id.to_string()),
-            ("RPC URL", draft.rpc_url.to_string()),
-        ],
+        &network_change_document(
+            "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
+            &[
+                ("Network", draft.name.clone()),
+                ("Chain ID", draft.chain_id.to_string()),
+                ("RPC URL", draft.rpc_url.to_string()),
+            ],
+        ),
+        "Save these changes",
+        "Cancel — nothing is written",
     )? {
         crate::tui::outro_cancel("Nothing saved.");
         return Ok(());
@@ -3766,6 +3766,37 @@ async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()
     )
 }
 
+/// The facts and the standing warning behind every network change, as a
+/// document. `confirm_network_change` prints the same content to the
+/// scrollback for the commands that are not already in a screen.
+fn network_change_document(
+    summary: &str,
+    facts: &[(&str, String)],
+) -> Vec<crate::fullscreen::Line> {
+    use crate::fullscreen::Span;
+    let mut lines = vec![
+        vec![Span::toned(summary, crate::tui::Tone::Muted)],
+        Vec::new(),
+    ];
+    for (label, value) in facts {
+        lines.push(vec![
+            Span::toned(format!("{label}: "), crate::tui::Tone::Muted),
+            Span::plain(value),
+        ]);
+    }
+    lines.push(Vec::new());
+    lines.push(vec![Span::toned(
+        format!("⚠ {NETWORK_TRUST_WARNING}"),
+        crate::tui::Tone::Warning,
+    )]);
+    lines
+}
+
+/// What a configured RPC decides, said the same way everywhere it is asked
+/// about.
+const NETWORK_TRUST_WARNING: &str = "The configured RPC supplies the chain state and eth_simulateV1 results that automatic \
+     signing decisions are made from.";
+
 fn confirm_network_change(
     title: &str,
     summary: &str,
@@ -3773,10 +3804,7 @@ fn confirm_network_change(
     facts: Vec<(&str, String)>,
 ) -> Result<bool> {
     require_interactive("network configuration changes")?;
-    let mut question = crate::tui::Confirmation::new(title, summary).warning(
-        "The configured RPC supplies the chain state and eth_simulateV1 results that automatic \
-         signing decisions are made from.",
-    );
+    let mut question = crate::tui::Confirmation::new(title, summary).warning(NETWORK_TRUST_WARNING);
     for (label, value) in facts {
         question = question.fact(label, value);
     }
@@ -4087,14 +4115,6 @@ mod tests {
             WalletPolicy::allow_all_with_approval()
         );
         assert_ne!(locked, StartingPolicy::AllowAll.policy());
-    }
-
-    #[test]
-    fn interactive_lists_are_sized_to_the_terminal() {
-        // The page is bounded and always leaves room for the prompt chrome.
-        let rows = interactive_list_rows();
-        assert!(rows >= 3);
-        assert!(rows < 10_000);
     }
 
     #[test]
