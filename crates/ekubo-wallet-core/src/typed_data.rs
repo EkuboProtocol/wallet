@@ -106,10 +106,61 @@ pub fn parse_typed_data(value: &serde_json::Value) -> Result<(TypedData, u64, B2
         typed.primary_type != "EIP712Domain",
         "refusing to sign a bare EIP712Domain payload"
     );
+    reject_unsigned_members(value, &typed)?;
     let digest = typed
         .eip712_signing_hash()
         .context("failed to compute the EIP-712 signing hash")?;
     Ok((typed, chain_id, digest))
+}
+
+/// Refuse a payload carrying members its own type definition does not declare.
+///
+/// EIP-712 hashes exactly the members listed for a type, in that order.
+/// Anything else in the `message` or `domain` object is ignored by the hash —
+/// and displayed to the reviewer, because the review screen shows the payload
+/// as submitted. That gap is writable: a `"note": "Approving 10 USDC"` beside
+/// a `value` of 2^256-1, or a second `deadline` shadowing the real one, reads
+/// as part of what is being authorized and is signed by nothing.
+///
+/// Refusing is the right shape rather than rendering only the signed members.
+/// A payload with an extra member is not a payload whose display needs fixing;
+/// it is one whose author is describing something other than what they are
+/// asking for, and the wallet has no way to know which half was the mistake.
+fn reject_unsigned_members(value: &serde_json::Value, typed: &TypedData) -> Result<()> {
+    for (object_name, declared_type) in [
+        ("message", typed.primary_type.as_str()),
+        ("domain", "EIP712Domain"),
+    ] {
+        let Some(object) = value
+            .get(object_name)
+            .and_then(serde_json::Value::as_object)
+        else {
+            continue;
+        };
+        // Read from the payload's own `types` map, which is the same thing
+        // the hash is derived from. A type absent there is left alone:
+        // `EIP712Domain` is commonly omitted and its members are fixed by the
+        // standard, and a missing `primaryType` has already failed above.
+        let Some(members) = value
+            .get("types")
+            .and_then(|types| types.get(declared_type))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        let declared: std::collections::BTreeSet<&str> = members
+            .iter()
+            .filter_map(|member| member.get("name").and_then(serde_json::Value::as_str))
+            .collect();
+        for key in object.keys() {
+            ensure!(
+                declared.contains(key.as_str()),
+                "typed data {object_name} carries \"{key}\", which type {declared_type} does not \
+                 declare; it would be displayed but not signed"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// One token approval a recognized permit payload grants when signed.
@@ -487,6 +538,32 @@ mod tests {
     use super::*;
     use crate::policy_store::DatabaseKey;
     use serde_json::json;
+
+    #[test]
+    fn a_member_the_type_does_not_declare_is_refused() {
+        // EIP-712 hashes only the members listed for the type. Anything else
+        // in `message` is displayed to the reviewer and signed by nothing, so
+        // it can describe a transaction other than the one being authorized.
+        let mut payload = permit_payload();
+        payload["message"]["note"] = json!("Approving 10 USDC");
+        let error = parse_typed_data(&payload).unwrap_err().to_string();
+        assert!(error.contains("\"note\""), "{error}");
+        assert!(error.contains("not signed"), "{error}");
+
+        // A member shadowing a declared one is the same problem wearing the
+        // right name, and is caught by the type not declaring it.
+        let mut shadowed = permit_payload();
+        shadowed["message"]["Deadline"] = json!(1);
+        assert!(parse_typed_data(&shadowed).is_err());
+
+        // The domain is checked the same way.
+        let mut domain = permit_payload();
+        domain["domain"]["salt"] = json!("0x01");
+        assert!(parse_typed_data(&domain).is_err());
+
+        // And an untouched payload still parses.
+        assert!(parse_typed_data(&permit_payload()).is_ok());
+    }
 
     pub(crate) fn permit_payload() -> serde_json::Value {
         json!({

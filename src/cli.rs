@@ -2612,13 +2612,43 @@ fn message_payload_lines(
                 .map(|line| vec![Span::plain(escape_payload_line(line))]),
         );
     } else {
-        lines.push(vec![Span::toned(
-            "Not valid UTF-8; the exact bytes as hex:",
-            Tone::Muted,
-        )]);
-        lines.push(vec![Span::plain(message_hex)]);
+        lines.push(vec![Span::toned("Not valid UTF-8.", Tone::Muted)]);
     }
+    // Always, not only when the decode failed. The rendering above is not
+    // injective: `escape_payload_line` turns a real U+202E into the characters
+    // `\u{202e}`, and a message that literally contains those characters
+    // renders identically — so the reviewer cannot tell which one they are
+    // being asked to sign. Confusables have the same problem in the other
+    // direction, a Cyrillic а being indistinguishable from a Latin a. The hex
+    // is the only thing on this screen that separates them, and it is what is
+    // actually hashed.
+    lines.push(Vec::new());
+    lines.push(vec![Span::toned("Exact bytes signed", Tone::Emphasis)]);
+    lines.extend(
+        hex_payload_rows(message_hex)
+            .into_iter()
+            .map(|row| vec![Span::plain(row)]),
+    );
     lines
+}
+
+/// Split a 0x-prefixed hex body into fixed-width rows.
+///
+/// One unbroken line of hex is re-wrapped by the viewport at whatever width
+/// the terminal happens to be, so the same message looks different in two
+/// windows and neither grouping means anything. Fixed rows of 32 bytes make
+/// the layout a property of the message.
+fn hex_payload_rows(message_hex: &str) -> Vec<String> {
+    const BYTES_PER_ROW: usize = 32;
+    let digits = message_hex.strip_prefix("0x").unwrap_or(message_hex);
+    if digits.is_empty() {
+        return vec!["0x (empty)".to_owned()];
+    }
+    digits
+        .as_bytes()
+        .chunks(BYTES_PER_ROW * 2)
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect()
 }
 
 /// The complete EIP-712 payload, pretty-printed, for the scrollable review
@@ -3941,6 +3971,32 @@ fn require_interactive(operation: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_readable_message_still_shows_the_bytes_that_get_signed() {
+        // Two messages that render identically after escaping: one holds a
+        // real right-to-left override, the other the seven ASCII characters
+        // that the escape of an override looks like. Only the hex tells the
+        // reviewer which one they are signing.
+        let real = "pay \u{202e}1".as_bytes();
+        let literal = "pay \\u{202e}1".as_bytes();
+
+        let rows = |bytes: &[u8]| {
+            let hex = format!("0x{}", hex::encode(bytes));
+            let display = crate::message::describe_message(bytes);
+            let lines = message_payload_lines(&hex, &display);
+            crate::fullscreen::lines_to_text(&lines, |text, _| text.to_owned())
+        };
+
+        let real_text = rows(real);
+        let literal_text = rows(literal);
+        assert!(real_text.contains("Exact bytes signed"), "{real_text}");
+        assert_ne!(
+            real_text, literal_text,
+            "an override and its own escape rendered identically"
+        );
+        assert!(real_text.contains(&hex::encode(real)), "{real_text}");
+    }
 
     #[test]
     fn a_review_transcript_carries_nothing_that_can_redraw_a_terminal() {
