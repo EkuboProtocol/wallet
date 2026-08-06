@@ -378,18 +378,34 @@ where
 /// error goes through this one implementation.
 #[must_use]
 pub fn sanitize_rpc_message(network: &NetworkConfig, message: &str) -> String {
-    let mut sanitized = message.replace(network.rpc_url.as_str(), "<rpc-url>");
-    if let Some(host) = network.rpc_url.host_str()
-        && (!network.rpc_url.username().is_empty() || network.rpc_url.password().is_some())
+    let url = &network.rpc_url;
+    // The whole URL first: once a component has been replaced, the full string
+    // can no longer match.
+    let mut sanitized = message.replace(url.as_str(), "<rpc-url>");
+    let username = url.username();
+    let password = url.password();
+    if (!username.is_empty() || password.is_some())
+        && let Some(host) = url.host_str()
     {
-        sanitized = sanitized.replace(
-            &format!(
-                "{}:{}@{host}",
-                network.rpc_url.username(),
-                network.rpc_url.password().unwrap_or_default()
-            ),
-            host,
-        );
+        // `Url::authority` yields whichever form this URL actually has —
+        // `user:pass@host:port`, `user@host:port`, or `:pass@host:port`. The
+        // previous single hand-built `user:pass@host` pattern matched none of
+        // them but the first, so a URL carrying only a username produced the
+        // pattern `KEY:@host`, which no provider ever echoes, and the key
+        // survived. Which endpoint failed is worth keeping, so the authority
+        // collapses to its host and port rather than to a placeholder.
+        let bare = url
+            .port()
+            .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+        sanitized = sanitized.replace(url.authority(), &bare);
+        // A provider may also quote a credential on its own, outside any
+        // authority it echoes.
+        if let Some(password) = password {
+            sanitized = sanitized.replace(password, "<redacted>");
+        }
+        if !username.is_empty() {
+            sanitized = sanitized.replace(username, "<redacted>");
+        }
     }
     sanitized
 }
@@ -450,6 +466,20 @@ mod tests {
         .to_string();
         assert!(!bare.contains("secret"), "{bare}");
         assert!(bare.contains("example.invalid"), "{bare}");
+
+        // The commonest provider shape carries the key as the username alone.
+        // The old pattern was built as `KEY:@host`, which nothing echoes, so
+        // this form went out verbatim.
+        let mut username_only = crate::config::default_networks().remove(0);
+        username_only.rpc_url = "https://KEYMATERIAL@example.invalid/rpc".parse().unwrap();
+        for message in [
+            "connect to KEYMATERIAL@example.invalid refused",
+            "unauthorized for KEYMATERIAL",
+        ] {
+            let sanitized = sanitized_rpc_error(&username_only, &format_args!("{message}"));
+            let sanitized = sanitized.to_string();
+            assert!(!sanitized.contains("KEYMATERIAL"), "{sanitized}");
+        }
     }
 
     #[test]
