@@ -92,6 +92,14 @@ the gas reported by `eth_simulateV1`, adds the EIP-7702 authorization cost when
 needed, and caps the signed limit at the lower of the network profile's
 `max_gas_limit` and the simulated block gas limit.
 
+**Set `max_gas_limit` on any custom network.** Every built-in preset carries
+one. Without it the only ceiling left is the block gas limit the endpoint
+itself reported, so the endpoint bounds its own pricing — and on the automatic
+path no human sees the fee before it is signed. Gas is native value the policy
+does not score: `native_value` guards what a call *sends*, not what it costs.
+A profile-level ceiling is the one bound on that which does not depend on the
+endpoint being honest.
+
 ## Running your own node
 
 The configured endpoint executes every simulation, so it decides whether a plan
