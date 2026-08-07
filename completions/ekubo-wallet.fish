@@ -12,6 +12,9 @@ complete -c ekubo-wallet -f
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a server -d 'Run the MCP server over stdio'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a version -d 'Print version information'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a status -d 'Show what is set up and what is waiting for you'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a portfolio -d 'Read native and token balances for an account'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a balance -d 'Alias for portfolio'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a bal -d 'Alias for portfolio'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a account -d 'Create, import, inspect, export, or remove accounts'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a acct -d 'Create, import, inspect, export, or remove accounts'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a wallet -d 'Alias for account'
@@ -60,5 +63,9 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l max-gas-limit -r -d 'Cap submitted transaction gas'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l block-explorer-url -r -d 'Set the block explorer URL'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l documentation-url -r -d 'Set the network documentation URL'
+
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from portfolio balance bal' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from portfolio balance bal' -l network -r -a '(ekubo-wallet __complete networks-fish 2>/dev/null)' -d 'Network name, alias, or chain ID'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from portfolio balance bal' -l tokens -r -d 'How many known tokens to check'
 
 complete -c ew -w ekubo-wallet

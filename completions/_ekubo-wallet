@@ -4,7 +4,7 @@ _ekubo-wallet() {
   local -a choices
 
   if (( CURRENT == 2 )); then
-    _values "command" server version status account acct wallet network net policy transaction tx token address-book legal review completion \
+    _values "command" server version status portfolio balance bal account acct wallet network net policy transaction tx token address-book legal review completion \
       --data-dir --json --help --version
     return
   fi

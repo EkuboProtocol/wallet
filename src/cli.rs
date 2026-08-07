@@ -77,6 +77,13 @@ enum Command {
     /// before the legal documents are accepted — finding out that they are
     /// what is blocking signing is most of the point.
     Status,
+    /// Read native and token balances for an account from a configured RPC.
+    ///
+    /// The one command here that talks to a chain. Balances come from the
+    /// endpoint configured for the network, read at a single pinned block so
+    /// the whole answer is one consistent view rather than a sequence of them.
+    #[command(alias = "balance", alias = "bal")]
+    Portfolio(PortfolioArgs),
     /// Keys this wallet holds, and the addresses they control.
     ///
     /// Named `account` rather than `wallet` because the program is already
@@ -117,6 +124,34 @@ enum Command {
     /// Configure a supported agent integration.
     #[command(name = "__configure-agent", hide = true)]
     ConfigureAgent(ConfigureAgentArgs),
+}
+
+#[derive(Debug, Args)]
+struct PortfolioArgs {
+    /// Account id, or a 0x address to read one this wallet does not hold.
+    ///
+    /// Reading is not signing, so an address nobody here has a key for is a
+    /// legitimate thing to ask about — checking where funds went before
+    /// approving anything is exactly the moment this is useful.
+    account: String,
+    /// Network name, alias, or decimal chain ID.
+    #[arg(long, short)]
+    network: String,
+    /// How many known tokens to check.
+    ///
+    /// Each 200 tokens is one Multicall3 round trip against a single pinned
+    /// block, and public endpoints are markedly less reliable across ten of
+    /// those than across one: they rate-limit, and a non-archive node may have
+    /// pruned the pinned block's state before the last batch asks for it.
+    /// Lowering this trades coverage for a read that finishes.
+    ///
+    /// The database has no notion of which tokens matter, so a lowered limit
+    /// takes them in address order — an arbitrary slice, not the interesting
+    /// ones. That is exactly why the coverage line is printed rather than
+    /// implied: a token missing from a truncated read says nothing about the
+    /// balance.
+    #[arg(long, default_value_t = crate::token_store::MAX_PORTFOLIO_TOKENS)]
+    tokens: usize,
 }
 
 #[derive(Debug, Args)]
@@ -463,6 +498,7 @@ impl Cli {
                 Ok(())
             }
             Command::Status => run_status(&config, mode),
+            Command::Portfolio(args) => run_portfolio(&config, &args, mode).await,
             Command::Account(args) => run_account(config, args.command, mode).await,
             Command::Network(args) => run_network(&config, args.command, mode).await,
             Command::Policy(args) => run_policy(&config, args.command, mode).await,
@@ -479,6 +515,94 @@ impl Cli {
             Command::ConfigureAgent(args) => run_configure_agent(args.command),
         }
     }
+}
+
+/// Read balances for one account on one network.
+///
+/// The token side is bounded by what the database already names: a balance is
+/// only shown for a token the owner's database knows, because a symbol read
+/// from the chain would be a name chosen by the counterparty. That bound is
+/// also why the reported skip matters — see `run_portfolio`'s note below.
+async fn run_portfolio(config: &ConfigStore, args: &PortfolioArgs, mode: OutputMode) -> Result<()> {
+    let network = config.network(&args.network)?;
+    // An account id first, so a wallet named like an address still resolves to
+    // the wallet. Falling back to a literal address is what makes reading a
+    // counterparty possible at all.
+    let address = match config.wallet(&args.account) {
+        Ok(wallet) => wallet.address,
+        Err(unknown) => Address::from_str(&args.account).map_err(|_| unknown)?,
+    };
+
+    let limit = args.tokens.min(crate::token_store::MAX_PORTFOLIO_TOKENS);
+    let tokens = crate::token_store::TokenStore::production(config.data_dir())?;
+    // The true total, not the page size. `read_portfolio` derives its own skip
+    // from the slice it was handed, so a slice that is already truncated would
+    // report nothing skipped and turn a partial read into a confident one.
+    let total = tokens.count(Some(network.chain_id))?;
+    let known = tokens.list(Some(network.chain_id), limit, 0)?;
+    drop(tokens);
+    let mut portfolio = crate::token_store::read_portfolio(&network, address, &known, None).await?;
+    portfolio.tokens_skipped = match total.saturating_sub(portfolio.tokens_checked) {
+        0 => None,
+        skipped => Some(skipped),
+    };
+
+    emit(mode, &portfolio, || {
+        let mut lines = vec![
+            format!("{} on {}", portfolio.address, portfolio.network),
+            format!("Block {}", portfolio.block_number),
+            String::new(),
+            format!(
+                "{} {}",
+                crate::approval_summary::format_fixed_point(
+                    &portfolio.native_balance,
+                    network
+                        .native_currency
+                        .as_ref()
+                        .map_or(18, |currency| currency.decimals)
+                ),
+                network
+                    .native_currency
+                    .as_ref()
+                    .map_or("native", |currency| currency.symbol.as_str())
+            ),
+        ];
+        for token in &portfolio.tokens {
+            lines.push(format!(
+                "{} {}",
+                token.decimals.map_or_else(
+                    || format!("{} base units of", token.balance),
+                    |decimals| crate::approval_summary::format_fixed_point(
+                        &token.balance,
+                        decimals
+                    )
+                ),
+                token.symbol.as_deref().unwrap_or(&token.address),
+            ));
+        }
+        if portfolio.tokens.is_empty() {
+            lines.push("No known token has a balance here.".into());
+        }
+        lines.push(String::new());
+        // Said plainly rather than as a footnote. A portfolio that checked a
+        // subset is not a portfolio, and the seeded database is large enough
+        // on a busy chain that this is the normal case rather than the edge
+        // one: an owner who reads "no balance" without seeing this would
+        // conclude something false about their own funds.
+        match portfolio.tokens_skipped {
+            Some(skipped) if skipped > 0 => lines.push(format!(
+                "⚠ Checked {} of {} known tokens on this chain; {skipped} were not read. \
+                 A token missing above may simply not have been checked.",
+                portfolio.tokens_checked,
+                portfolio.tokens_checked + skipped,
+            )),
+            _ => lines.push(format!(
+                "Checked all {} known tokens on this chain.",
+                portfolio.tokens_checked
+            )),
+        }
+        Ok(lines.join("\n"))
+    })
 }
 
 /// One place that answers "is this working, and does it need me?".
