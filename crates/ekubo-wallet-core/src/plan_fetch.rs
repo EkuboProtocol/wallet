@@ -650,6 +650,11 @@ fn is_public_ip(address: IpAddr) -> bool {
                 || (segments[0] & 0xfe00) == 0xfc00
                 // fe80::/10 link local
                 || (segments[0] & 0xffc0) == 0xfe80
+                // fec0::/10 site local. Deprecated by RFC 3879 and replaced by
+                // the unique-local range above, but deprecation is not
+                // unreachability: a stack still routes it, and a network
+                // numbered before 2004 still answers on it.
+                || (segments[0] & 0xffc0) == 0xfec0
                 // 100::/64 discard-only
                 || (segments[0] == 0x0100
                     && segments[1] == 0
@@ -663,8 +668,11 @@ fn is_public_ip(address: IpAddr) -> bool {
                 || (segments[0] == 0x0064 && segments[1] == 0xff9b)
                 // 2001::/32 Teredo, which tunnels to an arbitrary IPv4 host
                 || (segments[0] == 0x2001 && segments[1] == 0x0000)
-                // 2001:20::/28 ORCHIDv2
-                || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
+                // 2001:10::/28 ORCHID and 2001:20::/28 ORCHIDv2. Adjacent but
+                // not one aligned block, so they are two masks rather than a
+                // wider one that would also swallow 2001:0::/28.
+                || (segments[0] == 0x2001
+                    && ((segments[1] & 0xfff0) == 0x0010 || (segments[1] & 0xfff0) == 0x0020))
                 // 2002::/16 6to4, whose next 32 bits are an embedded IPv4
                 || segments[0] == 0x2002
                 // 2001:db8::/32 documentation

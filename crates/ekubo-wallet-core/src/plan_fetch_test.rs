@@ -402,7 +402,11 @@ fn public_ip_classification_covers_reserved_ranges() {
         "2002:a00:1::",
         "2001:0:53aa:64c:c:c7f2:f5ff:fffe",
         "2001:20::1",
+        "2001:10::1",
         "100::1",
+        // Site local: deprecated, which is not the same as unreachable.
+        "fec0::1",
+        "feff::1",
     ] {
         assert!(
             !is_public_ip(private.parse().unwrap()),
