@@ -98,6 +98,14 @@ codesign --force --options runtime --timestamp --sign "$identity" "$staged"
 codesign --verify --strict --verbose=2 "$staged"
 codesign -dv --verbose=4 "$staged" 2>&1 | grep -E "^Authority|^Timestamp|^TeamIdentifier"
 
+# Signing is the last step that needs the keychain: notarization authenticates
+# with the .p8. Hand the login keychain back now rather than holding the search
+# list for the length of the wait, which is minutes at best and has run past
+# forty-five for a first submission from a new team.
+# shellcheck disable=SC2086
+security list-keychains -d user -s $original_keychains
+echo "==> keychain search list restored; notarization does not need it"
+
 echo "==> packaging exactly as the release job does"
 package="$work/ekubo-wallet-rehearsal"
 mkdir -p "$package"
@@ -109,7 +117,13 @@ cp -R "$repo_root/completions" "$package/completions"
 cp -R "$repo_root/examples" "$repo_root/schemas" "$package/"
 ditto -c -k --sequesterRsrc --keepParent "$package" "$package.zip"
 
-echo "==> submitting to the Notary service (this takes a few minutes)"
+# Interrupting the wait is safe and costs nothing: the archive is already
+# uploaded and the Notary service finishes regardless. Note the submission id
+# it prints below and ask for the verdict later with
+#   xcrun notarytool info <id> --key ... --key-id ... --issuer ...
+echo "==> submitting to the Notary service"
+echo "    A first submission from a new team can take far longer than the"
+echo "    usual few minutes. Ctrl-C is safe; the verdict survives by id."
 xcrun notarytool submit "$package.zip" \
   --key "$p8" --key-id "$key_id" --issuer "$issuer_id" --wait
 
