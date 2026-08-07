@@ -281,15 +281,31 @@ pub fn render_balance_changes(
             ),
         )),
     }
-    let total = changes.tokens.len();
-    for (raw_token, change) in changes.tokens.iter().take(MAX_DISPLAYED_BALANCE_CHANGES) {
+    // The set being truncated is attacker-extensible: any contract may emit a
+    // `Transfer` log naming this wallet, and every emitter enters the change
+    // list. Truncating in address order therefore let someone deploy contracts
+    // whose addresses sort early and push the transaction's real outflow past
+    // the cut, leaving the reviewer a screen of noise and a "further token(s)"
+    // footnote. Sorting by how well substantiated each entry is puts measured
+    // balance movements first — only a token this wallet actually queried can
+    // have one — so what truncation drops is always the unverifiable tail.
+    //
+    // Stable, so entries of equal standing keep the map's address order.
+    let mut ordered: Vec<_> = changes.tokens.iter().collect();
+    ordered.sort_by_key(|(_, change)| substantiation(change));
+    let total = ordered.len();
+    for (raw_token, change) in ordered.into_iter().take(MAX_DISPLAYED_BALANCE_CHANGES) {
         let token = raw_token.parse::<Address>().ok();
         let display = token
             .and_then(|token| metadata.get(&token).cloned())
             .unwrap_or_default();
         let label = token.map_or_else(|| raw_token.clone(), |token| token_label(token, &display));
         let delta_text = match change.delta.as_deref() {
-            None => "net balance unavailable".to_string(),
+            // No queried balance for this address, so the only evidence it
+            // moved anything is a log the emitter wrote about itself.
+            None => {
+                "net balance not tracked; reported only by that contract's own logs".to_string()
+            }
             Some(raw) => parse_signed(raw).map_or_else(
                 || format!("unparseable net change reported as {raw:?}"),
                 |delta| format_signed_amount(&delta, display.decimals, display.symbol.as_deref()),
@@ -312,12 +328,29 @@ pub fn render_balance_changes(
         lines.push((
             "…".to_string(),
             format!(
-                "and {} further token(s) with net changes, not shown",
+                "and {} further token(s), least substantiated last, not shown",
                 total - MAX_DISPLAYED_BALANCE_CHANGES
             ),
         ));
     }
     lines
+}
+
+/// Rank for display, lowest first: how far each reported change is from
+/// something this wallet measured itself rather than was told.
+///
+/// A queried token has a net delta because its balance was read before and
+/// after; an address that merely emitted a `Transfer` log has none, and
+/// anyone can emit one of those.
+fn substantiation(change: &crate::simulation::TokenBalanceChange) -> u8 {
+    match change.delta.as_deref().map(parse_signed) {
+        Some(Some(delta)) if delta.sign() != Sign::NoSign => 0,
+        // Measured, but the value did not parse: still a token this wallet
+        // tracked, and still worth more of the screen than hearsay.
+        Some(None) => 1,
+        Some(Some(_)) => 2,
+        None => 3,
+    }
 }
 
 fn native_currency(network: &NetworkConfig) -> NativeCurrency {

@@ -417,3 +417,69 @@ fn an_unlisted_token_is_named_by_address_alone() {
     let amount = format_token_amount(U256::from(1_000_000_u64), token, &TokenMetadata::default());
     assert!(amount.starts_with("1000000 base units of"), "{amount}");
 }
+
+#[test]
+fn a_real_outflow_survives_a_flood_of_forged_transfer_logs() {
+    use crate::simulation::TokenBalanceChange;
+
+    // Any contract can emit a `Transfer` log naming this wallet, and every
+    // emitter enters the change list. While the list truncated in address
+    // order, deploying contracts whose addresses sort early pushed the
+    // transaction's real outflow past the cut and left the reviewer a screen
+    // of noise plus a "further token(s)" footnote.
+    //
+    // The genuine token is given the highest address there is, so address
+    // order alone would place it dead last.
+    let real = Address::repeat_byte(0xff);
+    let mut simulation = simulation_with_native_delta("0");
+    let changes = &mut simulation.balance_changes.as_mut().unwrap().tokens;
+
+    for index in 0..64_u8 {
+        changes.insert(
+            format!("{:#x}", Address::repeat_byte(index)),
+            TokenBalanceChange {
+                before: None,
+                after: None,
+                delta: None,
+                incoming_transfers: "1".into(),
+                outgoing_transfers: "0".into(),
+            },
+        );
+    }
+    changes.insert(
+        format!("{real:#x}"),
+        TokenBalanceChange {
+            before: Some("1000".into()),
+            after: Some("0".into()),
+            delta: Some("-1000".into()),
+            incoming_transfers: "0".into(),
+            outgoing_transfers: "1000".into(),
+        },
+    );
+
+    let network = crate::config::default_networks().remove(0);
+    let lines = render_balance_changes(&simulation, &network, &usdc_metadata(real));
+    let rendered = lines
+        .iter()
+        .map(|(label, value)| format!("{label} {value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        rendered.contains("-1000") || rendered.contains("-0.001"),
+        "the measured outflow must be on screen: {rendered}"
+    );
+    // And it leads, because nothing else here was measured at all.
+    assert_eq!(
+        lines[0].0,
+        token_label(
+            real,
+            &usdc_metadata(real).get(&real).cloned().unwrap_or_default()
+        ),
+        "the measured change must come first: {rendered}"
+    );
+    assert!(
+        rendered.contains("not shown"),
+        "the truncation notice must still appear: {rendered}"
+    );
+}
