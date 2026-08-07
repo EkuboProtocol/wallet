@@ -22,7 +22,7 @@ _ekubo_wallet() {
         network|net) choices="list presets reset add edit remove delete review" ;;
         policy) choices="show set allow-all require-approval validate schema review" ;;
         transaction|tx) choices="list show cancel rebroadcast discard" ;;
-        token) choices="list search review import" ;;
+        token) choices="list search review import remove delete" ;;
         address-book) choices="list add remove delete" ;;
         agent) choices="list add remove delete" ;;
         legal) choices="status show accept" ;;
@@ -45,7 +45,7 @@ _ekubo_wallet() {
         network:edit|network:remove|network:delete)
           choices="$(ekubo-wallet __complete networks 2>/dev/null)"
           ;;
-        address-book:list|address-book:add|address-book:remove|address-book:delete)
+        address-book:list|address-book:add|address-book:remove|address-book:delete|token:remove|token:delete)
           choices="$(ekubo-wallet __complete networks 2>/dev/null)"
           ;;
         agent:add|agent:remove|agent:delete)

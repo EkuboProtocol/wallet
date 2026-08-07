@@ -499,6 +499,17 @@ enum TokenCommand {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Forget one confirmed token, so the wallet shows its bare address again.
+    ///
+    /// A new database ships with thousands of names already trusted; this is
+    /// how to disagree with one of them.
+    #[command(alias = "delete")]
+    Remove {
+        /// Network name, alias, or decimal chain ID.
+        network: String,
+        /// Token contract address.
+        address: String,
+    },
     /// Review tokens an agent suggested, and confirm the ones to trust.
     ///
     /// Confirming a token is what lets the wallet show its symbol when
@@ -1116,11 +1127,72 @@ async fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMod
                 },
             )
         }
+        TokenCommand::Remove { network, address } => {
+            run_token_remove(config, network, address, mode)
+        }
         TokenCommand::Review => run_token_review(config, mode).await,
         TokenCommand::Import { path, list_name } => {
             run_token_import(config, path, list_name.as_deref(), mode).await
         }
     }
+}
+
+/// Forget one confirmed token after the owner confirms it in the terminal.
+///
+/// Shows what is about to be forgotten before asking, because the address is
+/// the only part of the row the owner supplied — confirming "remove USDC"
+/// without seeing which address currently carries that name would be agreeing
+/// to something they cannot check.
+fn run_token_remove(
+    config: &ConfigStore,
+    network: &str,
+    address: &str,
+    mode: OutputMode,
+) -> Result<()> {
+    require_interactive("token database changes")?;
+    let network = resolve_network(config, network)?;
+    let address =
+        Address::from_str(address).with_context(|| format!("{address} is not a token address"))?;
+    let mut store = crate::token_store::TokenStore::production(config.data_dir())?;
+    let existing = store
+        .get(network.chain_id, address)
+        .ok()
+        .flatten()
+        .with_context(|| {
+            format!(
+                "{} is not a confirmed token on {}",
+                address.to_checksum(None),
+                network.name
+            )
+        })?;
+
+    let confirmed = crate::tui::confirm(&format!(
+        "Forget {} ({}) on {}? The wallet will show its address instead of this name.",
+        existing.symbol.as_deref().unwrap_or("this token"),
+        address.to_checksum(None),
+        network.name
+    ))?;
+    if !confirmed {
+        crate::tui::outro_cancel("Nothing was removed.");
+        return Ok(());
+    }
+
+    let removed = store.remove(network.chain_id, address)?;
+    emit(
+        mode,
+        &serde_json::json!({
+            "removed": removed,
+            "chain_id": network.chain_id.to_string(),
+            "address": address.to_checksum(None),
+        }),
+        || {
+            Ok(format!(
+                "Forgot {} on {}. Re-import a list naming it to get it back.",
+                address.to_checksum(None),
+                network.name
+            ))
+        },
+    )
 }
 
 /// Import a token list the owner points at, confirming entries in the

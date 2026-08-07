@@ -38,7 +38,7 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from account acct wallet; an
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and not __fish_seen_subcommand_from list presets reset add edit remove delete review' -a 'list presets reset add edit remove delete review'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema review' -a 'show set allow-all require-approval validate schema review'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show cancel rebroadcast discard' -a 'list show cancel rebroadcast discard'
-complete -c ekubo-wallet -n '__fish_seen_subcommand_from token; and not __fish_seen_subcommand_from list search review import' -a 'list search review import'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from token; and not __fish_seen_subcommand_from list search review import remove delete' -a 'list search review import remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from address-book; and not __fish_seen_subcommand_from list add remove delete' -a 'list add remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from legal; and not __fish_seen_subcommand_from status show accept' -a 'status show accept'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show; and __fish_seen_subcommand_from legal' -a 'terms privacy licenses'

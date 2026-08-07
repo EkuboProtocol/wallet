@@ -422,3 +422,31 @@ fn a_legacy_plain_database_names_nothing_and_is_deleted() {
     assert_eq!(store.count_proposals().unwrap(), 0);
     assert!(!legacy_path.exists());
 }
+
+#[test]
+fn a_removed_token_stops_naming_its_address() {
+    let (_directory, mut store) = store();
+    let address = Address::repeat_byte(0x42);
+    store.add(&usdc(1, address), "a list").unwrap();
+    assert!(store.get(1, address).unwrap().is_some());
+
+    assert!(store.remove(1, address).unwrap());
+    assert!(store.get(1, address).unwrap().is_none());
+    // Removing again is not an error, it is just nothing to do — a sweep must
+    // not fail on a row someone already removed.
+    assert!(!store.remove(1, address).unwrap());
+}
+
+#[test]
+fn removing_a_token_leaves_the_same_address_on_other_chains() {
+    // The same contract address is routinely deployed on several chains, and
+    // disagreeing with a name on one of them says nothing about the others.
+    let (_directory, mut store) = store();
+    let address = Address::repeat_byte(0x42);
+    store.add(&usdc(1, address), "a list").unwrap();
+    store.add(&usdc(8453, address), "a list").unwrap();
+
+    assert!(store.remove(1, address).unwrap());
+    assert!(store.get(1, address).unwrap().is_none());
+    assert!(store.get(8453, address).unwrap().is_some());
+}

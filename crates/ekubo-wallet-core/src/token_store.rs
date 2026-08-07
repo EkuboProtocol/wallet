@@ -244,6 +244,28 @@ impl TokenStore {
         Ok(changed == 1)
     }
 
+    /// Forget one confirmed token. Returns whether a row was removed.
+    ///
+    /// Removing a name is fail-safe in a way adding one is not: the wallet
+    /// falls back to displaying the bare address, which is the conservative
+    /// thing to show. That is why this needs the owner's confirmation in the
+    /// terminal but not the credential-store authentication that replacing a
+    /// policy does — nothing here can cause something to be signed.
+    ///
+    /// It exists because a new database now arrives holding thousands of
+    /// seeded names, and an owner who disagrees with one of them had no way to
+    /// say so.
+    pub fn remove(&mut self, chain_id: u64, address: Address) -> Result<bool> {
+        let removed = self.database.connection.execute(
+            "DELETE FROM tokens WHERE chain_id = ?1 AND address = ?2",
+            params![
+                i64::try_from(chain_id).context("chain ID out of range")?,
+                format!("{address:#x}"),
+            ],
+        )?;
+        Ok(removed == 1)
+    }
+
     pub fn get(&self, chain_id: u64, address: Address) -> Result<Option<StoredToken>> {
         self.database
             .connection
