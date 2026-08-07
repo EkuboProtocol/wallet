@@ -71,16 +71,23 @@ enum Command {
     Server,
     /// Print the server version.
     Version,
-    /// Manage local wallets.
-    Wallet(WalletArgs),
-    /// List configured EVM networks.
+    /// Keys this wallet holds, and the addresses they control.
+    ///
+    /// Named `account` rather than `wallet` because the program is already
+    /// called that: `ekubo-wallet wallet create` says it twice and the second
+    /// one carries nothing. `wallet` still works as an alias.
+    #[command(alias = "wallet", alias = "acct")]
+    Account(AccountArgs),
+    /// Configured EVM networks and the endpoints they are reached through.
+    #[command(alias = "net")]
     Network(Box<NetworkArgs>),
-    /// Set and inspect local wallet policies.
+    /// What each account may sign without being asked.
     Policy(PolicyArgs),
-    /// Inspect transactions signed or broadcast by this wallet server.
+    /// Transactions signed or broadcast by this wallet, and what to do about
+    /// one that is stuck.
     #[command(alias = "tx")]
     Transaction(TransactionArgs),
-    /// Inspect the local token database.
+    /// The local token database: what this wallet will display a name for.
     Token(TokenArgs),
     /// Browse and edit per-chain address aliases used for agent lookups.
     /// Bare, on a terminal, this opens the full-screen editor.
@@ -107,14 +114,14 @@ enum Command {
 }
 
 #[derive(Debug, Args)]
-struct WalletArgs {
+struct AccountArgs {
     #[command(subcommand)]
-    command: WalletCommand,
+    command: AccountCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum WalletCommand {
-    /// List wallet metadata. Never returns private keys.
+enum AccountCommand {
+    /// List account metadata. Never returns private keys.
     List,
     /// Generate a new key directly in the platform credential store.
     Create {
@@ -128,7 +135,8 @@ enum WalletCommand {
     Import { wallet_id: String },
     /// Export a private key after terminal confirmation and owner authentication.
     Export { wallet_id: String },
-    /// Remove a wallet and key after terminal confirmation and owner authentication.
+    /// Remove an account and its key after terminal confirmation and owner
+    /// authentication.
     Remove { wallet_id: String },
 }
 
@@ -448,7 +456,7 @@ impl Cli {
                 println!("ekubo-wallet {VERSION}");
                 Ok(())
             }
-            Command::Wallet(args) => run_wallet(config, args.command, mode).await,
+            Command::Account(args) => run_account(config, args.command, mode).await,
             Command::Network(args) => run_network(&config, args.command, mode).await,
             Command::Policy(args) => run_policy(&config, args.command, mode).await,
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
@@ -466,19 +474,19 @@ impl Cli {
     }
 }
 
-async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMode) -> Result<()> {
+async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputMode) -> Result<()> {
     let custody = CustodyService::new(
         config.clone(),
         Arc::new(OsKeyStore),
         Arc::new(PlatformHumanPresence),
     );
     match command {
-        WalletCommand::List => {
+        AccountCommand::List => {
             let wallets = config.load()?.wallets;
             emit(mode, &wallets, || {
                 if wallets.is_empty() {
                     return Ok(
-                        "No wallets. Create one with `ekubo-wallet wallet create <id>`.".into(),
+                        "No accounts. Create one with `ekubo-wallet account create <id>`.".into(),
                     );
                 }
                 Ok(wallets
@@ -502,7 +510,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                     .join("\n"))
             })
         }
-        WalletCommand::Create { wallet_id, policy } => {
+        AccountCommand::Create { wallet_id, policy } => {
             // Chosen before the key exists, so a wallet is never briefly
             // permissive while the user is still deciding, and a cancelled
             // prompt leaves nothing behind.
@@ -526,7 +534,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                 ))
             })
         }
-        WalletCommand::Import { wallet_id } => {
+        AccountCommand::Import { wallet_id } => {
             require_interactive("wallet import")?;
             crate::tui::intro("Import an existing wallet");
             let mut input = crate::tui::text("Private key")
@@ -573,7 +581,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
                 }
             }
         }
-        WalletCommand::Export { wallet_id } => {
+        AccountCommand::Export { wallet_id } => {
             let wallet = config.wallet(&wallet_id)?;
             require_approval(
                 ApprovalRequest::new(
@@ -607,7 +615,7 @@ async fn run_wallet(config: ConfigStore, command: WalletCommand, mode: OutputMod
             stdout.flush()?;
             Ok(())
         }
-        WalletCommand::Remove { wallet_id } => {
+        AccountCommand::Remove { wallet_id } => {
             let wallet = config.wallet(&wallet_id)?;
             require_approval(
                 ApprovalRequest::new(

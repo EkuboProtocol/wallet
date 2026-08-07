@@ -221,7 +221,7 @@ controls, not spending limits.
 
 The platform prompt is asked for at two boundaries. The first is the private
 key coming out of the credential store, or leaving it for good: transaction,
-typed-data, and message signing, `wallet export`, and `wallet remove`. The
+typed-data, and message signing, `account export`, and `account remove`. The
 second is the signing policy being replaced — `policy set`, the presets, or an
 agent proposal applied through `policy review`. A policy change reads no key
 material, but the policy is what decides what gets signed with nobody

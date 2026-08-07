@@ -117,7 +117,7 @@ impl WalletMcpServer {
             configured.wallets.is_empty() || config.data_dir().join("policies.db").is_file(),
             "{} lists wallets but {} does not exist. If a wallet was created or imported while \
              policy initialization failed, repair it with `ekubo-wallet policy require-approval \
-             <wallet-id>` or remove it with `ekubo-wallet wallet remove <wallet-id>`. If this \
+             <wallet-id>` or remove it with `ekubo-wallet account remove <wallet-id>`. If this \
              directory belongs to different wallet software, point EKUBO_WALLET_HOME elsewhere.",
             config.data_dir().join("config.json").display(),
             config.data_dir().join("policies.db").display(),

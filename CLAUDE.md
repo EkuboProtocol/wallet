@@ -96,7 +96,7 @@ question. Build from `fullscreen`'s pieces — `pick_table`, `edit_form`,
 `confirm_review`, `TextField`, `decision_pane`, `SearchableTable` — and let
 only the finished result reach the scrollback, once, after the screen is
 released. A command that never opens a screen may use the inline prompts
-throughout; `wallet create`'s starting-policy question and the inline approval
+throughout; `account create`'s starting-policy question and the inline approval
 fallback are the two that legitimately do.
 
 The one unavoidable handover is platform owner authentication: a polkit text

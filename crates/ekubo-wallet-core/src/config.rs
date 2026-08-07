@@ -32,7 +32,7 @@ pub struct WalletMetadata {
     pub source: WalletSource,
     /// When this tool first handed out a copy of the private key.
     ///
-    /// A timestamp is a sound positive: `wallet export` definitely revealed
+    /// A timestamp is a sound positive: `account export` definitely revealed
     /// the key. Its absence is not the corresponding negative. The key sits in
     /// the OS credential store, which the owner can read with their login
     /// credential and anything running as them can reach, so a copy can leave

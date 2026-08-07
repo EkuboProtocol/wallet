@@ -161,7 +161,7 @@ for editor completion. Starting points live in [`examples/`](../examples):
 
 | File | Purpose |
 | --- | --- |
-| [`policy.json`](../examples/policy.json) | The allow-all profile, one of the two choices `wallet create` offers. |
+| [`policy.json`](../examples/policy.json) | The allow-all profile, one of the two choices `account create` offers. |
 | [`policies/deny-all.json`](../examples/policies/deny-all.json) | Exactly what `policy require-approval` installs, and the default for imported wallets. |
 | [`policies/token-budget.template.json`](../examples/policies/token-budget.template.json) | One chain, one router, one token: a bounded approval, a swap paying back to this wallet, and a blanket deny on operator grants. |
 | [`policies/approval-wildcards.template.json`](../examples/policies/approval-wildcards.template.json) | How an exact chain entry replaces the wildcard, and how the metadata predicates read. |

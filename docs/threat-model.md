@@ -132,7 +132,7 @@ it is not a control against in-process execution.
 8. An export timestamp is committed before raw key material is returned, so a
    failed metadata write cannot leak a key unrecorded. That record is a sound
    positive and an unsound negative: a timestamp proves this tool revealed the
-   key, while its absence proves only that `wallet export` never ran. Keys live
+   key, while its absence proves only that `account export` never ran. Keys live
    in the OS credential store, which the owner can read with their login
    credential and anything running as them can reach, so no wallet is ever
    described as exclusively controlled and nothing in the policy, signing, or

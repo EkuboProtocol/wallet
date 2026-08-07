@@ -40,10 +40,10 @@ Then accept the legal documents and create a wallet:
 
 ```sh
 ekubo-wallet legal accept
-ekubo-wallet wallet create primary
+ekubo-wallet account create primary
 ```
 
-`wallet create` asks which policy template the new wallet starts under. See
+`account create` asks which policy template the new account starts under. See
 [first use](docs/first-use.md) for what each one permits, and
 [installation](docs/installation.md) for release archives, manual installation,
 and registering the server by hand.

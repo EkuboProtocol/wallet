@@ -432,4 +432,4 @@ the staged file; check it before running it"
 fi
 
 log "installation complete; restart active agent and shell sessions"
-log "create a wallet with: ekubo-wallet wallet create primary"
+log "create an account with: ekubo-wallet account create primary"

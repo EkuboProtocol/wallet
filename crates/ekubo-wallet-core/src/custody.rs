@@ -205,7 +205,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             {
                 return Err(error).context(format!(
                     "wallet {wallet_id} was created and its key is stored, but the write reported \
-                     an error; verify with `ekubo-wallet wallet list` before retrying"
+                     an error; verify with `ekubo-wallet account list` before retrying"
                 ));
             }
             if let Err(rollback) = self.keys.delete(wallet_id) {

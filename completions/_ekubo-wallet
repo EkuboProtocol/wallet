@@ -4,15 +4,15 @@ _ekubo-wallet() {
   local -a choices
 
   if (( CURRENT == 2 )); then
-    _values "command" server version wallet network policy transaction tx token address-book legal review completion \
+    _values "command" server version account acct wallet network net policy transaction tx token address-book legal review completion \
       --data-dir --json --help --version
     return
   fi
 
   if (( CURRENT == 3 )); then
     case "$words[2]" in
-      wallet) _values "wallet command" list create import export remove ;;
-      network) _values "network command" list presets reset add edit remove delete ;;
+      account|acct|wallet) _values "account command" list create import export remove ;;
+      network|net) _values "network command" list presets reset add edit remove delete review ;;
       policy) _values "policy command" show set allow-all require-approval validate schema review ;;
       transaction|tx) _values "transaction command" list show cancel rebroadcast discard ;;
       token) _values "token command" list search review import ;;
@@ -30,9 +30,9 @@ _ekubo-wallet() {
   if (( CURRENT == 4 )); then
     case "$words[2]:$words[3]" in
       policy:validate) _files -g '*.json' ;;
-      wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:list|tx:list)
+      account:export|account:remove|acct:export|acct:remove|wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:list|tx:list)
         choices=("${(@f)$(ekubo-wallet __complete wallets-described 2>/dev/null)}")
-        _describe "wallet" choices
+        _describe "account" choices
         ;;
       network:add)
         choices=("${(@f)$(ekubo-wallet __complete defaults-described 2>/dev/null)}")
