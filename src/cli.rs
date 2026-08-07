@@ -3305,7 +3305,22 @@ async fn run_network(
                 crate::tui::outro_cancel("Networks unchanged.");
                 return Ok(());
             }
+            // A configuration mutation, so it takes owner authentication like
+            // every other one — and binds to what was actually reviewed: the
+            // discarded-settings warning above was computed from a snapshot,
+            // so committing over a configuration that has moved since would
+            // discard custom endpoints the owner was never shown.
+            PlatformHumanPresence
+                .confirm(&PresenceRequest::ConfirmNetwork {
+                    network: "the built-in presets".into(),
+                })
+                .await?;
             config.update(|state| {
+                ensure!(
+                    state.networks == configured,
+                    "the configured networks changed while the reset was being confirmed; \
+                     nothing was reset"
+                );
                 state.networks.clone_from(&networks);
                 Ok(())
             })?;
@@ -3362,6 +3377,11 @@ async fn run_network(
                 return Ok(());
             }
             verify_chain_id(&candidate).await?;
+            PlatformHumanPresence
+                .confirm(&PresenceRequest::ConfirmNetwork {
+                    network: candidate.name.clone(),
+                })
+                .await?;
             config.update(|state| {
                 ensure_reviewed_network(&state.networks, candidate.chain_id, reviewed.as_ref())?;
                 replace_configured_network(&mut state.networks, candidate.clone())
@@ -3397,8 +3417,24 @@ async fn run_network(
                 crate::tui::outro_cancel("Networks unchanged.");
                 return Ok(());
             }
-            let removed =
-                config.update(|state| remove_configured_network(&mut state.networks, &name))?;
+            PlatformHumanPresence
+                .confirm(&PresenceRequest::ConfirmNetwork {
+                    network: removed.name.clone(),
+                })
+                .await?;
+            // `remove_configured_network` resolves whatever currently answers
+            // to `name`, and a name or alias can move between the confirmation
+            // and the write. Remove the entry that was shown or nothing.
+            let reviewed = removed.clone();
+            let removed = config.update(|state| {
+                let removed = remove_configured_network(&mut state.networks, &name)?;
+                ensure!(
+                    removed == reviewed,
+                    "network {name} no longer describes the profile that was confirmed; \
+                     nothing was removed"
+                );
+                Ok(removed)
+            })?;
             emit(
                 mode,
                 &serde_json::json!({
@@ -3722,6 +3758,11 @@ async fn run_network_edit(
         return Ok(());
     }
     verify_chain_id(&draft).await?;
+    PlatformHumanPresence
+        .confirm(&PresenceRequest::ConfirmNetwork {
+            network: draft.name.clone(),
+        })
+        .await?;
     config.update(|state| {
         ensure_reviewed_network(&state.networks, draft.chain_id, Some(&original))?;
         replace_configured_network(&mut state.networks, draft.clone())

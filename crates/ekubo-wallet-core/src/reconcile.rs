@@ -381,7 +381,15 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     // cancellation that has since been superseded produces one that can be
     // cheaper than what is already in the mempool, which loses the race to the
     // transaction being cancelled.
-    let record = lock(pending)?.get(record.request_id).unwrap_or(record);
+    //
+    // And the re-read has to succeed. Falling back to the caller's snapshot on
+    // any error meant a busy database — the store sets a five-second busy
+    // timeout, so a contended write returns one — silently reinstated exactly
+    // the stale state this read exists to replace, on the one signing path
+    // that consults no policy.
+    let record = lock(pending)?
+        .get(record.request_id)
+        .context("could not re-read the transaction before pricing its cancellation")?;
     let record = reconcile_record(pending, network, record, true).await?;
     let block = |record: &PendingTransaction| {
         record
