@@ -145,9 +145,6 @@ fn a_symbol_that_sanitizes_away_is_refused() {
     assert_eq!(store.count(None).unwrap(), 0);
 }
 
-/// The rule `verify_listings` applies, exercised directly so it is pinned
-/// without needing an RPC: the contract may veto a listing, but it never
-/// gets to supply the name.
 /// The list is the authority on decimals, so a contract that would have
 /// disagreed changes nothing: what is stored, and therefore what scales
 /// every displayed amount, is what the owner confirmed.

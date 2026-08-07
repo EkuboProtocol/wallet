@@ -935,43 +935,25 @@ async fn confirm_and_store(
             .await?;
     }
 
-    // Accepting is where the chain gets its one and only say: confirm
-    // something token-like lives at each address, so a typo cannot become a
-    // named row. One Multicall3 pass per chain, and it asks nothing about
-    // what the token is called or how it scales.
-    let mut by_chain: std::collections::BTreeMap<u64, Vec<crate::token_store::ListedToken>> =
-        std::collections::BTreeMap::new();
-    for token in decision.accepted {
-        by_chain.entry(token.chain_id).or_default().push(token);
-    }
+    // The owner's yes is the whole decision. Nothing is asked of a chain
+    // here: a contract cannot tell them whether the curator they are trusting
+    // is trustworthy, and that is the only question a listing raises. An
+    // address that answers nothing becomes a row that names nothing, which
+    // costs a line in the database and misleads no one.
+    //
+    // This is also why accepting needs no network. A name for a chain the
+    // owner has not configured is not a name they cannot have; it simply
+    // waits for the chain.
     let mut confirmed = 0_u64;
-    let mut refused: Vec<String> = Vec::new();
     let mut decided: Vec<(u64, Address)> = Vec::new();
-    for (chain_id, tokens) in by_chain {
-        let Ok(network) = config.network_by_chain_id(&chain_id.to_string()) else {
-            refused.push(format!("chain {chain_id}: no configured network"));
-            continue;
-        };
-        for (token, rejection) in crate::token_store::verify_listings(&network, &tokens).await? {
-            let key = (token.chain_id, token.address);
-            if let Some(rejection) = rejection {
-                refused.push(format!(
-                    "{} ({}): {rejection}",
-                    token.symbol,
-                    token.address.to_checksum(None)
-                ));
-                continue;
-            }
-            let source = sources.get(&key).cloned().unwrap_or_else(|| "list".into());
-            if store.insert_if_absent(&token, &source)? {
-                confirmed += 1;
-            }
-            decided.push(key);
+    for token in decision.accepted {
+        let key = (token.chain_id, token.address);
+        let source = sources.get(&key).cloned().unwrap_or_else(|| "list".into());
+        if store.insert_if_absent(&token, &source)? {
+            confirmed += 1;
         }
+        decided.push(key);
     }
-    // Only forget suggestions that were actually decided. One refused by the
-    // chain stays queued, because the owner's answer was yes and the reason it
-    // did not land is worth showing again.
     if !clear_proposals.is_empty() {
         let clear: Vec<(u64, Address)> = decided
             .into_iter()
@@ -979,17 +961,9 @@ async fn confirm_and_store(
             .collect();
         store.discard_proposals(&clear)?;
     }
-    emit(
-        mode,
-        &serde_json::json!({ "confirmed": confirmed, "refused": refused }),
-        || {
-            let mut lines = vec![format!("Confirmed {confirmed} token name(s).")];
-            for entry in &refused {
-                lines.push(format!("  refused — {entry}"));
-            }
-            Ok(lines.join("\n"))
-        },
-    )
+    emit(mode, &serde_json::json!({ "confirmed": confirmed }), || {
+        Ok(format!("Confirmed {confirmed} token name(s)."))
+    })
 }
 
 /// Resolve a network by name, alias, or canonical decimal chain ID.

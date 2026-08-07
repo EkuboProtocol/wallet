@@ -13,16 +13,20 @@
 //! claim by someone the owner chose to trust; a contract's own answer is a
 //! claim by the counterparty they are being protected from.
 //!
-//! The chain is asked exactly one question, and it is not about identity:
-//! [`verify_listings`] checks that *something* at the address behaves like a
-//! token, so a typo or a dead entry cannot become a named row. Only whether it
-//! answers is used; what it answers is never decoded.
+//! The chain is not asked about a listing at all. It was once asked whether
+//! *something* at the address answered `symbol()` or `name()`, as a check
+//! against a typo or a dead entry, and that is gone: the owner's approval is
+//! the check. A contract cannot tell them whether a curator is trustworthy,
+//! which is the only question a listing raises, and an address that answers
+//! nothing yields a row that names nothing — a harmless one, not a dangerous
+//! one.
 //!
-//! In particular `decimals()` is never called. Every value a contract returns
-//! is chosen by whoever deployed it, `decimals` no less than `symbol`, so
-//! checking the list against it would let the counterparty overrule the
-//! curator the owner picked. The list is the authority on both the name and
-//! the scale of every amount displayed for a token.
+//! `decimals()` in particular is never called, and never was in this design.
+//! Every value a contract returns is chosen by whoever deployed it, `decimals`
+//! no less than `symbol`, so checking the list against it would let the
+//! counterparty overrule the curator the owner picked. The list is the
+//! authority on both the name and the scale of every amount displayed for a
+//! token.
 
 use crate::{
     config::NetworkConfig,
@@ -43,7 +47,7 @@ use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
+use std::{path::Path, str::FromStr, time::Duration};
 
 /// Plain-SQLite file used before the table moved into the encrypted
 /// database. Never trusted or imported: deleted on sight.
@@ -62,11 +66,13 @@ fn discard_legacy_database(data_dir: &Path) {
         let _ = std::fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
     }
 }
-/// Tokens verified per Multicall3 request; three calls each.
-const METADATA_CHUNK: usize = 100;
 /// Balance reads per Multicall3 request.
 const BALANCE_CHUNK: usize = 200;
-/// One import may verify at most this many new tokens.
+/// Tokens one import may carry.
+///
+/// This bounds a single list's size so one call cannot fill the review queue
+/// by itself. Nothing here is read from a chain, so the limit is about what a
+/// person can be handed at once, not about what a batch of RPC calls costs.
 pub const MAX_IMPORT_TOKENS: usize = 1_000;
 
 /// Token suggestions that may await review at once.
@@ -105,8 +111,6 @@ sol! {
 
     function aggregate3(TokenCall3[] calls) external payable returns (TokenResult3[] returnData);
 
-    function symbol() external view returns (string);
-    function name() external view returns (string);
     function balanceOf(address account) external view returns (uint256);
     function getEthBalance(address addr) external view returns (uint256);
     function getBlockNumber() external view returns (uint256);
@@ -175,25 +179,6 @@ pub struct ProposalSummary {
     pub already_confirmed: u64,
     /// Refused outright, currently only for an empty symbol.
     pub rejected: u64,
-}
-
-/// Why a listed token was refused at import.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ListingRejection {
-    /// The address answered neither `symbol()` nor `name()`, so there is no
-    /// evidence a token lives there at all. Only the fact that it answered is
-    /// used; what it answered is never read.
-    NotATokenContract,
-}
-
-impl std::fmt::Display for ListingRejection {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotATokenContract => {
-                write!(formatter, "nothing at this address behaves like a token")
-            }
-        }
-    }
 }
 
 pub struct TokenStore {
@@ -549,76 +534,6 @@ fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredToken> {
         source: row.get(5)?,
         added_at: row.get(6)?,
     })
-}
-
-/// Ask each address whether it behaves like a token, in Multicall3 chunks.
-///
-/// Only *whether* it answers is used. The answers themselves are discarded
-/// without being decoded: what a token calls itself is not evidence of
-/// anything, and a value read here would be one substitution away from
-/// becoming the name a reviewer trusts. `decimals()` is not called at all —
-/// the list's decimals are the wallet's decimals.
-async fn responds_as_token(
-    network: &NetworkConfig,
-    tokens: &[Address],
-) -> Result<BTreeMap<Address, bool>> {
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let mut out = BTreeMap::new();
-    for chunk in tokens.chunks(METADATA_CHUNK) {
-        let calls: Vec<TokenCall3> = chunk
-            .iter()
-            .flat_map(|token| {
-                [
-                    call(*token, symbolCall {}.abi_encode()),
-                    call(*token, nameCall {}.abi_encode()),
-                ]
-            })
-            .collect();
-        // Checked against real chain state; a fork must never influence what
-        // the owner is allowed to confirm. Deliberately unpinned: the question
-        // is only whether something answers, which no two blocks disagree
-        // about in a way that matters, and this read reports no block number
-        // that a later batch could contradict.
-        let results = aggregate(network, &provider, calls, None, None).await?;
-        ensure!(
-            results.len() == chunk.len() * 2,
-            "Multicall3 returned an unexpected result count"
-        );
-        for (index, token) in chunk.iter().enumerate() {
-            let answered = results[index * 2].success || results[index * 2 + 1].success;
-            out.insert(*token, answered);
-        }
-    }
-    Ok(out)
-}
-
-/// Check listed tokens against their contracts, returning each token with the
-/// reason it must be refused, if any.
-///
-/// The chain answers exactly one question here: is there something at this
-/// address that behaves like a token? That catches a typo or a dead entry
-/// before it becomes a named row, and it is all the chain is asked.
-///
-/// It is deliberately not asked what the token is called, and no longer asked
-/// what its `decimals` are. Every value a contract can return is chosen by
-/// whoever deployed it, `decimals` no less than `symbol`; treating one of them
-/// as a fact to check the list against would mean letting the counterparty
-/// veto the curator the owner picked. The list the owner confirmed is the
-/// authority on both the name and the scale of every amount shown for it.
-pub async fn verify_listings(
-    network: &NetworkConfig,
-    listed: &[ListedToken],
-) -> Result<Vec<(ListedToken, Option<ListingRejection>)>> {
-    let addresses: Vec<Address> = listed.iter().map(|token| token.address).collect();
-    let responds = responds_as_token(network, &addresses).await?;
-    Ok(listed
-        .iter()
-        .map(|token| {
-            let rejection = (!responds.get(&token.address).copied().unwrap_or_default())
-                .then_some(ListingRejection::NotATokenContract);
-            (token.clone(), rejection)
-        })
-        .collect())
 }
 
 /// One token balance line in a portfolio.

@@ -137,17 +137,24 @@ nothing is named until the owner accepts it.
 
 Agents get the same saving through a `token_list_reference` envelope, below.
 
-The chain is asked one question, and it is not about identity. When the owner
-accepts, each address is checked to confirm something token-like lives there,
-so a typo or a dead entry cannot become a named row. Only whether it answers
-is used; what it answers is never decoded.
+The chain is asked nothing. Accepting a listing reaches no RPC at all, and
+does not require the chain to be configured — a name for a chain the owner has
+not set up simply waits for it.
 
-`decimals()` is never called. Every value a contract returns is chosen by
-whoever deployed it, `decimals` no less than `symbol`, so checking the list
-against it would let the counterparty overrule the curator the owner picked.
-The list is the authority on both the name and the scale of every amount
-displayed for a token. A tripwire test fails the build if a `decimals()` call
-reappears.
+There used to be one question: does something at this address answer
+`symbol()` or `name()`, as a guard against a typo or a dead entry. It is gone,
+because it answered the wrong question. What a listing asks the owner is
+whether they trust the curator who vouched for the name, and no contract can
+speak to that. An address with nothing behind it produces a row that names
+nothing — a wasted line, not a dangerous one — while a live contract at a
+typo'd address would have passed the check anyway. The approval is the check.
+
+`decimals()` is never called either, and never was. Every value a contract
+returns is chosen by whoever deployed it, `decimals` no less than `symbol`, so
+checking the list against it would let the counterparty overrule the curator
+the owner picked. The list is the authority on both the name and the scale of
+every amount displayed for a token. A tripwire test fails the build if any of
+these calls reappear, in the token store or on the acceptance path.
 
 Integrity rules are structural. The `(chain_id, address)` pair is the primary
 key, so an entry is never overwritten and a second list cannot rename a token

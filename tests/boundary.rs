@@ -230,3 +230,56 @@ fn no_policy_predicate_can_consult_a_simulation() {
         );
     }
 }
+
+/// A contract never gets a say in whether a token may be named.
+///
+/// The token database once asked each address whether it answered `symbol()`
+/// or `name()` before the owner's acceptance could become a row, as a check
+/// against typos and dead entries. That is gone, and must not come back by
+/// habit: a contract cannot tell an owner whether the curator they are
+/// trusting is trustworthy, which is the only question a listing raises, and
+/// an address that answers nothing yields a row naming nothing rather than a
+/// dangerous one. Approval is the check.
+///
+/// `decimals()` is named here too. It was never called in this design, and
+/// calling it would be worse than the existence check ever was: it would let
+/// whoever deployed the contract restate the scale of every amount the owner
+/// is shown for that token.
+#[test]
+fn naming_a_token_asks_no_contract_for_permission() {
+    let store =
+        fs::read_to_string(repository_root().join("crates/ekubo-wallet-core/src/token_store.rs"))
+            .unwrap();
+    for forbidden in [
+        "verify_listings",
+        "responds_as_token",
+        "ListingRejection",
+        "symbolCall",
+        "nameCall",
+        "decimalsCall",
+    ] {
+        assert!(
+            !store.contains(forbidden),
+            "token_store.rs references {forbidden}; a listing is the owner's decision about a \
+             curator, and no contract may veto or supply it"
+        );
+    }
+
+    // The acceptance path is where the check used to run, so it is pinned
+    // too: confirming names must reach no chain at all.
+    let cli = fs::read_to_string(repository_root().join("src/cli.rs")).unwrap();
+    let confirm = cli
+        .split("async fn confirm_and_store(")
+        .nth(1)
+        .expect("confirm_and_store must remain declared in cli.rs")
+        .split("\n/// ")
+        .next()
+        .unwrap();
+    for forbidden in ["verify_listings", "network_by_chain_id", "ProviderBuilder"] {
+        assert!(
+            !confirm.contains(forbidden),
+            "confirm_and_store references {forbidden}; accepting a token name must not depend on \
+             a chain being reachable, or configured at all"
+        );
+    }
+}
