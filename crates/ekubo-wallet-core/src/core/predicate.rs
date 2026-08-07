@@ -9,11 +9,11 @@
 //! [`Predicate::Selector`] matches a batched inner call, and no part of this
 //! module knows what a multicall is.
 //!
-//! Two properties are load-bearing and deliberately not negotiable:
+//! Three properties are load-bearing and deliberately not negotiable:
 //!
 //! * **A predicate never errors at match time.** Anything that would be an
 //!   error — calldata too short, a decode that fails, a literal that does not
-//!   parse as the value's type — is a *non-match*. Combined with the rule set's
+//!   parse as the value's type — is a non-match. Combined with the rule set's
 //!   default-deny, an unanswerable question therefore denies rather than
 //!   admits.
 //! * **A matched call is canonically encoded.** `abi_decode_input` alone
@@ -22,6 +22,14 @@
 //!   back. That rejects trailing garbage, non-canonical offsets, and unclean
 //!   words in one comparison, which means a rule cannot be satisfied by an
 //!   alternate encoding that a target contract's decoder would read differently.
+//! * **Failing that check is doubt, not denial.** The two above nearly
+//!   cancelled each other out. Reporting a non-canonical call as a plain
+//!   non-match is right for an `allow` and wrong for everything else: a `deny`
+//!   naming the selector stopped firing, so one appended byte carried a
+//!   denied call through whatever broader `allow` sat beside it, and a `not`
+//!   around the same predicate inverted into a positive match. So there are
+//!   three answers, not two — see [`Match`] — and an `allow` requires
+//!   certainty while a `deny` needs only suspicion.
 
 use alloy::{
     dyn_abi::{DynSolType, DynSolValue, JsonAbiExt},
@@ -35,6 +43,75 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
 };
+
+/// The answer a predicate gives about one value.
+///
+/// Two answers are not enough. A selector predicate that meets its own
+/// function, encoded in a form this policy cannot decode, is not answering
+/// "no" — it is answering "this is my subject and I cannot read it". Those
+/// collapse safely for an `allow`, which must refuse both, and unsafely for
+/// everything else: reported as a non-match, a `deny` naming that selector
+/// stops firing while a broader `allow` still admits the call, and a `not`
+/// around it turns the unreadable call into a positive match. Doubt is
+/// therefore its own answer and it propagates, so that it can fail closed in
+/// both directions rather than in only one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Match {
+    Yes,
+    No,
+    /// The predicate's own subject, in an encoding it cannot decide. Satisfies
+    /// no `allow` and triggers every `deny` that could have named it.
+    Unreadable,
+}
+
+impl Match {
+    #[must_use]
+    const fn of(value: bool) -> Self {
+        if value { Self::Yes } else { Self::No }
+    }
+
+    /// Conjunction. A definite `No` settles it; otherwise doubt survives.
+    #[must_use]
+    pub(crate) const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::No, _) | (_, Self::No) => Self::No,
+            (Self::Unreadable, _) | (_, Self::Unreadable) => Self::Unreadable,
+            (Self::Yes, Self::Yes) => Self::Yes,
+        }
+    }
+
+    /// Disjunction. A definite `Yes` settles it; otherwise doubt survives.
+    #[must_use]
+    const fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Yes, _) | (_, Self::Yes) => Self::Yes,
+            (Self::Unreadable, _) | (_, Self::Unreadable) => Self::Unreadable,
+            (Self::No, Self::No) => Self::No,
+        }
+    }
+
+    #[must_use]
+    const fn negate(self) -> Self {
+        match self {
+            Self::Yes => Self::No,
+            Self::No => Self::Yes,
+            Self::Unreadable => Self::Unreadable,
+        }
+    }
+
+    /// Whether this answer may satisfy an `allow`. Only certainty does.
+    #[must_use]
+    pub const fn is_match(self) -> bool {
+        matches!(self, Self::Yes)
+    }
+
+    /// Whether this answer must trigger a `deny`. Doubt does: a rule written
+    /// to stop a call cannot be escaped by encoding that call unreadably.
+    #[must_use]
+    pub const fn is_suspected(self) -> bool {
+        matches!(self, Self::Yes | Self::Unreadable)
+    }
+}
 
 /// Everything a predicate may consult beyond the call itself.
 ///
@@ -111,32 +188,43 @@ impl SelectorPredicate {
         &self.args
     }
 
-    /// True when `data` is a canonically encoded call to this signature whose
+    /// Whether `data` is a canonically encoded call to this signature whose
     /// named arguments all satisfy their predicates.
-    fn matches(&self, data: &[u8], context: &PolicyContext) -> bool {
+    ///
+    /// The selector decides the subject and the body decides the answer. Once
+    /// the four bytes match, this call *is* the function named here, so a body
+    /// that will not decode or will not round-trip is [`Match::Unreadable`]
+    /// rather than [`Match::No`]: the arguments are unknown, not absent.
+    fn evaluate(&self, data: &[u8], context: &PolicyContext) -> Match {
         if data.len() < 4 || data[..4] != self.function.selector()[..] {
-            return false;
+            return Match::No;
         }
         let body = &data[4..];
         let Ok(values) = self.function.abi_decode_input(body) else {
-            return false;
+            return Match::Unreadable;
         };
-        // Canonical-form check: see the module comment. A decode that does not
-        // round-trip is treated as a non-match, never as a partial match.
+        // Canonical-form check: see the module comment. `abi_decode_input`
+        // alone ignores trailing bytes and accepts dirty padding, so a call a
+        // target contract would execute can decode here into arguments that
+        // are not the ones it will act on.
         let Ok(reencoded) = self.function.abi_encode_input_raw(&values) else {
-            return false;
+            return Match::Unreadable;
         };
         if reencoded != body {
-            return false;
+            return Match::Unreadable;
         }
-        self.args.iter().all(|(name, predicate)| {
-            self.function
-                .inputs
-                .iter()
-                .position(|input| &input.name == name)
-                .and_then(|index| values.get(index))
-                .is_some_and(|value| predicate.matches(value, context))
-        })
+        self.args
+            .iter()
+            .fold(Match::Yes, |answer, (name, predicate)| {
+                answer.and(
+                    self.function
+                        .inputs
+                        .iter()
+                        .position(|input| &input.name == name)
+                        .and_then(|index| values.get(index))
+                        .map_or(Match::No, |value| predicate.evaluate(value, context)),
+                )
+            })
     }
 }
 
@@ -282,49 +370,68 @@ impl Predicate {
         }
     }
 
-    /// True when `value` satisfies this predicate. Never errors: an
-    /// unanswerable question is a non-match, and the rule set denies by
-    /// default, so uncertainty denies.
+    /// How `value` answers this predicate. Never errors: an unanswerable
+    /// question is [`Match::No`] or [`Match::Unreadable`], and the rule set
+    /// denies by default, so uncertainty never admits.
+    ///
+    /// The two differ in what else they do. `No` says the predicate's subject
+    /// is not here; `Unreadable` says it is here in a form that cannot be
+    /// decided, which additionally trips any `deny` written over it.
     #[must_use]
-    pub fn matches(&self, value: &DynSolValue, context: &PolicyContext) -> bool {
+    pub fn evaluate(&self, value: &DynSolValue, context: &PolicyContext) -> Match {
         match self {
-            Self::AnyValue => true,
-            Self::Eq(literal) => render(value).is_some_and(|rendered| {
+            Self::AnyValue => Match::Yes,
+            Self::Eq(literal) => Match::of(render(value).is_some_and(|rendered| {
                 value
                     .as_type()
                     .and_then(|ty| parse_literal(literal, &ty).ok())
                     .is_some_and(|canonical| canonical == rendered)
-            }),
-            Self::In(literals) => render(value).is_some_and(|rendered| {
+            })),
+            Self::In(literals) => Match::of(render(value).is_some_and(|rendered| {
                 value.as_type().is_some_and(|ty| {
                     literals
                         .iter()
                         .filter_map(|literal| parse_literal(literal, &ty).ok())
                         .any(|canonical| canonical == rendered)
                 })
-            }),
-            Self::IsWallet => as_address(value).is_some_and(|address| address == context.wallet),
-            Self::IsToken => {
-                as_address(value).is_some_and(|address| context.known_tokens.contains(&address))
+            })),
+            Self::IsWallet => {
+                Match::of(as_address(value).is_some_and(|address| address == context.wallet))
             }
-            Self::IsAddressBook => {
-                as_address(value).is_some_and(|address| context.address_book.contains(&address))
-            }
+            Self::IsToken => Match::of(
+                as_address(value).is_some_and(|address| context.known_tokens.contains(&address)),
+            ),
+            Self::IsAddressBook => Match::of(
+                as_address(value).is_some_and(|address| context.address_book.contains(&address)),
+            ),
             Self::Selector(selector) => match value {
-                DynSolValue::Bytes(data) => selector.matches(data, context),
-                _ => false,
+                DynSolValue::Bytes(data) => selector.evaluate(data, context),
+                _ => Match::No,
             },
             Self::Each(inner) => match elements(value) {
-                Some(items) => items.iter().all(|item| inner.matches(item, context)),
-                None => false,
+                Some(items) => items.iter().fold(Match::Yes, |answer, item| {
+                    answer.and(inner.evaluate(item, context))
+                }),
+                None => Match::No,
             },
-            Self::Any(inner) => inner.iter().any(|item| item.matches(value, context)),
-            Self::All(inner) => inner.iter().all(|item| item.matches(value, context)),
-            Self::Not(inner) => !inner.matches(value, context),
-            Self::Length(inner) => length_of(value).is_some_and(|length| {
-                inner.matches(&DynSolValue::Uint(U256::from(length), 256), context)
+            Self::Any(inner) => inner.iter().fold(Match::No, |answer, item| {
+                answer.or(item.evaluate(value, context))
+            }),
+            Self::All(inner) => inner.iter().fold(Match::Yes, |answer, item| {
+                answer.and(item.evaluate(value, context))
+            }),
+            Self::Not(inner) => inner.evaluate(value, context).negate(),
+            Self::Length(inner) => length_of(value).map_or(Match::No, |length| {
+                inner.evaluate(&DynSolValue::Uint(U256::from(length), 256), context)
             }),
         }
+    }
+
+    /// True when `value` definitely satisfies this predicate — the question an
+    /// `allow` asks. Doubt answers no.
+    #[must_use]
+    pub fn matches(&self, value: &DynSolValue, context: &PolicyContext) -> bool {
+        self.evaluate(value, context).is_match()
     }
 
     /// Whether this predicate is exactly as permissive as, or narrower than,

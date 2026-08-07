@@ -785,3 +785,71 @@ proptest! {
         prop_assert!(!rule.matches(&bytes(data), &ctx));
     }
 }
+
+// ------------------------------------------------- unreadable encodings
+
+const APPROVE: &str = "approve(address spender, uint256 amount)";
+
+fn approve_body() -> Vec<u8> {
+    encode(
+        APPROVE,
+        &[
+            DynSolValue::Address(FRIEND),
+            DynSolValue::Uint(U256::from(1), 256),
+        ],
+    )
+}
+
+#[test]
+fn an_illegible_body_is_unreadable_rather_than_absent() {
+    // The distinction the engine rests on: "not my subject" and "my subject,
+    // in an encoding I cannot certify" are different answers. Only the first
+    // is a plain `No`.
+    let ctx = context();
+    let rule = selector(APPROVE, &serde_json::json!({}));
+    let honest = approve_body();
+    assert_eq!(rule.evaluate(&bytes(honest.clone()), &ctx), Match::Yes);
+
+    let other = encode(
+        "transfer(address to, uint256 amount)",
+        &[
+            DynSolValue::Address(FRIEND),
+            DynSolValue::Uint(U256::from(1), 256),
+        ],
+    );
+    assert_eq!(rule.evaluate(&bytes(other), &ctx), Match::No);
+
+    let mut trailing = honest.clone();
+    trailing.push(0x00);
+    assert_eq!(rule.evaluate(&bytes(trailing), &ctx), Match::Unreadable);
+
+    let truncated = honest[..honest.len() - 1].to_vec();
+    assert_eq!(rule.evaluate(&bytes(truncated), &ctx), Match::Unreadable);
+}
+
+#[test]
+fn doubt_survives_negation_and_composition() {
+    let ctx = context();
+    let mut data = approve_body();
+    data.push(0x00);
+
+    let negated = predicate(serde_json::json!({ "not": { "selector": { "abi": APPROVE } } }));
+    assert_eq!(
+        negated.evaluate(&bytes(data.clone()), &ctx),
+        Match::Unreadable,
+        "negating doubt must not manufacture certainty"
+    );
+    assert!(!negated.matches(&bytes(data.clone()), &ctx));
+
+    let any = predicate(serde_json::json!({ "any": [{ "selector": { "abi": APPROVE } }] }));
+    assert_eq!(any.evaluate(&bytes(data.clone()), &ctx), Match::Unreadable);
+    let all = predicate(serde_json::json!({ "all": [{ "selector": { "abi": APPROVE } }] }));
+    assert_eq!(all.evaluate(&bytes(data.clone()), &ctx), Match::Unreadable);
+
+    // A definite answer still settles a composition that also holds doubt.
+    let certain = predicate(serde_json::json!({ "any": [
+        { "any_value": null },
+        { "selector": { "abi": APPROVE } }
+    ]}));
+    assert_eq!(certain.evaluate(&bytes(data), &ctx), Match::Yes);
+}

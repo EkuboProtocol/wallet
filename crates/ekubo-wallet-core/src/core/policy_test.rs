@@ -556,3 +556,72 @@ proptest! {
         prop_assert!(!allows(&WalletPolicy::require_approval_for_everything(), &plan));
     }
 }
+
+// --------------------------------------------- unreadable encodings
+
+#[test]
+fn a_denied_call_cannot_escape_by_being_encoded_unreadably() {
+    // The carve-out shape: a broad allow with a narrow deny over it. Appending
+    // one byte to the calldata used to un-match the deny — a target contract's
+    // decoder ignores trailing bytes and performs the approve regardless —
+    // while leaving the broad allow matching, so the call signed automatically.
+    let subject = policy(json!({
+        "version": 1,
+        "chains": { "1": {
+            "max_calls_per_batch": 4,
+            "native_value": { "eq": "0" },
+            "rules": [
+                { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } },
+                { "effect": "deny",
+                  "to": { "eq": format!("{TOKEN:#x}") },
+                  "calldata": { "selector": {
+                      "abi": "approve(address spender, uint256 amount)" } } }
+            ]
+        }}
+    }));
+
+    let honest = approve_calldata(ROUTER, 1);
+    assert!(
+        codes(&subject, &plan_with(TOKEN, &honest, "0")).contains(&CALL_DENIED_CODE.to_owned())
+    );
+    assert!(
+        codes(&subject, &plan_with(TOKEN, &format!("{honest}00"), "0"))
+            .contains(&CALL_DENIED_CODE.to_owned()),
+        "a trailing byte must not buy the approve this deny rule names"
+    );
+    assert!(!allows(
+        &subject,
+        &plan_with(TOKEN, &format!("{honest}00"), "0")
+    ));
+}
+
+#[test]
+fn a_negated_selector_does_not_admit_an_unreadable_call() {
+    // "Allow anything that is not an approve." Reported as a plain non-match,
+    // an unreadable approve satisfied the negation and was the one call the
+    // rule existed to exclude.
+    let subject = policy(json!({
+        "version": 1,
+        "chains": { "1": {
+            "max_calls_per_batch": 4,
+            "native_value": { "eq": "0" },
+            "rules": [
+                { "effect": "allow",
+                  "to": { "eq": format!("{TOKEN:#x}") },
+                  "calldata": { "not": { "selector": {
+                      "abi": "approve(address spender, uint256 amount)" } } } }
+            ]
+        }}
+    }));
+
+    assert!(
+        allows(&subject, &plan_with(TOKEN, "0xaabbccdd", "0")),
+        "an unrelated call is still allowed"
+    );
+    let honest = approve_calldata(ROUTER, 1);
+    assert!(!allows(&subject, &plan_with(TOKEN, &honest, "0")));
+    assert!(
+        !allows(&subject, &plan_with(TOKEN, &format!("{honest}00"), "0")),
+        "a trailing byte must not invert the negation"
+    );
+}

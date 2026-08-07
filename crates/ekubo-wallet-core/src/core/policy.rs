@@ -29,7 +29,7 @@
 
 use crate::core::{
     execution_plan::ExecutionPlan,
-    predicate::{PolicyContext, Predicate},
+    predicate::{Match, PolicyContext, Predicate},
 };
 use alloy::{
     dyn_abi::{DynSolType, DynSolValue},
@@ -75,22 +75,24 @@ pub struct Rule {
 }
 
 impl Rule {
-    fn matches(&self, call: &Call, context: &PolicyContext) -> bool {
-        self.to
-            .as_ref()
-            .is_none_or(|predicate| predicate.matches(&call.to, context))
-            && self
-                .from
-                .as_ref()
-                .is_none_or(|predicate| predicate.matches(&call.from, context))
-            && self
-                .value
-                .as_ref()
-                .is_none_or(|predicate| predicate.matches(&call.value, context))
-            && self
-                .calldata
-                .as_ref()
-                .is_none_or(|predicate| predicate.matches(&call.calldata, context))
+    /// How this rule answers one call: every slot it constrains, conjoined.
+    ///
+    /// Three-valued, because an `allow` and a `deny` ask different questions
+    /// of the same answer — see [`Match`]. An omitted slot constrains nothing
+    /// and contributes `Yes`.
+    fn evaluate(&self, call: &Call, context: &PolicyContext) -> Match {
+        [
+            (self.to.as_ref(), &call.to),
+            (self.from.as_ref(), &call.from),
+            (self.value.as_ref(), &call.value),
+            (self.calldata.as_ref(), &call.calldata),
+        ]
+        .into_iter()
+        .fold(Match::Yes, |answer, (predicate, value)| {
+            predicate.map_or(answer, |predicate| {
+                answer.and(predicate.evaluate(value, context))
+            })
+        })
     }
 
     fn validate(&self) -> Result<()> {
@@ -411,15 +413,21 @@ pub fn evaluate_policy(
             ));
         }
         // Deny wins, so every rule is consulted even once an allow has matched.
+        //
+        // The two effects read the same answer differently, and that asymmetry
+        // is the point. An `allow` needs certainty: only `Yes` grants. A `deny`
+        // needs only suspicion, so a call encoded past the point this policy
+        // can decode it still trips the rule written to stop it. Reading both
+        // as a plain boolean let an unreadable encoding slip a denied call
+        // through whatever broader `allow` was also present.
         let mut allowed = false;
         let mut denied: Option<&Rule> = None;
         for rule in &chain.rules {
-            if !rule.matches(&call, context) {
-                continue;
-            }
+            let answer = rule.evaluate(&call, context);
             match rule.effect {
-                Effect::Deny => denied = denied.or(Some(rule)),
-                Effect::Allow => allowed = true,
+                Effect::Deny if answer.is_suspected() => denied = denied.or(Some(rule)),
+                Effect::Allow if answer.is_match() => allowed = true,
+                _ => {}
             }
         }
         if let Some(rule) = denied {
