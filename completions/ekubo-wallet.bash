@@ -13,7 +13,7 @@ _ekubo_wallet() {
 
   case "$COMP_CWORD" in
     1)
-      choices="server version status portfolio balance bal account acct wallet network net policy transaction tx token address-book legal review completion --data-dir --json --help --version"
+      choices="server version status portfolio balance bal account acct wallet network net policy transaction tx token address-book agent legal review completion --data-dir --json --help --version"
       ;;
     2)
       case "$first" in
@@ -24,6 +24,7 @@ _ekubo_wallet() {
         transaction|tx) choices="list show cancel rebroadcast discard" ;;
         token) choices="list search review import" ;;
         address-book) choices="list add remove delete" ;;
+        agent) choices="list add remove delete" ;;
         legal) choices="status show accept" ;;
         review) choices="$(ekubo-wallet __complete approvals 2>/dev/null)" ;;
         completion) choices="bash zsh fish elvish powershell" ;;
@@ -46,6 +47,9 @@ _ekubo_wallet() {
           ;;
         address-book:list|address-book:add|address-book:remove|address-book:delete)
           choices="$(ekubo-wallet __complete networks 2>/dev/null)"
+          ;;
+        agent:add|agent:remove|agent:delete)
+          choices="codex claude-code claude gemini-cli gemini cursor"
           ;;
         legal:show)
           choices="terms privacy licenses"

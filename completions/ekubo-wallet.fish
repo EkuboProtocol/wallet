@@ -25,6 +25,7 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a transaction -d 'Insp
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a tx -d 'Inspect signed and broadcast transactions'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a token -d 'Inspect the local token database'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a address-book -d 'Manage per-chain address aliases'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a agent -d 'Register this server with the agents on this machine'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a legal -d 'Read and accept legal documents'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a review -d 'Review a pending request and approve or reject it'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a completion -d 'Print shell completions'
@@ -67,5 +68,8 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from portfolio balance bal' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from portfolio balance bal' -l network -r -a '(ekubo-wallet __complete networks-fish 2>/dev/null)' -d 'Network name, alias, or chain ID'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from portfolio balance bal' -l tokens -r -d 'How many known tokens to check'
+
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from agent; and not __fish_seen_subcommand_from list add remove delete' -a 'list add remove delete'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add remove delete; and __fish_seen_subcommand_from agent' -a 'codex claude-code gemini-cli cursor'
 
 complete -c ew -w ekubo-wallet

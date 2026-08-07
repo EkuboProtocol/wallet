@@ -106,6 +106,11 @@ enum Command {
     /// Bare, on a terminal, this opens the full-screen editor.
     #[command(name = "address-book")]
     AddressBook(AddressBookArgs),
+    /// Register this wallet as an MCP server with the agents on this machine.
+    ///
+    /// The installer does this once. This is how to redo it after moving the
+    /// binary, and how to find out which agents currently point at it.
+    Agent(AgentArgs),
     /// Read legal documents and record their acceptance.
     Legal(LegalArgs),
     /// List exceptional requests, or review one locally and approve or reject it.
@@ -260,6 +265,72 @@ struct NetworkAddArgs {
     block_explorer_url: Option<Url>,
     #[arg(long)]
     documentation_url: Option<Url>,
+}
+
+#[derive(Debug, Args)]
+struct AgentArgs {
+    #[command(subcommand)]
+    command: AgentCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommand {
+    /// Show which supported agents are installed here and whether this server
+    /// is registered with each.
+    List,
+    /// Register this server. Without an agent, every one detected here.
+    Add { agent: Option<AgentName> },
+    /// Unregister this server. Without an agent, every one detected here.
+    #[command(alias = "delete")]
+    Remove { agent: Option<AgentName> },
+}
+
+/// The agents this wallet knows how to configure.
+///
+/// Three of them own their own MCP configuration and expose a CLI for it, so
+/// registration shells out rather than editing their files: their format is
+/// theirs to change. Cursor has no such command, which is why it is the one
+/// whose `mcp.json` this writes directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AgentName {
+    Codex,
+    #[value(name = "claude-code", alias = "claude")]
+    ClaudeCode,
+    #[value(name = "gemini-cli", alias = "gemini")]
+    Gemini,
+    Cursor,
+}
+
+impl AgentName {
+    const ALL: [Self; 4] = [Self::Codex, Self::ClaudeCode, Self::Gemini, Self::Cursor];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
+            Self::Gemini => "Gemini CLI",
+            Self::Cursor => "Cursor",
+        }
+    }
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
+            Self::Gemini => "gemini-cli",
+            Self::Cursor => "cursor",
+        }
+    }
+
+    /// The executable that owns this agent's MCP configuration, if any.
+    const fn binary(self) -> Option<&'static str> {
+        match self {
+            Self::Codex => Some("codex"),
+            Self::ClaudeCode => Some("claude"),
+            Self::Gemini => Some("gemini"),
+            Self::Cursor => None,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -505,6 +576,7 @@ impl Cli {
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
             Command::Token(args) => run_token(&config, &args.command, mode).await,
             Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
+            Command::Agent(args) => run_agent(&args.command, mode),
             Command::Legal(args) => run_legal(&config, &args.command, mode),
             Command::Review {
                 request_id,
@@ -4304,6 +4376,253 @@ fn print_completion_script(shell: Shell) -> Result<()> {
 
 fn completion_safe(value: &str) -> String {
     crate::render::terminal_safe_line(value)
+}
+
+/// Where this executable actually is, so a registration records the path an
+/// agent can still launch tomorrow.
+///
+/// `current_exe` rather than argv[0]: an agent config that recorded `ew` or a
+/// relative path would work only from the shell that wrote it.
+fn server_command() -> Result<String> {
+    let path = std::env::current_exe().context("could not determine this executable's path")?;
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .context("this executable's path is not valid UTF-8")
+}
+
+fn agent_binary(agent: AgentName) -> Option<PathBuf> {
+    let name = agent.binary()?;
+    // `which` is not available everywhere this runs, so PATH is walked here.
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// Whether this agent is present on this machine at all.
+fn agent_installed(agent: AgentName) -> bool {
+    match agent {
+        // Cursor is an editor rather than a CLI, so its configuration
+        // directory is the evidence that it is here.
+        AgentName::Cursor => {
+            BaseDirs::new().is_some_and(|base| base.home_dir().join(".cursor").is_dir())
+        }
+        _ => agent_binary(agent).is_some(),
+    }
+}
+
+/// Whether this server is currently registered with an agent.
+///
+/// `None` means the question could not be answered rather than answered no —
+/// an agent's `mcp list` may fail or change its wording, and reporting that as
+/// "not registered" would send someone to re-register something that is fine.
+fn agent_registered(agent: AgentName) -> Option<bool> {
+    if agent == AgentName::Cursor {
+        let file = BaseDirs::new()?.home_dir().join(".cursor").join("mcp.json");
+        let document: serde_json::Value = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
+        return Some(document.get("mcpServers")?.get("ekubo-wallet").is_some());
+    }
+    {
+        {
+            let output = std::process::Command::new(agent_binary(agent)?)
+                .args(["mcp", "list"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            Some(String::from_utf8_lossy(&output.stdout).contains("ekubo-wallet"))
+        }
+    }
+}
+
+fn register_agent(agent: AgentName) -> Result<()> {
+    let command = server_command()?;
+    if agent == AgentName::Cursor {
+        configure_cursor_mcp(&command, &["server".to_string()])?;
+        return Ok(());
+    }
+    let binary =
+        agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
+    // Removed first so re-registering after moving the binary replaces the old
+    // path instead of failing on a name that already exists.
+    let _ = unregister_agent(agent);
+    let mut arguments: Vec<String> = vec!["mcp".into(), "add".into(), "ekubo-wallet".into()];
+    match agent {
+        // Gemini takes the command inline and the scope after it; the other
+        // two separate the command with `--`.
+        AgentName::Gemini => {
+            arguments.extend([command, "server".into(), "--scope".into(), "user".into()]);
+        }
+        AgentName::ClaudeCode => {
+            arguments.extend([
+                "--scope".into(),
+                "user".into(),
+                "--".into(),
+                command,
+                "server".into(),
+            ]);
+        }
+        _ => arguments.extend(["--".into(), command, "server".into()]),
+    }
+    let status = std::process::Command::new(&binary)
+        .args(&arguments)
+        .status()
+        .with_context(|| format!("failed to run {}", binary.display()))?;
+    ensure!(
+        status.success(),
+        "{} rejected the registration; run it yourself to see why: {} {}",
+        agent.label(),
+        binary.display(),
+        arguments.join(" ")
+    );
+    Ok(())
+}
+
+fn unregister_agent(agent: AgentName) -> Result<()> {
+    if agent == AgentName::Cursor {
+        return remove_cursor_mcp();
+    }
+    let binary =
+        agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
+    let mut arguments: Vec<String> = vec!["mcp".into(), "remove".into(), "ekubo-wallet".into()];
+    if matches!(agent, AgentName::ClaudeCode | AgentName::Gemini) {
+        arguments.extend(["--scope".into(), "user".into()]);
+    }
+    let status = std::process::Command::new(&binary)
+        .args(&arguments)
+        .status()
+        .with_context(|| format!("failed to run {}", binary.display()))?;
+    ensure!(status.success(), "{} rejected the removal", agent.label());
+    Ok(())
+}
+
+/// Drop this server from Cursor's `mcp.json`, leaving every other entry and
+/// every unrelated key exactly as they were.
+fn remove_cursor_mcp() -> Result<()> {
+    let base = BaseDirs::new().context("could not determine the user home directory")?;
+    remove_cursor_mcp_at(base.home_dir())
+}
+
+fn remove_cursor_mcp_at(home: &Path) -> Result<()> {
+    let file = home.join(".cursor").join("mcp.json");
+    if !file.exists() {
+        return Ok(());
+    }
+    let mut document: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(&file).with_context(|| format!("failed to read {}", file.display()))?,
+        )
+        .with_context(|| format!("failed to parse {}", file.display()))?
+        .as_object()
+        .cloned()
+        .context("Cursor MCP configuration must be a JSON object")?;
+    let Some(mut servers) = document
+        .remove("mcpServers")
+        .and_then(|value| value.as_object().cloned())
+    else {
+        return Ok(());
+    };
+    servers.remove("ekubo-wallet");
+    document.insert("mcpServers".into(), servers.into());
+    let directory = file.parent().context("mcp.json has no parent directory")?;
+    let mut temporary = NamedTempFile::new_in(directory)?;
+    set_private_permissions(temporary.path(), false)?;
+    serde_json::to_writer_pretty(&mut temporary, &document)?;
+    std::io::Write::write_all(&mut temporary, b"\n")?;
+    temporary.persist(&file).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
+    match command {
+        AgentCommand::List => {
+            let rows: Vec<serde_json::Value> = AgentName::ALL
+                .into_iter()
+                .map(|agent| {
+                    let installed = agent_installed(agent);
+                    serde_json::json!({
+                        "agent": agent.key(),
+                        "installed": installed,
+                        "registered": installed.then(|| agent_registered(agent)).flatten(),
+                    })
+                })
+                .collect();
+            emit(mode, &serde_json::json!({ "agents": rows }), || {
+                let mut lines = vec![format!("Server command: {}", server_command()?)];
+                lines.push(String::new());
+                for agent in AgentName::ALL {
+                    let state = if agent_installed(agent) {
+                        match agent_registered(agent) {
+                            Some(true) => "registered".to_string(),
+                            Some(false) => format!(
+                                "installed, not registered — `ekubo-wallet agent add {}`",
+                                agent.key()
+                            ),
+                            None => "installed; could not read its MCP configuration".to_string(),
+                        }
+                    } else {
+                        "not installed".to_string()
+                    };
+                    lines.push(format!("{:<12} {state}", agent.label()));
+                }
+                Ok(lines.join("\n"))
+            })
+        }
+        AgentCommand::Add { agent } | AgentCommand::Remove { agent } => {
+            let adding = matches!(command, AgentCommand::Add { .. });
+            // A bare `add` configures what is actually here rather than
+            // failing on the agents that are not, which is what the installer
+            // does and the only behaviour that makes it re-runnable.
+            let targets: Vec<AgentName> = agent.map_or_else(
+                || {
+                    AgentName::ALL
+                        .into_iter()
+                        .filter(|agent| agent_installed(*agent))
+                        .collect()
+                },
+                |agent| vec![agent],
+            );
+            ensure!(
+                !targets.is_empty(),
+                "no supported agent was detected here; name one explicitly to configure it anyway"
+            );
+            let mut changed = Vec::new();
+            let mut failed = Vec::new();
+            for agent in targets {
+                let outcome = if adding {
+                    register_agent(agent)
+                } else {
+                    unregister_agent(agent)
+                };
+                match outcome {
+                    Ok(()) => changed.push(agent.key()),
+                    Err(error) => failed.push(format!("{}: {error:#}", agent.label())),
+                }
+            }
+            let verb = if adding { "registered" } else { "unregistered" };
+            emit(
+                mode,
+                &serde_json::json!({ verb: changed, "failed": failed }),
+                || {
+                    let mut lines = Vec::new();
+                    if changed.is_empty() {
+                        lines.push(format!("Nothing was {verb}."));
+                    } else {
+                        lines.push(format!("{verb} with {}.", changed.join(", ")));
+                    }
+                    for failure in &failed {
+                        lines.push(format!("Failed — {failure}"));
+                    }
+                    if adding && !changed.is_empty() {
+                        lines.push("Restart the agent to pick up the change.".into());
+                    }
+                    Ok(lines.join("\n"))
+                },
+            )
+        }
+    }
 }
 
 fn run_configure_agent(command: ConfigureAgentCommand) -> Result<()> {

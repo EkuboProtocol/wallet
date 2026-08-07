@@ -104,6 +104,11 @@ Linux also needs a working Secret Service provider for credential storage. If
 polkit, Windows Hello, or macOS Local Authentication is unavailable, sensitive
 operations fail closed.
 
+`ekubo-wallet agent list` shows which supported agents are installed here
+and whether this server is registered with each; `agent add` registers it
+with everything detected, and `agent add <name>` with one. The installer does
+this once, so reach for it after moving the binary or installing a new agent.
+
 Start the MCP server over stdio with `ekubo-wallet server`. It publishes the
 `wallet://docs/security-model` resource. Run `ekubo-wallet --help` for the
 complete CLI, or install a packaged completion:

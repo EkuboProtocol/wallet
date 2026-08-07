@@ -574,3 +574,56 @@ fn status_summarizes_every_queue_that_is_waiting() {
     assert!(rendered.contains("40 suggested"));
     assert!(rendered.contains("ekubo-wallet token review"));
 }
+
+#[test]
+fn unregistering_cursor_leaves_every_other_entry_alone() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+    let file = home.path().join(".cursor").join("mcp.json");
+    std::fs::write(
+        &file,
+        serde_json::json!({
+            "mcpServers": {
+                "ekubo-wallet": {"command": "/old/path", "args": ["server"]},
+                "something-else": {"command": "/bin/other", "args": []},
+            },
+            // A key this wallet knows nothing about. Rewriting the file must
+            // not be an opportunity to drop it.
+            "unrelated": {"keep": true},
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    remove_cursor_mcp_at(home.path()).unwrap();
+
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(document["mcpServers"].get("ekubo-wallet").is_none());
+    assert_eq!(
+        document["mcpServers"]["something-else"]["command"],
+        "/bin/other"
+    );
+    assert_eq!(document["unrelated"]["keep"], true);
+}
+
+#[test]
+fn unregistering_cursor_without_a_configuration_is_not_an_error() {
+    // `agent remove` with no agent named walks everything detected, so a
+    // machine where Cursor was never configured must not fail the sweep.
+    let home = tempfile::tempdir().unwrap();
+    remove_cursor_mcp_at(home.path()).unwrap();
+}
+
+#[test]
+fn every_agent_has_a_distinct_key_and_label() {
+    let mut keys = std::collections::HashSet::new();
+    for agent in AgentName::ALL {
+        assert!(keys.insert(agent.key()), "{agent:?} duplicates a key");
+        assert!(!agent.label().is_empty());
+    }
+    // Cursor is the one this wallet configures by writing the file itself,
+    // because it has no CLI that owns its MCP configuration.
+    assert!(AgentName::Cursor.binary().is_none());
+    assert!(AgentName::Codex.binary().is_some());
+}

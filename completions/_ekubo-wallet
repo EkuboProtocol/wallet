@@ -4,7 +4,7 @@ _ekubo-wallet() {
   local -a choices
 
   if (( CURRENT == 2 )); then
-    _values "command" server version status portfolio balance bal account acct wallet network net policy transaction tx token address-book legal review completion \
+    _values "command" server version status portfolio balance bal account acct wallet network net policy transaction tx token address-book agent legal review completion \
       --data-dir --json --help --version
     return
   fi
@@ -17,6 +17,7 @@ _ekubo-wallet() {
       transaction|tx) _values "transaction command" list show cancel rebroadcast discard ;;
       token) _values "token command" list search review import ;;
       address-book) _values "address book command" list add remove delete ;;
+      agent) _values "agent command" list add remove delete ;;
       legal) _values "legal command" status show accept ;;
       review)
         choices=("${(@f)$(ekubo-wallet __complete approvals-described 2>/dev/null)}")
