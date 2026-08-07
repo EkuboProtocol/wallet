@@ -1,6 +1,9 @@
 use crate::{
     config::{NetworkConfig, WalletMetadata},
-    core::{execution_plan::ExecutionPlan, policy::policy_denies},
+    core::{
+        execution_plan::ExecutionPlan,
+        policy::{PolicyOutcome, denial_reasons, policy_outcome},
+    },
     custody::{KeyStore, load_matching_signer},
     rpc::{rpc_error, transaction_receipt, verify_chain_id},
     simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
@@ -16,7 +19,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     signers::{SignerSync, local::PrivateKeySigner},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::json;
@@ -327,10 +330,25 @@ fn validate_preflight(
         simulation.digest == format!("{:#x}", plan.digest()),
         "simulation digest does not match execution plan"
     );
-    ensure!(
-        !policy_denies(&simulation.policy_findings) || overrides.allow_policy_override,
-        "transaction was denied by the active wallet policy"
-    );
+    // A `deny` rule is not overridable. The owner already answered this
+    // question when they wrote the rule, and an approval prompt that can talk
+    // them out of it makes the rule decoration. Matching no rule is a
+    // different thing — a question nobody has answered — and that is the one
+    // an interactive human may still answer.
+    match policy_outcome(&simulation.policy_findings) {
+        PolicyOutcome::Rejected => {
+            let reasons = denial_reasons(&simulation.policy_findings).join("; ");
+            bail!(
+                "the active wallet policy rejects this transaction outright, so it cannot be \
+                 signed or approved: {reasons}. Change the policy if this should be permitted."
+            );
+        }
+        PolicyOutcome::RequiresApproval => ensure!(
+            overrides.allow_policy_override,
+            "no policy rule covers this transaction, so it needs explicit human approval"
+        ),
+        PolicyOutcome::Allowed => {}
+    }
     ensure!(
         simulation.simulation.success || overrides.allow_simulation_failure,
         "transaction simulation did not succeed"

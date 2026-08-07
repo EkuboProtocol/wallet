@@ -40,6 +40,7 @@ fn result(plan: &ExecutionPlan) -> SimulationResult {
         simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
         allowed: true,
+        policy_outcome: crate::core::policy::PolicyOutcome::Allowed,
         policy_findings: Vec::new(),
         policy_revision: 1,
         execution_mode: ExecutionMode::Direct,

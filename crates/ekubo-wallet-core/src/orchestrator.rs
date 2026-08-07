@@ -156,6 +156,20 @@ pub async fn execute_automatic(
 ) -> Result<SendDisposition> {
     validate_send(wallet, network, plan, simulation)?;
 
+    // Rejected outright: nothing signs and nothing queues. Creating a pending
+    // row here would offer the user an approval prompt for something their own
+    // policy already refused, and the only honest answer at that prompt is
+    // "change the policy", which is not a thing an approval screen can do.
+    if let crate::core::policy::PolicyOutcome::Rejected =
+        crate::core::policy::policy_outcome(&simulation.policy_findings)
+    {
+        let reasons = crate::core::policy::denial_reasons(&simulation.policy_findings).join("; ");
+        anyhow::bail!(
+            "the active wallet policy rejects this plan outright, so nothing was queued or \
+             signed: {reasons}. Change the policy if this should be permitted."
+        );
+    }
+
     if !simulation.allowed || !simulation.simulation.success {
         let request = lock(pending)?.create(
             &wallet.id,

@@ -748,11 +748,25 @@ fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
     // And on the result itself, in band, at the moment the agent decides
     // what to do next: instructions and descriptions are read once, but
     // the denial arrives mid-task.
-    let next_step = policy_denial_next_step(uuid::Uuid::nil());
+    // A call no rule covers is the ordinary route to approval.
+    let next_step = policy_denial_next_step(
+        crate::core::policy::PolicyOutcome::RequiresApproval,
+        uuid::Uuid::nil(),
+    );
     assert!(next_step.contains("not a dead end"));
     assert!(next_step.contains("wallet_send_execution_plan"));
     assert!(next_step.contains(&uuid::Uuid::nil().to_string()));
     assert!(next_step.contains("do not ask the user to change their policy"));
+
+    // An explicit deny gets the opposite advice: do not queue, and the policy
+    // is exactly what has to change.
+    let refused = policy_denial_next_step(
+        crate::core::policy::PolicyOutcome::Rejected,
+        uuid::Uuid::nil(),
+    );
+    assert!(refused.contains("refuses this plan outright"));
+    assert!(refused.contains("do not queue it"));
+    assert!(!refused.contains("not a dead end"));
 }
 
 fn sendable_plan() -> ExecutionPlan {
@@ -790,6 +804,7 @@ fn recorded_failure(plan: &ExecutionPlan, policy_revision: u64) -> SimulationRes
         simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
         allowed: false,
+        policy_outcome: crate::core::policy::PolicyOutcome::RequiresApproval,
         policy_findings: Vec::new(),
         policy_revision,
         execution_mode: ExecutionMode::Direct,

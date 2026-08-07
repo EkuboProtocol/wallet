@@ -21,7 +21,8 @@ use crate::{
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{
-            FindingSeverity, PolicyFinding, SIMULATION_FAILED_CODE, evaluate_policy, policy_allows,
+            FindingSeverity, PolicyFinding, PolicyOutcome, SIMULATION_FAILED_CODE, evaluate_policy,
+            policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
     },
@@ -204,7 +205,14 @@ pub struct SimulationResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulation_id: Option<uuid::Uuid>,
     pub digest: String,
+    /// True only when the policy allowed every call *and* the simulation
+    /// succeeded, i.e. this signs with no prompt. `policy_outcome` says which
+    /// of the two a `false` came from.
     pub allowed: bool,
+    /// What the policy alone decided, independent of whether the simulation
+    /// succeeded: signs automatically, needs a human, or is refused outright
+    /// with no approval path at all.
+    pub policy_outcome: PolicyOutcome,
     pub policy_findings: Vec<PolicyFinding>,
     pub policy_revision: u64,
     pub execution_mode: ExecutionMode,
@@ -661,6 +669,7 @@ pub async fn simulate_execution(
         simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
         allowed: simulation.success && policy_allows(&findings),
+        policy_outcome: policy_outcome(&findings),
         policy_findings: findings,
         policy_revision: stored_policy.revision,
         execution_mode: planned.mode,
@@ -1220,6 +1229,7 @@ fn base_failure_result(
         simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
         allowed: false,
+        policy_outcome: policy_outcome(&findings),
         policy_findings: findings,
         policy_revision: stored_policy.revision,
         execution_mode: mode,

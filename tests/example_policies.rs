@@ -16,7 +16,7 @@ use alloy::{
 };
 use ekubo_wallet::core::{
     execution_plan::ExecutionPlan,
-    policy::{WalletPolicy, evaluate_policy, policy_allows},
+    policy::{PolicyOutcome, WalletPolicy, evaluate_policy, policy_allows, policy_outcome},
     predicate::PolicyContext,
 };
 use serde_json::json;
@@ -91,6 +91,10 @@ fn plan(chain_id: &str, to: Address, data: &str, value: &str) -> ExecutionPlan {
 
 fn allows(policy: &WalletPolicy, plan: &ExecutionPlan) -> bool {
     policy_allows(&evaluate_policy(plan, policy, &context()))
+}
+
+fn outcome(policy: &WalletPolicy, plan: &ExecutionPlan) -> PolicyOutcome {
+    policy_outcome(&evaluate_policy(plan, policy, &context()))
 }
 
 /// Assert a verdict and say which example and which call produced it.
@@ -444,6 +448,62 @@ fn the_edge_case_example_shows_each_corner_of_the_language() {
         &plan("1", ROUTER, &encode("poke()", &[]), "5"),
         false,
         "an amount the native_value guard does not list",
+    );
+}
+
+#[test]
+fn the_three_outcomes_are_distinguishable() {
+    // The whole reason `deny` and "no rule matched" are separate outcomes: one
+    // is the owner having answered, the other is nobody having asked. They get
+    // opposite treatment downstream, so they must be told apart here.
+    let denying = example("deny-blanket-operators.json");
+    assert_eq!(
+        outcome(&denying, &plan("1", STRANGER, "0xdeadbeef", "0")),
+        PolicyOutcome::Allowed,
+        "an allow rule matched: this signs with no prompt"
+    );
+    assert_eq!(
+        outcome(
+            &denying,
+            &plan("1", USDC, &set_approval_for_all(ROUTER, true), "0")
+        ),
+        PolicyOutcome::Rejected,
+        "a deny rule matched: refused outright, never queued, no approval path"
+    );
+
+    let narrow = example("transfers-to-address-book.json");
+    assert_eq!(
+        outcome(&narrow, &plan("1", STRANGER, "0xdeadbeef", "0")),
+        PolicyOutcome::RequiresApproval,
+        "no rule matched: the owner has not spoken, so a human still may"
+    );
+    assert_eq!(
+        outcome(&narrow, &plan("1", USDC, &transfer(FRIEND, 1), "0")),
+        PolicyOutcome::Allowed,
+    );
+}
+
+#[test]
+fn a_deny_rule_outranks_an_allow_that_also_matches() {
+    // Both rules match the same call. Deny-precedence decides, and the outcome
+    // is the hard one: a plan like this must not reach an approval prompt.
+    let policy = WalletPolicy::parse(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "label": "anything to this token" },
+            { "effect": "deny", "label": "but never an operator grant",
+              "calldata": { "selector": {
+                  "abi": "setApprovalForAll(address operator, bool approved)",
+                  "args": { "approved": { "eq": "true" } } } } },
+        ]}},
+    }))
+    .expect("policy parses");
+    assert_eq!(
+        outcome(
+            &policy,
+            &plan("1", USDC, &set_approval_for_all(ROUTER, true), "0")
+        ),
+        PolicyOutcome::Rejected,
     );
 }
 

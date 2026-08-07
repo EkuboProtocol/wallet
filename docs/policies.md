@@ -16,6 +16,22 @@ Every call in a plan is graded on its own, against the whole rule set:
 - otherwise any matching `allow` rule allows,
 - otherwise the call is denied.
 
+Those three lines are three *outcomes*, and they are not interchangeable:
+
+| Outcome | When | What happens |
+| --- | --- | --- |
+| `allowed` | every call matched an `allow` rule and every guard was satisfied | signs automatically, no prompt |
+| `requires_approval` | no rule covers some call | queues for explicit human approval in the CLI |
+| `rejected` | a `deny` rule matched | refused outright — nothing signs, nothing queues, and no approval can override it |
+
+The distinction between the two negative outcomes is the point. A `deny` rule is
+the owner having already answered; an approval prompt that can talk them out of
+it makes the rule decoration, so there is no such prompt. Matching no rule is
+the owner having said nothing, which is a question rather than a refusal, and
+that is exactly the case a human may still answer at the terminal. A rejected
+plan never reaches the pending queue at all: the only way forward is to change
+the policy, which is its own explicit CLI action with its own permission diff.
+
 Rules are a **set**, not a list. Order carries no meaning, and deny always beats
 allow, so a rule can be read without reading the rules around it. That is also
 what lets the permission diff shown before a policy is installed be a diff of

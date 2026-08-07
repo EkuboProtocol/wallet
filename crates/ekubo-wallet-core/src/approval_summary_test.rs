@@ -73,6 +73,7 @@ fn simulation_with_native_delta(delta: &str) -> SimulationResult {
         simulation_id: None,
         digest: "0x00".into(),
         allowed: true,
+        policy_outcome: crate::core::policy::PolicyOutcome::Allowed,
         policy_findings: Vec::new(),
         policy_revision: 1,
         execution_mode: ExecutionMode::Direct,

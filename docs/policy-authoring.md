@@ -45,6 +45,13 @@ Rules are an unordered set: any matching `deny` denies, otherwise any matching
 `allow` allows, otherwise the call is denied. So a blanket `deny` rule is a
 one-line way to close something off regardless of what else the document grants.
 
+The two ways a call can fail are not the same, and this matters when you propose
+a policy. A call **no rule covers** queues for human approval — that is the
+ordinary path, and it is fine for a policy to leave routine one-offs uncovered.
+A call a **`deny` rule matches** is refused outright: it never queues, no
+approval overrides it, and the only way forward is changing the policy. Reach
+for `deny` when the user wants something foreclosed, not merely gated.
+
 ## Predicates
 
 `"any_value"`, `{"eq": …}`, `{"in": [...]}`, `"is_wallet"`, `"is_token"`,

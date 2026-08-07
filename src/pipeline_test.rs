@@ -390,12 +390,13 @@ async fn automatic_path_signs_broadcasts_and_confirms_through_the_stub() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn policy_denial_queues_and_the_approved_row_broadcasts_by_request_id() {
+async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id() {
     let (address, chain) = start_stub().await;
     let (directory, server, wallet) =
         pipeline_server(address, &WalletPolicy::require_approval_for_everything());
 
-    // Agent leg: the policy denies, so the plan queues instead of signing.
+    // Agent leg: no rule covers this call, so it queues for a human instead
+    // of signing. This is the question-nobody-answered path.
     let output = server
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
             wallet_id: "primary".into(),
@@ -484,6 +485,57 @@ async fn policy_denial_queues_and_the_approved_row_broadcasts_by_request_id() {
         .0;
     assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
     assert_eq!(chain.mined.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_deny_rule_is_refused_outright_and_never_queues() {
+    // The other negative path. A `deny` rule is the owner having already
+    // answered, so there is nothing to ask them: the send fails, and no
+    // pending row exists for anyone to approve later.
+    let (address, _chain) = start_stub().await;
+    let policy = WalletPolicy::parse(serde_json::json!({
+        "version": 1,
+        "chains": { "*": {
+            "native_value": "any_value",
+            "rules": [
+                { "effect": "allow", "label": "everything, in principle" },
+                { "effect": "deny", "label": "except anything at all, in practice" },
+            ],
+        }},
+    }))
+    .expect("policy parses");
+    let (directory, server, wallet) = pipeline_server(address, &policy);
+
+    let error = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .err()
+        .expect("a deny rule refuses the send outright");
+    let message = format!("{error:?}");
+    assert!(
+        message.contains("rejects this plan outright"),
+        "the error must say it was refused rather than queued: {message}"
+    );
+
+    assert_eq!(
+        server
+            .pending
+            .lock()
+            .unwrap()
+            .awaiting_approval(None)
+            .unwrap()
+            .len(),
+        0,
+        "a rejected plan must not leave a request for a human to approve"
+    );
+    drop(directory);
 }
 
 #[tokio::test(flavor = "multi_thread")]

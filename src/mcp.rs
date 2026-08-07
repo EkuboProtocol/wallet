@@ -1011,9 +1011,9 @@ impl WalletMcpServer {
         // instruction: its findings are advisory and nothing about it can be
         // sent.
         let instruction = match result.simulation_id {
-            Some(simulation_id) if !result.allowed && result.simulation.success => {
-                Some(policy_denial_next_step(simulation_id))
-            }
+            Some(simulation_id) if !result.allowed && result.simulation.success => Some(
+                policy_denial_next_step(result.policy_outcome, simulation_id),
+            ),
             _ => None,
         };
         Ok(Json(SimulateOutput {
@@ -2794,14 +2794,33 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
 /// The next step for an agent holding a sendable simulation the policy
 /// denied. A denial routes the plan to a human review; it is not a failure,
 /// and widening the policy is never a precondition for the action in hand.
-fn policy_denial_next_step(simulation_id: uuid::Uuid) -> String {
-    format!(
-        "Policy denial is the ordinary route to human approval, not a dead end. Call \
-         wallet_send_execution_plan with simulation_id {simulation_id} to queue this exact result \
-         for the user's review, then follow the returned instruction through \
-         wallet_wait_for_approval. Do not stop to report the findings as a blocker, and do not \
-         ask the user to change their policy before this action can proceed."
-    )
+/// What to do next when the policy did not allow a plan outright.
+///
+/// The two negative outcomes need opposite advice, which is why this takes the
+/// outcome rather than assuming. Telling an agent to queue a plan the policy
+/// rejects wastes the user's attention on a prompt that cannot help; telling it
+/// to demand a policy change for a plan that merely matched no rule trains the
+/// user to widen their policy for routine work.
+fn policy_denial_next_step(
+    outcome: crate::core::policy::PolicyOutcome,
+    simulation_id: uuid::Uuid,
+) -> String {
+    match outcome {
+        crate::core::policy::PolicyOutcome::Rejected => {
+            "A deny rule in the active policy refuses this plan outright. There is no approval \
+             that can override it: do not queue it, and do not call wallet_send_execution_plan. \
+             Report the denial to the user and let them decide whether to change the policy, \
+             which is a separate explicit CLI action."
+                .to_string()
+        }
+        _ => format!(
+            "No policy rule covers this plan, which is the ordinary route to human approval, not \
+             a dead end. Call wallet_send_execution_plan with simulation_id {simulation_id} to \
+             queue this exact result for the user's review, then follow the returned instruction \
+             through wallet_wait_for_approval. Do not stop to report the findings as a blocker, \
+             and do not ask the user to change their policy before this action can proceed."
+        ),
+    }
 }
 
 fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput {

@@ -424,7 +424,7 @@ pub fn evaluate_policy(
         }
         if let Some(rule) = denied {
             findings.push(error(
-                "call_denied",
+                CALL_DENIED_CODE,
                 format!(
                     "step {} to {} is denied on chain {} by rule: {}",
                     step.step,
@@ -436,7 +436,7 @@ pub fn evaluate_policy(
             ));
         } else if !allowed {
             findings.push(error(
-                "call_not_allowed",
+                CALL_NOT_ALLOWED_CODE,
                 format!(
                     "step {} to {} matches no rule on chain {}",
                     step.step, step.transaction.to, plan.chain_id
@@ -462,13 +462,65 @@ pub fn policy_allows(findings: &[PolicyFinding]) -> bool {
 /// an explicit human override for each.
 pub const SIMULATION_FAILED_CODE: &str = "simulation_failed";
 
-/// True when the findings carry a policy denial: any error finding other than
-/// the simulation-failure record.
+/// A `deny` rule matched this call.
+pub const CALL_DENIED_CODE: &str = "call_denied";
+
+/// No rule matched this call at all.
+pub const CALL_NOT_ALLOWED_CODE: &str = "call_not_allowed";
+
+/// What the policy decided, and therefore what happens next.
+///
+/// The distinction between the two negative outcomes is the whole point. A
+/// `deny` rule is the owner having spoken; nothing at signing time may talk
+/// them out of it, or the rule was decoration. Matching no rule is the owner
+/// having said nothing, which is a question rather than a refusal, so it is
+/// exactly the case a human may still answer at the terminal.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyOutcome {
+    /// Every call matched an `allow` rule and every guard was satisfied. This
+    /// signs automatically, with no prompt.
+    Allowed,
+    /// Nothing in the policy covers some call. It cannot sign automatically,
+    /// but a human may approve it in the CLI.
+    RequiresApproval,
+    /// A `deny` rule matched. Nothing signs it and nothing queues: the policy
+    /// has to change first. There is no approval prompt for this outcome.
+    Rejected,
+}
+
+/// Classify findings into the outcome that decides what happens next.
+///
+/// A failed simulation is deliberately not a policy outcome — it is a separate
+/// precondition with its own override — so it does not make a policy that
+/// otherwise allows a plan read as one that does not.
 #[must_use]
-pub fn policy_denies(findings: &[PolicyFinding]) -> bool {
-    findings.iter().any(|finding| {
-        finding.severity == FindingSeverity::Error && finding.code != SIMULATION_FAILED_CODE
-    })
+pub fn policy_outcome(findings: &[PolicyFinding]) -> PolicyOutcome {
+    let errors = || {
+        findings
+            .iter()
+            .filter(|finding| finding.severity == FindingSeverity::Error)
+    };
+    if errors().any(|finding| finding.code == CALL_DENIED_CODE) {
+        return PolicyOutcome::Rejected;
+    }
+    if errors().any(|finding| finding.code != SIMULATION_FAILED_CODE) {
+        return PolicyOutcome::RequiresApproval;
+    }
+    PolicyOutcome::Allowed
+}
+
+/// The rules that refused, so a message can name what has to change rather
+/// than telling the user only that "policy denied" it.
+#[must_use]
+pub fn denial_reasons(findings: &[PolicyFinding]) -> Vec<String> {
+    findings
+        .iter()
+        .filter(|finding| {
+            finding.severity == FindingSeverity::Error && finding.code == CALL_DENIED_CODE
+        })
+        .map(|finding| finding.message.clone())
+        .collect()
 }
 
 /// The JSON Schema for policy documents, derived from the enforced types so it
