@@ -1590,6 +1590,13 @@ fn server_advertises_the_security_resource_and_rpc_simulation_boundary() {
     assert!(SECURITY_MODEL.contains("cannot create a pending request"));
     assert!(SERVER_INSTRUCTIONS.contains("wallet_create_fork"));
     assert!(SERVER_INSTRUCTIONS.contains("hypothetical"));
+    // The resource is served to agents as the description of this boundary,
+    // so it has to describe the one that exists. A token's name and scale
+    // come from the list the owner accepted; boundary.rs fails the build if
+    // symbol() or decimals() reappears, and this resource claimed the
+    // opposite — that MCP tools add tokens after verifying them on chain.
+    assert!(SECURITY_MODEL.contains("never read from the contract"));
+    assert!(!SECURITY_MODEL.contains("on-chain Multicall3 verification"));
 }
 
 #[test]
