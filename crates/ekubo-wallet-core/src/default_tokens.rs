@@ -1,37 +1,58 @@
-//! The curated token list compiled into the binary and seeded once, when the
+//! The default token list compiled into the binary and seeded once, when the
 //! database is first created.
 //!
 //! A confirmed token is what lets an approval screen render a symbol instead
 //! of a bare address, so this list decides which addresses a reviewer sees a
 //! familiar name next to. That makes it security-relevant display data, and it
 //! is handled the way [`crate::clear_signing`]'s registry is: vendored into the
-//! repository by `contrib/vendor-default-tokens.py`, reviewed in a diff, and
-//! embedded at compile time. Nothing here touches the network, at build time or
-//! at run time — a release carries exactly the names that were reviewed.
+//! repository by `contrib/vendor-default-tokens.py` and embedded at compile
+//! time. Nothing here touches the network, at build time or at run time — a
+//! release carries exactly the names that were vendored.
+//!
+//! At this size the integrity claim is provenance, not line-by-line review.
+//! Seventeen thousand rows is not a diff anyone reads, so what the vendored
+//! file actually pins is *which upstream bytes* a release was cut from: the
+//! snapshot records the sha256 of the document it was generated from, and the
+//! commit that changes the list is the commit that changes that digest. Trust
+//! in an individual symbol is inherited from Ekubo's token pipeline, and the
+//! list is aggregated from third-party feeds rather than hand-vetted per row.
+//! A symbol here is a convenience for reading a transaction, never on its own
+//! a reason to believe an address is the token it claims to be.
 //!
 //! Seeding runs from schema creation rather than at every startup, so it
 //! happens on a genuinely new database and never again. That is what keeps it
 //! from resurrecting a row the owner deliberately removed: once the schema
 //! exists, this module is not consulted, and the token database is theirs.
 //!
-//! The embedded bytes are parsed by [`parse_token_list`] — the same code that
-//! reads a list the owner imports by hand. Vendored data is still data, and a
-//! second parser for it would be a second set of tolerances to keep true.
+//! The embedded bytes are parsed by [`crate::token_list::parse_token_list`]'s
+//! own code path — the same one that reads a list the owner imports by hand,
+//! differing only in its size limits. Vendored data is still data, and a second
+//! parser for it would be a second set of tolerances to keep true.
 
-use crate::token_list::{ParsedTokenList, parse_token_list};
+use crate::token_list::{ParsedTokenList, parse_token_list_within};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{Connection, params};
 
-/// The vendored curated list, normalized to the field names
-/// [`parse_token_list`] accepts. Refresh it with
+/// Limits for the compiled-in list, deliberately not an import's.
+///
+/// An import is capped at what one owner can honestly verify in a review
+/// screen. Nothing reviews this list at run time — it is checked when it is
+/// vendored — so the cap here exists only to keep a corrupt or truncated
+/// snapshot from being read as a valid one, and is set well above the real
+/// list rather than near it.
+const MAX_EMBEDDED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_EMBEDDED_TOKENS: usize = 100_000;
+
+/// The vendored list, normalized to the field names
+/// [`crate::token_list::parse_token_list`] accepts. Refresh it with
 /// `contrib/vendor-default-tokens.py`.
 const EMBEDDED: &str = include_str!("../default-tokens.json");
 
 /// Recorded as the `source` of every seeded row, and shown wherever a token's
 /// provenance is displayed. It names the curator rather than a file, because
-/// that is the claim the owner is being asked to have accepted.
-pub const SOURCE: &str = "Ekubo curated defaults";
+/// that is the claim the row actually carries.
+pub const SOURCE: &str = "Ekubo default tokens";
 
 /// Parse the embedded list.
 ///
@@ -39,7 +60,7 @@ pub const SOURCE: &str = "Ekubo curated defaults";
 /// opening a database; a malformed vendored file would otherwise surface for
 /// the first time on a new user's very first launch.
 pub fn embedded() -> Result<ParsedTokenList> {
-    parse_token_list(EMBEDDED.as_bytes())
+    parse_token_list_within(EMBEDDED.as_bytes(), MAX_EMBEDDED_BYTES, MAX_EMBEDDED_TOKENS)
         .context("the compiled-in default token list is not a valid token list")
 }
 

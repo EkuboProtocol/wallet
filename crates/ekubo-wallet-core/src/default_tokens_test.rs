@@ -12,7 +12,7 @@ use crate::token_store::TokenStore;
 fn the_vendored_list_parses() {
     let parsed = embedded().unwrap();
     assert!(
-        parsed.tokens.len() > 100,
+        parsed.tokens.len() > 10_000,
         "vendored list holds only {} tokens; the snapshot looks truncated",
         parsed.tokens.len()
     );

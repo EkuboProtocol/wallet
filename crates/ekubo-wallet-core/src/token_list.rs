@@ -114,9 +114,28 @@ pub struct ParsedTokenList {
 /// Fails when the bytes are not a token list at all, when every entry was
 /// skipped, or when the list holds more entries than one import may verify.
 pub fn parse_token_list(body: &[u8]) -> Result<ParsedTokenList> {
+    parse_token_list_within(body, MAX_TOKEN_LIST_BYTES, MAX_IMPORT_TOKENS)
+}
+
+/// Parse one token-list body against explicit limits.
+///
+/// The limits are a parameter because the two callers bound different things.
+/// An import's caps exist to keep the owner from being handed more rows than
+/// one review can honestly verify, so they are stated in units of human
+/// attention. The compiled-in list in [`crate::default_tokens`] is not
+/// reviewed at run time at all — it was reviewed when it was vendored, and
+/// nothing about a startup seed asks the owner to check anything — so holding
+/// it to a reviewer's budget would be enforcing a limit against the wrong
+/// party. Everything else about how the bytes are read stays identical, which
+/// is the point: one set of tolerances, one place they are written down.
+pub fn parse_token_list_within(
+    body: &[u8],
+    max_bytes: usize,
+    max_entries: usize,
+) -> Result<ParsedTokenList> {
     ensure!(
-        body.len() <= MAX_TOKEN_LIST_BYTES,
-        "token list is larger than {MAX_TOKEN_LIST_BYTES} bytes"
+        body.len() <= max_bytes,
+        "token list is larger than {max_bytes} bytes"
     );
     let parsed: RawList = serde_json::from_slice(body).context(
         "not a token list: expected a tokens array of entries with \
@@ -128,8 +147,8 @@ pub fn parse_token_list(body: &[u8]) -> Result<ParsedTokenList> {
     };
     ensure!(!entries.is_empty(), "the token list lists no tokens");
     ensure!(
-        entries.len() <= MAX_IMPORT_TOKENS,
-        "the token list holds {} entries, over the {MAX_IMPORT_TOKENS} one import may verify",
+        entries.len() <= max_entries,
+        "the token list holds {} entries, over the {max_entries} one import may verify",
         entries.len()
     );
 

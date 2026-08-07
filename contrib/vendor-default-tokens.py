@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh the vendored curated token list that ships inside the binary.
+"""Refresh the vendored default token list that ships inside the binary.
 
 The wallet never fetches a token list at runtime: the default tokens are
 compiled in, and this script is the only step that reaches the network. It is
@@ -26,8 +26,9 @@ as a list the owner imports by hand.
 
 Usage:
 
-    contrib/vendor-default-tokens.py            # refresh from the default URL
+    contrib/vendor-default-tokens.py            # refresh from the full generated list
     contrib/vendor-default-tokens.py --check    # verify the vendored copy is current
+    contrib/vendor-default-tokens.py --url "$CURATED"   # hand-vetted rows only
 """
 
 from __future__ import annotations
@@ -39,7 +40,19 @@ import pathlib
 import sys
 import urllib.request
 
+# `tokens.json` is the complete generated document the Ekubo token database
+# consumes: the hand-maintained `curated-tokens.json` seed plus every remote
+# source merged in. The curated file alone is ~170 EVM rows, which covers the
+# majors and nothing else; a wallet that displays a symbol for one token in a
+# pair and a bare address for the other has not really helped a reviewer.
 SOURCE_URL = (
+    "https://raw.githubusercontent.com/EkuboProtocol/default-tokens/"
+    "refs/heads/main/tokens.json"
+)
+
+# The curated seed, kept reachable with --url for a build that wants only the
+# hand-vetted rows.
+CURATED_URL = (
     "https://raw.githubusercontent.com/EkuboProtocol/default-tokens/"
     "refs/heads/main/curated-tokens.json"
 )
@@ -54,7 +67,7 @@ VENDORED = (
 # The name recorded as the source of every seeded row. It reaches the token
 # review and search screens, so it reads as a provenance claim rather than a
 # file name.
-LIST_NAME = "Ekubo curated defaults"
+LIST_NAME = "Ekubo default tokens"
 
 
 def is_evm_address(value: str) -> bool:
@@ -88,7 +101,7 @@ def chain_id_of(entry: dict) -> int | None:
     return None
 
 
-def normalize(upstream: bytes) -> dict:
+def normalize(upstream: bytes, url: str = SOURCE_URL) -> dict:
     """Turn the upstream list into the vendored shape."""
     document = json.loads(upstream)
     entries = document["tokens"] if isinstance(document, dict) else document
@@ -140,7 +153,7 @@ def normalize(upstream: bytes) -> dict:
         # a refresh that changes nothing is visibly a no-op. There is no
         # timestamp here on purpose — it would churn the diff on every run
         # and record nothing the digest does not already say.
-        "source_url": SOURCE_URL,
+        "source_url": url,
         "source_sha256": hashlib.sha256(upstream).hexdigest(),
         "skipped_non_evm": skipped_non_evm,
         "tokens": tokens,
@@ -164,7 +177,7 @@ def main() -> int:
     with urllib.request.urlopen(arguments.url, timeout=60) as response:
         upstream = response.read()
 
-    document = normalize(upstream)
+    document = normalize(upstream, arguments.url)
     rendered = render(document)
 
     if arguments.check:
