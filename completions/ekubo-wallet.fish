@@ -11,6 +11,7 @@ end
 complete -c ekubo-wallet -f
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a server -d 'Run the MCP server over stdio'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a version -d 'Print version information'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a status -d 'Show what is set up and what is waiting for you'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a account -d 'Create, import, inspect, export, or remove accounts'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a acct -d 'Create, import, inspect, export, or remove accounts'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a wallet -d 'Alias for account'

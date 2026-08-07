@@ -10,6 +10,12 @@ ekubo-wallet account list
 ekubo-wallet policy show primary
 ```
 
+`ekubo-wallet status` answers "is this set up, and does it need me?" in one
+screen: whether the legal documents are accepted, which accounts exist, how
+many networks are configured, how large the token database is, and what is
+queued for review. It reads local state only, so it never blocks on an
+endpoint and works before anything else does.
+
 Every MCP tool except `wallet_get_legal` is disabled until the current Terms
 of Service are accepted and the Privacy Policy is separately acknowledged.
 Acceptance binds the exact document digests, so a release that changes a

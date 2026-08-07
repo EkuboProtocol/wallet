@@ -71,6 +71,12 @@ enum Command {
     Server,
     /// Print the server version.
     Version,
+    /// What is set up, what is missing, and what is waiting for you.
+    ///
+    /// Reads only local state, so it never blocks on an endpoint and works
+    /// before the legal documents are accepted — finding out that they are
+    /// what is blocking signing is most of the point.
+    Status,
     /// Keys this wallet holds, and the addresses they control.
     ///
     /// Named `account` rather than `wallet` because the program is already
@@ -456,6 +462,7 @@ impl Cli {
                 println!("ekubo-wallet {VERSION}");
                 Ok(())
             }
+            Command::Status => run_status(&config, mode),
             Command::Account(args) => run_account(config, args.command, mode).await,
             Command::Network(args) => run_network(&config, args.command, mode).await,
             Command::Policy(args) => run_policy(&config, args.command, mode).await,
@@ -472,6 +479,173 @@ impl Cli {
             Command::ConfigureAgent(args) => run_configure_agent(args.command),
         }
     }
+}
+
+/// One place that answers "is this working, and does it need me?".
+///
+/// Deliberately local-only. Reaching an endpoint would make the one command
+/// someone runs when something is wrong the command most likely to hang, and
+/// the questions it answers — is a key present, were the documents accepted,
+/// is anything queued — are all answered by files this process already owns.
+/// `account list` and the balance reads are where the chain gets involved.
+///
+/// Nothing here requires legal acceptance, because "the documents are what is
+/// blocking you" is one of the answers it exists to give.
+fn run_status(config: &ConfigStore, mode: OutputMode) -> Result<()> {
+    let state = config.load()?;
+    let data_dir = config.data_dir().to_path_buf();
+
+    let legal = crate::legal::LegalStore::production(&data_dir)?.status()?;
+    let awaiting = PendingStore::production(&data_dir)?
+        .awaiting_approval(None)?
+        .len();
+    let awaiting_typed_data = TypedDataStore::production(&data_dir)?
+        .awaiting_approval(None)?
+        .len();
+    let awaiting_messages = MessageStore::production(&data_dir)?
+        .awaiting_approval(None)?
+        .len();
+    let policies = PolicyStore::production(&data_dir)?;
+    let policy_proposals = policies.list_proposals()?.len();
+    let network_proposals = policies.network_proposals()?.len();
+    drop(policies);
+    let tokens = crate::token_store::TokenStore::production(&data_dir)?;
+    let token_count = tokens.count(None)?;
+    let token_proposals = tokens.count_proposals()?;
+    drop(tokens);
+
+    let waiting = awaiting + awaiting_typed_data + awaiting_messages;
+    let report = serde_json::json!({
+        "version": VERSION,
+        "data_dir": data_dir,
+        "signing_allowed": legal.signing_allowed,
+        "legal": legal,
+        "accounts": state.wallets.iter().map(|wallet| serde_json::json!({
+            "id": wallet.id,
+            "address": format!("{:#x}", wallet.address),
+        })).collect::<Vec<_>>(),
+        "networks": state.networks.len(),
+        "awaiting_approval": {
+            "transactions": awaiting,
+            "typed_data": awaiting_typed_data,
+            "messages": awaiting_messages,
+            "policy_proposals": policy_proposals,
+            "network_proposals": network_proposals,
+        },
+        "tokens": { "confirmed": token_count, "suggested": token_proposals },
+    });
+
+    emit(mode, &report, || {
+        Ok(status_lines(&StatusFacts {
+            data_dir: &data_dir.display().to_string(),
+            signing_allowed: legal.signing_allowed,
+            terms_accepted: legal.terms_of_service.accepted,
+            privacy_accepted: legal.privacy_policy.accepted,
+            accounts: &state
+                .wallets
+                .iter()
+                .map(|wallet| format!("{} ({:#x})", wallet.id, wallet.address))
+                .collect::<Vec<_>>(),
+            networks: state.networks.len(),
+            token_count,
+            token_proposals,
+            waiting,
+            policy_proposals,
+            network_proposals,
+        }))
+    })
+}
+
+/// Everything the human view of `status` reports, gathered so the rendering
+/// can be exercised without a database, a keyring, or a terminal.
+struct StatusFacts<'a> {
+    data_dir: &'a str,
+    signing_allowed: bool,
+    terms_accepted: bool,
+    privacy_accepted: bool,
+    accounts: &'a [String],
+    networks: usize,
+    token_count: u64,
+    token_proposals: u64,
+    waiting: usize,
+    policy_proposals: usize,
+    network_proposals: usize,
+}
+
+/// Render the human view.
+///
+/// Every line that reports a missing prerequisite also names the command that
+/// supplies it. This is the command someone runs when the wallet is not doing
+/// what they expected, and "terms of service not accepted" without the next
+/// step just moves the search rather than ending it.
+fn status_lines(facts: &StatusFacts<'_>) -> String {
+    let mut lines = vec![
+        format!("ekubo-wallet {VERSION}"),
+        format!("Data directory   {}", facts.data_dir),
+        String::new(),
+    ];
+    lines.push(format!(
+        "Legal            {}",
+        if facts.signing_allowed {
+            "terms and privacy policy accepted".to_string()
+        } else {
+            format!(
+                "{} — signing is disabled until both are accepted \
+                 (`ekubo-wallet legal accept`)",
+                match (facts.terms_accepted, facts.privacy_accepted) {
+                    (false, false) => "neither document accepted",
+                    (true, false) => "privacy policy not accepted",
+                    (false, true) => "terms of service not accepted",
+                    // Both recorded yet signing still refused means a document
+                    // changed since, and its digest no longer matches.
+                    (true, true) => "a document changed and needs re-accepting",
+                }
+            )
+        }
+    ));
+    lines.push(format!(
+        "Accounts         {}",
+        if facts.accounts.is_empty() {
+            "none — create one with `ekubo-wallet account create <id>`".to_string()
+        } else {
+            facts.accounts.join(", ")
+        }
+    ));
+    lines.push(format!("Networks         {} configured", facts.networks));
+    lines.push(format!(
+        "Tokens           {} confirmed{}",
+        facts.token_count,
+        if facts.token_proposals == 0 {
+            String::new()
+        } else {
+            format!(
+                " · {} suggested, waiting on `ekubo-wallet token review`",
+                facts.token_proposals
+            )
+        }
+    ));
+
+    // The line someone is actually looking for, so it goes last, where a
+    // terminal leaves it closest to the prompt.
+    let mut queued = Vec::new();
+    if facts.waiting > 0 {
+        queued.push(format!("{} signing request(s)", facts.waiting));
+    }
+    if facts.policy_proposals > 0 {
+        queued.push(format!("{} policy proposal(s)", facts.policy_proposals));
+    }
+    if facts.network_proposals > 0 {
+        queued.push(format!("{} network suggestion(s)", facts.network_proposals));
+    }
+    lines.push(format!(
+        "Waiting for you  {}",
+        if queued.is_empty() {
+            "nothing".to_string()
+        } else {
+            format!("{} — `ekubo-wallet review`", queued.join(", "))
+        }
+    ));
+    lines.join("\n")
 }
 
 async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputMode) -> Result<()> {

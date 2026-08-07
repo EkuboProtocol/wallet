@@ -502,3 +502,75 @@ fn cursor_configuration_is_private_atomic_and_preserves_other_servers() {
         );
     }
 }
+
+fn ready_status() -> StatusFacts<'static> {
+    StatusFacts {
+        data_dir: "/tmp/ekubo",
+        signing_allowed: true,
+        terms_accepted: true,
+        privacy_accepted: true,
+        accounts: &[],
+        networks: 10,
+        token_count: 17_120,
+        token_proposals: 0,
+        waiting: 0,
+        policy_proposals: 0,
+        network_proposals: 0,
+    }
+}
+
+#[test]
+fn status_names_the_command_that_fixes_each_missing_prerequisite() {
+    // A wallet nobody has set up yet: every line that reports something
+    // missing has to say what supplies it, or the command only moves the
+    // search rather than ending it.
+    let fresh = StatusFacts {
+        signing_allowed: false,
+        terms_accepted: false,
+        privacy_accepted: false,
+        ..ready_status()
+    };
+    let rendered = status_lines(&fresh);
+    assert!(rendered.contains("neither document accepted"));
+    assert!(rendered.contains("ekubo-wallet legal accept"));
+    assert!(rendered.contains("ekubo-wallet account create"));
+    assert!(rendered.contains("Waiting for you  nothing"));
+}
+
+#[test]
+fn status_distinguishes_a_changed_document_from_an_unread_one() {
+    // Both accepted yet signing still refused means a document changed since,
+    // which is a different action from never having read one.
+    let stale = StatusFacts {
+        signing_allowed: false,
+        ..ready_status()
+    };
+    assert!(status_lines(&stale).contains("a document changed and needs re-accepting"));
+
+    let partial = StatusFacts {
+        signing_allowed: false,
+        privacy_accepted: false,
+        ..ready_status()
+    };
+    assert!(status_lines(&partial).contains("privacy policy not accepted"));
+}
+
+#[test]
+fn status_summarizes_every_queue_that_is_waiting() {
+    let busy = StatusFacts {
+        waiting: 2,
+        policy_proposals: 1,
+        network_proposals: 3,
+        token_proposals: 40,
+        ..ready_status()
+    };
+    let rendered = status_lines(&busy);
+    assert!(rendered.contains("2 signing request(s)"));
+    assert!(rendered.contains("1 policy proposal(s)"));
+    assert!(rendered.contains("3 network suggestion(s)"));
+    assert!(rendered.contains("ekubo-wallet review"));
+    // Token suggestions are not part of the review inbox, so they are reported
+    // on their own line pointing at their own screen.
+    assert!(rendered.contains("40 suggested"));
+    assert!(rendered.contains("ekubo-wallet token review"));
+}
