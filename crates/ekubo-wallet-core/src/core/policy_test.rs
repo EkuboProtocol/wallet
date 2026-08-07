@@ -625,3 +625,107 @@ fn a_negated_selector_does_not_admit_an_unreadable_call() {
         "a trailing byte must not invert the negation"
     );
 }
+
+// ------------------------------------------------ diff direction
+
+#[test]
+fn removing_a_deny_rule_reads_as_a_widening() {
+    // The marker states the direction of the change, not which document the
+    // rule sits in. Dropping a deny hands authority back, so it must not be
+    // shown under the same sign as dropping an allow.
+    let current = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } },
+            { "effect": "deny", "label": "no router", "to": { "eq": format!("{ROUTER:#x}") } }
+        ]}}
+    }));
+    let proposed = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } }
+        ]}}
+    }));
+
+    let diff = diff_policies(&current, &proposed);
+    let line = diff
+        .iter()
+        .find(|line| line.contains("no router"))
+        .unwrap_or_else(|| panic!("the dropped deny must be reported: {diff:?}"));
+    assert!(
+        line.starts_with("+ ") && line.contains("stops denying"),
+        "dropping a deny grants authority and must read that way: {line}"
+    );
+    assert!(
+        !diff.iter().any(|line| line.starts_with("- ")),
+        "nothing here takes authority away: {diff:?}"
+    );
+}
+
+#[test]
+fn adding_a_deny_rule_reads_as_a_narrowing() {
+    let current = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } }
+        ]}}
+    }));
+    let proposed = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            { "effect": "allow", "to": { "eq": format!("{TOKEN:#x}") } },
+            { "effect": "deny", "label": "no router", "to": { "eq": format!("{ROUTER:#x}") } }
+        ]}}
+    }));
+
+    let diff = diff_policies(&current, &proposed);
+    let line = diff
+        .iter()
+        .find(|line| line.contains("no router"))
+        .unwrap_or_else(|| panic!("the added deny must be reported: {diff:?}"));
+    assert!(
+        line.starts_with("- ") && line.contains("starts denying"),
+        "adding a deny takes authority away and must read that way: {line}"
+    );
+}
+
+#[test]
+fn a_chain_taking_its_own_rules_is_diffed_against_the_fallback_it_leaves() {
+    // The chain was already governed, by (*), so "now governed" would be a
+    // false description — and the authority it actually gains is only what
+    // its own rules add over the fallback's.
+    let shared =
+        json!({ "effect": "allow", "label": "token", "to": { "eq": format!("{TOKEN:#x}") } });
+    let current = policy(json!({
+        "version": 1,
+        "chains": { "*": { "rules": [shared] }}
+    }));
+    let proposed = policy(json!({
+        "version": 1,
+        "chains": {
+            "*": { "rules": [shared] },
+            "1": { "rules": [
+                shared,
+                { "effect": "allow", "label": "router", "to": { "eq": format!("{ROUTER:#x}") } }
+            ]}
+        }
+    }));
+
+    let diff = diff_policies(&current, &proposed);
+    assert!(
+        diff.iter()
+            .any(|line| line.contains("stops following every chain (*)")),
+        "the fallback it leaves must be named: {diff:?}"
+    );
+    assert!(
+        !diff.iter().any(|line| line.contains("now governed")),
+        "the chain was already governed by the fallback: {diff:?}"
+    );
+    let granted: Vec<_> = diff.iter().filter(|line| line.starts_with("+ ")).collect();
+    assert_eq!(
+        granted.len(),
+        1,
+        "only the rule the fallback did not already carry is new authority: {diff:?}"
+    );
+    assert!(granted[0].contains("router"), "{diff:?}");
+}

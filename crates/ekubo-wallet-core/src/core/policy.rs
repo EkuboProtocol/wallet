@@ -147,6 +147,21 @@ impl Rule {
     /// forwards to somewhere else entirely.
     #[must_use]
     pub fn describe(&self) -> String {
+        let effect = match self.effect {
+            Effect::Allow => "allow",
+            Effect::Deny => "deny",
+        };
+        format!(
+            "{effect}{}: {}",
+            self.described_label(),
+            self.described_constraints()
+        )
+    }
+
+    /// The calls this rule picks out, with no word about what it then does to
+    /// them — shared by `describe` and `describe_change`, which disagree only
+    /// about the verb in front.
+    fn described_constraints(&self) -> String {
         let mut parts = Vec::new();
         parts.push(match &self.to {
             Some(predicate) => format!("to {}", predicate.describe()),
@@ -162,15 +177,37 @@ impl Rule {
         if let Some(predicate) = &self.value {
             parts.push(format!("native value {}", predicate.describe()));
         }
-        let effect = match self.effect {
-            Effect::Allow => "allow",
-            Effect::Deny => "deny",
-        };
-        let label = self
-            .label
+        parts.join("; ")
+    }
+
+    fn described_label(&self) -> String {
+        self.label
             .as_ref()
-            .map_or_else(String::new, |label| format!(" [{label}]"));
-        format!("{effect}{label}: {}", parts.join("; "))
+            .map_or_else(String::new, |label| format!(" [{label}]"))
+    }
+
+    /// One diff line saying how this rule appearing or disappearing moves the
+    /// authority the policy grants.
+    ///
+    /// The marker is the direction of that move, not which side of the set
+    /// difference the rule landed on, because those are opposites for half the
+    /// rules there are. A `deny` that disappears hands authority back and a
+    /// `deny` that appears takes it away, so keying `+` to "present in the
+    /// proposal" printed a widening under a minus sign — on the one surface
+    /// the CLI tells the reviewer is authoritative.
+    #[must_use]
+    fn describe_change(&self, chain: &str, added: bool) -> String {
+        let (marker, verb) = match (self.effect, added) {
+            (Effect::Allow, true) => ('+', "starts allowing"),
+            (Effect::Allow, false) => ('-', "stops allowing"),
+            (Effect::Deny, true) => ('-', "starts denying"),
+            (Effect::Deny, false) => ('+', "stops denying"),
+        };
+        format!(
+            "{marker} chain {chain}: {verb}{}: {}",
+            self.described_label(),
+            self.described_constraints()
+        )
     }
 }
 
@@ -572,15 +609,28 @@ pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<Str
         .collect();
     for key in chain_keys {
         let label = if key == "*" { "every chain (*)" } else { key };
+        // What governs a chain is its own entry if it has one and the `"*"`
+        // fallback otherwise, so a chain appearing in or vanishing from the map
+        // is a change of parent rather than a change from nothing. Diffing the
+        // literal entries alone described the wrong pair: a chain taking its
+        // own rules read as "now governed" — as though it had been ungoverned —
+        // and hid the fallback whose authority it was actually replacing.
         match (current.chains.get(key), proposed.chains.get(key)) {
             (None, Some(next)) => {
-                lines.push(format!(
-                    "+ chain {label}: now governed, up to {} call(s) per batch, native value {}",
-                    next.max_calls_per_batch,
-                    next.native_value.describe()
-                ));
-                for rule in &next.rules {
-                    lines.push(format!("+ chain {label}: {}", rule.describe()));
+                if let Some(fallback) = (key != "*").then(|| current.chains.get("*")).flatten() {
+                    lines.push(format!(
+                        "~ chain {label}: stops following every chain (*) and takes its own rules"
+                    ));
+                    diff_chain(&mut lines, label, fallback, next);
+                } else {
+                    lines.push(format!(
+                        "+ chain {label}: now governed, up to {} call(s) per batch, native value {}",
+                        next.max_calls_per_batch,
+                        next.native_value.describe()
+                    ));
+                    for rule in &next.rules {
+                        lines.push(rule.describe_change(label, true));
+                    }
                 }
             }
             (Some(previous), None) => {
@@ -588,15 +638,10 @@ pub fn diff_policies(current: &WalletPolicy, proposed: &WalletPolicy) -> Vec<Str
                     lines.push(format!(
                         "~ chain {label}: loses its own rules and falls back to every chain (*)"
                     ));
-                    for rule in &fallback.rules {
-                        lines.push(format!(
-                            "~ chain {label}: now covered by (*): {}",
-                            rule.describe()
-                        ));
-                    }
+                    diff_chain(&mut lines, label, previous, fallback);
                 } else {
                     for rule in &previous.rules {
-                        lines.push(format!("- chain {label}: {}", rule.describe()));
+                        lines.push(rule.describe_change(label, false));
                     }
                 }
             }
@@ -628,13 +673,16 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
     }
     for rule in &next.rules {
         if !previous.rules.contains(rule) {
-            lines.push(format!("+ chain {label}: {}", rule.describe()));
+            lines.push(rule.describe_change(label, true));
         }
     }
     for rule in &previous.rules {
         if next.rules.contains(rule) {
             continue;
         }
+        // `is_narrower_than` compares effects, so a surviving cover is always
+        // the same kind of rule: a dropped allow can only be covered by a
+        // wider allow, and a dropped deny only by a wider deny.
         if let Some(cover) = next
             .rules
             .iter()
@@ -646,7 +694,7 @@ fn diff_chain(lines: &mut Vec<String>, label: &str, previous: &ChainPolicy, next
                 cover.describe()
             ));
         } else {
-            lines.push(format!("- chain {label}: {}", rule.describe()));
+            lines.push(rule.describe_change(label, false));
         }
     }
 }

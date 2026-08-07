@@ -37,6 +37,14 @@ allow, so a rule can be read without reading the rules around it. That is also
 what lets the permission diff shown before a policy is installed be a diff of
 the document rather than a simulation of it.
 
+In that diff, `+` and `-` mean *more* and *less* signing authority, not
+"present in the proposal" and "absent from it". The two come apart for deny
+rules, and in the direction that matters: a deny that disappears hands
+authority back, so it is a `+` reading `stops denying`, while a deny that
+appears is a `-` reading `starts denying`. A chain that gains or loses its own
+entry is likewise diffed against the `"*"` fallback that governed it before or
+governs it after, since that — not "nothing" — is the authority being replaced.
+
 A rule is a conjunction of optional predicate slots — `to`, `from`, `value`,
 `calldata` — plus its `effect`. **A slot that is absent constrains nothing.** A
 rule naming only `to` permits every function that contract has, including any
