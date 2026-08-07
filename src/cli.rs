@@ -141,17 +141,15 @@ struct PortfolioArgs {
     network: String,
     /// How many known tokens to check.
     ///
-    /// Each 200 tokens is one Multicall3 round trip against a single pinned
-    /// block, and public endpoints are markedly less reliable across ten of
-    /// those than across one: they rate-limit, and a non-archive node may have
-    /// pruned the pinned block's state before the last batch asks for it.
-    /// Lowering this trades coverage for a read that finishes.
+    /// Rarely worth setting. Every known token on a chain is read in one call
+    /// through Ekubo's `TokenDataFetcher` lens, which returns only the nonzero
+    /// balances, so the default already covers the whole database on every
+    /// shipped network.
     ///
     /// The database has no notion of which tokens matter, so a lowered limit
     /// takes them in address order — an arbitrary slice, not the interesting
-    /// ones. That is exactly why the coverage line is printed rather than
-    /// implied: a token missing from a truncated read says nothing about the
-    /// balance.
+    /// ones. That is why a truncated read says so explicitly: a token missing
+    /// from one says nothing about the balance.
     #[arg(long, default_value_t = crate::token_store::MAX_PORTFOLIO_TOKENS)]
     tokens: usize,
 }

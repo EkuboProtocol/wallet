@@ -1,4 +1,4 @@
-//! Token display database and Multicall3-backed portfolio reads.
+//! Token display database and lens-backed balance reads.
 //!
 //! This database is where a token's name comes from. Nothing in the signing or
 //! policy path consults it, but the review screen does, and a name a reviewer
@@ -82,7 +82,14 @@ pub const MAX_IMPORT_TOKENS: usize = 1_000;
 /// cannot make `token review` an unbounded scroll of decisions.
 pub const MAX_PENDING_TOKEN_PROPOSALS: u64 = 5_000;
 /// A portfolio read checks at most this many known tokens.
-pub const MAX_PORTFOLIO_TOKENS: usize = 2_000;
+///
+/// Comfortably above the largest chain in the shipped list — Ethereum's ~5,600
+/// — so the ordinary answer is complete rather than truncated. The lens
+/// returns only nonzero entries, so asking about every known token costs one
+/// request and a response sized by what the owner actually holds; the bound
+/// exists so an unusually large imported list cannot turn one read into a
+/// request no endpoint will serve.
+pub const MAX_PORTFOLIO_TOKENS: usize = 8_000;
 /// One explicit balances read accepts at most this many token addresses.
 pub const MAX_BALANCE_TOKENS: usize = 1_000;
 /// The Ekubo `TokenDataFetcher` lens, deployed deterministically at the same
@@ -93,7 +100,17 @@ pub const MAX_BALANCE_TOKENS: usize = 1_000;
 pub const TOKEN_DATA_FETCHER_ADDRESS: Address =
     address!("0x305cf9a34dcb265522780d1d64544d3f7c450407");
 /// Tokens per `TokenDataFetcher` call.
-const FETCHER_CHUNK: usize = 500;
+///
+/// Sized so both bounded reads fit in one call: a portfolio asks about at most
+/// [`MAX_PORTFOLIO_TOKENS`] plus the native sentinel, and an explicit read at
+/// most [`MAX_BALANCE_TOKENS`]. That is the point of the number rather than a
+/// throughput tuning. A second chunk has to be read at the block the first one
+/// reported, so that the answer is one view of the chain instead of several,
+/// and public endpoints are markedly worse at serving a block a moment after
+/// announcing it — an archive-less node may already have pruned that state,
+/// which is exactly how this failed on Arbitrum and Base before the lens
+/// answered a whole portfolio at once.
+const FETCHER_CHUNK: usize = 8_192;
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_TEXT_LEN: usize = 64;
 
@@ -578,10 +595,9 @@ pub struct Portfolio {
     pub network: String,
     /// Native balance in wei.
     pub native_balance: String,
-    /// The block every balance here was read at. The first Multicall3 batch
-    /// reports it and each later batch is sent against it, so a portfolio that
-    /// needed several batches is still one consistent view rather than a
-    /// sequence of them.
+    /// The block every balance here was read at. One lens call answers the
+    /// whole portfolio, so this is simply the block that call saw rather than
+    /// a block several batches had to be held to.
     pub block_number: String,
     /// Tokens with a nonzero balance; zero balances are never included.
     pub tokens: Vec<PortfolioToken>,
@@ -596,94 +612,68 @@ pub struct Portfolio {
     pub fork: Option<ForkContext>,
 }
 
-/// Read native and token balances for `address` through Multicall3. Only
-/// tokens with a nonzero balance are returned.
+/// Read native and token balances for `address` over the tokens the owner's
+/// database knows, through the same lens path as an explicit balances read.
+///
+/// Only nonzero balances come back, and the native balance arrives with them:
+/// the lens reads `address(0)` as the owner's native balance, so one call
+/// answers both instead of spending a separate Multicall3 slot on it.
 pub async fn read_portfolio(
     network: &NetworkConfig,
     address: Address,
     known_tokens: &[StoredToken],
     fork: Option<&ForkPreface>,
 ) -> Result<Portfolio> {
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let checked: Vec<&StoredToken> = known_tokens.iter().take(MAX_PORTFOLIO_TOKENS).collect();
     let skipped = known_tokens.len().saturating_sub(checked.len());
 
-    // The first batch pins the block and reads the native balance alongside
-    // the first token chunk; Multicall3 answers both natively.
-    let mut block_number = None;
-    let mut pinned = None;
-    let mut native_balance = U256::ZERO;
-    let mut tokens = Vec::new();
-    let mut start = 0_usize;
-    loop {
-        let chunk: Vec<&StoredToken> = checked
-            .iter()
-            .skip(start)
-            .take(BALANCE_CHUNK)
-            .copied()
-            .collect();
-        if start > 0 && chunk.is_empty() {
-            break;
-        }
-        let mut calls = Vec::with_capacity(chunk.len() + 2);
-        if start == 0 {
-            calls.push(call(
-                crate::rpc::MULTICALL3_ADDRESS,
-                getBlockNumberCall {}.abi_encode(),
-            ));
-            calls.push(call(
-                crate::rpc::MULTICALL3_ADDRESS,
-                getEthBalanceCall { addr: address }.abi_encode(),
-            ));
-        }
-        for token in &chunk {
-            let token_address =
-                Address::from_str(&token.address).context("stored token address is invalid")?;
-            calls.push(call(
-                token_address,
-                balanceOfCall { account: address }.abi_encode(),
-            ));
-        }
-        let results = aggregate(network, &provider, calls, fork, pinned).await?;
-        let mut results = results.into_iter();
-        if start == 0 {
-            let block = results.next().context("missing block number result")?;
-            ensure!(block.success, "Multicall3 getBlockNumber failed");
-            let number = getBlockNumberCall::abi_decode_returns(&block.returnData)?;
-            pinned = Some(pin(number)?);
-            block_number = Some(number.to_string());
-            let native = results.next().context("missing native balance result")?;
-            ensure!(native.success, "Multicall3 getEthBalance failed");
-            native_balance = getEthBalanceCall::abi_decode_returns(&native.returnData)?;
-        }
-        for token in &chunk {
-            let result = results.next().context("missing token balance result")?;
-            let balance = result
-                .success
-                .then(|| balanceOfCall::abi_decode_returns(&result.returnData).ok())
-                .flatten()
-                .unwrap_or(U256::ZERO);
-            if balance > U256::ZERO {
-                tokens.push(PortfolioToken {
-                    address: token.address.clone(),
-                    symbol: token.symbol.clone(),
-                    decimals: token.decimals,
-                    balance: balance.to_string(),
-                });
-            }
-        }
-        start += chunk.len().max(1);
-        if start >= checked.len() {
-            break;
+    // `address(0)` is the lens's native-balance sentinel, and a database row
+    // may legitimately name it too. Asking once and keeping the answer as the
+    // native balance is what stops the same wei being reported twice — once
+    // as the chain's currency and again as a token called "ETH".
+    let mut seen = std::collections::BTreeSet::new();
+    let mut requested = vec![Address::ZERO];
+    seen.insert(Address::ZERO);
+    let mut rows: Vec<(Address, &StoredToken)> = Vec::with_capacity(checked.len());
+    for token in &checked {
+        let parsed =
+            Address::from_str(&token.address).context("stored token address is invalid")?;
+        rows.push((parsed, token));
+        if seen.insert(parsed) {
+            requested.push(parsed);
         }
     }
+
+    let read = fetch_nonzero_balances(network, address, &requested, fork).await?;
+    let balances: std::collections::BTreeMap<Address, U256> = read.balances.into_iter().collect();
+
+    let native_balance = balances
+        .get(&Address::ZERO)
+        .copied()
+        .unwrap_or(U256::ZERO)
+        .to_string();
+    let tokens = rows
+        .into_iter()
+        .filter(|(parsed, _)| *parsed != Address::ZERO)
+        .filter_map(|(parsed, token)| {
+            let balance = balances.get(&parsed)?;
+            Some(PortfolioToken {
+                address: token.address.clone(),
+                symbol: token.symbol.clone(),
+                decimals: token.decimals,
+                balance: balance.to_string(),
+            })
+        })
+        .collect();
 
     Ok(Portfolio {
         address: address.to_checksum(None),
         chain_id: network.chain_id.to_string(),
         network: network.name.clone(),
-        native_balance: native_balance.to_string(),
-        block_number: block_number.context("portfolio read produced no block number")?,
+        native_balance,
+        block_number: read
+            .block_number
+            .context("portfolio read produced no block number")?,
         tokens,
         tokens_checked: checked.len() as u64,
         tokens_skipped: (skipped > 0).then_some(skipped as u64),
@@ -746,6 +736,56 @@ pub async fn read_token_balances(
         .filter(|token| seen.insert(*token))
         .collect();
 
+    let read = fetch_nonzero_balances(network, owner, &tokens, fork).await?;
+    Ok(TokenBalances {
+        address: owner.to_checksum(None),
+        chain_id: network.chain_id.to_string(),
+        network: network.name.clone(),
+        block_number: read
+            .block_number
+            .context("balances read produced no block number")?,
+        balances: read
+            .balances
+            .iter()
+            .map(|(token, amount)| TokenBalance {
+                token: token.to_checksum(None),
+                balance: amount.to_string(),
+            })
+            .collect(),
+        tokens_checked: tokens.len() as u64,
+        source: read.source.into(),
+        fork: None,
+    })
+}
+
+/// One chunked balance read, and how it was answered.
+struct NonzeroBalances {
+    block_number: Option<String>,
+    /// Only tokens with a nonzero balance. `address(0)` is the native balance.
+    balances: Vec<(Address, U256)>,
+    source: &'static str,
+}
+
+/// Read nonzero balances for an explicit token list.
+///
+/// One code path for every balance this wallet reports, because the checks
+/// that make a lens answer trustworthy — that it named no token nobody asked
+/// about, and returned no more entries than were requested — are only worth
+/// writing once. A second copy is a copy that can be updated alone.
+///
+/// The lens answers a whole chunk in one `eth_call` and returns only the
+/// nonzero entries, so the response stays small no matter how many tokens
+/// were asked about. That is the difference that matters against a public
+/// endpoint: the per-token `balanceOf` fan-out this replaces sent five times
+/// as many requests for the same answer, and every one of them was another
+/// chance to be rate-limited or to ask for a block the node had already
+/// pruned.
+async fn fetch_nonzero_balances(
+    network: &NetworkConfig,
+    owner: Address,
+    tokens: &[Address],
+    fork: Option<&ForkPreface>,
+) -> Result<NonzeroBalances> {
     let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let mut block_number: Option<String> = None;
     let mut pinned = None;
@@ -814,10 +854,7 @@ pub async fn read_token_balances(
                 "TokenDataFetcher returned a balance for {}, which was not requested",
                 entry.token.to_checksum(None)
             );
-            balances.push(TokenBalance {
-                token: entry.token.to_checksum(None),
-                balance: entry.amount.to_string(),
-            });
+            balances.push((entry.token, entry.amount));
         }
     }
 
@@ -850,25 +887,17 @@ pub async fn read_token_balances(
                     .flatten()
                     .unwrap_or(U256::ZERO);
                 if balance > U256::ZERO {
-                    balances.push(TokenBalance {
-                        token: token.to_checksum(None),
-                        balance: balance.to_string(),
-                    });
+                    balances.push((*token, balance));
                 }
             }
         }
         "multicall_balance_of"
     };
 
-    Ok(TokenBalances {
-        address: owner.to_checksum(None),
-        chain_id: network.chain_id.to_string(),
-        network: network.name.clone(),
-        block_number: block_number.context("balances read produced no block number")?,
+    Ok(NonzeroBalances {
+        block_number,
         balances,
-        tokens_checked: tokens.len() as u64,
-        source: source.into(),
-        fork: None,
+        source,
     })
 }
 
