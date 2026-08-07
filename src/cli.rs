@@ -1445,7 +1445,7 @@ async fn run_transaction(
             let pending = std::sync::Mutex::new(pending);
             let transactions =
                 crate::reconcile::reconcile_all(config, &pending, transactions).await;
-            if mode == OutputMode::Json {
+            if mode.effective() == OutputMode::Json {
                 return print_json(&serde_json::json!({ "transactions": transactions }));
             }
             if transactions.is_empty() {
@@ -1470,7 +1470,7 @@ async fn run_transaction(
                 .await
                 .pop()
                 .expect("reconciled listing keeps its single record");
-            if mode == OutputMode::Json {
+            if mode.effective() == OutputMode::Json {
                 return print_json(&record);
             }
             let detail = crate::tx_browser::load_detail(config, &record).await;
@@ -1497,7 +1497,7 @@ async fn run_transaction(
                 &OsKeyStore,
             )
             .await?;
-            if mode == OutputMode::Json {
+            if mode.effective() == OutputMode::Json {
                 return print_json(&serde_json::json!({
                     "transaction": record,
                     "broadcast": broadcast,
@@ -1541,7 +1541,7 @@ async fn run_transaction(
                 .claim_broadcast_retry(record.request_id)?;
             let (record, broadcast) =
                 crate::reconcile::submit_claimed(&pending, &wallet, &network, claimed).await?;
-            if mode == OutputMode::Json {
+            if mode.effective() == OutputMode::Json {
                 return print_json(&serde_json::json!({
                     "transaction": record,
                     "broadcast": broadcast,
@@ -1557,7 +1557,7 @@ async fn run_transaction(
             let mut pending = pending;
             let record = pending.get_by_identifier(&identifier)?;
             let record = pending.discard_unsent(record.request_id)?;
-            if mode == OutputMode::Json {
+            if mode.effective() == OutputMode::Json {
                 return print_json(&record);
             }
             println!(

@@ -972,6 +972,7 @@ pub(crate) struct Screen {
 
 impl Screen {
     pub(crate) fn enter() -> Result<Self> {
+        crate::render::note_interactive_surface();
         terminal::enable_raw_mode()?;
         execute!(io::stderr(), EnterAlternateScreen)?;
         Ok(Self {

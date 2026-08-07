@@ -94,3 +94,27 @@ fn list_labels_collapse_newlines_into_one_row() {
 fn human_output_strips_control_sequences_but_keeps_lines() {
     assert_eq!(terminal_safe_multiline("a\u{1b}[31mb\nc"), "a [31mb\nc");
 }
+
+/// Both halves of the latch in one test on purpose.
+///
+/// `INTERACTIVE_SURFACE_SHOWN` is process-global and only ever moves from
+/// false to true, so a separate test asserting the unset case would pass or
+/// fail depending on whether this one had run yet. Ordering them inside a
+/// single test is the only way to assert both without depending on the test
+/// harness's scheduling.
+#[test]
+fn drawing_for_a_person_stops_json_from_following_it() {
+    // Before anything is drawn, an explicit --json run is still JSON: a script
+    // that asked for machine output and got none would be the worse bug.
+    assert_eq!(OutputMode::Json.effective(), OutputMode::Json);
+    assert_eq!(OutputMode::Human.effective(), OutputMode::Human);
+
+    note_interactive_surface();
+
+    // Once a prompt or full-screen review has been drawn, the person watching
+    // has already been told what happened, and the JSON copy would only push
+    // it out of the scrollback.
+    assert_eq!(OutputMode::Json.effective(), OutputMode::Human);
+    assert_eq!(OutputMode::Human.effective(), OutputMode::Human);
+    assert!(interactive_surface_shown());
+}

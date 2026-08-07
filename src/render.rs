@@ -10,7 +10,27 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_width::UnicodeWidthChar;
+
+/// Set the first time this process draws a prompt or a full-screen surface.
+///
+/// Latched rather than passed down because the two facts are established in
+/// different places: the mode is resolved from the flags before the command
+/// runs, and whether a person was asked anything is only known once one of the
+/// prompt entry points has drawn. A run that drew one cannot un-draw it, so
+/// this only ever moves from false to true.
+static INTERACTIVE_SURFACE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+/// Called by the prompt and full-screen entry points as they open.
+pub fn note_interactive_surface() {
+    INTERACTIVE_SURFACE_SHOWN.store(true, Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn interactive_surface_shown() -> bool {
+    INTERACTIVE_SURFACE_SHOWN.load(Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
@@ -29,6 +49,25 @@ impl OutputMode {
             Self::Human
         }
     }
+
+    /// The mode to actually render in.
+    ///
+    /// A run that has drawn a prompt or a full-screen review has a person
+    /// watching it and has already told them, on screen, what happened. A JSON
+    /// blob dropped into their scrollback afterwards is not a second audience's
+    /// copy — it is the same answer again, in a form they did not ask for,
+    /// pushing the part they were reading off the top of the terminal.
+    ///
+    /// Drawing at all requires a terminal, so this can never turn a piped or
+    /// redirected run into human text: those never draw, and keep their JSON.
+    #[must_use]
+    pub fn effective(self) -> Self {
+        if interactive_surface_shown() {
+            Self::Human
+        } else {
+            self
+        }
+    }
 }
 
 /// Print `value` as JSON, or the provided human rendering, per mode. The
@@ -39,7 +78,7 @@ pub fn emit<T: Serialize>(
     value: &T,
     human: impl FnOnce() -> Result<String>,
 ) -> Result<()> {
-    match mode {
+    match mode.effective() {
         OutputMode::Json => print_json(value),
         OutputMode::Human => {
             let text = human()?;

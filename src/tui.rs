@@ -198,6 +198,7 @@ impl Inline {
             interactive(),
             "this prompt requires an interactive terminal"
         );
+        crate::render::note_interactive_surface();
         raw::enable_raw_mode()?;
         match Terminal::with_options(
             CrosstermBackend::new(io::stderr()),
