@@ -161,13 +161,62 @@ pub trait ApprovalUi: Send + Sync {
 /// adapter. A presenter never receives key material or store handles, and
 /// never authors review content — the orchestrator builds the document, the
 /// presenter only shows it.
+///
+/// `refresh` re-runs the simulation on demand. A presenter is free to ignore
+/// it — a non-interactive one has nobody to ask — but a reviewer looking at a
+/// document that failed to simulate has no other way to find out whether the
+/// reason has passed.
 #[async_trait]
 pub trait ReviewPresenter: Send + Sync {
     async fn review_transaction(
         &self,
         request: &ApprovalRequest,
         simulation: &crate::simulation::SimulationResult,
+        refresh: &dyn ReviewRefresh,
     ) -> Result<ApprovalDecision>;
+}
+
+/// Re-runs the simulation behind a review and re-authors its document.
+///
+/// This exists because a queued transaction is not queued only for reasons
+/// about itself. A plan reaches review when its simulation failed, and that
+/// failure is often about the moment rather than the plan: every configured
+/// RPC endpoint was refusing requests, or the plan depends on an approval
+/// that has since been mined. Without this, the reviewer's only options are
+/// to approve a transaction nobody could simulate or to reject a transaction
+/// that is fine, and both answers are guesses.
+///
+/// A refresh re-simulates **the same plan under the same policy revision**.
+/// It cannot change what is being approved — the plan's digest and the policy
+/// it is judged against are fixed when the request is queued — so the only
+/// thing that can differ is what the chain now says about it. The
+/// orchestrator signs whatever the last refresh produced, so what a reviewer
+/// approved is what gets signed rather than a simulation they never saw.
+#[async_trait]
+pub trait ReviewRefresh: Send + Sync {
+    async fn resimulate(&self) -> Result<Refreshed>;
+}
+
+/// One re-authored review: the new document and the simulation behind it.
+#[derive(Clone, Debug)]
+pub struct Refreshed {
+    pub request: ApprovalRequest,
+    pub simulation: crate::simulation::SimulationResult,
+}
+
+/// A refresh handle for presenters and tests that have nothing to re-run.
+///
+/// Answering "the review cannot be refreshed here" as an error keeps the
+/// alternative — quietly returning the same document — from reading to a
+/// reviewer as a refresh that found nothing changed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoRefresh;
+
+#[async_trait]
+impl ReviewRefresh for NoRefresh {
+    async fn resimulate(&self) -> Result<Refreshed> {
+        anyhow::bail!("this review cannot be re-simulated")
+    }
 }
 
 #[cfg(test)]

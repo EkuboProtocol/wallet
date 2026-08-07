@@ -23,7 +23,7 @@ fn the_cursor_starts_on_reject_and_enter_there_rejects() {
     assert!(!review.on_approve, "reject is the default");
     assert_eq!(
         review.handle_key(press(KeyCode::Enter)),
-        Some(ApprovalDecision::Rejected)
+        Some(ReviewAction::Decide(ApprovalDecision::Rejected))
     );
 }
 
@@ -40,7 +40,7 @@ fn every_way_out_reads_as_rejection() {
         review.reached_end = true;
         assert_eq!(
             review.handle_key(key),
-            Some(ApprovalDecision::Rejected),
+            Some(ReviewAction::Decide(ApprovalDecision::Rejected)),
             "{key:?} must reject even with approve highlighted"
         );
     }
@@ -57,7 +57,7 @@ fn approving_takes_a_deliberate_move_and_a_fully_seen_document() {
     review.reached_end = true;
     assert_eq!(
         review.handle_key(press(KeyCode::Enter)),
-        Some(ApprovalDecision::Approved)
+        Some(ReviewAction::Decide(ApprovalDecision::Approved))
     );
 }
 
@@ -191,4 +191,139 @@ fn wrapped_fact_values_hang_at_the_value_column() {
     let plain = wrap_document(&[heading], 40);
     assert!(plain.len() > 1);
     assert!(!plain[1][0].text.starts_with(' '), "{plain:?}");
+}
+
+fn document(text: &str) -> Vec<Line> {
+    vec![vec![Span::plain(text)]]
+}
+
+#[test]
+fn re_simulation_is_offered_only_where_it_means_something() {
+    let mut review = screen();
+    // A typed-data or message review has no simulation behind it.
+    assert_eq!(review.handle_key(press(KeyCode::Char('r'))), None);
+    review.refreshable = true;
+    assert_eq!(
+        review.handle_key(press(KeyCode::Char('r'))),
+        Some(ReviewAction::Refresh)
+    );
+}
+
+/// The security property of a refresh: a reviewer who has scrolled a document
+/// to its end has earned the right to approve *that* document. A refresh that
+/// replaces it takes that evidence away, because the end they saw belongs to
+/// text no longer on screen.
+#[test]
+fn a_changed_document_withdraws_the_right_to_approve() {
+    let mut review = screen();
+    review.refreshable = true;
+    review.reached_end = true;
+    review.on_approve = true;
+    review.offset = 42;
+
+    review.begin_refresh();
+    review.finish_refresh(RefreshOutcome::Document(document("a different summary")));
+
+    assert!(!review.reached_end, "the end of the new document is unseen");
+    assert!(!review.on_approve, "the cursor returns to Reject");
+    assert_eq!(review.offset, 0, "the new document starts at the top");
+    assert_eq!(
+        review.handle_key(press(KeyCode::Enter)),
+        Some(ReviewAction::Decide(ApprovalDecision::Rejected)),
+        "Enter on Reject still rejects"
+    );
+}
+
+/// The converse: re-simulating an unchanged review must not punish the
+/// reviewer by making them scroll it again, or they learn to hold Enter.
+#[test]
+fn an_unchanged_document_keeps_the_reading_it_already_had() {
+    let mut review = ReviewScreen::new(document("summary"));
+    review.refreshable = true;
+    review.reached_end = true;
+    review.offset = 7;
+
+    review.begin_refresh();
+    review.finish_refresh(RefreshOutcome::Document(document("summary")));
+
+    assert!(review.reached_end, "nothing changed, so nothing is unread");
+    assert_eq!(review.offset, 7, "the scroll position survives");
+    assert!(
+        review
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("nothing changed")),
+        "the reviewer is told the refresh found nothing: {:?}",
+        review.notice
+    );
+}
+
+/// Beginning a refresh alone must move the cursor off Approve, before any
+/// document arrives: the moment the reviewer asks for new numbers, the old
+/// ones stop being something to approve.
+#[test]
+fn asking_for_a_refresh_immediately_disarms_approve() {
+    let mut review = screen();
+    review.refreshable = true;
+    review.reached_end = true;
+    review.on_approve = true;
+    review.begin_refresh();
+    assert!(!review.on_approve);
+    assert!(review.waiting_message().is_some(), "the wait is visible");
+}
+
+#[test]
+fn a_failed_refresh_says_so_and_changes_nothing_else() {
+    let mut review = ReviewScreen::new(document("summary"));
+    review.refreshable = true;
+    review.reached_end = true;
+    review.offset = 3;
+
+    review.begin_refresh();
+    review.finish_refresh(RefreshOutcome::Failed("every endpoint refused".to_owned()));
+
+    assert!(review.refreshing.is_none(), "the wait ended");
+    assert!(review.reached_end, "the document was not replaced");
+    assert_eq!(review.offset, 3);
+    assert_eq!(review.document, document("summary"));
+    assert!(
+        review
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("every endpoint refused")),
+        "the reviewer is told why: {:?}",
+        review.notice
+    );
+}
+
+/// The waiting message counts real time, so a slow chain reads as slow rather
+/// than as a frozen screen.
+#[test]
+fn the_wait_reports_elapsed_seconds() {
+    let mut review = screen();
+    review.begin_refresh();
+    assert_eq!(review.waiting_message().as_deref(), Some("Re-simulating…"));
+    for _ in 0..(1000 / REFRESH_TICK_MILLIS) {
+        review.tick();
+    }
+    assert_eq!(
+        review.waiting_message().as_deref(),
+        Some("Re-simulating… 1s")
+    );
+}
+
+#[test]
+fn the_refresh_key_is_advertised_only_where_it_works() {
+    let mut review = screen();
+    assert!(
+        !review.hints().contains("re-simulate"),
+        "a review with no simulation must not offer one: {}",
+        review.hints()
+    );
+    review.refreshable = true;
+    assert!(
+        review.hints().contains("r re-simulate"),
+        "the key has to be discoverable: {}",
+        review.hints()
+    );
 }

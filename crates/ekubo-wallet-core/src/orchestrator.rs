@@ -26,7 +26,7 @@ use crate::{
     policy_store::StoredPolicy,
     simulation::{SimulationResult, simulate_execution},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use num_bigint::BigUint;
 use std::{str::FromStr, sync::Mutex};
 
@@ -290,24 +290,7 @@ pub async fn approve_transaction(
     let policy_context = crate::core::predicate::PolicyContext {
         wallet: wallet.address,
     };
-    let simulation = simulate_execution(
-        &wallet,
-        &network,
-        &request.execution_plan,
-        &stored_policy,
-        &policy_context,
-        None,
-    )
-    .await?;
     let overrides = SigningOverrides::human(&proof);
-    let prepared = prepare_execution(
-        &wallet,
-        &network,
-        &request.execution_plan,
-        &simulation,
-        overrides,
-    )
-    .await?;
     // Display metadata only, and only ever from the owner's token database: a
     // token contract must not get to name itself on the screen where the owner
     // decides. A token with no confirmed row renders by address in base units,
@@ -318,12 +301,33 @@ pub async fn approve_transaction(
             &plan_token_targets(&request.execution_plan.ordered_steps).await,
         )
         .unwrap_or_default();
-    let approval =
-        transaction_approval_request(&request, &simulation, &prepared, &network, &token_metadata)
-            .await?;
+    let review = TransactionReview {
+        wallet: &wallet,
+        network: &network,
+        request: &request,
+        stored_policy: &stored_policy,
+        policy_context: &policy_context,
+        token_metadata,
+        overrides,
+        latest: Mutex::new(None),
+    };
+    let (approval, simulation) = review.author().await?;
     // Rejecting here is a decision, not an abort: it is recorded, so the
     // agent waiting on this request learns the answer.
-    if presenter.review_transaction(&approval, &simulation).await? != ApprovalDecision::Approved {
+    let decision = presenter
+        .review_transaction(&approval, &simulation, &review)
+        .await?;
+    // Whatever the reviewer last had in front of them, not what was authored
+    // first. A refresh replaces the simulation and the prepared envelope
+    // together, and signing the earlier pair would sign numbers nobody
+    // approved — the whole point of offering the refresh is that the two can
+    // differ.
+    let Authored {
+        simulation,
+        prepared,
+        ..
+    } = review.take_authored()?;
+    if decision != ApprovalDecision::Approved {
         let rejected = lock(&pending)?.reject(request.request_id)?;
         return Ok(ApprovalOutcome::Rejected(rejected));
     }
@@ -394,6 +398,106 @@ pub async fn approve_transaction(
         &signed.transaction_hash,
     )?;
     Ok(ApprovalOutcome::Signed(approved))
+}
+
+/// Everything one queued transaction's review is authored from, so the first
+/// document and every refreshed one are built by the same code from the same
+/// inputs.
+///
+/// The fixed half is what makes a refresh safe: the plan, the policy, and the
+/// wallet are borrowed and never replaced, so re-simulating cannot change what
+/// is being approved. Only the chain's answer to it can differ.
+struct TransactionReview<'a> {
+    wallet: &'a WalletMetadata,
+    network: &'a NetworkConfig,
+    request: &'a PendingTransaction,
+    stored_policy: &'a StoredPolicy,
+    policy_context: &'a crate::core::predicate::PolicyContext,
+    /// Resolved once, before the review opens. Token names come from the
+    /// owner's local database, which nothing in a review can change, so
+    /// re-reading them per refresh would query a store that cannot have a
+    /// different answer — and would need that store to be shareable across
+    /// threads purely to say the same thing again.
+    token_metadata: TokenMetadataMap,
+    overrides: SigningOverrides,
+    /// What the presenter is currently showing. Replaced on every refresh and
+    /// read once after the review, because the signature has to be built from
+    /// the numbers the reviewer actually decided on.
+    latest: Mutex<Option<Authored>>,
+}
+
+/// One authored review: the simulation, the envelope prepared from it, and
+/// the document rendered from both. They travel together because they are one
+/// consistent answer about one moment; mixing a document from one refresh with
+/// a prepared envelope from another would show a reviewer fees and effects
+/// that never coexisted.
+struct Authored {
+    simulation: SimulationResult,
+    prepared: crate::execution::PreparedExecution,
+    #[allow(dead_code)]
+    approval: ApprovalRequest,
+}
+
+impl TransactionReview<'_> {
+    /// Simulate, prepare, and render. Every call is a complete re-read of the
+    /// chain: the simulation is pinned to whatever block is current now, and
+    /// the fee fields come from the same moment.
+    async fn author(&self) -> Result<(ApprovalRequest, SimulationResult)> {
+        let simulation = simulate_execution(
+            self.wallet,
+            self.network,
+            &self.request.execution_plan,
+            self.stored_policy,
+            self.policy_context,
+            None,
+        )
+        .await?;
+        let prepared = prepare_execution(
+            self.wallet,
+            self.network,
+            &self.request.execution_plan,
+            &simulation,
+            self.overrides,
+        )
+        .await?;
+        let approval = transaction_approval_request(
+            self.request,
+            &simulation,
+            &prepared,
+            self.network,
+            &self.token_metadata,
+        )
+        .await?;
+        *self
+            .latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("review state lock was poisoned"))? = Some(Authored {
+            simulation: simulation.clone(),
+            prepared,
+            approval: approval.clone(),
+        });
+        Ok((approval, simulation))
+    }
+
+    /// The authored review the presenter finished on.
+    fn take_authored(&self) -> Result<Authored> {
+        self.latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("review state lock was poisoned"))?
+            .take()
+            .context("the review produced no authored document")
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::approval::ReviewRefresh for TransactionReview<'_> {
+    async fn resimulate(&self) -> Result<crate::approval::Refreshed> {
+        let (request, simulation) = self.author().await?;
+        Ok(crate::approval::Refreshed {
+            request,
+            simulation,
+        })
+    }
 }
 
 /// The complete server-authored review document for one queued transaction:

@@ -15,7 +15,7 @@
 //! the document has been on screen.
 
 use crate::{
-    approval::{ApprovalDecision, ApprovalFact, ApprovalRequest, ApprovalUi},
+    approval::{ApprovalDecision, ApprovalFact, ApprovalRequest, ApprovalUi, ReviewRefresh},
     fullscreen::{self, Line, Screen, Span},
     sanitize::terminal_safe_line as terminal_safe,
     tui::Tone,
@@ -126,15 +126,72 @@ pub async fn review_fullscreen(
     request: &ApprovalRequest,
     payload: Vec<Line>,
 ) -> Result<ApprovalDecision> {
-    let request = request.clone();
-    tokio::task::spawn_blocking(move || review_fullscreen_blocking(&request, payload))
-        .await
-        .context("terminal approval task failed")?
+    review_fullscreen_refreshable(request, payload, None).await
+}
+
+/// The same review, with `r` bound to re-running the simulation behind it.
+///
+/// Offered only where a refresh means something. A typed-data or message
+/// review has no simulation to re-run, so it gets `None` and the key does
+/// nothing — an affordance that answers "cannot be re-simulated" would be a
+/// worse screen than one that never offers it.
+///
+/// The refresh runs on the async side while this screen stays up. That is the
+/// reason for the channel pair rather than simply returning and being called
+/// again: leaving and re-entering the alternate screen for every refresh is
+/// the mode-flipping this codebase deliberately does not do, and it would
+/// leave the reviewer looking at their ordinary terminal for however long the
+/// RPC takes — which, with endpoint failover, can be a long time.
+pub async fn review_fullscreen_refreshable(
+    request: &ApprovalRequest,
+    payload: Vec<Line>,
+    refresh: Option<&dyn ReviewRefresh>,
+) -> Result<ApprovalDecision> {
+    let title = terminal_safe(&request.title);
+    let document = review_document(request, payload);
+    // Capacity one and a single in-flight request: the screen blocks while a
+    // refresh runs, so it cannot ask twice.
+    let (want_tx, mut want_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let (fresh_tx, fresh_rx) = std::sync::mpsc::channel::<RefreshOutcome>();
+    let refreshable = refresh.is_some();
+    let mut blocking = tokio::task::spawn_blocking(move || {
+        review_fullscreen_blocking(&title, document, refreshable, &want_tx, &fresh_rx)
+    });
+    loop {
+        tokio::select! {
+            joined = &mut blocking => {
+                return joined.context("terminal approval task failed")?;
+            }
+            Some(()) = want_rx.recv() => {
+                let outcome = match refresh {
+                    Some(refresh) => match refresh.resimulate().await {
+                        Ok(refreshed) => {
+                            RefreshOutcome::Document(review_document(&refreshed.request, Vec::new()))
+                        }
+                        Err(error) => RefreshOutcome::Failed(format!("{error:#}")),
+                    },
+                    None => RefreshOutcome::Failed("this review cannot be re-simulated".to_owned()),
+                };
+                // A send failure means the screen is already gone, which the
+                // join above is about to report.
+                let _ = fresh_tx.send(outcome);
+            }
+        }
+    }
+}
+
+/// What one refresh produced: a re-authored document, or why there is none.
+enum RefreshOutcome {
+    Document(Vec<Line>),
+    Failed(String),
 }
 
 fn review_fullscreen_blocking(
-    request: &ApprovalRequest,
-    payload: Vec<Line>,
+    title: &str,
+    document: Vec<Line>,
+    refreshable: bool,
+    want_refresh: &tokio::sync::mpsc::Sender<()>,
+    refreshed: &std::sync::mpsc::Receiver<RefreshOutcome>,
 ) -> Result<ApprovalDecision> {
     ensure!(
         std::io::stdin().is_terminal()
@@ -142,22 +199,26 @@ fn review_fullscreen_blocking(
             && std::io::stderr().is_terminal(),
         "approval requires an interactive terminal"
     );
-    let mut review = ReviewScreen::new(review_document(request, payload));
-    let title = terminal_safe(&request.title);
+    let mut review = ReviewScreen::new(document);
+    review.refreshable = refreshable;
     let decision = {
         let mut screen = Screen::enter()?;
         loop {
             screen
                 .terminal
-                .draw(|frame| draw(frame, &title, &mut review))?;
+                .draw(|frame| draw(frame, title, &mut review))?;
             let key = match crossterm::event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => key,
                 // Anything else — a resize above all — just redraws against
                 // the new terminal size.
                 _ => continue,
             };
-            if let Some(decision) = review.handle_key(key) {
-                break decision;
+            match review.handle_key(key) {
+                Some(ReviewAction::Decide(decision)) => break decision,
+                Some(ReviewAction::Refresh) => {
+                    run_refresh(&mut screen, title, &mut review, want_refresh, refreshed)?;
+                }
+                None => {}
             }
         }
         // `screen` drops here: raw mode off, main screen back, so the outro
@@ -173,6 +234,58 @@ fn review_fullscreen_blocking(
     }
     Ok(decision)
 }
+
+/// Run one refresh with the screen still up: ask the async side, animate
+/// while it works, then apply whatever came back.
+///
+/// Input is deliberately not read while the refresh is in flight — there is
+/// nothing a key could mean — and is **drained** afterwards. Without that
+/// drain, a reviewer who pressed Enter during a slow re-simulation would have
+/// it delivered to the refreshed document the instant it appeared, deciding on
+/// a screen they had not seen. That is the same class of mistake the
+/// scroll-to-the-end rule exists to prevent.
+fn run_refresh(
+    screen: &mut Screen,
+    title: &str,
+    review: &mut ReviewScreen,
+    want_refresh: &tokio::sync::mpsc::Sender<()>,
+    refreshed: &std::sync::mpsc::Receiver<RefreshOutcome>,
+) -> Result<()> {
+    review.begin_refresh();
+    screen
+        .terminal
+        .draw(|frame| draw(frame, title, &mut *review))?;
+    if want_refresh.blocking_send(()).is_err() {
+        review.finish_refresh(RefreshOutcome::Failed(
+            "the review could not be re-simulated".to_owned(),
+        ));
+        return Ok(());
+    }
+    let outcome = loop {
+        match refreshed.recv_timeout(REFRESH_TICK) {
+            Ok(outcome) => break outcome,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                review.tick();
+                screen
+                    .terminal
+                    .draw(|frame| draw(frame, title, &mut *review))?;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                break RefreshOutcome::Failed("the review could not be re-simulated".to_owned());
+            }
+        }
+    };
+    review.finish_refresh(outcome);
+    while crossterm::event::poll(std::time::Duration::ZERO)? {
+        let _ = crossterm::event::read()?;
+    }
+    Ok(())
+}
+
+/// How often the waiting screen redraws. Short enough that the elapsed
+/// seconds tick visibly, long enough not to spin.
+const REFRESH_TICK_MILLIS: u64 = 200;
+const REFRESH_TICK: std::time::Duration = std::time::Duration::from_millis(REFRESH_TICK_MILLIS);
 
 /// The authored document plus the payload as one styled text, in the same
 /// visual language as the transaction browser's detail view: aligned muted
@@ -275,6 +388,17 @@ struct ReviewScreen {
     /// movement, exactly like the inline picker.
     on_approve: bool,
     notice: Option<String>,
+    /// Whether `r` re-runs the simulation behind this review.
+    refreshable: bool,
+    /// Ticks while a refresh is in flight; `None` when none is.
+    refreshing: Option<u32>,
+}
+
+/// What a keypress asked for. Only a decision ends the review.
+#[derive(Debug, PartialEq, Eq)]
+enum ReviewAction {
+    Decide(ApprovalDecision),
+    Refresh,
 }
 
 impl ReviewScreen {
@@ -287,6 +411,52 @@ impl ReviewScreen {
             reached_end: false,
             on_approve: false,
             notice: None,
+            refreshable: false,
+            refreshing: None,
+        }
+    }
+
+    /// Enter the waiting state. The cursor goes back to Reject immediately:
+    /// the document on screen is about to be replaced, so an Approve the
+    /// reviewer had lined up no longer refers to anything they have read.
+    fn begin_refresh(&mut self) {
+        self.refreshing = Some(0);
+        self.on_approve = false;
+        self.notice = None;
+    }
+
+    fn tick(&mut self) {
+        if let Some(ticks) = &mut self.refreshing {
+            *ticks = ticks.saturating_add(1);
+        }
+    }
+
+    /// Apply what the refresh produced.
+    ///
+    /// A document that came back *different* resets the evidence that it was
+    /// read — scroll position, `reached_end`, and the cursor — because the
+    /// reviewer has now scrolled through a document that is no longer the one
+    /// on screen, and Approve is gated on having seen the end of *this* one.
+    /// A document that came back identical keeps it: forcing someone to
+    /// re-read an unchanged screen teaches them to scroll past it.
+    fn finish_refresh(&mut self, outcome: RefreshOutcome) {
+        self.refreshing = None;
+        match outcome {
+            RefreshOutcome::Document(document) => {
+                if document == self.document {
+                    self.notice = Some("Re-simulated; nothing changed.".to_owned());
+                    return;
+                }
+                self.document = document;
+                self.offset = 0;
+                self.reached_end = false;
+                self.on_approve = false;
+                self.notice =
+                    Some("Re-simulated; the review changed, so read it again.".to_owned());
+            }
+            RefreshOutcome::Failed(reason) => {
+                self.notice = Some(format!("Re-simulation failed: {reason}"));
+            }
         }
     }
 
@@ -294,20 +464,23 @@ impl ReviewScreen {
     /// rejection: an approval must be explicit. The scrolling keys can never
     /// decide, and Enter on Approve is refused until the end of the document
     /// has been seen.
-    fn handle_key(&mut self, key: KeyEvent) -> Option<ApprovalDecision> {
+    fn handle_key(&mut self, key: KeyEvent) -> Option<ReviewAction> {
         self.notice = None;
         if fullscreen::is_interrupt(key) {
-            return Some(ApprovalDecision::Rejected);
+            return Some(ReviewAction::Decide(ApprovalDecision::Rejected));
         }
         let page = self.viewport.max(1);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => return Some(ApprovalDecision::Rejected),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                return Some(ReviewAction::Decide(ApprovalDecision::Rejected));
+            }
+            KeyCode::Char('r') if self.refreshable => return Some(ReviewAction::Refresh),
             KeyCode::Enter => {
                 if !self.on_approve {
-                    return Some(ApprovalDecision::Rejected);
+                    return Some(ReviewAction::Decide(ApprovalDecision::Rejected));
                 }
                 if self.reached_end {
-                    return Some(ApprovalDecision::Approved);
+                    return Some(ReviewAction::Decide(ApprovalDecision::Approved));
                 }
                 self.notice =
                     Some("Scroll to the end of the document before approving.".to_owned());
@@ -326,6 +499,33 @@ impl ReviewScreen {
             _ => {}
         }
         None
+    }
+
+    /// What to say while a refresh is in flight, with the elapsed seconds so
+    /// a slow chain reads as slow rather than as a hung screen.
+    fn waiting_message(&self) -> Option<String> {
+        let ticks = self.refreshing?;
+        let seconds = (u64::from(ticks) * REFRESH_TICK_MILLIS) / 1000;
+        Some(if seconds == 0 {
+            "Re-simulating…".to_owned()
+        } else {
+            format!("Re-simulating… {seconds}s")
+        })
+    }
+
+    /// The footer key legend. A refresh nobody knows about is a refresh
+    /// nobody uses, so the key is advertised exactly where it is available
+    /// and nowhere else.
+    fn hints(&self) -> String {
+        let refresh = if self.refreshable {
+            " · r re-simulate"
+        } else {
+            ""
+        };
+        format!(
+            "{} · ↑↓ scroll · PgUp/PgDn page{refresh} · Tab switch · Enter decide · Esc rejects",
+            self.position()
+        )
     }
 
     fn position(&self) -> String {
@@ -406,7 +606,12 @@ fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
             line
         }
     };
-    let approve_label = if review.reached_end {
+    let approve_label = if review.refreshing.is_some() {
+        // Nothing on screen is settled while a refresh is running, so the
+        // affirmative option says so rather than inviting a decision on
+        // numbers that are about to be replaced.
+        "Approve — waiting for the new simulation".to_owned()
+    } else if review.reached_end {
         "Approve — sign this exact action".to_owned()
     } else {
         "Approve — scroll to the end of the document first".to_owned()
@@ -423,12 +628,13 @@ fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
         decision,
     );
 
-    let hints = format!(
-        "{} · ↑↓ scroll · PgUp/PgDn page · Tab switch · Enter decide · Esc rejects",
-        review.position()
-    );
+    let hints = review.hints();
+    // The waiting message outranks any notice: it is the only thing on screen
+    // that is still changing, and it tells the reviewer why their keys are
+    // being ignored.
+    let waiting = review.waiting_message();
     frame.render_widget(
-        fullscreen::footer_line(review.notice.as_deref(), &hints),
+        fullscreen::footer_line(waiting.as_deref().or(review.notice.as_deref()), &hints),
         footer,
     );
 }

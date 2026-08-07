@@ -27,10 +27,37 @@ impl ReviewPresenter for ApproveEverything {
         &self,
         _request: &ApprovalRequest,
         _simulation: &SimulationResult,
+        _refresh: &dyn ekubo_wallet_core::approval::ReviewRefresh,
     ) -> anyhow::Result<ApprovalDecision> {
         Ok(ApprovalDecision::Approved)
     }
 }
+/// A presenter that presses `r` once and then approves, standing in for a
+/// reviewer who re-simulated before deciding.
+///
+/// It keeps both documents so the test can compare them: a refresh must be
+/// able to change what the chain says about a plan, and must not be able to
+/// change the plan.
+#[derive(Default)]
+struct RefreshThenApprove {
+    documents: StdMutex<Vec<ApprovalRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ReviewPresenter for RefreshThenApprove {
+    async fn review_transaction(
+        &self,
+        request: &ApprovalRequest,
+        _simulation: &SimulationResult,
+        refresh: &dyn ekubo_wallet_core::approval::ReviewRefresh,
+    ) -> anyhow::Result<ApprovalDecision> {
+        self.documents.lock().unwrap().push(request.clone());
+        let refreshed = refresh.resimulate().await?;
+        self.documents.lock().unwrap().push(refreshed.request);
+        Ok(ApprovalDecision::Approved)
+    }
+}
+
 use alloy::primitives::{Address, B256, keccak256};
 use base64::Engine as _;
 use std::{collections::HashSet, net::SocketAddr, sync::Mutex as StdMutex};
@@ -582,4 +609,118 @@ async fn simulate_then_send_consumes_the_recorded_simulation() {
         panic!("a simulation must not authorize two sends");
     };
     assert!(error.message.contains("already sent"), "{}", error.message);
+}
+
+/// The reviewer re-simulates before deciding, and the approval still
+/// completes end to end.
+///
+/// A queued transaction is often queued because its simulation failed for a
+/// reason that has since passed — every endpoint was refusing requests, or a
+/// prerequisite has now mined — so the review offers `r`. This drives that
+/// path through the real orchestrator: the refresh re-runs simulation and
+/// preparation, and the signature is built from what the refresh produced
+/// rather than from the document the reviewer first saw.
+///
+/// That last property is structural rather than asserted here: the
+/// orchestrator holds exactly one authored review, replaces it on every
+/// refresh, and takes it after the presenter returns, so there is no earlier
+/// simulation left in scope for signing to reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reviewer_can_re_simulate_before_approving() {
+    let (address, chain) = start_stub().await;
+    let (directory, server, wallet) =
+        pipeline_server(address, &WalletPolicy::require_approval_for_everything());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("send queues for approval")
+        .0;
+    assert_eq!(output.status, ExecutionStatus::ApprovalRequired);
+    let request_id = output.request_id;
+
+    let record = server.pending.lock().unwrap().get(request_id).unwrap();
+    let read_policy = || -> anyhow::Result<crate::policy_store::StoredPolicy> {
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .get("primary")?
+            .context("policy exists")
+    };
+    let presenter = RefreshThenApprove::default();
+    let outcome = crate::orchestrator::approve_transaction(
+        &server.config,
+        PendingStore::new(
+            PolicyStore::open(
+                &directory.path().join("policies.db"),
+                &DatabaseKey::new([9; 32]),
+            )
+            .unwrap(),
+        ),
+        &TokenStore::new(
+            PolicyStore::open(
+                &directory.path().join("policies.db"),
+                &DatabaseKey::new([9; 32]),
+            )
+            .unwrap(),
+        ),
+        &read_policy,
+        record,
+        crate::approval::InteractiveProof::for_tests(),
+        &presenter,
+        &TestHumanPresence { allow: true },
+        &*server.keys,
+    )
+    .await
+    .unwrap();
+
+    let crate::orchestrator::ApprovalOutcome::Signed(signed_record) = outcome else {
+        panic!("the presenter approved, so the outcome must be Signed");
+    };
+    assert_eq!(signed_record.status, PendingStatus::Signed);
+    assert!(
+        signed_record.review_digest.is_some(),
+        "the signature is bound to a reviewed document"
+    );
+
+    let documents = presenter.documents.lock().unwrap().clone();
+    assert_eq!(
+        documents.len(),
+        2,
+        "one original and one refreshed document"
+    );
+    // Against an unchanged chain the refresh must produce the same review:
+    // a refresh re-reads the chain, it does not re-decide what is being
+    // approved. The plan digest above all must survive it.
+    assert_eq!(
+        documents[0].digest, documents[1].digest,
+        "a refresh changed the digest under review"
+    );
+    assert_eq!(
+        documents[0].facts, documents[1].facts,
+        "a refresh changed the facts under review"
+    );
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: None,
+            simulation_id: None,
+            request_id: Some(request_id),
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("approved resubmission succeeds")
+        .0;
+    assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
+    assert_eq!(chain.mined.lock().unwrap().len(), 1);
 }

@@ -90,6 +90,43 @@ it learns the answer as soon as the user gives it. `--decision approve`
 and `--decision reject` skip only that prompt; approving still prints the review
 and still requires platform owner authentication.
 
+## Re-simulating a queued transaction
+
+`r` re-runs the simulation behind a transaction review and re-authors the
+document from the result, without leaving the screen. It exists because a
+transaction is queued here precisely when its simulation failed or its policy
+asked a question, and a simulation failure is frequently about the moment
+rather than the plan: every configured endpoint was refusing requests, or a
+prerequisite approval has since been mined. Without it the reviewer's only
+options are to approve something nobody could simulate or to reject something
+that is fine.
+
+A refresh re-reads the chain. It cannot change what is being approved: the
+plan, its digest, and the policy revision it is judged against are fixed when
+the request is queued, and only the simulation, the prepared fee and nonce
+fields, and the effects rendered from them are re-derived. The wallet signs
+what the *last* refresh produced, so the numbers approved are the numbers
+signed rather than an earlier simulation the reviewer never saw.
+
+Two rules protect the decision across a refresh:
+
+- Asking for one moves the cursor back to Reject immediately, before any new
+  document arrives, because the screen it was aimed at is about to be replaced.
+- A document that comes back **different** resets the scroll position and the
+  requirement to reach the end of it. The reviewer scrolled through text that
+  is no longer on screen, and Approve is gated on having seen the end of what
+  is. A document that comes back identical keeps that reading, so re-simulating
+  an unchanged review does not train anyone to scroll past it.
+
+Keystrokes typed while the re-simulation is running are discarded rather than
+delivered to the new document — otherwise an Enter pressed during a slow
+re-simulation would decide a screen its author never saw. The footer shows the
+elapsed seconds while it runs, since with endpoint failover an unreachable
+chain can take a while to say so.
+
+Only transaction reviews offer this. A typed-data or message review has no
+simulation behind it, so `r` is neither bound nor advertised there.
+
 Decoded readings and token metadata are decoration on top of the exact fields,
 never a substitute for them. Calldata is decoded locally and only when it is
 canonically encoded; anything else is presented as an unrecognized selector

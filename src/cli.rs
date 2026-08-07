@@ -2684,13 +2684,19 @@ impl crate::approval::ReviewPresenter for CliTransactionPresenter {
         &self,
         request: &ApprovalRequest,
         _simulation: &SimulationResult,
+        refresh: &dyn crate::approval::ReviewRefresh,
     ) -> Result<ApprovalDecision> {
         if self.no_confirm {
             return Ok(ApprovalDecision::Approved);
         }
         // The plan's calldata already lives in the document's call sections,
         // so there is no separate payload to append.
-        crate::approve_tui::review_fullscreen(request, Vec::new()).await
+        //
+        // This is the one review that can be re-simulated, and the one that
+        // needs to be: a transaction is queued here precisely when its
+        // simulation failed or its policy asked a question, and the first of
+        // those is often about the moment rather than the plan.
+        crate::approve_tui::review_fullscreen_refreshable(request, Vec::new(), Some(refresh)).await
     }
 }
 
