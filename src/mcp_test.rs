@@ -561,6 +561,7 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
             // Nothing listens here, so reaching it at all fails slowly and
             // with a connection error rather than the conflict below.
             rpc_urls: vec!["http://127.0.0.1:9".parse().unwrap()],
+            rpc_strategy: None,
             max_gas_limit: "30000000".into(),
             native_currency: NativeCurrency {
                 name: "Test Ether".into(),
@@ -588,6 +589,7 @@ fn add_network_input(rpc_url: &str) -> AddNetworkInput {
         aliases: vec![],
         chain_id: "999999".into(),
         rpc_urls: vec![rpc_url.parse().unwrap()],
+        rpc_strategy: None,
         max_gas_limit: "30000000".into(),
         native_currency: NativeCurrency {
             name: "Test Ether".into(),

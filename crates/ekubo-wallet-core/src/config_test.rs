@@ -296,3 +296,93 @@ fn network_display_fields_reject_invisible_and_bidirectional_characters() {
     candidate.display_name = Some("Éthereum メインネット".into());
     assert!(validate_network(&candidate).is_ok());
 }
+
+#[test]
+fn rpc_strategies_round_trip_through_the_spellings_people_type() {
+    use crate::config::RpcStrategy;
+    for (text, expected) in [
+        ("ordered", RpcStrategy::Ordered),
+        ("Random", RpcStrategy::Random),
+        ("m_of_n(2)", RpcStrategy::MOfN { agree: 2 }),
+        // A shell eats parentheses, so the other spellings are accepted too.
+        ("m_of_n:3", RpcStrategy::MOfN { agree: 3 }),
+        ("m-of-n 2", RpcStrategy::MOfN { agree: 2 }),
+        ("M_OF_N(4)", RpcStrategy::MOfN { agree: 4 }),
+    ] {
+        assert_eq!(
+            text.parse::<RpcStrategy>().unwrap(),
+            expected,
+            "parsing {text}"
+        );
+    }
+    // Display round-trips, so what `network list` prints can be typed back in.
+    for strategy in [
+        RpcStrategy::Ordered,
+        RpcStrategy::Random,
+        RpcStrategy::MOfN { agree: 2 },
+    ] {
+        assert_eq!(
+            strategy.to_string().parse::<RpcStrategy>().unwrap(),
+            strategy
+        );
+    }
+    assert!("majority".parse::<RpcStrategy>().is_err());
+    assert!("m_of_n".parse::<RpcStrategy>().is_err());
+    assert!("m_of_n(two)".parse::<RpcStrategy>().is_err());
+}
+
+/// A threshold the network cannot reach would refuse every request on it, so
+/// it is refused where the number is typed rather than at signing time.
+#[test]
+fn an_unreachable_agreement_threshold_is_refused() {
+    use crate::config::RpcStrategy;
+    let mut network = default_networks().remove(0);
+    network.rpc_urls.truncate(2);
+
+    network.rpc_strategy = RpcStrategy::MOfN { agree: 3 };
+    let error = crate::config::validate_network(&network)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("needs 3 endpoints but"), "{error}");
+
+    network.rpc_strategy = RpcStrategy::MOfN { agree: 1 };
+    let error = crate::config::validate_network(&network)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("at least 2"), "{error}");
+
+    network.rpc_strategy = RpcStrategy::MOfN { agree: 2 };
+    crate::config::validate_network(&network).expect("two of two is reachable");
+}
+
+/// The setting is absent from a configuration written before it existed, and
+/// is left out again when it holds the default, so upgrading and downgrading
+/// do not rewrite every network.
+#[test]
+fn the_default_strategy_is_neither_required_nor_written() {
+    use crate::config::RpcStrategy;
+    let stored: crate::config::NetworkConfig = serde_json::from_value(serde_json::json!({
+        "name": "legacy",
+        "chain_id": 1,
+        "rpc_url": "https://legacy.example.invalid/rpc",
+    }))
+    .expect("a pre-strategy network still loads");
+    assert_eq!(stored.rpc_strategy, RpcStrategy::Ordered);
+    let written = serde_json::to_value(&stored).unwrap();
+    assert!(
+        written.get("rpc_strategy").is_none(),
+        "the default is not written back: {written}"
+    );
+
+    let mut agreeing = stored.clone();
+    agreeing.rpc_strategy = RpcStrategy::MOfN { agree: 2 };
+    let written = serde_json::to_value(&agreeing).unwrap();
+    assert_eq!(
+        written["rpc_strategy"],
+        serde_json::json!({"m_of_n": {"agree": 2}})
+    );
+    assert_eq!(
+        serde_json::from_value::<crate::config::NetworkConfig>(written).unwrap(),
+        agreeing
+    );
+}

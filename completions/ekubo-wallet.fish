@@ -58,7 +58,8 @@ complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subco
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from review' -l decision -r -a 'reject approve' -d 'Decide without the interactive prompt'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 4; and __fish_seen_subcommand_from set; and __fish_seen_subcommand_from policy' -F
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from validate; and __fish_seen_subcommand_from policy' -F
-complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l rpc-url -r -d 'Use an RPC URL instead of a preset or hidden prompt'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l rpc-url -r -d 'RPC endpoint; repeat for fallbacks'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l rpc-strategy -r -a 'ordered random m_of_n(2) m_of_n(3)' -d 'How the endpoints are used'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l display-name -r -d 'Set the human-readable network name'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l alias -r -d 'Add a repeatable network alias'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from add' -l native-currency-name -r -d 'Set the native currency name'

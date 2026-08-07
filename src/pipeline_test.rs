@@ -81,6 +81,11 @@ fn hash_of(number: u64) -> B256 {
 #[derive(Default)]
 struct StubChain {
     mined: StdMutex<HashSet<B256>>,
+    /// What this node claims the plan costs. A second stub with a different
+    /// value is the smallest possible dishonest endpoint: it agrees about the
+    /// chain, the block, and the outcome, and lies about one number that a
+    /// reviewer would read and a signature would carry.
+    gas_used: Option<u64>,
 }
 
 fn zero_bloom() -> String {
@@ -141,7 +146,7 @@ impl StubChain {
                             .map(|_| serde_json::json!({
                                 "returnData": "0x",
                                 "logs": [],
-                                "gasUsed": "0x5208",
+                                "gasUsed": format!("{:#x}", self.gas_used.unwrap_or(0x5208)),
                                 "status": "0x1",
                             }))
                             .collect::<Vec<_>>()
@@ -189,9 +194,16 @@ impl StubChain {
 /// Serves the stub over real HTTP on an ephemeral port. Handles keep-alive
 /// connections and one JSON-RPC request per HTTP request.
 async fn start_stub() -> (SocketAddr, std::sync::Arc<StubChain>) {
+    start_stub_reporting(None).await
+}
+
+async fn start_stub_reporting(gas_used: Option<u64>) -> (SocketAddr, std::sync::Arc<StubChain>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let chain = std::sync::Arc::new(StubChain::default());
+    let chain = std::sync::Arc::new(StubChain {
+        gas_used,
+        ..StubChain::default()
+    });
     let serve_chain = chain.clone();
     tokio::spawn(async move {
         loop {
@@ -271,6 +283,7 @@ fn stub_network(address: SocketAddr) -> NetworkConfig {
         aliases: Vec::new(),
         chain_id: CHAIN_ID,
         rpc_urls: vec![format!("http://{address}/").parse().unwrap()],
+        rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
         max_gas_limit: Some(BLOCK_GAS_LIMIT.to_string()),
         native_currency: None,
         block_explorer_url: None,
@@ -723,4 +736,106 @@ async fn a_reviewer_can_re_simulate_before_approving() {
         .0;
     assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
     assert_eq!(chain.mined.lock().unwrap().len(), 1);
+}
+
+/// Build a server whose one network lists both stubs and requires them to
+/// agree.
+fn agreeing_server(
+    first: SocketAddr,
+    second: SocketAddr,
+    policy: &WalletPolicy,
+) -> (tempfile::TempDir, WalletMcpServer, WalletMetadata) {
+    let (directory, server, wallet) = pipeline_server(first, policy);
+    server
+        .config
+        .update(|state| {
+            // By chain ID: the configuration also holds the shipped defaults,
+            // so the stub is not the first entry.
+            let network = state
+                .networks
+                .iter_mut()
+                .find(|network| network.chain_id == CHAIN_ID)
+                .expect("the stub network is configured");
+            network.rpc_urls = vec![
+                format!("http://{first}/").parse().unwrap(),
+                format!("http://{second}/").parse().unwrap(),
+            ];
+            network.rpc_strategy = ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 };
+            Ok(())
+        })
+        .unwrap();
+    (directory, server, wallet)
+}
+
+/// Two honest endpoints agree, so `m_of_n(2)` signs exactly as `ordered`
+/// would. The strategy must cost correctness nothing when nobody is lying.
+#[tokio::test(flavor = "multi_thread")]
+async fn agreeing_endpoints_sign_normally() {
+    let (first, chain) = start_stub().await;
+    let (second, _other) = start_stub().await;
+    let (_directory, server, wallet) =
+        agreeing_server(first, second, &WalletPolicy::allow_all_with_approval());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("two agreeing endpoints sign")
+        .0;
+    assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
+    assert_eq!(chain.mined.lock().unwrap().len(), 1);
+}
+
+/// The property the strategy exists for: one endpoint understating the gas is
+/// caught by the other, and nothing is signed.
+///
+/// The two stubs agree about the chain, the block, and the outcome. They
+/// differ only in what the plan costs — the smallest lie an endpoint can tell
+/// that a reviewer would read and a signature would carry. Under `ordered`
+/// this would have been signed on the first endpoint's word.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lying_endpoint_is_caught_and_nothing_is_signed() {
+    let (honest, chain) = start_stub().await;
+    let (liar, liar_chain) = start_stub_reporting(Some(0x9999)).await;
+    let (_directory, server, wallet) =
+        agreeing_server(honest, liar, &WalletPolicy::allow_all_with_approval());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("a contradiction is a reviewable outcome, not a crash")
+        .0;
+
+    // Nothing signed on either node, by anybody.
+    assert!(
+        chain.mined.lock().unwrap().is_empty() && liar_chain.mined.lock().unwrap().is_empty(),
+        "a disputed simulation must not produce a signature"
+    );
+    // It becomes a human's decision, with the contradiction on the screen,
+    // rather than a silently-taken side or an opaque command failure.
+    assert_eq!(
+        output.status,
+        ExecutionStatus::ApprovalRequired,
+        "{output:?}"
+    );
+    let record = server
+        .pending
+        .lock()
+        .unwrap()
+        .get(output.request_id)
+        .unwrap();
+    assert_eq!(record.status, PendingStatus::AwaitingApproval);
 }

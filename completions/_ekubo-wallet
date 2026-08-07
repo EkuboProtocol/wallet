@@ -57,7 +57,7 @@ _ekubo-wallet() {
     case "$words[2]:$words[3]" in
       policy:set) _files -g '*.json' ;;
       network:add)
-        _values "network option" --rpc-url --display-name --alias --native-currency-name \
+        _values "network option" --rpc-url --rpc-strategy --display-name --alias --native-currency-name \
           --native-currency-symbol --native-currency-decimals --max-gas-limit \
           --block-explorer-url --documentation-url
         ;;
@@ -70,7 +70,7 @@ _ekubo-wallet() {
   fi
 
   if (( CURRENT > 5 )) && [[ "$words[2]:$words[3]" == "network:add" ]]; then
-    _values "network option" --rpc-url --display-name --alias --native-currency-name \
+    _values "network option" --rpc-url --rpc-strategy --display-name --alias --native-currency-name \
       --native-currency-symbol --native-currency-decimals --max-gas-limit \
       --block-explorer-url --documentation-url
   fi

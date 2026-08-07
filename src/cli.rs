@@ -4,8 +4,8 @@ use crate::{
     address_book::AddressBookStore,
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi},
     config::{
-        ConfigStore, NativeCurrency, NetworkConfig, add_configured_network, default_networks,
-        remove_configured_network, replace_configured_network,
+        ConfigStore, NativeCurrency, NetworkConfig, RpcStrategy, add_configured_network,
+        default_networks, remove_configured_network, replace_configured_network,
     },
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial, load_matching_signer},
@@ -280,6 +280,11 @@ struct NetworkAddArgs {
     /// should reach, not what to append to something already there.
     #[arg(long = "rpc-url")]
     rpc_urls: Vec<Url>,
+    /// How the endpoints are used: `ordered` (first answer wins), `random`
+    /// (fresh order per request), or `m_of_n(2)` (require 2 endpoints to
+    /// return the same simulation before acting on it).
+    #[arg(long)]
+    rpc_strategy: Option<RpcStrategy>,
     #[arg(long)]
     display_name: Option<String>,
     #[arg(long = "alias")]
@@ -3427,6 +3432,7 @@ async fn run_network(
                     ("Network", candidate.name.clone()),
                     ("Chain ID", candidate.chain_id.to_string()),
                     ("RPC URLs", endpoint_lines(&candidate, "")),
+                    ("RPC strategy", candidate.rpc_strategy.to_string()),
                 ],
             )? {
                 crate::tui::outro_cancel("No network added.");
@@ -3577,20 +3583,21 @@ fn networks_human(networks: &[NetworkConfig]) -> String {
     networks
         .iter()
         .map(|network| {
+            let aliases = if network.aliases.is_empty() {
+                String::new()
+            } else {
+                format!(" — aliases: {}", network.aliases.join(", "))
+            };
+            let explorer = network
+                .block_explorer_url
+                .as_ref()
+                .map_or_else(String::new, |url| format!("\n  explorer: {url}"));
             format!(
-                "{} (chain {}){}\n  rpc:\n{}{}",
+                "{} (chain {}){aliases}\n  rpc:\n{}\n  strategy: {}{explorer}",
                 network.name,
                 network.chain_id,
-                if network.aliases.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — aliases: {}", network.aliases.join(", "))
-                },
                 endpoint_lines(network, "       "),
-                network
-                    .block_explorer_url
-                    .as_ref()
-                    .map_or_else(String::new, |url| format!("\n  explorer: {url}")),
+                network.rpc_strategy,
             )
         })
         .collect::<Vec<_>>()
@@ -3611,6 +3618,7 @@ fn describe_network(network: &NetworkConfig) -> serde_json::Value {
             .iter()
             .map(url::Url::as_str)
             .collect::<Vec<_>>(),
+        "rpc_strategy": network.rpc_strategy.to_string(),
         "max_gas_limit": network.max_gas_limit,
         "native_currency": network.native_currency,
         "block_explorer_url": network.block_explorer_url,
@@ -3630,14 +3638,23 @@ fn network_candidate(
     args: NetworkAddArgs,
     configured: &[NetworkConfig],
 ) -> Result<NetworkConfig> {
-    if let Some(base) = network_base(&name, args.chain_id, configured) {
-        return apply_network_overrides(base, args);
-    }
-    ensure!(
-        args.chain_id.is_some(),
-        "unknown network {name}; run `ekubo-wallet network presets` to see the built-in ones, `ekubo-wallet network list` to see the configured ones, or pass a chain ID to define a custom network",
-    );
-    build_custom_network(name, &args)
+    let candidate = if let Some(base) = network_base(&name, args.chain_id, configured) {
+        apply_network_overrides(base, args)?
+    } else {
+        ensure!(
+            args.chain_id.is_some(),
+            "unknown network {name}; run `ekubo-wallet network presets` to see the built-in ones, `ekubo-wallet network list` to see the configured ones, or pass a chain ID to define a custom network",
+        );
+        build_custom_network(name, &args)?
+    };
+    // Checked here rather than only at the write. The same rules run again
+    // inside `add_configured_network`, so nothing invalid can be stored
+    // either way — but a profile that will be refused should be refused
+    // before the owner is walked through a confirmation screen, a live
+    // chain-ID probe, and an operating-system authentication prompt, all to
+    // be told at the end that a number they typed was out of range.
+    ekubo_wallet_core::config::validate_network(&candidate)?;
+    Ok(candidate)
 }
 
 /// Work out what `network add` should configure when no name was given.
@@ -3890,6 +3907,7 @@ async fn run_network_edit(
                 ("Network", draft.name.clone()),
                 ("Chain ID", draft.chain_id.to_string()),
                 ("RPC URLs", endpoint_lines(&draft, "")),
+                ("RPC strategy", draft.rpc_strategy.to_string()),
             ],
         ),
         "Save these changes to this network?",
@@ -3959,6 +3977,7 @@ fn network_field_value(network: &NetworkConfig, flag: &str) -> String {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", "),
+        "--rpc-strategy" => network.rpc_strategy.to_string(),
         _ => unreachable!("unknown network field {flag}"),
     }
 }
@@ -4013,6 +4032,9 @@ fn set_network_field(network: &mut NetworkConfig, flag: &str, value: &str) -> Re
             );
         }
         "--rpc-url" => network.rpc_urls = parse_endpoint_list(value)?,
+        "--rpc-strategy" => {
+            network.rpc_strategy = value.parse().context("RPC strategy is invalid")?;
+        }
         _ => unreachable!("unknown network field {flag}"),
     }
     Ok(())
@@ -4102,6 +4124,9 @@ fn apply_network_overrides(mut base: NetworkConfig, args: NetworkAddArgs) -> Res
     if !args.rpc_urls.is_empty() {
         base.rpc_urls = args.rpc_urls;
     }
+    if let Some(strategy) = args.rpc_strategy {
+        base.rpc_strategy = strategy;
+    }
     if let Some(display_name) = args.display_name {
         base.display_name = Some(display_name);
     }
@@ -4149,6 +4174,16 @@ struct RequiredField {
     example: &'static str,
     /// Offered as the prompt default and accepted on an empty answer.
     default: Option<&'static str>,
+    /// Whether a scripted `network add` may leave this out and take the
+    /// default.
+    ///
+    /// Every descriptive field is required, because a network nobody named is
+    /// a network nobody can read back. A setting that is a *choice* between
+    /// safe alternatives is not: demanding it would break every existing
+    /// scripted install to ask a question whose answer was already fine.
+    /// It still appears in the edit form, so it is no less editable for being
+    /// optional.
+    optional: bool,
 }
 
 /// Asked in this order: the cheap descriptive metadata first, then the
@@ -4161,6 +4196,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "How this chain is named in human output",
         example: "Base",
         default: None,
+        optional: false,
     },
     RequiredField {
         flag: "--alias",
@@ -4168,6 +4204,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "Short names this chain can also be selected by",
         example: "base-mainnet, base8453",
         default: None,
+        optional: false,
     },
     RequiredField {
         flag: "--native-currency-name",
@@ -4175,6 +4212,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "The gas token's full name",
         example: "Ether",
         default: Some("Ether"),
+        optional: false,
     },
     RequiredField {
         flag: "--native-currency-symbol",
@@ -4182,6 +4220,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "The gas token's ticker",
         example: "ETH",
         default: Some("ETH"),
+        optional: false,
     },
     RequiredField {
         flag: "--native-currency-decimals",
@@ -4189,6 +4228,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "Smallest-unit exponent of the gas token",
         example: "18",
         default: Some("18"),
+        optional: false,
     },
     RequiredField {
         flag: "--max-gas-limit",
@@ -4196,6 +4236,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "Largest gas limit this wallet may ever sign on this chain",
         example: "16777216",
         default: Some("16777216"),
+        optional: false,
     },
     RequiredField {
         flag: "--block-explorer-url",
@@ -4203,6 +4244,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "Where the CLI links transactions and addresses",
         example: "https://basescan.org",
         default: None,
+        optional: false,
     },
     RequiredField {
         flag: "--documentation-url",
@@ -4210,6 +4252,7 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "Where this chain's connection details are published",
         example: "https://docs.base.org",
         default: None,
+        optional: false,
     },
     RequiredField {
         flag: "--rpc-url",
@@ -4217,6 +4260,15 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         help: "JSON-RPC endpoint that supplies chain state and eth_simulateV1 execution",
         example: "https://rpc.example.com/v1/<key>",
         default: None,
+        optional: false,
+    },
+    RequiredField {
+        flag: "--rpc-strategy",
+        prompt: "RPC strategy",
+        help: "How the endpoints above are used: ordered, random, or m_of_n(N) to require N of them to return the same simulation",
+        example: "m_of_n(2)",
+        default: Some("ordered"),
+        optional: true,
     },
 ];
 
@@ -4257,6 +4309,10 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
             args.documentation_url.as_ref().map(ToString::to_string),
         ),
         (
+            "--rpc-strategy",
+            args.rpc_strategy.map(|strategy| strategy.to_string()),
+        ),
+        (
             "--rpc-url",
             (!args.rpc_urls.is_empty()).then(|| {
                 args.rpc_urls
@@ -4286,6 +4342,9 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
         aliases,
         chain_id,
         rpc_urls: parse_endpoint_list(&field("--rpc-url"))?,
+        rpc_strategy: field("--rpc-strategy")
+            .parse()
+            .context("RPC strategy is invalid")?,
         max_gas_limit: Some(field("--max-gas-limit")),
         native_currency: Some(NativeCurrency {
             name: field("--native-currency-name"),
@@ -4314,14 +4373,22 @@ fn collect_custom_network_fields(
     chain_id: u64,
     supplied: &BTreeMap<&'static str, Option<String>>,
 ) -> Result<BTreeMap<&'static str, String>> {
+    // An optional field that was not supplied is simply its default; only the
+    // fields a profile cannot be written without are demanded.
+    let defaults = CUSTOM_NETWORK_FIELDS
+        .iter()
+        .filter(|field| field.optional && supplied.get(field.flag).is_none_or(Option::is_none))
+        .filter_map(|field| field.default.map(|value| (field.flag, value.to_owned())));
     let missing = CUSTOM_NETWORK_FIELDS
         .iter()
+        .filter(|field| !field.optional)
         .filter(|field| supplied.get(field.flag).is_none_or(Option::is_none))
         .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok(supplied
             .iter()
             .map(|(flag, value)| (*flag, value.clone().unwrap_or_default()))
+            .chain(defaults)
             .collect());
     }
     if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
@@ -4531,6 +4598,7 @@ async fn review_one_network_proposal(
             ("Network", proposal.name.clone()),
             ("Chain ID", proposal.chain_id.to_string()),
             ("RPC endpoints", endpoint_lines(proposal, "")),
+            ("RPC strategy", proposal.rpc_strategy.to_string()),
         ];
         // An edit is the dangerous shape: the chain keeps working and its
         // narrator changes. Say which endpoint is being replaced, because the

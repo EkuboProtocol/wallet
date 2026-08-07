@@ -69,6 +69,10 @@ pub struct NetworkConfig {
     /// is the order they are tried in.
     #[schemars(with = "Vec<String>")]
     pub rpc_urls: Vec<Url>,
+    /// How those endpoints are used: in order, in a random order, or several
+    /// at once with their answers compared.
+    #[serde(default, skip_serializing_if = "RpcStrategy::is_default")]
+    pub rpc_strategy: RpcStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas_limit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +83,111 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
     pub documentation_url: Option<Url>,
+}
+
+/// How a network's endpoints are used for one request.
+///
+/// Failover already answers availability: any healthy endpoint will do. This
+/// answers a different question — how much the answer is worth. A single
+/// public RPC is an unaccountable third party that sees every address this
+/// wallet asks about and can answer anything it likes, and for a simulation
+/// that means it decides what the approval screen says a transaction will do
+/// and what it will cost. Nothing downstream can catch a *coherent* lie: the
+/// wallet checks that a response is internally consistent and linked to the
+/// block it pinned, not that it is true.
+///
+/// The defence against a lie is a second opinion from an unrelated operator.
+/// That is what [`RpcStrategy::MOfN`] buys, and what it costs is one more
+/// copy of the most expensive request the wallet makes.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RpcStrategy {
+    /// Try endpoints in configured order and take the first answer. The
+    /// cheapest strategy, and the one that trusts whichever endpoint happens
+    /// to be first.
+    #[default]
+    Ordered,
+    /// Try endpoints in a fresh random order per request.
+    ///
+    /// Costs exactly what `ordered` costs. What it buys is that no single
+    /// operator sees the whole of a wallet's activity, and that an operator
+    /// deciding whether to lie about a particular request cannot know it will
+    /// be asked — which is weaker than being checked, but is not nothing, and
+    /// it spreads load off whichever endpoint would otherwise be first.
+    Random,
+    /// Ask several endpoints and use the answer only if `agree` of them
+    /// return the same one.
+    ///
+    /// This is the only strategy that reduces what a single RPC operator can
+    /// do to a signature. Endpoints are drawn from the configured list until
+    /// `agree` of them return matching answers; one that fails or refuses is
+    /// an unavailable witness rather than a disagreement, so it is skipped.
+    /// A genuine disagreement fails closed: the wallet refuses the answer
+    /// rather than picking a side, because there is no basis on which it
+    /// could choose correctly.
+    MOfN { agree: usize },
+}
+
+impl RpcStrategy {
+    /// The number of endpoints whose answers must match. One, except under
+    /// [`RpcStrategy::MOfN`].
+    #[must_use]
+    pub fn required_agreement(self) -> usize {
+        match self {
+            Self::Ordered | Self::Random => 1,
+            Self::MOfN { agree } => agree,
+        }
+    }
+
+    /// Whether every request should visit the endpoints in a fresh order.
+    #[must_use]
+    pub fn shuffles(self) -> bool {
+        matches!(self, Self::Random)
+    }
+
+    /// Serialization skips the default, so a configuration written before
+    /// this setting existed round-trips unchanged.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::Ordered
+    }
+}
+
+impl std::fmt::Display for RpcStrategy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ordered => formatter.write_str("ordered"),
+            Self::Random => formatter.write_str("random"),
+            Self::MOfN { agree } => write!(formatter, "m_of_n({agree})"),
+        }
+    }
+}
+
+impl std::str::FromStr for RpcStrategy {
+    type Err = anyhow::Error;
+
+    /// Accepts `ordered`, `random`, and `m_of_n(2)`; the parenthesised count
+    /// may also be written `m_of_n:2` or `m-of-n 2`, because this is typed at
+    /// a prompt and a shell eats parentheses.
+    fn from_str(value: &str) -> Result<Self> {
+        let normalized = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        match normalized.as_str() {
+            "ordered" => return Ok(Self::Ordered),
+            "random" => return Ok(Self::Random),
+            _ => {}
+        }
+        let count = normalized
+            .strip_prefix("m_of_n")
+            .map(|rest| rest.trim_matches(|character| matches!(character, '(' | ')' | ':' | '_')))
+            .filter(|rest| !rest.is_empty())
+            .with_context(|| {
+                format!("unknown RPC strategy {value}; use ordered, random, or m_of_n(2)")
+            })?;
+        let agree = count
+            .parse::<usize>()
+            .with_context(|| format!("m_of_n needs a count, as in m_of_n(2); got {value}"))?;
+        Ok(Self::MOfN { agree })
+    }
 }
 
 impl NetworkConfig {
@@ -113,6 +222,8 @@ struct StoredNetwork {
     rpc_url: Option<Url>,
     #[serde(default)]
     rpc_urls: Vec<Url>,
+    #[serde(default)]
+    rpc_strategy: RpcStrategy,
     #[serde(default)]
     max_gas_limit: Option<String>,
     #[serde(default)]
@@ -163,6 +274,7 @@ impl TryFrom<StoredNetwork> for NetworkConfig {
             aliases: stored.aliases,
             chain_id: stored.chain_id,
             rpc_urls,
+            rpc_strategy: stored.rpc_strategy,
             max_gas_limit: stored.max_gas_limit,
             native_currency: stored.native_currency,
             block_explorer_url: stored.block_explorer_url,
@@ -596,6 +708,22 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
         network.rpc_urls.len() <= MAX_NETWORK_RPC_URLS,
         "a network may have at most {MAX_NETWORK_RPC_URLS} RPC URLs"
     );
+    // An agreement threshold the network cannot reach would refuse every
+    // request, and refusing to sign is exactly what an unusable configuration
+    // should not be able to cause silently at signing time. Checked where the
+    // number is entered, so the message names the number that is wrong.
+    if let RpcStrategy::MOfN { agree } = network.rpc_strategy {
+        ensure!(
+            agree >= 2,
+            "m_of_n needs at least 2 agreeing endpoints; use ordered for a single answer"
+        );
+        ensure!(
+            agree <= network.rpc_urls.len(),
+            "m_of_n({agree}) needs {agree} endpoints but {} has {}",
+            network.name,
+            network.rpc_urls.len()
+        );
+    }
     let mut endpoints = BTreeSet::new();
     for rpc_url in &network.rpc_urls {
         ensure!(

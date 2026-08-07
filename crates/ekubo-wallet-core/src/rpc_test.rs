@@ -89,6 +89,7 @@ fn network_with(chain_id: u64, rpc_urls: Vec<Url>) -> NetworkConfig {
         aliases: Vec::new(),
         chain_id,
         rpc_urls,
+        rpc_strategy: crate::config::RpcStrategy::Ordered,
         max_gas_limit: None,
         native_currency: None,
         block_explorer_url: None,
@@ -161,4 +162,105 @@ async fn a_successful_endpoint_ends_the_search() {
     let (second, _b) = stub_endpoint(7, 200);
     let network = network_with(7, vec![first, second]);
     assert_eq!(latest_block_number(&network).await.unwrap(), 100);
+}
+
+use crate::config::RpcStrategy;
+
+fn strategy_network(strategy: RpcStrategy, rpc_urls: Vec<Url>) -> NetworkConfig {
+    let mut network = network_with(7, rpc_urls);
+    network.rpc_strategy = strategy;
+    network
+}
+
+/// `m_of_n` returns an answer only once the required number of endpoints have
+/// returned the same one.
+#[tokio::test]
+async fn agreement_returns_the_answer_two_endpoints_share() {
+    let (first, _a) = stub_endpoint(7, 500);
+    let (second, _b) = stub_endpoint(7, 500);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![first, second]);
+    let block = crate::rpc::agree_across_endpoints(&network, |provider| async move {
+        with_timeout(provider.get_block_number()).await
+    })
+    .await
+    .expect("both endpoints said the same thing");
+    assert_eq!(block, 500);
+}
+
+/// The property the strategy exists for: one endpoint's word is not enough,
+/// and a contradiction is refused rather than resolved by picking a side.
+#[tokio::test]
+async fn agreement_refuses_a_contradiction_instead_of_choosing() {
+    let (honest, _a) = stub_endpoint(7, 500);
+    let (liar, _b) = stub_endpoint(7, 999_999);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![honest, liar]);
+    let error = format!(
+        "{:#}",
+        crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect_err("a disagreement must not produce an answer")
+    );
+    assert!(error.contains("do not agree"), "unexpected: {error}");
+    // Naming the endpoints on each side is what makes the report actionable.
+    assert!(error.contains("2 distinct answers"), "unexpected: {error}");
+}
+
+/// An endpoint that fails is a missing witness, not a dissenting one: it must
+/// neither count toward agreement nor be mistaken for a contradiction.
+#[tokio::test]
+async fn a_dead_endpoint_is_not_a_dissenting_vote() {
+    let (first, _a) = stub_endpoint(7, 500);
+    let (second, _b) = stub_endpoint(7, 500);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![dead_endpoint(), first, second],
+    );
+    assert_eq!(
+        crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect("two live endpoints agreed"),
+        500
+    );
+}
+
+/// Too few witnesses is reported as unavailability, not as a disagreement:
+/// they are different problems and lead to different fixes.
+#[tokio::test]
+async fn too_few_answers_reads_as_unavailable() {
+    let (only, _a) = stub_endpoint(7, 500);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![only, dead_endpoint()]);
+    let error = format!(
+        "{:#}",
+        crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect_err("one witness is not two")
+    );
+    assert!(error.contains("requires 2 endpoints to agree"), "{error}");
+    assert!(error.contains("only 1 answered"), "{error}");
+}
+
+/// Under `ordered` and `random` the agreement helper is plain failover: one
+/// answer, from whoever answers first.
+#[tokio::test]
+async fn a_single_answer_is_enough_without_m_of_n() {
+    for strategy in [RpcStrategy::Ordered, RpcStrategy::Random] {
+        let (first, _a) = stub_endpoint(7, 500);
+        let (second, _b) = stub_endpoint(7, 999_999);
+        let network = strategy_network(strategy, vec![first, second]);
+        let block = crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect("one answer suffices");
+        assert!(
+            block == 500 || block == 999_999,
+            "{strategy} took an answer"
+        );
+    }
 }

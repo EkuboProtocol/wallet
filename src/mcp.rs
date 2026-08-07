@@ -193,6 +193,11 @@ struct PublicNetwork {
     /// tries them. Reported in full because failover reaches any of them, so
     /// naming only the first would describe traffic that does not happen.
     rpc_urls: Vec<String>,
+    /// How those endpoints are used: `ordered`, `random`, or `m_of_n(N)`.
+    /// Worth reading before trusting a simulation: under `m_of_n` the result
+    /// is one several independent endpoints returned identically, and under
+    /// the others it is one endpoint's word.
+    rpc_strategy: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -354,6 +359,14 @@ struct AddNetworkInput {
     /// when that endpoint does.
     #[schemars(with = "Vec<String>")]
     rpc_urls: Vec<Url>,
+    /// How those endpoints are used: `ordered` takes the first answer,
+    /// `random` varies which endpoint is asked first, and `m_of_n(2)` acts
+    /// only on a simulation two endpoints returned identically. Omit for
+    /// `ordered`. Proposing this still queues for the owner, who sees the
+    /// strategy on the review screen before anything is written.
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    rpc_strategy: Option<String>,
     /// The largest gas limit this network will ever be asked for, as a
     /// canonical decimal integer of at least 21000 — a cap below the
     /// intrinsic cost of a transaction would refuse every transaction here.
@@ -899,6 +912,7 @@ impl WalletMcpServer {
                     name: network.name,
                     chain_id: network.chain_id.to_string(),
                     rpc_urls: network.rpc_urls.iter().map(ToString::to_string).collect(),
+                    rpc_strategy: network.rpc_strategy.to_string(),
                 })
                 .collect(),
         }))
@@ -1658,6 +1672,13 @@ impl WalletMcpServer {
             aliases: input.aliases,
             chain_id,
             rpc_urls: input.rpc_urls,
+            rpc_strategy: input
+                .rpc_strategy
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .map_err(|error: anyhow::Error| tool_error(&error))?
+                .unwrap_or_default(),
             max_gas_limit: Some(input.max_gas_limit),
             native_currency: Some(input.native_currency),
             block_explorer_url: Some(input.block_explorer_url),

@@ -131,6 +131,11 @@ pub(crate) fn parse(document: &str) -> Result<Vec<NetworkProfile>> {
                         .with_context(|| {
                             format!("chain {} has an unparsable RPC URL", chain.chain_id)
                         })?,
+                    // The registry never ships a strategy. Which one is right
+                    // is a judgement about how much an owner's transactions
+                    // are worth and how much latency they will pay, and that
+                    // is theirs to make.
+                    rpc_strategy: crate::config::RpcStrategy::default(),
                     max_gas_limit: chain.max_gas_limit,
                     native_currency: chain.native_currency,
                     block_explorer_url: chain

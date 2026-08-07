@@ -48,6 +48,7 @@ use anyhow::{Context as _, Result, ensure};
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, LazyLock},
@@ -302,10 +303,17 @@ pub async fn simulate_execution(
     // A reverted call or a setup failure is a fact about the plan or the
     // chain, and asking seven more endpoints returns the same answer more
     // slowly.
-    let mut endpoints = network.rpc_urls.iter().peekable();
-    let mut last = None;
-    while let Some(endpoint) = endpoints.next() {
+    let required = network.rpc_strategy.required_agreement();
+    let mut pin = None;
+    let mut last: Option<SimulationResult> = None;
+    // Successful simulations, grouped by the part of them that has to match.
+    let mut agreed: Vec<(SimulationAgreement, Vec<String>, SimulationResult)> = Vec::new();
+    let endpoints = crate::rpc::endpoint_order(network);
+    let mut remaining = endpoints.len();
+    for endpoint in endpoints {
+        remaining -= 1;
         let provider = crate::rpc::provider_for(endpoint);
+        let mut observed_parent = None;
         let result = simulate_execution_through(
             &provider,
             wallet,
@@ -314,22 +322,136 @@ pub async fn simulate_execution(
             stored_policy,
             context,
             fork,
+            pin,
+            &mut observed_parent,
         )
         .await?;
-        let retryable = result
-            .simulation
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.category == SimulationFailureCategory::RpcError);
-        if !retryable || endpoints.peek().is_none() {
-            return Ok(result);
+        // The first endpoint that got as far as reading a header fixes the
+        // height every later one is held to.
+        if pin.is_none() && fork.is_none() {
+            pin = observed_parent.map(|parent| parent.number);
         }
-        last = Some(result);
+
+        if required <= 1 {
+            let retryable = result
+                .simulation
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.category == SimulationFailureCategory::RpcError);
+            if !retryable || remaining == 0 {
+                return Ok(result);
+            }
+            last = Some(result);
+            continue;
+        }
+
+        // Under m_of_n only a *successful* simulation is a vote. A failure is
+        // this endpoint declining to witness — it may be down, out of sync,
+        // or refusing the method — and demanding that failures match too
+        // would turn "two nodes worded a revert differently" into a refusal
+        // to produce the reviewable failure the caller is entitled to.
+        let Some(parent) = observed_parent else {
+            last = Some(result);
+            continue;
+        };
+        if !result.simulation.success {
+            last = Some(result);
+            continue;
+        }
+        let witness = SimulationAgreement::of(&result, parent);
+        if let Some(slot) = agreed.iter_mut().find(|(seen, _, _)| *seen == witness) {
+            slot.1.push(endpoint.to_string());
+            if slot.1.len() >= required {
+                return Ok(slot.2.clone());
+            }
+        } else {
+            agreed.push((witness, vec![endpoint.to_string()], result));
+        }
     }
+
+    if required > 1 {
+        // Endpoints that answered and contradicted each other. This is
+        // reported as a simulation failure rather than an error so it lands
+        // in front of a human with the reason on the screen: a contradiction
+        // between independent operators about a pinned, deterministic read is
+        // exactly the thing a person should see before signing, and an
+        // `Err` here would collapse it into a failed command.
+        if agreed.len() > 1 {
+            let mut detail = String::new();
+            for (_, witnesses, _) in &agreed {
+                let _ = write!(detail, " [{}]", witnesses.join(", "));
+            }
+            return Ok(setup_failure_result_at_block(
+                plan,
+                stored_policy,
+                context,
+                planned_call(plan, wallet.address).mode,
+                &format!(
+                    "the RPC endpoints for {} returned {} different simulations of this plan at \
+                     the same block, so none of them was used:{detail}",
+                    network.name,
+                    agreed.len()
+                ),
+                pin.unwrap_or_default(),
+            ));
+        }
+        if let Some((_, witnesses, _)) = agreed.first() {
+            return Ok(setup_failure_result_at_block(
+                plan,
+                stored_policy,
+                context,
+                planned_call(plan, wallet.address).mode,
+                &format!(
+                    "{} requires {required} endpoints to agree on this simulation but only {} \
+                     produced one",
+                    network.name,
+                    witnesses.len()
+                ),
+                pin.unwrap_or_default(),
+            ));
+        }
+    }
+
     // Unreachable while a network is required to list an endpoint, but a
     // configuration is a file: an empty list must not silently report a
     // successful simulation of nothing.
     last.context("network has no RPC endpoints to simulate against")
+}
+
+/// The part of a simulation that independent endpoints must return
+/// identically before the wallet will act on it.
+///
+/// Deliberately a projection rather than the whole result. Left out are the
+/// fields that differ for honest reasons — the simulation's own identifier,
+/// and the wording a particular node chooses for an error — and the fields
+/// derived locally from the plan and the policy, which cannot differ because
+/// no endpoint contributes to them. What is left is exactly what an endpoint
+/// gets to assert: which block it built on, whether the plan executed, what
+/// it cost, what it returned, and what moved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SimulationAgreement {
+    /// The hash of the block simulated on top of. Two endpoints naming
+    /// different blocks at one height are on different chains, or one of them
+    /// is lying about which chain it is on.
+    parent_hash: alloy::primitives::B256,
+    success: bool,
+    gas_used: Option<String>,
+    output: Option<String>,
+    token_spends: BTreeMap<String, String>,
+    balance_changes: Option<BalanceChanges>,
+}
+
+impl SimulationAgreement {
+    fn of(result: &SimulationResult, parent: ForkParent) -> Self {
+        Self {
+            parent_hash: parent.hash,
+            success: result.simulation.success,
+            gas_used: result.simulation.gas_used.clone(),
+            output: result.simulation.output.clone(),
+            token_spends: result.token_spends.clone(),
+            balance_changes: result.balance_changes.clone(),
+        }
+    }
 }
 
 async fn simulate_execution_through(
@@ -340,6 +462,8 @@ async fn simulate_execution_through(
     stored_policy: &StoredPolicy,
     context: &PolicyContext,
     fork: Option<&ForkPreface>,
+    pin: Option<u64>,
+    observed_parent: &mut Option<ForkParent>,
 ) -> Result<SimulationResult> {
     let planned = planned_call(plan, wallet.address);
     let fork_calls: &[PlannedCall] = fork.map_or(&[], |preface| preface.calls.as_slice());
@@ -347,9 +471,20 @@ async fn simulate_execution_through(
         let chain_id = provider.get_chain_id().await?;
         // A fork already pinned its parent when it was created, and that
         // header can no longer change, so replay never re-reads it.
-        let block = match fork {
-            Some(_) => None,
-            None => {
+        // Pinned when a previous endpoint already chose the block: two
+        // endpoints simulating the same plan at different heights would
+        // disagree for an entirely honest reason, and comparing those answers
+        // would measure block times rather than truthfulness. Each endpoint
+        // still reads the header itself, so a disagreement about *which*
+        // block that height holds is one of the things agreement catches.
+        let block = match (fork, pin) {
+            (Some(_), _) => None,
+            (None, Some(number)) => {
+                provider
+                    .get_block_by_number(BlockNumberOrTag::Number(number))
+                    .await?
+            }
+            (None, None) => {
                 provider
                     .get_block_by_number(BlockNumberOrTag::Latest)
                     .await?
@@ -382,6 +517,7 @@ async fn simulate_execution_through(
                     ));
                 }
             };
+            *observed_parent = Some(parent);
             (chain_id, parent)
         }
         Err(error) => {

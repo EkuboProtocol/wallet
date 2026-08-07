@@ -285,6 +285,10 @@ fn run_refresh(
 /// How often the waiting screen redraws. Short enough that the elapsed
 /// seconds tick visibly, long enough not to spin.
 const REFRESH_TICK_MILLIS: u64 = 200;
+/// Braille frames rather than an ASCII spinner: they occupy one cell in every
+/// terminal that renders the rest of this document's box drawing, and they
+/// animate without the width changing under the text beside them.
+const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 const REFRESH_TICK: std::time::Duration = std::time::Duration::from_millis(REFRESH_TICK_MILLIS);
 
 /// The authored document plus the payload as one styled text, in the same
@@ -505,11 +509,17 @@ impl ReviewScreen {
     /// a slow chain reads as slow rather than as a hung screen.
     fn waiting_message(&self) -> Option<String> {
         let ticks = self.refreshing?;
+        // A moving glyph and a rising count, because the two answer different
+        // questions: the glyph says the screen is alive, the seconds say
+        // whether the wait is normal or the chain is not answering. With
+        // endpoint failover a genuine timeout can take a while, and a still
+        // screen with no number on it reads as a hang.
+        let frame = SPINNER[(ticks as usize) % SPINNER.len()];
         let seconds = (u64::from(ticks) * REFRESH_TICK_MILLIS) / 1000;
         Some(if seconds == 0 {
-            "Re-simulating…".to_owned()
+            format!("{frame} Re-simulating…")
         } else {
-            format!("Re-simulating… {seconds}s")
+            format!("{frame} Re-simulating… {seconds}s")
         })
     }
 

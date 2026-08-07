@@ -302,13 +302,18 @@ fn a_failed_refresh_says_so_and_changes_nothing_else() {
 fn the_wait_reports_elapsed_seconds() {
     let mut review = screen();
     review.begin_refresh();
-    assert_eq!(review.waiting_message().as_deref(), Some("Re-simulating…"));
+    let first = review.waiting_message().expect("a wait is in progress");
+    assert!(first.ends_with("Re-simulating…"), "{first}");
     for _ in 0..(1000 / REFRESH_TICK_MILLIS) {
         review.tick();
     }
-    assert_eq!(
-        review.waiting_message().as_deref(),
-        Some("Re-simulating… 1s")
+    let later = review.waiting_message().expect("still waiting");
+    assert!(later.ends_with("Re-simulating… 1s"), "{later}");
+    // The glyph moves, so a stalled RPC still reads as a live screen.
+    assert_ne!(
+        first.chars().next(),
+        later.chars().next(),
+        "the spinner has to animate: {first} then {later}"
     );
 }
 

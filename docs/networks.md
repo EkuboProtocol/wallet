@@ -36,6 +36,76 @@ each network's endpoint list), and surfaced RPC errors all show them verbatim.
 A provider credential embedded in an RPC URL is read-only and easy to rotate,
 so use one whose disclosure would be an inconvenience, not a loss.
 
+## How the endpoints are used: `rpc_strategy`
+
+Failover answers availability — any healthy endpoint will do. `rpc_strategy`
+answers a different question: how much one endpoint's answer is worth.
+
+| Strategy | Cost | What it buys |
+| --- | --- | --- |
+| `ordered` (default) | one request | Nothing beyond availability. The first endpoint that answers is believed. |
+| `random` | one request | No single operator sees all of a wallet's activity, and one deciding whether to lie cannot know it will be asked. Also spreads load. |
+| `m_of_n(N)` | N requests | The answer is used only if N independent endpoints return the same one. The only strategy that reduces what a single RPC operator can do to a signature. |
+
+The reason this matters is narrow and specific. Nothing downstream can catch a
+*coherent* lie from an RPC: the wallet checks that a simulation response is
+internally consistent and linked to the block it pinned, not that it is true.
+A dishonest endpoint therefore decides what the approval screen says a
+transaction will do and what it will cost. Policy is not affected — every rule
+is decided from the plan's own bytes — but the predicted effects, the gas, and
+whether the plan appears to succeed at all are the endpoint's word.
+
+The defence is a second opinion from an unrelated operator, which is what
+`m_of_n` is:
+
+```sh
+ekubo-wallet network add ethereum --rpc-strategy 'm_of_n(2)'
+```
+
+Set it alongside any other network field, in `network add`, in the interactive
+`network edit` form, or by an agent's `wallet_propose_network` (which still
+queues for your review, with the strategy on the review screen). `network list`
+prints it. It defaults to `ordered`, is omitted from `config.json` when it
+holds that default, and a configuration written before it existed keeps
+working unchanged.
+
+### What `m_of_n` actually compares
+
+Agreement is applied where an honest disagreement is impossible, which is
+narrower than "every request":
+
+- **Simulation** — the whole point. All attempts are pinned to **one block**,
+  chosen by the first endpoint to answer, and each endpoint reads that block's
+  header itself. What must match is the parent block hash, whether the plan
+  executed, the gas it used, what it returned, and the token and native
+  balance changes. Node-specific error wording and the wallet's own
+  locally-derived policy findings are excluded — the first differs for honest
+  reasons, the second cannot differ at all.
+- **Reads whose answers legitimately differ between honest nodes** — the chain
+  head, a pending nonce, a receipt only one node has seen yet — take the first
+  answer under every strategy. Requiring those to match would refuse every
+  request rather than catch anything.
+
+Three outcomes are kept distinct. Enough endpoints agreed, and the answer is
+used. Endpoints answered and **contradicted** each other, and the result is
+refused — a contradiction about a pinned, deterministic read is either a bug
+or a lie, and there is no basis on which the wallet could pick a side, so
+picking the majority of two would be picking at random. Or too few endpoints
+answered at all, which is unavailability: an endpoint that errors is a missing
+witness, never a dissenting one, so it never counts in either direction.
+
+Under `m_of_n` a simulation disagreement is reported as a *simulation failure*
+rather than a command error, so it lands in front of a human on the review
+screen with the endpoints named, which is exactly where a contradiction
+between independent operators belongs.
+
+The costs are real and worth stating plainly: `m_of_n(2)` doubles the most
+expensive request the wallet makes, roughly doubles the latency before an
+approval screen appears, and needs at least N endpoints that all implement
+`eth_simulateV1` — which, per the table above, many chains do not have. A
+threshold a network cannot reach is refused when it is typed rather than at
+signing time.
+
 ## Where the endpoints come from
 
 Releases before this one shipped one endpoint per network, each chosen because

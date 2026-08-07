@@ -183,6 +183,7 @@ fn transaction_lines_render_offline() {
         aliases: Vec::new(),
         chain_id: 42_161,
         rpc_urls: vec!["https://example.invalid/rpc".parse().unwrap()],
+        rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
         max_gas_limit: None,
         native_currency: None,
         block_explorer_url: None,
@@ -257,6 +258,7 @@ fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
         name: Some(name.into()),
         chain_id,
         rpc_urls: Vec::new(),
+        rpc_strategy: None,
         display_name: None,
         aliases: Vec::new(),
         native_currency_name: None,
@@ -370,8 +372,22 @@ fn a_new_custom_network_reports_every_missing_value_at_once() {
     let error = candidate_of(add_args("custom", Some(987_654)), &default_networks())
         .expect_err("an incomplete custom network is rejected");
     let message = error.to_string();
-    for flag in CUSTOM_NETWORK_FIELDS.iter().map(|field| field.flag) {
-        assert!(message.contains(flag), "{flag} missing from:\n{message}");
+    for field in CUSTOM_NETWORK_FIELDS.iter().filter(|field| !field.optional) {
+        assert!(
+            message.contains(field.flag),
+            "{} missing from:\n{message}",
+            field.flag
+        );
+    }
+    // A setting that is a choice between safe alternatives is not demanded:
+    // requiring it would break every scripted install that was already
+    // correct, to ask a question whose answer was already fine.
+    for field in CUSTOM_NETWORK_FIELDS.iter().filter(|field| field.optional) {
+        assert!(
+            !message.contains(field.flag),
+            "{} must not be demanded:\n{message}",
+            field.flag
+        );
     }
     assert!(message.contains("987654"), "{message}");
     // Every flag carries its own explanation and a usable example.
@@ -395,6 +411,38 @@ fn a_complete_custom_network_needs_no_terminal_at_all() {
     assert_eq!(candidate.chain_id, 987_654);
     assert_eq!(candidate.aliases, vec!["custom-chain".to_owned()]);
     assert_eq!(candidate.native_currency.unwrap().decimals, 18);
+    // The omitted optional setting took its default rather than blocking.
+    assert_eq!(
+        candidate.rpc_strategy,
+        ekubo_wallet_core::config::RpcStrategy::Ordered
+    );
+}
+
+/// The strategy is settable from the same command as every other network
+/// field, and validated against the endpoints it is given.
+#[test]
+fn the_rpc_strategy_is_set_and_checked_alongside_the_other_fields() {
+    let mut args = add_args("base", None);
+    args.rpc_urls = vec![
+        "https://one.example.invalid".parse().unwrap(),
+        "https://two.example.invalid".parse().unwrap(),
+    ];
+    args.rpc_strategy = Some(ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 });
+    let candidate = candidate_of(args, &default_networks()).unwrap();
+    assert_eq!(
+        candidate.rpc_strategy,
+        ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 }
+    );
+
+    // Asking for more agreement than there are endpoints is refused where the
+    // number is typed, not at signing time.
+    let mut args = add_args("base", None);
+    args.rpc_urls = vec!["https://only.example.invalid".parse().unwrap()];
+    args.rpc_strategy = Some(ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 });
+    let error = candidate_of(args, &default_networks())
+        .expect_err("two of one is not reachable")
+        .to_string();
+    assert!(error.contains("needs 2 endpoints but"), "{error}");
 }
 
 #[test]

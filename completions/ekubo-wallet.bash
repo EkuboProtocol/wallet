@@ -11,7 +11,7 @@ _ekubo_wallet() {
   fi
 
   if [[ "$first:$second" == "network:add" && "$COMP_CWORD" -ge 4 ]]; then
-    choices="--rpc-url --display-name --alias --native-currency-name --native-currency-symbol --native-currency-decimals --max-gas-limit --block-explorer-url --documentation-url"
+    choices="--rpc-url --rpc-strategy --display-name --alias --native-currency-name --native-currency-symbol --native-currency-decimals --max-gas-limit --block-explorer-url --documentation-url"
     COMPREPLY=( $(compgen -W "$choices" -- "$current") )
     return
   fi

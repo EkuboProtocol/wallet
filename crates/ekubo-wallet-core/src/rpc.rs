@@ -54,13 +54,139 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let mut failures = Vec::new();
-    for endpoint in &network.rpc_urls {
+    for endpoint in endpoint_order(network) {
         match operation(provider_for(endpoint)).await {
             Ok(value) => return Ok(value),
             Err(error) => failures.push((endpoint, error)),
         }
     }
     Err(all_endpoints_failed(network, &failures))
+}
+
+/// The order this request should visit the endpoints in.
+///
+/// Configured order, unless the network asks for a random one. `m_of_n` is
+/// deliberately absent here: it is not an ordering, and the reads that route
+/// through [`try_endpoints`] are the ones whose answers cannot be compared —
+/// a chain head, a receipt that only one endpoint has seen yet. Those take
+/// the first answer under every strategy. Agreement is applied where it means
+/// something, by [`agree_across_endpoints`] and by simulation.
+pub(crate) fn endpoint_order(network: &NetworkConfig) -> Vec<&url::Url> {
+    let mut order: Vec<&url::Url> = network.rpc_urls.iter().collect();
+    if network.rpc_strategy.shuffles() {
+        shuffle(&mut order);
+    }
+    order
+}
+
+/// Fisher-Yates over the thread RNG. Written out rather than pulled from
+/// `rand`'s slice extension so the crate keeps its single, auditable use of
+/// randomness.
+fn shuffle<T>(items: &mut [T]) {
+    use rand::TryRng as _;
+    for index in (1..items.len()).rev() {
+        let mut bytes = [0_u8; 8];
+        // A failure to read randomness leaves the order as it is: configured
+        // order is a worse privacy answer than a shuffled one, never a wrong
+        // one, and no request should fail because entropy was unavailable.
+        if rand::rng().try_fill_bytes(&mut bytes).is_err() {
+            return;
+        }
+        let pick =
+            usize::try_from(u64::from_le_bytes(bytes) % (index as u64 + 1)).unwrap_or_default();
+        items.swap(index, pick);
+    }
+}
+
+/// Run one read against enough endpoints to satisfy the network's strategy,
+/// and return the answer only if that many of them agree.
+///
+/// Under `ordered` and `random` this is [`try_endpoints`]: one answer, from
+/// whichever endpoint answers first. Under `m_of_n` it keeps asking further
+/// endpoints until the required number have returned *equal* answers.
+///
+/// Three outcomes are deliberately distinct:
+///
+/// - Enough endpoints agreed. The answer is returned.
+/// - Endpoints answered but did not agree. The read **fails**, naming the
+///   disagreement. There is no basis on which the wallet could pick a side,
+///   and picking the majority of two is picking at random; a disagreement
+///   between endpoints about a pinned, deterministic read is either a bug or
+///   a lie, and both are reasons to stop rather than to continue.
+/// - Too few endpoints answered at all. The read fails as unavailable. An
+///   endpoint that errors is a missing witness, not a dissenting one, so it
+///   never counts toward agreement in either direction.
+///
+/// Only meaningful for reads that are deterministic across honest endpoints —
+/// pinned to a block and free of per-node state. A chain head or a pending
+/// nonce legitimately differs between two honest nodes, and requiring those
+/// to match would refuse every request.
+pub async fn agree_across_endpoints<T, F, Fut>(network: &NetworkConfig, operation: F) -> Result<T>
+where
+    T: PartialEq,
+    F: Fn(DynProvider) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let required = network.rpc_strategy.required_agreement();
+    if required <= 1 {
+        return try_endpoints(network, operation).await;
+    }
+    let mut failures = Vec::new();
+    // Answers, each with the endpoints that returned it. A second endpoint
+    // returning an answer already seen is what agreement means.
+    let mut answers: Vec<(T, Vec<&url::Url>)> = Vec::new();
+    for endpoint in endpoint_order(network) {
+        match operation(provider_for(endpoint)).await {
+            Ok(value) => {
+                if let Some(slot) = answers.iter_mut().find(|(seen, _)| *seen == value) {
+                    slot.1.push(endpoint);
+                    if slot.1.len() >= required {
+                        return Ok(answers
+                            .into_iter()
+                            .find(|(_, witnesses)| witnesses.len() >= required)
+                            .map(|(value, _)| value)
+                            .expect("the slot just counted is still there"));
+                    }
+                } else {
+                    answers.push((value, vec![endpoint]));
+                }
+            }
+            Err(error) => failures.push((endpoint, error)),
+        }
+    }
+    // Disagreement outranks unavailability in the message: an owner whose
+    // endpoints contradict each other has a different problem, and a more
+    // urgent one, than an owner whose endpoints are down.
+    if answers.len() > 1 {
+        let mut message = format!(
+            "the RPC endpoints configured for {} do not agree, so the answer was refused;              {} distinct answers from",
+            network.name,
+            answers.len()
+        );
+        for (_, witnesses) in &answers {
+            let names: Vec<&str> = witnesses.iter().map(|url| url.as_str()).collect();
+            let _ = write!(
+                message,
+                "
+  {}",
+                names.join(", ")
+            );
+        }
+        return Err(anyhow::anyhow!(message));
+    }
+    let reached = answers.first().map_or(0, |(_, witnesses)| witnesses.len());
+    let mut message = format!(
+        "{} requires {required} endpoints to agree but only {reached} answered",
+        network.name
+    );
+    for (endpoint, error) in &failures {
+        let _ = write!(
+            message,
+            "
+  {endpoint}: {error:#}"
+        );
+    }
+    Err(anyhow::anyhow!(message))
 }
 
 /// The error raised when every endpoint a network lists has been tried.
