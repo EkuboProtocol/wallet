@@ -123,6 +123,7 @@ fn a_network_suggestion_waits_and_the_latest_one_prevails() {
 
     // An agent that changed its mind has not left two decisions to make,
     // so the newer suggestion for a chain replaces the older one.
+    let superseded = profile.clone();
     profile.rpc_url = "https://second.example.invalid/rpc".parse().unwrap();
     store.put_network_proposal(&profile).unwrap();
     assert_eq!(store.count_network_proposals().unwrap(), 1);
@@ -139,9 +140,16 @@ fn a_network_suggestion_waits_and_the_latest_one_prevails() {
     // A suggestion is not a network. Nothing here reaches the
     // configuration; the queue is the whole of its effect.
     assert_eq!(store.network_proposals().unwrap().len(), 1);
-    assert!(store.discard_network_proposal(profile.chain_id).unwrap());
+    // The queue now holds the *second* profile, so discarding the first —
+    // the one an owner might still be looking at — must remove nothing.
+    // Discarding names the profile that was reviewed, so a decision about the
+    // superseded suggestion cannot consume the one that replaced it — which
+    // the owner has not seen and may point at a different endpoint.
+    assert!(!store.discard_network_proposal(&superseded).unwrap());
+    assert_eq!(store.count_network_proposals().unwrap(), 1);
+    assert!(store.discard_network_proposal(&profile).unwrap());
     assert_eq!(store.count_network_proposals().unwrap(), 0);
-    assert!(!store.discard_network_proposal(profile.chain_id).unwrap());
+    assert!(!store.discard_network_proposal(&profile).unwrap());
 }
 
 #[test]

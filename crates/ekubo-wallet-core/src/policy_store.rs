@@ -690,11 +690,24 @@ impl PolicyStore {
     }
 
     /// Remove a suggestion once it has been decided, either way.
-    pub fn discard_network_proposal(&mut self, chain_id: u64) -> Result<bool> {
-        let chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
+    /// Discard exactly the profile that was reviewed, if it is still the
+    /// pending one for its chain. Returns whether it was.
+    ///
+    /// `network review` snapshots the queue, shows the owner what would be
+    /// stored, and then waits — on a confirmation, a chain-ID probe, and an OS
+    /// presence check. An agent may replace the suggestion for that chain at
+    /// any point in there, pointing it at a different endpoint. Deleting by
+    /// chain ID alone consumed that replacement under a decision made about
+    /// its predecessor, so a profile the owner never saw disappeared without
+    /// being reviewed or stored.
+    pub fn discard_network_proposal(&mut self, profile: &NetworkConfig) -> Result<bool> {
+        let profile_json = serde_json::to_string(profile)?;
         let changed = self.connection.execute(
-            "DELETE FROM network_proposals WHERE chain_id = ?1",
-            [chain_id],
+            "DELETE FROM network_proposals WHERE chain_id = ?1 AND profile_json = ?2",
+            params![
+                i64::try_from(profile.chain_id).context("chain ID out of range")?,
+                profile_json
+            ],
         )?;
         Ok(changed == 1)
     }
