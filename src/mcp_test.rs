@@ -442,6 +442,105 @@ fn proposing_a_network_is_not_destructive_and_is_idempotent() {
     assert_eq!(annotations.read_only_hint, Some(false));
 }
 
+#[test]
+fn simulating_a_plan_is_not_annotated_read_only() {
+    // It signs nothing and broadcasts nothing, but it is not read-only: a
+    // simulation against real chain state is recorded under a simulation_id
+    // that a later send accepts in place of simulating again, and one on a
+    // fork appends the plan to that fork, changing what every later call on
+    // it sees. read_only_hint is the strongest "safe to call without asking"
+    // signal a client has, so claiming it here would be an overclaim — and
+    // wallet_create_fork is already annotated for creating the same state.
+    let router = WalletMcpServer::tool_router();
+    let tool = router.get("wallet_simulate_execution_plan").unwrap();
+    let annotations = tool.annotations.as_ref().unwrap();
+    assert_eq!(annotations.read_only_hint, Some(false));
+    // The writes are additions to in-process registries that expire, so
+    // nothing here is destructive, and a repeat records a second simulation
+    // rather than nothing.
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert_eq!(annotations.idempotent_hint, Some(false));
+    assert_eq!(annotations.open_world_hint, Some(true));
+}
+
+#[test]
+fn every_tool_that_resolves_a_reference_is_annotated_open_world() {
+    // A reference is a URL the caller named, and resolving one leaves this
+    // machine under the same admission policy a plan reference gets. That is
+    // an open world whether or not the tool also reaches a chain, which is
+    // what wallet_propose_tokens — the one tool here that touches no RPC at
+    // all — got wrong.
+    let router = WalletMcpServer::tool_router();
+    let accepts_reference = router
+        .list_all()
+        .into_iter()
+        .filter(|tool| {
+            tool.input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|properties| properties.contains_key("reference"))
+        })
+        .map(|tool| tool.name.into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        accepts_reference,
+        [
+            "wallet_batch_eth_call",
+            "wallet_get_balances",
+            "wallet_propose_tokens",
+            "wallet_send_execution_plan",
+            "wallet_simulate_execution_plan",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>(),
+    );
+    for name in accepts_reference {
+        let tool = router.get(&name).unwrap();
+        assert_eq!(
+            tool.annotations.as_ref().unwrap().open_world_hint,
+            Some(true),
+            "{name} resolves a caller-named reference and must be open-world"
+        );
+    }
+}
+
+#[test]
+fn wait_schemas_publish_the_timeout_bounds_the_validator_enforces() {
+    // A u8 admits 0 and 255; the validator admits neither. The schema is the
+    // only thing a caller reads before choosing a number, so it states the
+    // range rather than leaving it to be discovered by a rejected call.
+    let router = WalletMcpServer::tool_router();
+    for name in [
+        "wallet_wait_for_approval",
+        "wallet_wait_for_execution",
+        "wallet_wait_for_message",
+        "wallet_wait_for_typed_data",
+    ] {
+        let tool = router.get(name).unwrap();
+        let timeout = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|properties| properties.get("timeout_seconds"))
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("{name} has no timeout_seconds"));
+        assert_eq!(
+            timeout.get("minimum"),
+            Some(&serde_json::json!(1)),
+            "{name}"
+        );
+        assert_eq!(
+            timeout.get("maximum"),
+            Some(&serde_json::json!(55)),
+            "{name}"
+        );
+    }
+    assert!(validate_timeout_seconds(0).is_err());
+    assert!(validate_timeout_seconds(55).is_ok());
+    assert!(validate_timeout_seconds(56).is_err());
+}
+
 /// Endpoint admission resolves a hostname the caller chose, so a name
 /// collision has to be settled before it: a profile that could never be
 /// stored must not become outbound work on its way to being rejected.

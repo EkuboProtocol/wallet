@@ -285,6 +285,11 @@ struct SendExecutionPlanInput {
     /// still the active one.
     #[serde(default)]
     simulation_id: Option<uuid::Uuid>,
+    /// The `request_id` of a request the user already approved and signed,
+    /// whose exact signed bytes are submitted as they stand. A request whose
+    /// broadcast the chain never saw is re-broadcast; one already known to
+    /// the chain is left alone and reported. Nothing is re-signed, so this
+    /// can never become a different transaction.
     #[serde(default)]
     request_id: Option<uuid::Uuid>,
     /// What to do when the plan's simulation fails. Has no effect on a plan
@@ -319,8 +324,13 @@ enum OnSimulationFailure {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DecodeAbiInput {
+    /// The bytes to decode, `0x`-prefixed and a whole number of bytes, up to
+    /// 1048576 of them. Bytes already in hand: this tool reads nothing.
     return_data: String,
+    /// How to read those bytes. A plan that does not fit them fails the
+    /// decode and reports why rather than guessing.
     decode: AbiDecodePlan,
+    /// Echo `return_data` back beside the decoded value. Default true.
     #[serde(default = "default_true")]
     include_raw: bool,
 }
@@ -328,16 +338,25 @@ struct DecodeAbiInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct AddNetworkInput {
+    /// The identifier the owner types: 1-64 letters, numbers, underscores, or
+    /// hyphens.
     name: String,
+    /// How the network is written out for a human, 1-128 characters.
     display_name: String,
+    /// Up to 8 further identifiers for the same network, each in the same
+    /// character set as `name`.
     aliases: Vec<String>,
+    /// Canonical decimal chain ID, positive and without leading zeros.
     chain_id: String,
-    /// One or more RPC endpoints, tried in the order given. Several is
-    /// better than one: the wallet moves to the next when an endpoint fails,
-    /// and a network with a single endpoint stops working when that endpoint
-    /// does.
+    /// One to eight distinct http/https RPC endpoints, tried in the order
+    /// given. Several is better than one: the wallet moves to the next when
+    /// an endpoint fails, and a network with a single endpoint stops working
+    /// when that endpoint does.
     #[schemars(with = "Vec<String>")]
     rpc_urls: Vec<Url>,
+    /// The largest gas limit this network will ever be asked for, as a
+    /// canonical decimal integer of at least 21000 — a cap below the
+    /// intrinsic cost of a transaction would refuse every transaction here.
     max_gas_limit: String,
     native_currency: NativeCurrency,
     #[schemars(with = "String")]
@@ -377,11 +396,16 @@ struct WaitInput {
     wallet_id: String,
     chain_id: String,
     request_id: uuid::Uuid,
+    /// How long this call blocks before returning what it last saw, in
+    /// seconds: 1 to 55, default 55. A wait that times out has decided
+    /// nothing; call it again with the same `request_id` to keep waiting.
     #[serde(default = "default_wait_seconds")]
+    #[schemars(range(min = 1, max = 55))]
     timeout_seconds: u8,
     /// How many confirmations the mined receipt must have before the wait
     /// resolves: 1 means included in any block. Default 1, maximum 1000.
     #[serde(default = "default_confirmations")]
+    #[schemars(range(min = 1, max = 1000))]
     confirmations: u16,
 }
 
@@ -389,7 +413,11 @@ struct WaitInput {
 #[serde(deny_unknown_fields)]
 struct ApprovalWaitInput {
     request_id: uuid::Uuid,
+    /// How long this call blocks before returning what it last saw, in
+    /// seconds: 1 to 55, default 55. A wait that times out has decided
+    /// nothing; call it again with the same `request_id` to keep waiting.
     #[serde(default = "default_wait_seconds")]
+    #[schemars(range(min = 1, max = 55))]
     timeout_seconds: u8,
 }
 
@@ -399,8 +427,11 @@ struct ListTokensInput {
     /// Decimal chain ID filter; omitted lists every chain.
     #[serde(default)]
     chain_id: Option<crate::token_store::ChainIdInput>,
+    /// Rows to return, default 200. Values above 1000 are silently capped at
+    /// 1000; page through the rest with `offset`.
     #[serde(default = "default_token_limit")]
     limit: usize,
+    /// Rows to skip before the page begins, default 0.
     #[serde(default)]
     offset: usize,
 }
@@ -419,6 +450,8 @@ struct SearchTokensInput {
     query: String,
     #[serde(default)]
     chain_id: Option<crate::token_store::ChainIdInput>,
+    /// Matches to return, default 50. Values above 1000 are silently capped
+    /// at 1000.
     #[serde(default = "default_search_limit")]
     limit: usize,
 }
@@ -463,9 +496,10 @@ struct ProposeTokensInput {
     /// it overrides whatever name the referenced list declares.
     #[serde(default)]
     list_name: Option<String>,
-    /// Entries written out one by one. Provide exactly one of `tokens` and
-    /// `reference`; prefer `reference` for anything beyond a handful, since
-    /// restating a list here costs an output token per field.
+    /// Entries written out one by one, at most 1000 of them. Provide exactly
+    /// one of `tokens` and `reference`; prefer `reference` for anything
+    /// beyond a handful, since restating a list here costs an output token
+    /// per field.
     #[serde(default)]
     tokens: Vec<ProposeTokenItem>,
     /// A producer's `artifact_reference` envelope of `artifact_type`
@@ -474,7 +508,9 @@ struct ProposeTokensInput {
     /// verifies the envelope's integrity digest and byte count over what it
     /// actually fetched. This changes only who carries the bytes — the
     /// entries still reach the owner as suggestions and are still named
-    /// nothing until they accept them in `ekubo-wallet token review`.
+    /// nothing until they accept them in `ekubo-wallet token review`. The
+    /// same 1000-entry cap applies: a longer list is refused rather than
+    /// truncated.
     #[serde(default)]
     reference: Option<ArtifactReference>,
 }
@@ -534,7 +570,10 @@ struct GetBalancesInput {
     /// addresses. Only the addresses are used: this reads balances and never
     /// consults or records what the list calls anything. Entries on other
     /// chains are ignored, so one canonical multi-chain list can be pointed
-    /// at any chain.
+    /// at any chain — but the cap is on the list, not on the chain: a
+    /// referenced list is refused outright above 1000 entries across every
+    /// chain it names, so a larger list has to be split before it is
+    /// referenced here.
     #[serde(default)]
     reference: Option<ArtifactReference>,
     /// Read this temporary simulation fork's hypothetical balances instead of
@@ -576,8 +615,11 @@ struct AddressBookInput {
     /// Exact alias to look up. Requires `chain_id`.
     #[serde(default)]
     alias: Option<String>,
+    /// Rows to return, default 200. Values above 1000 are silently capped at
+    /// 1000; page through the rest with `offset`.
     #[serde(default = "default_token_limit")]
     limit: usize,
+    /// Rows to skip before the page begins, default 0.
     #[serde(default)]
     offset: usize,
 }
@@ -633,7 +675,11 @@ struct SignTypedDataInput {
 #[serde(deny_unknown_fields)]
 struct TypedDataWaitInput {
     request_id: uuid::Uuid,
+    /// How long this call blocks before returning what it last saw, in
+    /// seconds: 1 to 55, default 55. A wait that times out has decided
+    /// nothing; call it again with the same `request_id` to keep waiting.
     #[serde(default = "default_wait_seconds")]
+    #[schemars(range(min = 1, max = 55))]
     timeout_seconds: u8,
 }
 
@@ -683,7 +729,11 @@ struct SignMessageInput {
 #[serde(deny_unknown_fields)]
 struct MessageWaitInput {
     request_id: uuid::Uuid,
+    /// How long this call blocks before returning what it last saw, in
+    /// seconds: 1 to 55, default 55. A wait that times out has decided
+    /// nothing; call it again with the same `request_id` to keep waiting.
     #[serde(default = "default_wait_seconds")]
+    #[schemars(range(min = 1, max = 55))]
     timeout_seconds: u8,
 }
 
@@ -826,7 +876,7 @@ struct SimulateOutput {
 impl WalletMcpServer {
     #[tool(
         name = "wallet_list",
-        description = "Discover all local wallets and globally configured networks: name, decimal chain ID, and RPC URL. Never returns private keys.",
+        description = "Discover all local wallets and globally configured networks: name, decimal chain ID, and every RPC URL each network may use. Never returns private keys.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_list(&self) -> Result<Json<WalletInventory>, ErrorData> {
@@ -913,10 +963,24 @@ impl WalletMcpServer {
         Ok(Json(status))
     }
 
+    // Not annotated read-only, though it signs nothing and broadcasts
+    // nothing. A simulation against real chain state is recorded and returns
+    // a `simulation_id` that `wallet_send_execution_plan` will later accept
+    // in place of simulating again, and a simulation on a fork appends the
+    // plan to that fork, changing what every later call on it sees. Both are
+    // modifications of this server's state, and `wallet_create_fork` is
+    // already annotated for creating the same kind of state. Nothing here is
+    // destructive: the only writes are additions, to registries that are
+    // in-process, short-lived, and invisible at approval time.
     #[tool(
         name = "wallet_simulate_execution_plan",
         description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result still goes to wallet_send_execution_plan, which queues it for human approval.",
-        annotations(read_only_hint = true, open_world_hint = true)
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn wallet_simulate_execution_plan(
         &self,
@@ -1233,7 +1297,11 @@ impl WalletMcpServer {
             read_only_hint = false,
             destructive_hint = false,
             idempotent_hint = true,
-            open_world_hint = false
+            // The `reference` path fetches a body from a URL the caller
+            // named, over the same admission policy a plan reference uses.
+            // Nothing about the proposal reaches a chain, but the call does
+            // leave this machine, so it is not a closed-world tool.
+            open_world_hint = true
         )
     )]
     async fn wallet_propose_tokens(
@@ -1324,7 +1392,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_get_portfolio",
-        description = "Read the native balance and every token-database balance for one address on one chain through Multicall3, pinned to a reported block. Accepts a wallet_id or any EVM address. Only nonzero token balances are returned.",
+        description = "Read the native balance and every token-database balance for one address on one chain, pinned to a reported block, through the same path as wallet_get_balances: the Ekubo TokenDataFetcher lens where deployed, otherwise Multicall3 balanceOf reads. Accepts a wallet_id or any EVM address. Only nonzero token balances are returned. At most 8000 known tokens are checked; a database holding more reports the remainder as tokens_skipped rather than reading them.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_get_portfolio(

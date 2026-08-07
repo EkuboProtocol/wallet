@@ -10,7 +10,7 @@
 | `wallet_list_tokens` | Page through the tokens the owner has confirmed, optionally per chain. |
 | `wallet_search_tokens` | Find confirmed tokens by symbol, name, or exact address, optionally within one chain. |
 | `wallet_propose_tokens` | Suggest up to 1000 tokens, with the list's own symbol/name/decimals, for the owner to confirm in the CLI. Inline or by `token_list_reference`. Writes no names. |
-| `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
+| `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, over the same lens-or-Multicall3 path as `wallet_get_balances`, pinned to a reported block. At most 8000 known tokens are checked; the rest are reported as `tokens_skipped`. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
 | `wallet_simulate_execution_plan` | Resolve the exact plan from the producer's `artifact_reference` envelope, passed through verbatim as `reference` — the wallet fetches the body (public https, an inline `data:application/json` URI, or a `file:` path described with `ekubo-wallet reference`) and verifies the envelope's integrity digest and byte count — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
@@ -170,12 +170,17 @@ only the characters real symbols use and is dropped entirely if it still
 contains `0x`, so it cannot forge the `SYMBOL (0xaddress)` suffix.
 
 `wallet_get_portfolio` turns the database into a portfolio reader for **any**
-address, not just configured wallets: one Multicall3 batch per 200 tokens
-reads `balanceOf` for every known token on the chain, alongside the native
-balance (`getEthBalance`) and a pinned block number, on any EVM chain where
-Multicall3 is deployed — which is effectively all of them. Zero balances are
-omitted unless requested; balances are raw smallest-unit decimal strings with
-the stored decimals/symbols attached.
+address, not just configured wallets. It reads every known token on the chain
+through the same path as an explicit balances read: one `TokenDataFetcher`
+lens call where the lens is deployed — which is every default network — and
+per-token `balanceOf` reads through Multicall3 elsewhere, on any EVM chain
+where Multicall3 is deployed, which is effectively all of them. The native
+balance rides along in the same call, as does a pinned block number. At most
+`MAX_PORTFOLIO_TOKENS` (8000) known tokens are checked, comfortably above the
+largest shipped chain list, and a database holding more reports the remainder
+as `tokens_skipped` rather than reading them. Zero balances are always
+omitted; balances are raw smallest-unit decimal strings with the stored
+decimals/symbols attached.
 
 Inspect the database from the CLI with `ekubo-wallet token list [chain-id]`,
 or find one with `ekubo-wallet token search <query>`.
