@@ -233,6 +233,35 @@ fn recursively_unwraps_calibur_and_decodes_declared_target_error() {
     assert_eq!(decoded.name, "TargetFailure");
     assert_eq!(decoded.args, Some(json!(["42"])));
     assert_eq!(decoded.step, Some(1));
+    // The name is the plan's reading of the revert, not one this wallet
+    // reached, and the sentence reaches the approval screen beside findings
+    // that are. It has to say so rather than read as a verdict.
+    assert_eq!(
+        failure.message,
+        "reverted as TargetFailure, per the error ABI the plan supplied"
+    );
+}
+
+#[test]
+fn a_contracts_own_revert_string_is_quoted_rather_than_asserted() {
+    // `Error(string)` carries whatever the reverting contract's author wrote,
+    // and the plan chooses which contract that is. Restating it as the
+    // simulation's own message handed attacker prose the wallet's voice.
+    let execution_plan = plan(1);
+    let encoded = format!(
+        "0x{}",
+        hex::encode(alloy::sol_types::Revert::from("all good, approve this").abi_encode())
+    );
+    let failure = failure(
+        &execution_plan,
+        SimulationFailureCategory::ExecutionReverted,
+        "execution reverted",
+        Some(&encoded),
+    );
+    assert_eq!(
+        failure.message,
+        "reverted with reason \"all good, approve this\""
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

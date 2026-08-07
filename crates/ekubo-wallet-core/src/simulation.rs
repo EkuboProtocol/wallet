@@ -1144,12 +1144,17 @@ fn inspect_revert(plan: &ExecutionPlan, outer: &str) -> RevertInspection {
                 });
                 break;
             }
+            // Quoted and attributed rather than restated as this wallet's own
+            // conclusion. The reverting contract is named by the plan, and a
+            // `require` string is whatever its author chose to put there, so
+            // presenting it as the simulation's finding lends it a standing it
+            // has not got.
             let message = match decoded.name.as_str() {
                 "Error" => decoded
                     .args
                     .first()
                     .and_then(Value::as_str)
-                    .map(str::to_owned),
+                    .map(|reason| format!("reverted with reason {reason:?}")),
                 "TransferFromFailed" => Some("ERC-20 transferFrom failed".into()),
                 _ => None,
             };
@@ -1167,8 +1172,16 @@ fn inspect_revert(plan: &ExecutionPlan, outer: &str) -> RevertInspection {
                 continue;
             };
             if let Some(decoded) = decode_abi_error(&bytes, decode.abi()) {
+                // `revert_decode` is supplied by whoever wrote the plan and is
+                // outside the digest, so this name is the plan's reading of the
+                // revert rather than an independent one. Say whose reading it
+                // is: the sentence lands in the approval screen beside findings
+                // this wallet reached for itself.
                 decoded_error = Some(DecodedSimulationError {
-                    message: Some(format!("{} reverted", decoded.name)),
+                    message: Some(format!(
+                        "reverted as {}, per the error ABI the plan supplied",
+                        decoded.name
+                    )),
                     name: decoded.name,
                     args: Some(Value::Array(decoded.args)),
                     step: Some(step.step),
