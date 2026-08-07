@@ -13,7 +13,7 @@
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
-| `wallet_simulate_execution_plan` | Resolve the exact plan from the producer's `artifact_reference` envelope, passed through verbatim as `reference` — the wallet fetches the body (public https or an inline `data:application/json` URI) and verifies the envelope's integrity digest and byte count — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
+| `wallet_simulate_execution_plan` | Resolve the exact plan from the producer's `artifact_reference` envelope, passed through verbatim as `reference` — the wallet fetches the body (public https, an inline `data:application/json` URI, or a `file:` path described with `ekubo-wallet reference`) and verifies the envelope's integrity digest and byte count — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
 | `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
 | `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
 | `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. Takes the same `on_simulation_failure` choice as `wallet_send_execution_plan`. |
@@ -62,8 +62,14 @@ no descriptive duplicate of its contents for anyone to trust or cross-check. The
 fetched over the network. A plan held locally travels as an envelope whose
 URL is a `data:application/json;base64` URI of its exact bytes and touches no
 network (there the bytes are the reference, so integrity is verified only
-when supplied). A 404 means the reference expired: re-run the producer's
-preparation tool. These fetches are the only outbound requests this process
+when supplied). A plan an agent assembled itself, which is too large to want
+in its context and which no producer has published a digest for, travels as
+an envelope whose URL is a `file:` URL: `ekubo-wallet reference <path>`
+checks the body and prints the envelope, and the wallet reads the file, which
+must be a regular file within the same 16 MiB cap, and verifies it against
+that digest and byte count — both mandatory there, because a path is not
+bytes the way a `data:` payload is. A 404 means the reference expired:
+re-run the producer's preparation tool. These fetches are the only outbound requests this process
 makes that are not a configured chain RPC.
 
 Read-call bundles travel under the same discipline. A producer returns a

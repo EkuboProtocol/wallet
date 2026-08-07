@@ -121,6 +121,29 @@ enum Command {
         #[arg(long, value_enum)]
         decision: Option<ReviewDecision>,
     },
+    // clap prints this doc comment as `--help` text, where the backticks the
+    // lint wants would be shown literally. `artifact_reference` is the wire
+    // spelling an agent has to type, so it is written as it is typed.
+    #[allow(clippy::doc_markdown)]
+    /// Print the artifact_reference envelope for a JSON body on this machine.
+    ///
+    /// Producers publish their own envelopes, so this is for bodies nobody
+    /// published: an execution plan an agent assembled by splicing two
+    /// prepared plans into one batch, a read-call bundle it merged, a token
+    /// list it filtered. The file is checked to be the artifact it claims to
+    /// be and then described — path, keccak256 digest, exact byte count — so
+    /// the megabyte of calldata stays on disk and only the envelope is passed
+    /// to the wallet's tools.
+    ///
+    ///   ekubo-wallet reference /tmp/combined-plan.json
+    Reference {
+        /// Path to the JSON body.
+        path: PathBuf,
+        /// What the file holds. Inferred from its top-level fields when
+        /// omitted.
+        #[arg(long = "type", value_enum)]
+        artifact_type: Option<ReferenceType>,
+    },
     /// Print a shell completion script, including local dynamic candidates.
     Completion { shell: Shell },
     /// Print dynamic completion candidates.
@@ -582,6 +605,10 @@ impl Cli {
                 request_id,
                 decision,
             } => run_review(&config, request_id, decision, mode).await,
+            Command::Reference {
+                path,
+                artifact_type,
+            } => run_reference(&path, artifact_type),
             Command::Completion { shell } => print_completion_script(shell),
             Command::Complete { value_kind } => print_completion_values(&config, &value_kind),
         }
@@ -4534,6 +4561,115 @@ fn print_completion_values(config: &ConfigStore, requested: &str) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// The artifact kinds a `file:` reference can name, spelled as the wire
+/// values that go into the envelope's `artifact_type`.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum ReferenceType {
+    #[value(name = "execution_plan", alias = "execution-plan", alias = "plan")]
+    ExecutionPlan,
+    #[value(name = "read_calls", alias = "read-calls", alias = "calls")]
+    ReadCalls,
+    #[value(name = "token_list", alias = "token-list", alias = "tokens")]
+    TokenList,
+}
+
+impl ReferenceType {
+    const fn wire_name(self) -> &'static str {
+        match self {
+            Self::ExecutionPlan => "execution_plan",
+            Self::ReadCalls => "read_calls",
+            Self::TokenList => "token_list",
+        }
+    }
+
+    /// What the file has to be for the envelope to be worth printing.
+    ///
+    /// The wallet runs exactly these parses again after it reads the file, so
+    /// checking here changes no decision — it only moves the diagnosis to the
+    /// terminal of whoever wrote the file, where the mistake was made, rather
+    /// than leaving it to surface as a tool error a step later.
+    fn validate(self, bytes: &[u8], value: serde_json::Value) -> Result<()> {
+        match self {
+            Self::ExecutionPlan => {
+                crate::core::execution_plan::ExecutionPlan::parse(value)?;
+            }
+            Self::ReadCalls => {
+                serde_json::from_value::<crate::batch_read::ReadCallsBody>(value).context(
+                    "not a valid wallet_batch_eth_call argument object; a bundle carries \
+                     chain_id and calls, and nothing this tool does not take inline",
+                )?;
+            }
+            Self::TokenList => {
+                crate::token_list::parse_token_list(bytes)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Describe a local JSON body as an `artifact_reference` envelope.
+fn run_reference(path: &Path, declared: Option<ReferenceType>) -> Result<()> {
+    let bytes = fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
+    ensure!(
+        bytes.len() <= crate::core::execution_plan::MAX_SERIALIZED_PLAN_BYTES,
+        "{} is larger than the {} bytes the wallet will read",
+        path.display(),
+        crate::core::execution_plan::MAX_SERIALIZED_PLAN_BYTES
+    );
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let artifact_type = match declared {
+        Some(declared) => declared,
+        None => infer_reference_type(&value)?,
+    };
+    artifact_type.validate(&bytes, value)?;
+
+    // Canonical, so the envelope names one path through symlinks and relative
+    // segments: the file this command read is the file the wallet opens.
+    let canonical =
+        fs::canonicalize(path).with_context(|| format!("could not resolve {}", path.display()))?;
+    let url = Url::from_file_path(&canonical)
+        .map_err(|()| anyhow::anyhow!("{} has no file URL", canonical.display()))?;
+    print_json(&serde_json::json!({
+        "kind": "artifact_reference",
+        "artifact_type": artifact_type.wire_name(),
+        "url": url.as_str(),
+        "integrity": {
+            "algorithm": "keccak256",
+            "value": format!("{:#x}", alloy::primitives::keccak256(&bytes)),
+        },
+        "bytes": bytes.len(),
+    }))
+}
+
+/// Which artifact a body is, from the field each kind requires.
+///
+/// Guessing is safe here in a way it would not be inside the wallet: a wrong
+/// guess produces an envelope whose `artifact_type` the tool it is handed to
+/// rejects outright, and the parse below has already refused a body that is
+/// not the kind it was named. `--type` settles it for anything ambiguous.
+fn infer_reference_type(value: &serde_json::Value) -> Result<ReferenceType> {
+    // A bare array of token entries is the one shape with no object at all.
+    if value.is_array() {
+        return Ok(ReferenceType::TokenList);
+    }
+    let object = value
+        .as_object()
+        .context("a referenced body is a JSON object, or an array for a bare token list")?;
+    if object.contains_key("ordered_steps") {
+        Ok(ReferenceType::ExecutionPlan)
+    } else if object.contains_key("calls") {
+        Ok(ReferenceType::ReadCalls)
+    } else if object.contains_key("tokens") {
+        Ok(ReferenceType::TokenList)
+    } else {
+        bail!(
+            "could not tell what this file holds from its fields; \
+             pass --type execution_plan, read_calls, or token_list"
+        )
+    }
 }
 
 fn print_completion_script(shell: Shell) -> Result<()> {

@@ -423,10 +423,10 @@ async fn transaction_approval_request(
     .fact("Wallet", &pending.wallet_id)
     .fact("Network", &pending.network_name)
     .fact("Chain ID", &pending.chain_id)
-    // The vetted TLS host the plan body was fetched from, or "inline data
-    // URI" for an agent-held plan. A plan this wallet built itself shows
-    // that plainly, so a reviewer always knows which producer they are
-    // trusting.
+    // The vetted TLS host the plan body was fetched from, "inline data URI"
+    // for an agent-held plan, or "a file on this machine" for one read off
+    // local disk. A plan this wallet built itself shows that plainly, so a
+    // reviewer always knows which producer they are trusting.
     .fact(
         "Plan source",
         pending

@@ -29,6 +29,19 @@ never echoes response bytes in an error. The fetched plan then passes the same
 parse, validation, simulation, and policy path as any inline plan, so the URL
 transport grants no authority; `data:` URIs decode locally with no network.
 
+A `file:` URL is the third form, for a plan the agent assembled rather than
+received, and it is a read of this machine rather than a request off it. The
+caller already has that read — the transport is stdio, so it runs as the
+owner — and what it does not get is the wallet reading a file on its behalf
+and reporting back: the digest and byte count are mandatory, so naming a body
+means already holding its bytes, the path must be a regular file so a FIFO
+cannot hold the call open, and a mismatch reports neither the file's real
+length nor its computed digest. The residual disclosure is whether a path
+exists and opens. This assumes the transport stays stdio; a network-reachable
+transport would make the caller someone other than the owner, and `file:`
+would have to be reconsidered along with everything else that assumption
+carries.
+
 ### Key custody, and the presence check that is deliberately absent
 
 Private keys are individual OS credential-store entries keyed by wallet ID,

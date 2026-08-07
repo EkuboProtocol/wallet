@@ -4,7 +4,7 @@ _ekubo-wallet() {
   local -a choices
 
   if (( CURRENT == 2 )); then
-    _values "command" server version status portfolio balance bal account acct network net policy transaction tx token address-book agent legal review completion \
+    _values "command" server version status portfolio balance bal account acct network net policy transaction tx token address-book agent legal review reference completion \
       --data-dir --json --help --version
     return
   fi
@@ -23,6 +23,7 @@ _ekubo-wallet() {
         choices=("${(@f)$(ekubo-wallet __complete approvals-described 2>/dev/null)}")
         _describe "pending approval" choices
         ;;
+      reference) _files -g '*.json' ;;
       completion) _values "shell" bash zsh fish elvish powershell ;;
     esac
     return

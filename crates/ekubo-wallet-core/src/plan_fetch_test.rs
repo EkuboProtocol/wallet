@@ -377,6 +377,170 @@ async fn refuses_an_oversized_data_uri() {
     assert!(error.to_string().contains("exceeds"), "{error}");
 }
 
+mod file_references {
+    use super::*;
+
+    /// A file holding `body`, and the `file:` URL that names it. The
+    /// directory is returned with the URL because dropping it deletes the
+    /// file, which is exactly the failure the caller is not testing.
+    fn written(body: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("artifact.json");
+        std::fs::write(&path, body).unwrap();
+        let url = Url::from_file_path(&path).unwrap().to_string();
+        (directory, path, url)
+    }
+
+    #[tokio::test]
+    async fn resolves_a_plan_an_agent_left_on_disk() {
+        let body = plan_json();
+        let (_directory, _path, url) = written(&body);
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+        let (plan, source) = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap();
+        assert_eq!(plan.ordered_steps.len(), 1);
+        assert_eq!(source, ArtifactSource::LocalFile);
+        // What the owner reads on the approval screen. It must not be
+        // mistakable for the wallet having built the plan itself.
+        assert_eq!(source.to_string(), "a file on this machine");
+    }
+
+    #[tokio::test]
+    async fn a_file_reference_must_carry_integrity_and_a_byte_count() {
+        // The digest is what ties the bytes read at send time to the ones
+        // read at simulate time, and what stops a reference from naming a
+        // file whose contents its author does not already have.
+        let body = plan_json();
+        let (_directory, _path, url) = written(&body);
+        let reference = reference_for(ArtifactType::ExecutionPlan, url.clone(), None);
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("integrity block"), "{error}");
+        assert!(error.contains("ekubo-wallet reference"), "{error}");
+
+        let mut without_count = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+        without_count.bytes = None;
+        let error = resolve(&without_count, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("byte count"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_changed_file_is_refused_without_describing_what_it_holds() {
+        let body = plan_json();
+        let (_directory, path, url) = written(&body);
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+
+        // Longer than the promise, so a message that named the file's real
+        // size would be reporting a fact about a file the caller may never
+        // have read.
+        let replacement = format!("{}    ", plan_json());
+        std::fs::write(&path, &replacement).unwrap();
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("rebuild the reference"), "{error}");
+        assert!(
+            !error.contains(&replacement.len().to_string()),
+            "the size of a file the caller could not describe leaked: {error}"
+        );
+
+        // Same length, different bytes: the digest is the only thing that
+        // catches it, and the digest it computed is the one thing the error
+        // may not say.
+        let replacement = plan_json().replace("0x2222", "0x3333");
+        assert_eq!(replacement.len(), body.len());
+        std::fs::write(&path, &replacement).unwrap();
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("must not be simulated or signed"), "{error}");
+        assert!(
+            !error.contains(digest_of(&replacement).trim_start_matches("0x")),
+            "the digest of a file the caller could not describe leaked: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_a_file_url_naming_another_host() {
+        // This process speaks to no file server, so an authority is not a
+        // fetch it declines to make — it is a path it refuses to invent.
+        let body = plan_json();
+        let reference = reference_for(
+            ArtifactType::ExecutionPlan,
+            "file://files.example/plans/one.json",
+            Some(&body),
+        );
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("absolute local path"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn refuses_anything_that_is_not_a_regular_file() {
+        // A directory here, but the check is really about the FIFO and the
+        // character device: both would hold the tool call open indefinitely.
+        let body = plan_json();
+        let directory = tempfile::tempdir().unwrap();
+        let url = Url::from_directory_path(directory.path())
+            .unwrap()
+            .to_string();
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_names_the_path_the_caller_gave() {
+        let body = plan_json();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("never-written.json");
+        let url = Url::from_file_path(&path).unwrap().to_string();
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+        let error = resolve(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("could not be read"), "{error}");
+        assert!(error.contains("never-written.json"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn read_call_bundles_travel_the_same_way() {
+        let body = serde_json::json!({
+            "chain_id": "1",
+            "calls": [{
+                "to": "0x2222222222222222222222222222222222222222",
+                "data": "0x18160ddd",
+            }],
+        })
+        .to_string();
+        let (_directory, _path, url) = written(&body);
+        let reference = reference_for(ArtifactType::ReadCalls, url, Some(&body));
+        let fetched = fetch_reference(
+            &reference,
+            ArtifactType::ReadCalls,
+            FetchPolicy::production(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched.bytes, body.as_bytes());
+        assert_eq!(fetched.source, ArtifactSource::LocalFile);
+    }
+}
+
 #[test]
 fn public_ip_classification_covers_reserved_ranges() {
     for private in [

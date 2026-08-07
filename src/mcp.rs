@@ -235,7 +235,11 @@ struct SimulateInput {
     /// integrity digest and byte count over what it actually fetched, so what
     /// the agent saw prepared is what gets simulated. An inline plan travels
     /// as an envelope whose url is a `data:application/json[;base64],…` URI
-    /// of its exact bytes (integrity optional there).
+    /// of its exact bytes (integrity optional there). A plan you assembled
+    /// yourself — two prepared plans spliced into one batch, say — can stay
+    /// on disk instead: write the JSON, run `ekubo-wallet reference <path>`,
+    /// and pass the `file:` envelope it prints, integrity and byte count
+    /// included, so the calldata never travels through your context.
     reference: ArtifactReference,
     /// Simulate on top of everything already applied to this temporary fork
     /// and, if execution succeeds, append this plan to it. Omit to simulate
@@ -264,8 +268,10 @@ struct SendExecutionPlanInput {
     wallet_id: String,
     chain_id: String,
     /// The producer's `artifact_reference` envelope for the plan to simulate
-    /// and send, passed through VERBATIM. Provide exactly one of `reference`,
-    /// `simulation_id`, or `request_id`.
+    /// and send, passed through VERBATIM, or the `file:` envelope
+    /// `ekubo-wallet reference <path>` prints for a plan you assembled and
+    /// wrote to disk. Provide exactly one of `reference`, `simulation_id`, or
+    /// `request_id`.
     #[serde(default)]
     reference: Option<ArtifactReference>,
     /// The `simulation_id` of a plan already simulated against real chain
@@ -902,7 +908,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_simulate_execution_plan",
-        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result still goes to wallet_send_execution_plan, which queues it for human approval.",
+        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result still goes to wallet_send_execution_plan, which queues it for human approval.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_simulate_execution_plan(
@@ -1134,7 +1140,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_batch_eth_call",
-        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the stored call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
+        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the stored call bundle itself instead of having it restated. A bundle you assembled yourself can stay on disk: write it, run `ekubo-wallet reference <path>`, and pass the file: envelope it prints. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_batch_eth_call(
@@ -1450,7 +1456,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference; send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; policy denials queue for approval either way. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; policy denials queue for approval either way. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

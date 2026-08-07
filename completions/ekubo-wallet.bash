@@ -13,7 +13,7 @@ _ekubo_wallet() {
 
   case "$COMP_CWORD" in
     1)
-      choices="server version status portfolio balance bal account acct network net policy transaction tx token address-book agent legal review completion --data-dir --json --help --version"
+      choices="server version status portfolio balance bal account acct network net policy transaction tx token address-book agent legal review reference completion --data-dir --json --help --version"
       ;;
     2)
       case "$first" in
@@ -27,6 +27,7 @@ _ekubo_wallet() {
         agent) choices="list add remove delete" ;;
         legal) choices="status show accept" ;;
         review) choices="$(ekubo-wallet __complete approvals 2>/dev/null)" ;;
+        reference) choices="--type" ;;
         completion) choices="bash zsh fish elvish powershell" ;;
       esac
       ;;

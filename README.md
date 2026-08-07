@@ -12,9 +12,11 @@ dapp, or other MCP server. Any tool can produce a signer-neutral execution plan;
 this wallet validates, simulates, and policy-checks every plan identically
 regardless of where it came from, and treats all of them as untrusted input.
 Plans arrive by URL — a producer reference's public https URL, verified
-against the keccak256 digest published beside it, or a `data:application/json`
-URI carrying the plan inline — so the agent relaying a plan between servers
-passes a line of text instead of the plan body.
+against the keccak256 digest published beside it, a `data:application/json`
+URI carrying the plan inline, or a `file:` URL naming a body written to this
+machine's disk and described with `ekubo-wallet reference <path>` — so the
+agent relaying a plan between servers, or assembling one of its own out of
+several, passes a line of text instead of the plan body.
 
 This is security-sensitive software. It has not been independently audited, and
 nothing here should be read as a claim that it has.

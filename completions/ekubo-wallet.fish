@@ -27,6 +27,7 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a address-book -d 'Man
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a agent -d 'Register this server with the agents on this machine'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a legal -d 'Read and accept legal documents'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a review -d 'Review a pending request and approve or reject it'
+complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a reference -d 'Print the artifact_reference envelope for a local JSON body'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a completion -d 'Print shell completions'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l data-dir -r -d 'Override the wallet data directory'
 complete -c ekubo-wallet -l json -d 'Print machine-readable JSON instead of the human view'
@@ -43,6 +44,7 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from legal; and not __fish_s
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show; and __fish_seen_subcommand_from legal' -a 'terms privacy licenses'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add remove delete; and __fish_seen_subcommand_from address-book' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from address-book; and __fish_seen_subcommand_from add' -l note -r -d 'Attach a short note to the alias'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from reference' -l type -r -a 'execution_plan read_calls token_list' -d 'What the file holds'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish elvish powershell' -a 'bash zsh fish elvish powershell'
 
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from export remove; and __fish_seen_subcommand_from account acct' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'

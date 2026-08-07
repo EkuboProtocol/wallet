@@ -66,8 +66,9 @@ pub struct PendingTransaction {
     pub chain_id: String,
     pub execution_plan: ExecutionPlan,
     /// Where the plan's bytes came from — the TLS-vetted https host that
-    /// served them or "inline data URI" — shown as an approval fact. None for
-    /// plans this process built itself (transfers, CLI).
+    /// served them, "inline data URI", or "a file on this machine" — shown as
+    /// an approval fact. None for plans this process built itself (transfers,
+    /// CLI).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_source: Option<String>,
     pub digest: String,
@@ -1026,14 +1027,16 @@ impl PendingRow {
 pub const MAX_CANCELLATION_ATTEMPTS: usize = 8;
 
 /// A stored plan source must be exactly what the fetch layer produces — the
-/// literal "inline data URI" or a lowercase vetted hostname — so a tampered
-/// database cannot inject terminal escapes or misleading text into the
-/// approval screen.
+/// literal "inline data URI", the literal "a file on this machine", or a
+/// lowercase vetted hostname — so a tampered database cannot inject terminal
+/// escapes or misleading text into the approval screen. Neither literal can
+/// be mistaken for a host name, because a host name has no space in it.
 fn validate_plan_source(value: Option<&str>) -> Result<()> {
     let Some(value) = value else { return Ok(()) };
     ensure!(value.len() <= 255, "stored plan source exceeds 255 bytes");
     ensure!(
         value == "inline data URI"
+            || value == "a file on this machine"
             || (!value.is_empty()
                 && value.bytes().all(|byte| byte.is_ascii_lowercase()
                     || byte.is_ascii_digit()

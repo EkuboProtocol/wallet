@@ -16,8 +16,27 @@
 //! URI that never touches the network — there the bytes are the reference,
 //! so integrity is verified only when supplied.
 //!
-//! These fetches are this process's only outbound requests that are not a
-//! configured chain RPC, so admission is deliberately narrow: `https` on the
+//! A `file:` URL reads a body the caller left on this machine's disk. It
+//! exists so an agent can assemble one — download two prepared plans, splice
+//! their `ordered_steps` together, write the result — without carrying a
+//! megabyte of calldata through its context to say what it built. Such a body
+//! is verified exactly as a fetched one is, and for the same reason it is
+//! required to be: a local body is not the reference the way a `data:`
+//! payload is, so nothing but the digest ties the bytes read at send time to
+//! the bytes read at simulate time. `ekubo-wallet reference <path>` prints
+//! the envelope, digest included, for a file the caller just wrote.
+//!
+//! Requiring the digest is also what keeps a `file:` reference from becoming
+//! a way to read this machine. The transport is stdio, so the caller already
+//! runs as the owner and can open any of these paths itself; what it must not
+//! gain is a way to make *the wallet* open one and repeat what it found to
+//! whoever supplied the envelope. It cannot, because naming a body requires
+//! its digest — which requires already holding its bytes — and because the
+//! two errors that would otherwise describe an unmatched local body, the byte
+//! count and the computed digest, are withheld for local reads.
+//!
+//! The `https` fetches are this process's only outbound requests that are not
+//! a configured chain RPC, so admission is deliberately narrow: `https` on the
 //! default port to a public, resolvable host; no credentials, fragments,
 //! redirects, or private/internal addresses; a hard response-size cap; and
 //! errors that describe the failure without echoing a byte of the response
@@ -25,7 +44,7 @@
 
 use crate::core::execution_plan::{ExecutionPlan, MAX_SERIALIZED_PLAN_BYTES};
 use alloy::primitives::keccak256;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::Engine as _;
 use percent_encoding::percent_decode_str;
 use schemars::JsonSchema;
@@ -65,9 +84,11 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What transports `resolve_execution_plan` will accept.
 ///
-/// Production admits only public `https` and local `data:` URIs. Debug builds
-/// may loosen that to plain `http` and loopback hosts for end-to-end testing
-/// against a local plan producer; release builds never do.
+/// Production admits only public `https`, `data:`, and `file:` URIs. Debug
+/// builds may loosen that to plain `http` and loopback hosts for end-to-end
+/// testing against a local plan producer; release builds never do. `file:`
+/// needs no such loosening: it names this machine either way, and what makes
+/// it safe is the required digest rather than a build flag.
 #[derive(Clone, Copy, Debug)]
 pub struct FetchPolicy {
     allow_insecure: bool,
@@ -176,8 +197,9 @@ pub struct ArtifactReference {
     /// Must be `artifact_reference`.
     pub kind: String,
     pub artifact_type: ArtifactType,
-    /// Public `https` URL of the stored body, or a
-    /// `data:application/json[;base64]` URI carrying it inline.
+    /// Public `https` URL of the stored body, a
+    /// `data:application/json[;base64]` URI carrying it inline, or a `file:`
+    /// URL naming an absolute path on this machine.
     pub url: String,
     #[serde(default)]
     pub integrity: Option<ArtifactIntegrity>,
@@ -192,10 +214,18 @@ pub struct ArtifactReference {
 /// Where verified bytes came from, for provenance display at approval time.
 /// The `https` host is the vetted, pinned name admission checked, so showing
 /// it to the user is showing a TLS-verified fact.
+///
+/// `LocalFile` deliberately does not carry the path. A hostname is evidence —
+/// TLS proved it — while a path is a string the caller chose, and one chosen
+/// as `/tmp/reviewed by owner - safe.json` would put its own caption on the
+/// approval screen. What the owner needs from provenance here is that the
+/// bytes came off this disk rather than from a vetted publisher, and that is
+/// the whole of what it says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtifactSource {
     Https { host: String },
     InlineDataUri,
+    LocalFile,
 }
 
 impl fmt::Display for ArtifactSource {
@@ -203,6 +233,7 @@ impl fmt::Display for ArtifactSource {
         match self {
             Self::Https { host } => formatter.write_str(host),
             Self::InlineDataUri => formatter.write_str("inline data URI"),
+            Self::LocalFile => formatter.write_str("a file on this machine"),
         }
     }
 }
@@ -293,36 +324,132 @@ pub async fn fetch_reference(
             decode_data_uri(&reference.url, expected_type)?,
             ArtifactSource::InlineDataUri,
         )
+    } else if reference.url.starts_with("file:") {
+        // A local body is fetched, not carried, so it is verified like a
+        // fetched one — and unlike a fetched one, the verification is also
+        // what stops the read from describing a file the caller could not
+        // already describe itself.
+        require_verifiable(
+            reference,
+            noun,
+            "read from a local file",
+            "; `ekubo-wallet reference <path>` prints an envelope for a file you just wrote",
+        )?;
+        (
+            read_local_file(&reference.url, expected_type)?,
+            ArtifactSource::LocalFile,
+        )
     } else {
         // A body that travels over the network must be verifiable: the
         // silent skip-verification path of the old optional digest is gone.
-        ensure!(
-            reference.integrity.is_some(),
-            "{noun} references fetched over the network must carry an integrity block"
-        );
-        ensure!(
-            reference.bytes.is_some(),
-            "{noun} references fetched over the network must carry their exact byte count"
-        );
+        require_verifiable(reference, noun, "fetched over the network", "")?;
         let (bytes, host) = fetch_remote(&reference.url, policy, expected_type).await?;
         (bytes, ArtifactSource::Https { host })
     };
 
+    // A body whose bytes the caller does not already hold must not be
+    // described back to it. For a `file:` read that is the point (see the
+    // module docs); for the other two the caller wrote or hosted the bytes,
+    // so naming what was actually found is free and much easier to debug.
+    let describe_body = source != ArtifactSource::LocalFile;
     if let Some(expected_bytes) = reference.bytes {
-        ensure!(
-            body.len() as u64 == expected_bytes,
-            "the reference promised {expected_bytes} bytes but the {noun} body is {} bytes; \
-             the artifact was altered or truncated",
-            body.len()
-        );
+        if describe_body {
+            ensure!(
+                body.len() as u64 == expected_bytes,
+                "the reference promised {expected_bytes} bytes but the {noun} body is {} bytes; \
+                 the artifact was altered or truncated",
+                body.len()
+            );
+        } else {
+            ensure!(
+                body.len() as u64 == expected_bytes,
+                "the file does not hold the {expected_bytes} bytes the {noun} reference promised; \
+                 rebuild the reference for the file as it is now"
+            );
+        }
     }
     if let Some(integrity) = &reference.integrity {
-        verify_digest(&body, &integrity.value, expected_type)?;
+        verify_digest(&body, &integrity.value, expected_type, describe_body)?;
     }
     Ok(FetchedArtifact {
         bytes: body,
         source,
     })
+}
+
+/// Both facts a body living outside its own reference must come with before
+/// it is worth reading: what it should hash to, and how long it should be.
+fn require_verifiable(
+    reference: &ArtifactReference,
+    noun: &str,
+    how: &str,
+    hint: &str,
+) -> Result<()> {
+    ensure!(
+        reference.integrity.is_some(),
+        "{noun} references {how} must carry an integrity block{hint}"
+    );
+    ensure!(
+        reference.bytes.is_some(),
+        "{noun} references {how} must carry their exact byte count{hint}"
+    );
+    Ok(())
+}
+
+/// Read a body from the absolute local path a `file:` URL names.
+///
+/// Synchronous inside an async caller on purpose: this is a bounded read of
+/// at most `MAX_SERIALIZED_PLAN_BYTES` from local storage, and the wallet
+/// already does its encrypted-database work the same way. What it must not
+/// do is block
+/// indefinitely, which is why the path has to be a regular file — a FIFO
+/// would hold the open itself until someone wrote to it, and a character
+/// device would answer the read forever.
+fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let noun = artifact_type.noun();
+    let parsed = Url::parse(url).with_context(|| format!("{noun} URL is not a valid URL"))?;
+    ensure!(
+        parsed.query().is_none(),
+        "{noun} file URLs must not carry a query"
+    );
+    ensure!(
+        parsed.fragment().is_none(),
+        "{noun} file URLs must not carry a fragment"
+    );
+    // `to_file_path` admits an empty authority or `localhost` and nothing
+    // else, so `file://files.example/plan.json` is refused here rather than
+    // turning into a request: this process speaks to no file server.
+    let path = parsed.to_file_path().map_err(|()| {
+        anyhow!("{noun} file URL must name an absolute local path, as in file:///tmp/plan.json")
+    })?;
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
+    ensure!(
+        metadata.is_file(),
+        "{noun} file {} is not a regular file",
+        path.display()
+    );
+    let measured = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    ensure!(
+        measured <= MAX_SERIALIZED_PLAN_BYTES,
+        "{noun} file exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+    );
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
+    let mut body = Vec::with_capacity(measured);
+    // Read one byte past the cap rather than trusting the size just measured:
+    // the file may have grown between the two calls, and the limit is on what
+    // this process holds, not on what it expected to.
+    file.take(MAX_SERIALIZED_PLAN_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
+    ensure!(
+        body.len() <= MAX_SERIALIZED_PLAN_BYTES,
+        "{noun} file exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+    );
+    Ok(body)
 }
 
 /// Decode `data:application/json[;base64],…` without touching the network.
@@ -521,21 +648,47 @@ fn pinned_client(key: PinnedKey) -> Result<reqwest::Client> {
     Ok(client)
 }
 
-fn verify_digest(bytes: &[u8], expected: &str, artifact_type: ArtifactType) -> Result<()> {
+/// Check a body against the digest its reference promised.
+///
+/// `describe_body` decides whether the failure may name the digest that was
+/// actually computed. It may when the caller supplied or hosted the bytes,
+/// where it is the fact that makes a stale reference obvious. It may not for
+/// a local file: a caller that cannot produce a file's digest must not be
+/// handed it for guessing at, which is the difference between a `file:`
+/// reference reading a body its caller already had and one fingerprinting a
+/// body it did not.
+fn verify_digest(
+    bytes: &[u8],
+    expected: &str,
+    artifact_type: ArtifactType,
+    describe_body: bool,
+) -> Result<()> {
     let normalized = expected.strip_prefix("0x").unwrap_or(expected);
     ensure!(
         normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "integrity.value must be a 32-byte hex keccak256 digest"
     );
     let actual = format!("{:x}", keccak256(bytes));
-    ensure!(
-        actual == normalized.to_ascii_lowercase(),
-        "fetched {} bytes hash to 0x{actual} but the reference promised 0x{}; \
-         the body was altered or the reference is stale, so {}",
-        artifact_type.noun(),
-        normalized.to_ascii_lowercase(),
-        artifact_type.mismatch_consequence()
-    );
+    let matched = actual == normalized.to_ascii_lowercase();
+    if describe_body {
+        ensure!(
+            matched,
+            "fetched {} bytes hash to 0x{actual} but the reference promised 0x{}; \
+             the body was altered or the reference is stale, so {}",
+            artifact_type.noun(),
+            normalized.to_ascii_lowercase(),
+            artifact_type.mismatch_consequence()
+        );
+    } else {
+        ensure!(
+            matched,
+            "the file does not hold the {} the reference promised 0x{} for, so {}; \
+             rebuild the reference for the file as it is now",
+            artifact_type.noun(),
+            normalized.to_ascii_lowercase(),
+            artifact_type.mismatch_consequence()
+        );
+    }
     Ok(())
 }
 

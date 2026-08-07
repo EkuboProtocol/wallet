@@ -68,6 +68,7 @@ broadcast.
 |---|---|
 | Fetched plan bytes match the caller-supplied keccak256 digest | `plan_fetch::verify_digest`, sole caller `plan_fetch::fetch_verified_bytes` |
 | Fetch admission: https, default port, public pinned addresses, no redirects, 16 MiB cap, no body echo | `plan_fetch::fetch_remote`, `plan_fetch::is_public_ip` |
+| A `file:` body is admitted only as a regular file with a mandatory digest and byte count, and a mismatch reports neither its real length nor its computed digest | `plan_fetch::read_local_file`, `plan_fetch::require_verifiable`, and the `describe_body` argument threaded from `plan_fetch::fetch_reference` into `plan_fetch::verify_digest` |
 | Plan shape and size bounds | `core::execution_plan::ExecutionPlan::{parse, validate}` and its `MAX_*` constants |
 | Policy evaluation is the sole automatic gate | `core::policy::evaluate_policy`, verdict via `core::policy::policy_allows`; the denial/failure distinction via `core::policy::policy_denies` and `SIMULATION_FAILED_CODE` |
 | No policy predicate reads a simulation: every rule is decided from the plan's own bytes | `core::policy::evaluate_policy` takes only the plan and the policy; pinned by `tests/boundary.rs::no_policy_predicate_can_consult_a_simulation` |

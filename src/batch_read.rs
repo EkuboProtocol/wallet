@@ -90,8 +90,10 @@ pub struct BatchEthCallInput {
     /// whose stored body is the exact call bundle: the same JSON object as
     /// this tool's inline arguments minus `fork_id` (`chain_id`, optional
     /// `block_parameter` and `from`, `calls`). Fetched under the
-    /// execution-plan admission policy — public https on the default port or
-    /// a `data:application/json` URI — then verified against the envelope's
+    /// execution-plan admission policy — public https on the default port, a
+    /// `data:application/json` URI, or a `file:` URL naming a bundle you
+    /// wrote yourself and described with `ekubo-wallet reference <path>` —
+    /// then verified against the envelope's
     /// integrity digest and byte count. The body's `chain_id` must equal
     /// `chain_id` above, and the body alone supplies `block_parameter`,
     /// `from`, and `calls`.

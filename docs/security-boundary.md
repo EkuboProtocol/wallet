@@ -18,7 +18,12 @@ wallet cannot be used to exfiltrate what an internal endpoint returns. The
 fetched bytes are checked against the caller-supplied keccak256 digest when
 one is given, and the result is parsed and validated identically to an inline
 plan — a URL grants no trust. `data:` URIs decode locally and touch no
-network.
+network. `file:` URLs read this machine's disk, for bodies an agent assembled
+rather than received; there the digest and byte count are mandatory, and
+because naming a body requires already holding its bytes — and because a
+mismatch reports neither the file's real length nor its computed digest — the
+read tells its caller nothing about a file it did not write beyond whether
+the path could be opened.
 
 Exceptional signing has an additional boundary: the CLI re-simulates, prepares
 the exact nonce/gas/fees/delegation without loading the key, shows those fields,
