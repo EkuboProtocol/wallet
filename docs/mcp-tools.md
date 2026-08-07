@@ -9,7 +9,7 @@
 | `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. Accepts a `fork_id` to read simulated state. |
 | `wallet_list_tokens` | Page through the tokens the owner has confirmed, optionally per chain. |
 | `wallet_search_tokens` | Find confirmed tokens by symbol, name, or exact address, optionally within one chain. |
-| `wallet_propose_tokens` | Suggest up to 1000 tokens, with the list's own symbol/name/decimals, for the owner to confirm in the CLI. Writes no names. |
+| `wallet_propose_tokens` | Suggest up to 1000 tokens, with the list's own symbol/name/decimals, for the owner to confirm in the CLI. Inline or by `token_list_reference`. Writes no names. |
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, via Multicall3, pinned to a reported block. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
@@ -121,7 +121,21 @@ separate proposals table that no display path reads. Suggestions become names
 only when the owner confirms them with `ekubo-wallet token review`, which
 groups them by the list that vouched for them so a whole list is one decision
 rather than hundreds. The owner can also import a list themselves with
-`ekubo-wallet token import <file>`, which reads the standard token-list shape.
+`ekubo-wallet token import <file>`, which reads the standard token-list shape,
+or pipe one in with `ekubo-wallet token import -`:
+
+```sh
+curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet token import -
+```
+
+The pipe exists because a list is the largest thing an agent is ever asked to
+carry, and carrying it costs output tokens per field — roughly fifty thousand
+of them for a thousand-token list. A shell pipe costs none, because the bytes
+never enter the conversation at all. It changes nothing else: the review
+screen still opens (every prompt reads the terminal, not standard input), and
+nothing is named until the owner accepts it.
+
+Agents get the same saving through a `token_list_reference` envelope, below.
 
 The chain is asked one question, and it is not about identity. When the owner
 accepts, each address is checked to confirm something token-like lives there,
@@ -212,6 +226,28 @@ Calls are supplied either inline or by a producer's `read_calls_reference`
 envelope passed verbatim as `reference` (mutually exclusive with inline
 `calls`; with `reference`, leave `from` unset and `block_parameter` at its
 default — the fetched body governs both).
+
+Token lists are the third referenced artifact, and the one where the saving is
+largest. A producer returns a `token_list_reference` envelope whose stored
+body is a curated token list; the agent passes it verbatim as the `reference`
+argument of `wallet_propose_tokens` or `wallet_get_balances`, with no inline
+`tokens`. The same admission policy, integrity verification, and size cap
+apply, plus a 4 MiB list-specific cap and the existing 1000-entry limit.
+
+The parser is deliberately more tolerant than the read-call one, because a
+token list is a published document rather than an exact argument object:
+`chain_id` is accepted alongside `chainId`, a chain ID may be a JSON number, a
+decimal string, or `0x`-hex, and unknown fields are ignored so a curator
+adding a logo URL does not break the import. Entries whose address is not a
+20-byte EVM address — the Starknet rows in a multi-ecosystem list — are
+skipped and counted in `skipped_non_evm` rather than failing the list.
+
+Tolerance here costs nothing, because a token list authorizes nothing. It
+carries display names that reach a proposals table no display path reads, and
+every one of them still waits for the owner in `ekubo-wallet token review`.
+`wallet_get_balances` does not even read the names: it takes the addresses on
+the selected chain and ignores the rest, so one canonical multi-chain list
+serves every chain without being restated.
 
 Five decode plan kinds are supported: `function_result`, `abi_parameters`,
 `multicall3`, `function_result_bytes_array`, and `semantic_value`. Complete

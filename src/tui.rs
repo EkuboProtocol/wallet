@@ -17,6 +17,7 @@
 use std::fmt::Display;
 use std::io::{self, IsTerminal};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, ensure};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -91,11 +92,38 @@ pub fn paint_stdout(text: &str, tone: Tone) -> String {
     }
 }
 
-/// Whether prompts can run at all: interactive stdin plus a terminal to draw
-/// on. Callers decide what to do when they cannot.
+/// Set once a command has read standard input to EOF as *data* rather than as
+/// keystrokes. See [`note_stdin_consumed`].
+static STDIN_CONSUMED: AtomicBool = AtomicBool::new(false);
+
+/// Record that standard input carried a document, not keystrokes, so
+/// [`interactive`] stops treating it as evidence either way.
+///
+/// `ekubo-wallet token import -` exists so a list can be piped in without an
+/// agent re-emitting it, and a pipe is by definition not a terminal — so the
+/// ordinary stdin check would conclude "not interactive" and silently confirm
+/// nothing, which is the one outcome that would make the feature useless. It
+/// is safe to disregard stdin here because no prompt in this wallet reads it:
+/// every one of them goes through crossterm, which reads the controlling
+/// terminal directly (`/dev/tty` on Unix, the console input handle on
+/// Windows) and draws on stderr. Redirecting stdin therefore takes nothing
+/// away from the picker.
+///
+/// The check on stderr below is what still has to hold, and it is the one
+/// that matters: with no terminal to draw on there is no review, so a
+/// piped-in list in a script confirms nothing rather than confirming
+/// everything.
+pub fn note_stdin_consumed() {
+    STDIN_CONSUMED.store(true, Ordering::Relaxed);
+}
+
+/// Whether prompts can run at all: a terminal to draw on, and a standard
+/// input that is either a terminal or has already been spent on a document.
+/// Callers decide what to do when they cannot.
 #[must_use]
 pub fn interactive() -> bool {
-    io::stdin().is_terminal() && io::stderr().is_terminal()
+    (io::stdin().is_terminal() || STDIN_CONSUMED.load(Ordering::Relaxed))
+        && io::stderr().is_terminal()
 }
 
 /// Punctuates a prompt message so the answer cannot read as part of the

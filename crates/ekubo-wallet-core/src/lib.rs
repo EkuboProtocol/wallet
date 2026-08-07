@@ -35,5 +35,6 @@ pub mod sanitize;
 pub(crate) mod signature_requests;
 pub mod simulation;
 pub mod simulation_store;
+pub mod token_list;
 pub mod token_store;
 pub mod typed_data;

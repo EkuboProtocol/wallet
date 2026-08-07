@@ -35,7 +35,7 @@ use num_bigint::BigUint;
 use std::{
     collections::BTreeMap,
     fs,
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
@@ -385,13 +385,26 @@ enum TokenCommand {
     /// reviewing a transaction, so nothing an agent proposes is displayed as a
     /// name until it is accepted here.
     Review,
-    /// Import a token list file, confirming what to trust in the terminal.
+    /// Import a token list, confirming what to trust in the terminal.
     ///
     /// Reads the standard token-list shape: a `tokens` array of entries with
     /// `chainId`, `address`, `symbol`, `name`, and `decimals`, or a bare array
-    /// of the same.
+    /// of the same. `chain_id` is accepted for `chainId`, and a chain ID may
+    /// be a number, a decimal string, or `0x`-hex, so a list can be piped
+    /// straight from a curator's API without being rewritten on the way.
+    ///
+    /// Pass `-` to read the list from standard input:
+    ///
+    ///   curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet token import -
+    ///
+    /// The review screen still opens, because piping in a list decides
+    /// nothing: it only saves an agent from re-typing it.
+    // clap prints this doc comment as `--help` text, where a URL in angle
+    // brackets would be shown with the brackets. The example is meant to be
+    // copied and run.
+    #[allow(clippy::doc_markdown)]
     Import {
-        /// Path to the token list JSON file.
+        /// Path to the token list JSON file, or `-` for standard input.
         path: std::path::PathBuf,
         /// Name recorded as the source of these tokens; defaults to the
         /// list's own `name` field, then to the file name.
@@ -732,69 +745,71 @@ async fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMod
     }
 }
 
-/// One entry of a standard token-list file. Field names follow the token-list
-/// convention so a published list parses unmodified.
-#[derive(Debug, serde::Deserialize)]
-struct TokenListEntry {
-    #[serde(rename = "chainId")]
-    chain_id: u64,
-    address: String,
-    symbol: String,
-    #[serde(default)]
-    name: Option<String>,
-    decimals: u8,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(untagged)]
-enum TokenListFile {
-    Wrapped {
-        #[serde(default)]
-        name: Option<String>,
-        tokens: Vec<TokenListEntry>,
-    },
-    Bare(Vec<TokenListEntry>),
-}
-
 /// Import a token list the owner points at, confirming entries in the
 /// terminal. This is the trusted way names get into the database: the owner
-/// chose the file, and sees exactly what it would name before anything is
+/// chose the source, and sees exactly what it would name before anything is
 /// written.
+///
+/// Reading the bytes is the only thing that differs between a file and a
+/// pipe. Both are equally untrusted, both are parsed by the one shared
+/// [`crate::token_list`] parser, and both end at the same review screen — so
+/// `-` is a way to spend fewer tokens getting a list here, never a way to
+/// skip the owner.
 async fn run_token_import(
     config: &ConfigStore,
     path: &std::path::Path,
     list_name: Option<&str>,
     mode: OutputMode,
 ) -> Result<()> {
-    let body = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read token list {}", path.display()))?;
-    let parsed: TokenListFile = serde_json::from_str(&body)
-        .with_context(|| format!("{} is not a token list", path.display()))?;
-    let (declared_name, entries) = match parsed {
-        TokenListFile::Wrapped { name, tokens } => (name, tokens),
-        TokenListFile::Bare(tokens) => (None, tokens),
+    let from_stdin = path == std::path::Path::new("-");
+    let body = if from_stdin {
+        // Bounded at the parser's own cap plus one byte, so an endless pipe
+        // is refused by the size check rather than by the allocator.
+        let mut buffer = Vec::new();
+        io::stdin()
+            .take(crate::token_list::MAX_TOKEN_LIST_BYTES as u64 + 1)
+            .read_to_end(&mut buffer)
+            .context("failed to read the token list from standard input")?;
+        // Every prompt reads the terminal rather than stdin, so spending
+        // stdin on the list does not cost us the review screen.
+        crate::tui::note_stdin_consumed();
+        buffer
+    } else {
+        std::fs::read(path)
+            .with_context(|| format!("failed to read token list {}", path.display()))?
     };
+    let origin = if from_stdin {
+        "standard input".to_owned()
+    } else {
+        path.display().to_string()
+    };
+    let parsed = crate::token_list::parse_token_list(&body)
+        .with_context(|| format!("failed to import the token list from {origin}"))?;
     let source = list_name
         .map(str::to_owned)
-        .or(declared_name)
+        .or(parsed.declared_name)
         .unwrap_or_else(|| {
-            path.file_name()
-                .map_or_else(|| "token list".into(), |name| name.to_string_lossy().into())
+            if from_stdin {
+                "standard input".into()
+            } else {
+                path.file_name()
+                    .map_or_else(|| "token list".into(), |name| name.to_string_lossy().into())
+            }
         });
-    ensure!(!entries.is_empty(), "{} lists no tokens", path.display());
-
-    let mut listed = Vec::with_capacity(entries.len());
-    for entry in entries {
-        listed.push(crate::token_store::ListedToken {
-            chain_id: entry.chain_id,
-            address: Address::from_str(&entry.address)
-                .with_context(|| format!("token address {} is not valid", entry.address))?,
-            symbol: entry.symbol,
-            name: entry.name,
-            decimals: entry.decimals,
-        });
+    // Said before the screen opens, so a list that arrived shorter than the
+    // owner expected explains itself rather than just looking incomplete.
+    if parsed.skipped_non_evm > 0 {
+        crate::tui::warning(format!(
+            "Skipped {} entr{} without a 20-byte EVM address; this wallet cannot act on them.",
+            parsed.skipped_non_evm,
+            if parsed.skipped_non_evm == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ));
     }
-    confirm_and_store(config, vec![(source, listed)], mode, &[]).await
+    confirm_and_store(config, vec![(source, parsed.tokens)], mode, &[]).await
 }
 
 /// Review what agents have suggested. Accepting writes the names; rejecting

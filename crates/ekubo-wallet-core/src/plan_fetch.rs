@@ -6,9 +6,10 @@
 //! stored and an integrity block (keccak256 of its exact bytes plus their
 //! count). The agent between the producer
 //! and this wallet relays the envelope verbatim as a single `reference`
-//! argument instead of re-emitting kilobytes of calldata. Two artifact kinds
-//! travel this way: execution plans and read-call bundles (exact
-//! `wallet_batch_eth_call` argument bodies). This wallet fetches the body
+//! argument instead of re-emitting kilobytes of calldata. Three artifact
+//! kinds travel this way: execution plans, read-call bundles (exact
+//! `wallet_batch_eth_call` argument bodies), and curated token lists. This
+//! wallet fetches the body
 //! itself, verifies the digest and byte count, and then parses and validates
 //! it exactly as it would an inline one; a fetched body earns no extra trust
 //! from having a URL, and an inline body is still expressible as a `data:`
@@ -96,6 +97,7 @@ impl FetchPolicy {
 pub enum ArtifactType {
     ExecutionPlan,
     ReadCalls,
+    TokenList,
 }
 
 impl ArtifactType {
@@ -103,6 +105,7 @@ impl ArtifactType {
         match self {
             Self::ExecutionPlan => "execution plan",
             Self::ReadCalls => "read-call bundle",
+            Self::TokenList => "token list",
         }
     }
 
@@ -110,6 +113,7 @@ impl ArtifactType {
         match self {
             Self::ExecutionPlan => "execution_plan",
             Self::ReadCalls => "read_calls",
+            Self::TokenList => "token_list",
         }
     }
 
@@ -119,6 +123,7 @@ impl ArtifactType {
                 "re-run the producer's preparation tool for a fresh plan and reference"
             }
             Self::ReadCalls => "re-run the producer's tool for a fresh bundle and reference",
+            Self::TokenList => "re-run the producer's tool for a fresh list and reference",
         }
     }
 
@@ -126,6 +131,10 @@ impl ArtifactType {
         match self {
             Self::ExecutionPlan => "it must not be simulated or signed",
             Self::ReadCalls => "its calls must not be executed",
+            // A token list only ever becomes a suggestion the owner still has
+            // to confirm, so the consequence is about what they would be
+            // shown, not about anything that could be signed.
+            Self::TokenList => "none of its names may be suggested",
         }
     }
 }
@@ -208,6 +217,23 @@ pub async fn resolve_execution_plan_reference(
         serde_json::from_slice(&fetched.bytes).context("execution plan body is not valid JSON")?;
     let plan = ExecutionPlan::parse(value)?;
     Ok((plan, fetched.source))
+}
+
+/// Fetch, verify, and parse one referenced token list, and report where its
+/// bytes came from.
+///
+/// A token list earns no trust from having been fetched rather than typed:
+/// what comes back is a set of suggestions the owner still confirms one list
+/// at a time in `ekubo-wallet token review`. Verifying the digest only
+/// establishes that the bytes are the ones the producer published, which is
+/// the same thing it establishes for a plan.
+pub async fn resolve_token_list_reference(
+    reference: &ArtifactReference,
+    policy: FetchPolicy,
+) -> Result<(crate::token_list::ParsedTokenList, ArtifactSource)> {
+    let fetched = fetch_reference(reference, ArtifactType::TokenList, policy).await?;
+    let list = crate::token_list::parse_token_list(&fetched.bytes)?;
+    Ok((list, fetched.source))
 }
 
 /// Fetch one referenced body — remote `https` or local `data:` URI — and

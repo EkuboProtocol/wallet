@@ -6,7 +6,7 @@ pub use ekubo_wallet_core::{
     abi_decoder, address_book, approval, approval_summary, clear_signing, config, core, custody,
     execution, fork, human_presence, input_validation, legal, message, orchestrator, pending,
     plan_fetch, policy_context, policy_store, reconcile, rpc, sanitize, simulation,
-    simulation_store, token_store, typed_data,
+    simulation_store, token_list, token_store, typed_data,
 };
 
 pub mod approve_tui;

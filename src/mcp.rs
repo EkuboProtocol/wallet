@@ -446,9 +446,24 @@ struct ProposeTokensInput {
     /// Where these entries came from — the token list's own name, for
     /// instance. The owner reviews suggestions grouped under it and usually
     /// decides a whole list at once, so name the real source rather than
-    /// something generic.
-    list_name: String,
+    /// something generic. Required with inline `tokens`; with a `reference`
+    /// it overrides whatever name the referenced list declares.
+    #[serde(default)]
+    list_name: Option<String>,
+    /// Entries written out one by one. Provide exactly one of `tokens` and
+    /// `reference`; prefer `reference` for anything beyond a handful, since
+    /// restating a list here costs an output token per field.
+    #[serde(default)]
     tokens: Vec<ProposeTokenItem>,
+    /// A producer's `artifact_reference` envelope of `artifact_type`
+    /// `token_list`, passed through VERBATIM: never rename, edit, restate, or
+    /// reconstruct any of its fields. The wallet fetches the list itself and
+    /// verifies the envelope's integrity digest and byte count over what it
+    /// actually fetched. This changes only who carries the bytes — the
+    /// entries still reach the owner as suggestions and are still named
+    /// nothing until they accept them in `ekubo-wallet token review`.
+    #[serde(default)]
+    reference: Option<ArtifactReference>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -457,6 +472,11 @@ struct ProposeTokensOutput {
     summary: crate::token_store::ProposalSummary,
     /// Every suggestion now waiting for the owner, this call's included.
     awaiting_review: u64,
+    /// Entries a referenced list carried that this wallet cannot act on,
+    /// because their address is not 20 bytes — the Starknet rows in a
+    /// multi-ecosystem list, typically. Dropped rather than proposed, and
+    /// reported so a shorter proposal than expected explains itself.
+    skipped_non_evm: usize,
     next_step: String,
 }
 
@@ -492,7 +512,18 @@ struct GetBalancesInput {
     address: Option<String>,
     /// 1-1000 token contract addresses. Include
     /// 0x0000000000000000000000000000000000000000 to read the native balance.
+    /// Provide exactly one of `tokens` and `reference`.
+    #[serde(default)]
     tokens: Vec<String>,
+    /// A producer's `artifact_reference` envelope of `artifact_type`
+    /// `token_list`, passed through VERBATIM, whose entries supply the
+    /// addresses to read. Use this instead of restating a long list of
+    /// addresses. Only the addresses are used: this reads balances and never
+    /// consults or records what the list calls anything. Entries on other
+    /// chains are ignored, so one canonical multi-chain list can be pointed
+    /// at any chain.
+    #[serde(default)]
+    reference: Option<ArtifactReference>,
     /// Read this temporary simulation fork's hypothetical balances instead of
     /// real chain state.
     #[serde(default)]
@@ -1186,7 +1217,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_tokens",
-        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet token review`, where they accept or reject them by list. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. When the owner accepts, the only thing checked on-chain is that something token-like exists at the address, so a typo is caught then rather than here.",
+        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. Provide the entries one of two ways: inline in tokens, or — for anything beyond a handful — as a producer's token_list artifact_reference envelope passed through VERBATIM as reference, which the wallet fetches and integrity-verifies itself instead of having the list restated a field at a time. Prefer the reference: a thousand-token list costs about fifty thousand output tokens to write out and a few hundred to reference, and the two paths are otherwise identical. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet token review`, where they accept or reject them by list. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. When the owner accepts, the only thing checked on-chain is that something token-like exists at the address, so a typo is caught then rather than here.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1194,44 +1225,77 @@ impl WalletMcpServer {
             open_world_hint = false
         )
     )]
-    fn wallet_propose_tokens(
+    async fn wallet_propose_tokens(
         &self,
         Parameters(input): Parameters<ProposeTokensInput>,
     ) -> Result<Json<ProposeTokensOutput>, ErrorData> {
         ensure_tool(
-            !input.tokens.is_empty(),
-            "a proposal must contain at least one token",
+            input.tokens.is_empty() != input.reference.is_none(),
+            "provide exactly one of tokens and reference",
         )?;
-        ensure_tool(
-            input.tokens.len() <= crate::token_store::MAX_IMPORT_TOKENS,
-            "proposal exceeds the per-call maximum",
-        )?;
-        let mut listed = Vec::with_capacity(input.tokens.len());
-        for item in &input.tokens {
-            let chain_id = item.chain_id.value().map_err(|error| tool_error(&error))?;
-            let address = Address::from_str(&item.address).map_err(|_| {
+        let (list_name, listed, skipped_non_evm) = if let Some(reference) = &input.reference {
+            let (parsed, _source) = crate::plan_fetch::resolve_token_list_reference(
+                reference,
+                FetchPolicy::production(),
+            )
+            .await
+            .map_err(|error| tool_error(&error))?;
+            let list_name = input
+                .list_name
+                .clone()
+                .or(parsed.declared_name)
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        "the referenced list declares no name; pass list_name so the owner \
+                         sees where these suggestions came from"
+                            .to_owned(),
+                        None,
+                    )
+                })?;
+            (list_name, parsed.tokens, parsed.skipped_non_evm)
+        } else {
+            let list_name = input.list_name.clone().ok_or_else(|| {
                 ErrorData::invalid_params(
-                    format!(
-                        "token address {} is not a 20-byte EVM address",
-                        item.address
-                    ),
+                    "list_name is required with inline tokens".to_owned(),
                     None,
                 )
             })?;
-            listed.push(crate::token_store::ListedToken {
-                chain_id,
-                address,
-                symbol: item.symbol.clone(),
-                name: item.name.clone(),
-                decimals: item.decimals,
-            });
-        }
+            ensure_tool(
+                input.tokens.len() <= crate::token_store::MAX_IMPORT_TOKENS,
+                "proposal exceeds the per-call maximum",
+            )?;
+            let mut listed = Vec::with_capacity(input.tokens.len());
+            for item in &input.tokens {
+                let chain_id = item.chain_id.value().map_err(|error| tool_error(&error))?;
+                let address = Address::from_str(&item.address).map_err(|_| {
+                    ErrorData::invalid_params(
+                        format!(
+                            "token address {} is not a 20-byte EVM address",
+                            item.address
+                        ),
+                        None,
+                    )
+                })?;
+                listed.push(crate::token_store::ListedToken {
+                    chain_id,
+                    address,
+                    symbol: item.symbol.clone(),
+                    name: item.name.clone(),
+                    decimals: item.decimals,
+                });
+            }
+            (list_name, listed, 0)
+        };
+        ensure_tool(
+            !listed.is_empty(),
+            "a proposal must contain at least one token",
+        )?;
         let mut store = self
             .tokens
             .lock()
             .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
         let summary = store
-            .propose(&listed, &input.list_name)
+            .propose(&listed, &list_name)
             .map_err(|error| tool_error(&error))?;
         let awaiting_review = store
             .count_proposals()
@@ -1239,6 +1303,7 @@ impl WalletMcpServer {
         Ok(Json(ProposeTokensOutput {
             summary,
             awaiting_review,
+            skipped_non_evm,
             next_step: "The owner reviews these with `ekubo-wallet token review`. \
                         Until they accept one, the wallet keeps showing that token by \
                         address alone."
@@ -1286,7 +1351,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_get_balances",
-        description = "Read balances for an explicit list of up to 1000 token addresses for one address on one chain, pinned to a reported block. Uses the Ekubo TokenDataFetcher lens where deployed (all default networks) and falls back to individual Multicall3 balanceOf reads elsewhere; failed, nonexistent, or misbehaving tokens read as zero instead of aborting the batch, and only nonzero balances are returned with their token addresses. Address 0x0000000000000000000000000000000000000000 reads the native balance. Accepts a wallet_id or any EVM address.",
+        description = "Read balances for up to 1000 token addresses for one address on one chain, pinned to a reported block. Give the addresses inline in tokens, or as a producer's token_list artifact_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the list itself and reads only its entries on the selected chain, so one canonical multi-chain list serves every chain without being restated. Uses the Ekubo TokenDataFetcher lens where deployed (all default networks) and falls back to individual Multicall3 balanceOf reads elsewhere; failed, nonexistent, or misbehaving tokens read as zero instead of aborting the batch, and only nonzero balances are returned with their token addresses. Address 0x0000000000000000000000000000000000000000 reads the native balance. Accepts a wallet_id or any EVM address.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_get_balances(
@@ -1300,25 +1365,49 @@ impl WalletMcpServer {
         let owner =
             self.resolve_read_address(input.wallet_id.as_deref(), input.address.as_deref())?;
         ensure_tool(
-            !input.tokens.is_empty(),
-            "tokens must contain at least one address",
+            input.tokens.is_empty() != input.reference.is_none(),
+            "provide exactly one of tokens and reference",
         )?;
+        let tokens = if let Some(reference) = &input.reference {
+            let (parsed, _source) = crate::plan_fetch::resolve_token_list_reference(
+                reference,
+                FetchPolicy::production(),
+            )
+            .await
+            .map_err(|error| tool_error(&error))?;
+            // A canonical list spans chains; reading the whole thing against
+            // one chain would spend the request on addresses that cannot hold
+            // a balance there. Filtering here is what lets one reference serve
+            // every chain the caller asks about.
+            let addresses: Vec<Address> = parsed
+                .tokens
+                .iter()
+                .filter(|token| token.chain_id == network.chain_id)
+                .map(|token| token.address)
+                .collect();
+            ensure_tool(
+                !addresses.is_empty(),
+                "the referenced list holds no tokens on this chain",
+            )?;
+            addresses
+        } else {
+            input
+                .tokens
+                .iter()
+                .map(|token| {
+                    Address::from_str(token).map_err(|_| {
+                        ErrorData::invalid_params(
+                            format!("token address {token} is not a 20-byte EVM address"),
+                            None,
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, ErrorData>>()?
+        };
         ensure_tool(
-            input.tokens.len() <= crate::token_store::MAX_BALANCE_TOKENS,
+            tokens.len() <= crate::token_store::MAX_BALANCE_TOKENS,
             "tokens exceeds the per-request maximum of 1000 addresses",
         )?;
-        let tokens = input
-            .tokens
-            .iter()
-            .map(|token| {
-                Address::from_str(token).map_err(|_| {
-                    ErrorData::invalid_params(
-                        format!("token address {token} is not a 20-byte EVM address"),
-                        None,
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, ErrorData>>()?;
         let session = self.fork_session(input.fork_id, &input.chain_id, None)?;
         let preface = session.as_ref().map(ForkSession::preface);
         let mut balances =

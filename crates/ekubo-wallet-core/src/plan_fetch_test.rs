@@ -423,3 +423,81 @@ fn public_ip_classification_covers_reserved_ranges() {
         );
     }
 }
+
+mod token_list_references {
+    use super::*;
+
+    fn list_json() -> String {
+        serde_json::json!({
+            "name": "Ekubo canonical list",
+            "tokens": [{
+                "chainId": 1,
+                "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "symbol": "USDC",
+                "name": "USD Coin",
+                "decimals": 6,
+            }],
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn resolves_a_token_list_from_an_inline_data_uri() {
+        let body = list_json();
+        let reference = reference_for(ArtifactType::TokenList, data_uri_of(&body), Some(&body));
+        let (list, source) = resolve_token_list_reference(&reference, FetchPolicy::production())
+            .await
+            .unwrap();
+        assert_eq!(list.declared_name.as_deref(), Some("Ekubo canonical list"));
+        assert_eq!(list.tokens.len(), 1);
+        assert_eq!(list.tokens[0].symbol, "USDC");
+        assert_eq!(source, ArtifactSource::InlineDataUri);
+    }
+
+    /// The digest is what makes a fetched list the producer's list rather than
+    /// whatever answered the URL, so altering a single byte must be refused
+    /// exactly as it is for a plan.
+    #[tokio::test]
+    async fn a_tampered_token_list_is_refused() {
+        let body = list_json();
+        let tampered = body.replace("USDC", "USDT");
+        assert_eq!(tampered.len(), body.len());
+        let mut reference = reference_for(ArtifactType::TokenList, data_uri_of(&body), Some(&body));
+        reference.url = data_uri_of(&tampered);
+        let error = resolve_token_list_reference(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("token list"), "{error}");
+    }
+
+    /// Artifact types are not interchangeable: a plan handed to the token-list
+    /// path must be refused by type before anything parses it.
+    #[tokio::test]
+    async fn an_execution_plan_reference_is_not_a_token_list() {
+        let body = plan_json();
+        let reference = reference_for(ArtifactType::ExecutionPlan, data_uri_of(&body), Some(&body));
+        let error = resolve_token_list_reference(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("token_list"), "{error}");
+        assert!(error.contains("execution_plan"), "{error}");
+    }
+
+    /// Errors name the artifact that failed, so an agent relaying three kinds
+    /// of reference is told which one to re-request.
+    #[tokio::test]
+    async fn errors_name_the_token_list_not_the_plan() {
+        let reference = reference_for(
+            ArtifactType::TokenList,
+            "data:application/json,not-json",
+            None,
+        );
+        let error = resolve_token_list_reference(&reference, FetchPolicy::production())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("execution plan"), "{error}");
+    }
+}
