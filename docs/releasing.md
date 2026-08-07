@@ -190,9 +190,15 @@ this on the Mac that will hold the private key.
 5. Confirm the `.p12` carries the intermediate, not just the leaf:
 
    ```sh
-   openssl pkcs12 -in ~/DeveloperID.p12 -nokeys -legacy 2>/dev/null |
-     grep -c "BEGIN CERTIFICATE"
+   openssl pkcs12 -in ~/DeveloperID.p12 -nokeys | grep -c "BEGIN CERTIFICATE"
    ```
+
+   Do not add `-legacy` here and do not discard stderr. `/usr/bin/openssl` on
+   macOS is LibreSSL, which has no such flag and rejects the whole command; with
+   stderr hidden that surfaces as a count of `0`, which reads as an empty `.p12`
+   rather than as the argument error it is. LibreSSL already reads the RC2/3DES
+   encryption `security export` produces. Homebrew's OpenSSL 3 is the one that
+   needs `-legacy`, because it keeps those algorithms in its legacy provider.
 
    Two or more is correct. One means the chain did not travel, and the release
    job would hit the same `CSSMERR_TP_NOT_TRUSTED` seen locally: it points the
