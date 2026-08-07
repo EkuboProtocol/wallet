@@ -7,8 +7,8 @@
 
 use crate::{
     config::{
-        NetworkConfig, create_private_dir, set_private_file_permissions, validate_network,
-        validate_wallet_id,
+        NetworkConfig, create_private_dir, set_private_file_permissions,
+        set_private_handle_permissions, validate_network, validate_wallet_id,
     },
     core::policy::WalletPolicy,
 };
@@ -166,7 +166,7 @@ impl PolicyStore {
             .truncate(false)
             .open(&lock_path)
             .with_context(|| format!("failed to open {}", lock_path.display()))?;
-        set_private_file_permissions(&lock_path)?;
+        set_private_handle_permissions(&lock)?;
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
         let path = data_dir.join(DATABASE_FILE);

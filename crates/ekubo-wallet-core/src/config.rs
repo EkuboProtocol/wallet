@@ -229,7 +229,9 @@ impl ConfigStore {
         // unpacked from an archive arrives with whatever mode it was given.
         // Repairing on read means it is fixed the first time anything looks at
         // it rather than the next time something writes.
-        set_private_file_permissions(&self.file)?;
+        // Applied to the handle just opened, not to the name it came from: the
+        // two need not still be the same file.
+        set_private_handle_permissions(&file)?;
         let mut reader = BufReader::new(file).take(MAX_CONFIG_BYTES as u64 + 1);
         let mut bytes = Vec::new();
         reader
@@ -261,7 +263,7 @@ impl ConfigStore {
         create_private_dir(&self.data_dir)?;
         let mut temporary = NamedTempFile::new_in(&self.data_dir)
             .context("failed to create temporary configuration")?;
-        set_private_file_permissions(temporary.path())?;
+        set_private_handle_permissions(temporary.as_file())?;
         serde_json::to_writer_pretty(&mut temporary, config)?;
         temporary.write_all(b"\n")?;
         temporary.as_file().sync_all()?;
@@ -275,10 +277,14 @@ impl ConfigStore {
         // happened. `custody::add` deleting the only copy of a private key is
         // that mistake in its worst form.
         //
-        // Neither step is load-bearing on its own. `load` re-narrows an
-        // over-permissive file every time it reads one, and the durability
-        // `sync_parent` buys is bounded by what the platform offers anyway.
-        let _ = set_private_file_permissions(&self.file);
+        // The mode is already right: the temporary was narrowed through its own
+        // handle before anything was written to it, and a rename carries the
+        // mode with the inode. Re-narrowing by name here bought nothing and was
+        // the one permission change in this file that resolved a path instead
+        // of a handle — on the configuration, immediately after publishing it.
+        //
+        // `sync_parent` stays best-effort: the durability it buys is bounded by
+        // what the platform offers anyway.
         let _ = sync_parent(&self.data_dir);
         Ok(())
     }
@@ -299,7 +305,7 @@ impl ConfigStore {
             .truncate(false)
             .open(&lock_path)
             .with_context(|| format!("failed to open {}", lock_path.display()))?;
-        set_private_file_permissions(&lock_path)?;
+        set_private_handle_permissions(&lock)?;
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
 
@@ -835,6 +841,24 @@ pub(crate) fn set_private_file_permissions(path: &Path) -> Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     let _ = path;
+    Ok(())
+}
+
+/// Narrow the file this handle already refers to, rather than whatever its
+/// name refers to now.
+///
+/// `fs::set_permissions` resolves a path and follows symlinks, so a caller
+/// that opens a file and then narrows it by name is naming the same thing
+/// twice and can be answered differently each time — the second answer being
+/// a link the mode is then applied to. Every one of these callers is holding
+/// the open handle already, so there is no reason to ask twice.
+pub(crate) fn set_private_handle_permissions(file: &File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    let _ = file;
     Ok(())
 }
 
