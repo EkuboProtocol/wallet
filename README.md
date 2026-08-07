@@ -64,7 +64,9 @@ and registering the server by hand.
   size.
 - Exact execution through a direct EIP-1559 transaction or one atomic Calibur
   batch, with EIP-7702 authorization when required.
-- Simulation through the configured RPC's typed `eth_simulateV1` method. There
+- Simulation through the configured RPCs' typed `eth_simulateV1` method. Each
+  network carries several endpoints and fails over between them, so one public
+  RPC rate-limiting the wallet does not stop it signing. There
   is no local EVM, `eth_getProof` state reconstruction, or `eth_call`
   fallback for signing decisions.
 - Temporary simulation forks so an agent can simulate a chain of dependent
@@ -93,8 +95,8 @@ Using it:
   registering the MCP server by hand
 - [First use](docs/first-use.md) — accepting the legal documents, creating a
   wallet, choosing its policy
-- [Networks](docs/networks.md) — built-in profiles, adding a chain, RPC
-  requirements
+- [Networks](docs/networks.md) — the 45 default networks and the 852-chain
+  registry behind them, endpoint failover, adding a chain, RPC requirements
 - [Policies](docs/policies.md) — what a policy can express, the shipped
   templates, editing one
 - [MCP tools](docs/mcp-tools.md) — every tool, the token database, simulation

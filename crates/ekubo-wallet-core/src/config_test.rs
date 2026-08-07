@@ -174,15 +174,15 @@ fn cli_replacement_takes_over_the_name_or_the_chain_id() {
         .find(|network| network.name == "ethereum")
         .unwrap()
         .clone();
-    ethereum.rpc_url = "https://rpc.example.invalid".parse().unwrap();
+    ethereum.rpc_urls = vec!["https://rpc.example.invalid".parse().unwrap()];
     replace_configured_network(&mut networks, ethereum.clone()).unwrap();
     assert_eq!(
         networks
             .iter()
             .find(|network| network.name == "ethereum")
             .unwrap()
-            .rpc_url,
-        ethereum.rpc_url
+            .rpc_urls,
+        ethereum.rpc_urls
     );
 
     // Chain 1 under a new name takes chain 1 over rather than failing:
@@ -248,7 +248,7 @@ fn owner_configuration_admits_a_loopback_node() {
         "http://[::1]:8545",
     ] {
         let mut candidate = default_networks().remove(0);
-        candidate.rpc_url = endpoint.parse().unwrap();
+        candidate.rpc_urls = vec![endpoint.parse().unwrap()];
         assert!(
             validate_network(&candidate).is_ok(),
             "owner configuration rejected {endpoint}"
@@ -257,7 +257,7 @@ fn owner_configuration_admits_a_loopback_node() {
 
     // The scheme is still the one thing an RPC URL must get right.
     let mut candidate = default_networks().remove(0);
-    candidate.rpc_url = "file:///etc/passwd".parse().unwrap();
+    candidate.rpc_urls = vec!["file:///etc/passwd".parse().unwrap()];
     assert!(validate_network(&candidate).is_err());
 }
 

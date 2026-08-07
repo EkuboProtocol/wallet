@@ -43,4 +43,7 @@ since the same file holds the pending signing queues, the address book, and
 the token names a reviewer reads. Wallet private keys use
 `org.ekubo.wallet.private-key.v1` and the wallet ID as their account. The
 unencrypted `config.json` in the same data directory contains wallet metadata
-and network configuration, including RPC URLs; it contains no private key.
+and network configuration, including every network's list of RPC URLs; it
+contains no private key. A configuration written by an earlier release names a
+single `rpc_url` per network; it is read as a one-entry list and rewritten as
+`rpc_urls` on the next change. Older builds cannot read the new spelling.

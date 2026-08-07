@@ -182,7 +182,7 @@ fn transaction_lines_render_offline() {
         display_name: None,
         aliases: Vec::new(),
         chain_id: 42_161,
-        rpc_url: "https://example.invalid/rpc".parse().unwrap(),
+        rpc_urls: vec!["https://example.invalid/rpc".parse().unwrap()],
         max_gas_limit: None,
         native_currency: None,
         block_explorer_url: None,
@@ -248,7 +248,7 @@ fn parses_transaction_network_and_completion_parity_commands() {
     let cli = Cli::try_parse_from(["ekubo-wallet", "network", "presets"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Network(args) if matches!(args.command, NetworkCommand::Presets)
+        Command::Network(args) if matches!(args.command, NetworkCommand::Presets { .. })
     ));
 }
 
@@ -256,7 +256,7 @@ fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
     NetworkAddArgs {
         name: Some(name.into()),
         chain_id,
-        rpc_url: None,
+        rpc_urls: Vec::new(),
         display_name: None,
         aliases: Vec::new(),
         native_currency_name: None,
@@ -290,11 +290,11 @@ fn editing_a_configured_network_only_needs_the_field_that_changes() {
     let configured = configured;
 
     let mut args = add_args("base", None);
-    args.rpc_url = Some("https://rpc.example.invalid/base".parse().unwrap());
+    args.rpc_urls = vec!["https://rpc.example.invalid/base".parse().unwrap()];
     let candidate = candidate_of(args, &configured).unwrap();
 
     assert_eq!(
-        candidate.rpc_url.as_str(),
+        candidate.primary_rpc_url().as_str(),
         "https://rpc.example.invalid/base"
     );
     // Everything the user did not name survives, including their own
@@ -314,7 +314,7 @@ fn a_chain_id_names_its_own_network_so_add_never_asks_for_one() {
         .iter_mut()
         .find(|network| network.name == "base")
         .unwrap();
-    base.rpc_url = "https://rpc.example.invalid/base".parse().unwrap();
+    base.rpc_urls = vec!["https://rpc.example.invalid/base".parse().unwrap()];
     let configured = configured;
 
     let (known, origin) = network_for_chain(8453, &configured).unwrap();
@@ -322,7 +322,10 @@ fn a_chain_id_names_its_own_network_so_add_never_asks_for_one() {
     assert_eq!(origin, "configured as");
     // The configured endpoint is what the RPC prompt offers back, not the
     // shipped default it was changed away from.
-    assert_eq!(known.rpc_url.as_str(), "https://rpc.example.invalid/base");
+    assert_eq!(
+        known.primary_rpc_url().as_str(),
+        "https://rpc.example.invalid/base"
+    );
 
     let (preset, origin) = network_for_chain(8453, &[]).unwrap();
     assert_eq!(preset.name, "base");
@@ -379,7 +382,7 @@ fn a_new_custom_network_reports_every_missing_value_at_once() {
 #[test]
 fn a_complete_custom_network_needs_no_terminal_at_all() {
     let mut args = add_args("custom", Some(987_654));
-    args.rpc_url = Some("https://rpc.example.invalid".parse().unwrap());
+    args.rpc_urls = vec!["https://rpc.example.invalid".parse().unwrap()];
     args.display_name = Some("Custom Chain".into());
     args.aliases = vec!["custom-chain".into()];
     args.native_currency_name = Some("Ether".into());
@@ -417,7 +420,7 @@ fn every_editable_field_round_trips_through_its_own_validator() {
     }
     let untouched = preset();
     assert_eq!(network.chain_id, untouched.chain_id);
-    assert_eq!(network.rpc_url, untouched.rpc_url);
+    assert_eq!(network.rpc_urls, untouched.rpc_urls);
     assert_eq!(network.aliases, untouched.aliases);
     assert_eq!(network.native_currency, untouched.native_currency);
 }
@@ -426,7 +429,10 @@ fn every_editable_field_round_trips_through_its_own_validator() {
 fn setting_network_fields_applies_each_typed_value() {
     let mut network = default_networks().remove(0);
     set_network_field(&mut network, "--rpc-url", "https://rpc.example.invalid").unwrap();
-    assert_eq!(network.rpc_url.as_str(), "https://rpc.example.invalid/");
+    assert_eq!(
+        network.primary_rpc_url().as_str(),
+        "https://rpc.example.invalid/"
+    );
     set_network_field(&mut network, "--native-currency-decimals", "6").unwrap();
     assert_eq!(network.native_currency.clone().unwrap().decimals, 6);
     set_network_field(&mut network, "--alias", "one, two").unwrap();

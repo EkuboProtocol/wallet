@@ -25,6 +25,7 @@ pub mod human_presence;
 pub mod input_validation;
 pub mod legal;
 pub mod message;
+pub mod networks;
 pub mod orchestrator;
 pub mod pending;
 pub mod plan_fetch;

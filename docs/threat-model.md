@@ -274,6 +274,17 @@ the endpoint verbatim. Such credentials are read-only and easy to rotate, so
 hiding them bought little and cost error fidelity. Use credentials whose
 disclosure scope is appropriate for the local MCP host.
 
+A network lists several endpoints and fails over between them, which widens
+this exposure rather than changing its character: any endpoint in a network's
+list can end up serving a given request, so all of them see the addresses that
+network is used with. It does not weaken the trust model, because no endpoint
+was ever trusted — every answer is either structurally cross-checked or
+attributable to a plan's own digest, and each endpoint's chain ID is verified
+before its answer is used. What it does change is that a *single* dishonest
+operator no longer needs to be chosen by the owner to be reached; it needs only
+to be in the list. That is the argument for pointing a valuable wallet at one
+provider you chose, which `network add --rpc-url` does by replacing the list.
+
 `wallet_propose_network` is the one MCP tool that makes this process send a request
 to an address its caller chose, so the address is admitted before the request
 rather than judged by whether the request succeeds: public `https` only, no

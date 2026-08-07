@@ -13,7 +13,7 @@ use alloy::{
     eips::{BlockId, BlockNumberOrTag},
     network::{TransactionBuilder, primitives::BlockResponse},
     primitives::{Address, Bytes},
-    providers::{Provider, ProviderBuilder},
+    providers::Provider,
     rpc::types::TransactionRequest,
     sol,
     sol_types::SolCall,
@@ -272,11 +272,30 @@ pub async fn batch_eth_call(
     if let Some(preface) = fork {
         return fork_batch_eth_call(network, input, &calls, requested_caller, preface).await;
     }
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    ekubo_wallet_core::rpc::try_endpoints(network, |provider| {
+        let calls = &calls;
+        async move { batch_eth_call_through(network, input, calls, requested_caller, &provider).await }
+    })
+    .await
+}
+
+/// The batch itself, against one endpoint.
+///
+/// Whole-batch failover rather than per-call: every call in a batch is
+/// resolved at the same pinned block, and a batch whose calls came from
+/// different endpoints at different blocks is not a consistent read of
+/// anything.
+async fn batch_eth_call_through(
+    network: &NetworkConfig,
+    input: &BatchEthCallInput,
+    calls: &[NormalizedCall],
+    requested_caller: Option<Address>,
+    provider: &alloy::providers::DynProvider,
+) -> Result<BatchEthCallOutput> {
     let setup = tokio::time::timeout(RPC_TIMEOUT, async {
         let (chain_id, block) = tokio::try_join!(
             provider.get_chain_id(),
-            resolve_block(&provider, &input.block_parameter),
+            resolve_block(provider, &input.block_parameter),
         )?;
         Ok::<_, alloy::transports::TransportError>((chain_id, block))
     })
@@ -292,7 +311,7 @@ pub async fn batch_eth_call(
     let block = setup.1;
 
     if requested_caller.is_none()
-        && let Some(results) = try_multicall(&provider, &calls, block.call_id).await
+        && let Some(results) = try_multicall(provider, calls, block.call_id).await
     {
         return Ok(BatchEthCallOutput {
             network: network.name.clone(),
@@ -320,7 +339,6 @@ pub async fn batch_eth_call(
         let offset = chunk_index * MAX_CONCURRENT_INDIVIDUAL_CALLS;
         results.extend(
             join_all(chunk.iter().enumerate().map(|(position, call)| {
-                let provider = &provider;
                 let index = offset + position;
                 async move {
                     let request = TransactionRequest::default()

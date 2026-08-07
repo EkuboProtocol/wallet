@@ -36,6 +36,8 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print ve
 
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from account acct; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and not __fish_seen_subcommand_from list presets reset add edit remove delete review' -a 'list presets reset add edit remove delete review'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from presets' -l search -r -d 'Search the compiled-in registry by chain ID or name'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and __fish_seen_subcommand_from presets' -l all -d 'List every chain in the compiled-in registry'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema review' -a 'show set allow-all require-approval validate schema review'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show cancel rebroadcast discard' -a 'list show cancel rebroadcast discard'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from token; and not __fish_seen_subcommand_from list search review import remove delete' -a 'list search review import remove delete'

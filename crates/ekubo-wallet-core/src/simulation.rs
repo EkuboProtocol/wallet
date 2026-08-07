@@ -35,7 +35,7 @@ use alloy::{
     eips::{BlockId, BlockNumberOrTag},
     network::primitives::BlockResponse,
     primitives::{Address, B256, Bytes, U256, address, keccak256},
-    providers::{Provider, ProviderBuilder},
+    providers::Provider,
     rpc::types::{
         Log, TransactionInput, TransactionRequest,
         simulate::{SimBlock, SimCallResult, SimulatePayload},
@@ -289,9 +289,60 @@ pub async fn simulate_execution(
     }
 
     let _permit = simulation_slot().await?;
+
+    // Failover, at the granularity of the whole simulation rather than the
+    // individual request. Each attempt re-reads the head block and the pinned
+    // account state from the endpoint that will run `eth_simulateV1`, because
+    // a simulation assembled from one endpoint's block and another's execution
+    // is not a simulation of anything.
+    //
+    // Only `RpcError` moves to the next endpoint. That is the category an
+    // endpoint earns by timing out, rate-limiting, or answering
+    // `eth_simulateV1` with "method not found" — all facts about the endpoint.
+    // A reverted call or a setup failure is a fact about the plan or the
+    // chain, and asking seven more endpoints returns the same answer more
+    // slowly.
+    let mut endpoints = network.rpc_urls.iter().peekable();
+    let mut last = None;
+    while let Some(endpoint) = endpoints.next() {
+        let provider = crate::rpc::provider_for(endpoint);
+        let result = simulate_execution_through(
+            &provider,
+            wallet,
+            network,
+            plan,
+            stored_policy,
+            context,
+            fork,
+        )
+        .await?;
+        let retryable = result
+            .simulation
+            .failure
+            .as_ref()
+            .is_some_and(|failure| failure.category == SimulationFailureCategory::RpcError);
+        if !retryable || endpoints.peek().is_none() {
+            return Ok(result);
+        }
+        last = Some(result);
+    }
+    // Unreachable while a network is required to list an endpoint, but a
+    // configuration is a file: an empty list must not silently report a
+    // successful simulation of nothing.
+    last.context("network has no RPC endpoints to simulate against")
+}
+
+async fn simulate_execution_through(
+    provider: &alloy::providers::DynProvider,
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    plan: &ExecutionPlan,
+    stored_policy: &StoredPolicy,
+    context: &PolicyContext,
+    fork: Option<&ForkPreface>,
+) -> Result<SimulationResult> {
     let planned = planned_call(plan, wallet.address);
     let fork_calls: &[PlannedCall] = fork.map_or(&[], |preface| preface.calls.as_slice());
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let setup = tokio::time::timeout(RPC_SETUP_TIMEOUT, async {
         let chain_id = provider.get_chain_id().await?;
         // A fork already pinned its parent when it was created, and that

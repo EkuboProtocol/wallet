@@ -118,8 +118,15 @@ endpoints collect.
 
 Apart from these RPC endpoints and the referenced-artifact fetches described
 in section 4, this software makes no network requests. If you add or replace
-a network, requests for that network go to the endpoint you configure. Each
+a network, requests for that network go to the endpoints you configure. Each
 release keeps the following list current with its built-in defaults.
+
+Each network below lists several endpoints, run by unrelated operators. The
+wallet tries them in the order shown and moves to the next when one fails, so
+over time your requests for a network may reach any endpoint listed under it.
+Which one serves a given request depends on which are healthy at that moment,
+and is not something you select per request; to send your traffic to one
+operator only, replace the list with `ekubo-wallet network edit`.
 
 ## 3. Default RPC endpoints in this release
 ";
@@ -188,15 +195,20 @@ requires a fresh acknowledgment before signing resumes.
 
 /// The complete privacy policy, with the default endpoint list generated from
 /// the same catalog the wallet configures by default.
+///
+/// Every endpoint is listed, not just the first one for each network. A
+/// network now carries several so that one of them being down does not stop
+/// the wallet, and failover moves between them on its own — so all of them
+/// are endpoints an owner's requests can reach, and a disclosure that named
+/// only the first would understate who sees their traffic.
 #[must_use]
 pub fn privacy_policy() -> String {
     let mut text = String::from(PRIVACY_POLICY_PREAMBLE);
     for network in crate::config::default_networks() {
-        let _ = writeln!(
-            text,
-            "- {} (chain {}): {}",
-            network.name, network.chain_id, network.rpc_url
-        );
+        let _ = writeln!(text, "- {} (chain {}):", network.name, network.chain_id);
+        for endpoint in &network.rpc_urls {
+            let _ = writeln!(text, "  - {endpoint}");
+        }
     }
     text.push_str(PRIVACY_POLICY_CLOSING);
     text

@@ -189,7 +189,10 @@ struct PublicWallet {
 struct PublicNetwork {
     name: String,
     chain_id: String,
-    rpc_url: String,
+    /// Every endpoint configured for this network, in the order the wallet
+    /// tries them. Reported in full because failover reaches any of them, so
+    /// naming only the first would describe traffic that does not happen.
+    rpc_urls: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -329,8 +332,12 @@ struct AddNetworkInput {
     display_name: String,
     aliases: Vec<String>,
     chain_id: String,
-    #[schemars(with = "String")]
-    rpc_url: Url,
+    /// One or more RPC endpoints, tried in the order given. Several is
+    /// better than one: the wallet moves to the next when an endpoint fails,
+    /// and a network with a single endpoint stops working when that endpoint
+    /// does.
+    #[schemars(with = "Vec<String>")]
+    rpc_urls: Vec<Url>,
     max_gas_limit: String,
     native_currency: NativeCurrency,
     #[schemars(with = "String")]
@@ -841,7 +848,7 @@ impl WalletMcpServer {
                 .map(|network| PublicNetwork {
                     name: network.name,
                     chain_id: network.chain_id.to_string(),
-                    rpc_url: network.rpc_url.to_string(),
+                    rpc_urls: network.rpc_urls.iter().map(ToString::to_string).collect(),
                 })
                 .collect(),
         }))
@@ -1582,7 +1589,7 @@ impl WalletMcpServer {
             display_name: Some(input.display_name),
             aliases: input.aliases,
             chain_id,
-            rpc_url: input.rpc_url,
+            rpc_urls: input.rpc_urls,
             max_gas_limit: Some(input.max_gas_limit),
             native_currency: Some(input.native_currency),
             block_explorer_url: Some(input.block_explorer_url),
@@ -1636,9 +1643,14 @@ impl WalletMcpServer {
         // check that matters happens in `network review`, immediately before
         // the profile is written. Not probing also keeps an unconfirmed agent
         // action from producing a JSON-RPC request.
-        ekubo_wallet_core::plan_fetch::ensure_public_endpoint(&candidate.rpc_url, "RPC URL")
-            .await
-            .map_err(|error| tool_error(&error))?;
+        // Every endpoint, not just the first. A proposal whose second entry
+        // is a loopback address is exactly the proposal this check exists to
+        // refuse, and failover would reach it.
+        for endpoint in &candidate.rpc_urls {
+            ekubo_wallet_core::plan_fetch::ensure_public_endpoint(endpoint, "RPC URL")
+                .await
+                .map_err(|error| tool_error(&error))?;
+        }
         self.policies
             .lock()
             .map_err(|_| ErrorData::internal_error("policy store lock was poisoned", None))?

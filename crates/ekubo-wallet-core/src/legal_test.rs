@@ -24,11 +24,12 @@ fn documents_have_stable_nonempty_digests() {
 fn privacy_policy_discloses_every_default_endpoint() {
     let policy = privacy_policy();
     for network in crate::config::default_networks() {
-        let url = network.rpc_url.as_str();
-        assert!(
-            policy.contains(url),
-            "privacy policy does not disclose default endpoint {url}"
-        );
+        for url in network.rpc_urls.iter().map(url::Url::as_str) {
+            assert!(
+                policy.contains(url),
+                "privacy policy does not disclose default endpoint {url}"
+            );
+        }
     }
     assert!(policy.contains("Apart from these RPC endpoints"));
 }

@@ -5,7 +5,7 @@ use crate::{
         policy::{PolicyOutcome, denial_reasons, policy_outcome},
     },
     custody::{KeyStore, load_matching_signer},
-    rpc::{rpc_error, transaction_receipt, verify_chain_id},
+    rpc::{rpc_error, transaction_receipt},
     simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
 };
 use alloy::{
@@ -16,7 +16,7 @@ use alloy::{
     eips::{eip2718::Decodable2718, eip2930::AccessList, eip7702::Authorization},
     network::TxSignerSync,
     primitives::{B256, TxKind, U256, keccak256},
-    providers::{Provider, ProviderBuilder},
+    providers::Provider,
     signers::{SignerSync, local::PrivateKeySigner},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -216,23 +216,26 @@ pub async fn prepare_execution(
     validate_preflight(wallet, network, plan, simulation, overrides)?;
     let planned = planned_call(plan, wallet.address);
     let gas_limit = signing_gas_limit(network, simulation)?;
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let prepared = tokio::time::timeout(RPC_TIMEOUT, async {
-        tokio::try_join!(
-            provider.get_chain_id(),
-            provider.get_transaction_count(wallet.address).pending(),
-            provider.estimate_eip1559_fees(),
-        )
+    let prepared = crate::rpc::try_endpoints(network, |provider| async move {
+        let prepared = tokio::time::timeout(RPC_TIMEOUT, async {
+            tokio::try_join!(
+                provider.get_chain_id(),
+                provider.get_transaction_count(wallet.address).pending(),
+                provider.estimate_eip1559_fees(),
+            )
+        })
+        .await
+        .context("transaction preparation RPC timed out")?
+        .map_err(|error| rpc_error(&error))?;
+        ensure!(
+            prepared.0 == network.chain_id,
+            "RPC reports chain {}, not {}",
+            prepared.0,
+            network.chain_id
+        );
+        Ok(prepared)
     })
-    .await
-    .context("transaction preparation RPC timed out")?
-    .map_err(|error| rpc_error(&error))?;
-    ensure!(
-        prepared.0 == network.chain_id,
-        "RPC reports chain {}, not {}",
-        prepared.0,
-        network.chain_id
-    );
+    .await?;
     ensure!(
         prepared.2.max_fee_per_gas >= prepared.2.max_priority_fee_per_gas,
         "RPC returned invalid EIP-1559 fee fields"
@@ -706,26 +709,30 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
         data: alloy::primitives::Bytes::new(),
         value: U256::ZERO,
     };
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let estimate_request = alloy::rpc::types::TransactionRequest::default()
-        .from(wallet.address)
-        .to(wallet.address)
-        .value(U256::ZERO);
-    let (chain_id, market, estimated_gas) = tokio::time::timeout(RPC_TIMEOUT, async {
-        tokio::try_join!(
-            provider.get_chain_id(),
-            provider.estimate_eip1559_fees(),
-            provider.estimate_gas(estimate_request),
-        )
-    })
-    .await
-    .context("cancellation preparation RPC timed out")?
-    .map_err(|error| rpc_error(&error))?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
+    let (_chain_id, market, estimated_gas) =
+        crate::rpc::try_endpoints(network, |provider| async move {
+            let estimate_request = alloy::rpc::types::TransactionRequest::default()
+                .from(wallet.address)
+                .to(wallet.address)
+                .value(U256::ZERO);
+            let (chain_id, market, estimated_gas) = tokio::time::timeout(RPC_TIMEOUT, async {
+                tokio::try_join!(
+                    provider.get_chain_id(),
+                    provider.estimate_eip1559_fees(),
+                    provider.estimate_gas(estimate_request),
+                )
+            })
+            .await
+            .context("cancellation preparation RPC timed out")?
+            .map_err(|error| rpc_error(&error))?;
+            ensure!(
+                chain_id == network.chain_id,
+                "RPC reports chain {chain_id}, not {}",
+                network.chain_id
+            );
+            Ok((chain_id, market, estimated_gas))
+        })
+        .await?;
     let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(
         &incumbents,
         market.max_fee_per_gas,
@@ -808,16 +815,61 @@ pub async fn broadcast_signed_cancellation(
     send_exact_bytes(signed, network).await
 }
 
+/// Submit already-signed bytes, trying each configured endpoint until one
+/// accepts them.
+///
+/// Broadcasting is the one path failover cannot express as "retry the read
+/// elsewhere". Re-sending the identical signed bytes is safe — same nonce,
+/// same signature, same hash, so a second acceptance is the first one
+/// again — but a *rejection* has to be interpreted against the endpoint that
+/// produced it, because "already known" and "nonce too low" describe a
+/// submission that succeeded. So each endpoint runs the complete
+/// send-and-reconcile below, and only an outcome that still reports a
+/// broadcast error moves on to the next.
+///
+/// The first endpoint's error is the one reported when every endpoint fails:
+/// it is the one that saw the transaction in the state closest to unsent.
 async fn send_exact_bytes(
     signed: &SignedExecution,
     network: &NetworkConfig,
 ) -> Result<BroadcastResult> {
-    verify_chain_id(network).await?;
+    let mut first_failure = None;
+    for endpoint in &network.rpc_urls {
+        let provider = crate::rpc::provider_for(endpoint);
+        let outcome = match send_exact_bytes_through(signed, network, &provider).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if first_failure.is_none() {
+                    first_failure = Some(Err(error));
+                }
+                continue;
+            }
+        };
+        if outcome.broadcast_error.is_none() {
+            return Ok(outcome);
+        }
+        if first_failure.is_none() {
+            first_failure = Some(Ok(outcome));
+        }
+    }
+    first_failure.unwrap_or_else(|| {
+        Err(anyhow::anyhow!(
+            "network {} has no RPC endpoint to broadcast through",
+            network.name
+        ))
+    })
+}
+
+async fn send_exact_bytes_through(
+    signed: &SignedExecution,
+    network: &NetworkConfig,
+    provider: &alloy::providers::DynProvider,
+) -> Result<BroadcastResult> {
+    crate::rpc::ensure_serving_chain(provider, network.chain_id).await?;
     if let Ok(Some(receipt)) = transaction_receipt(network, &signed.transaction_hash).await {
         return Ok(receipt_result(&signed.transaction_hash, receipt));
     }
     let hash = B256::from_str(&signed.transaction_hash).context("invalid transaction hash")?;
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let known = tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash))
         .await
         .ok()
@@ -834,7 +886,7 @@ async fn send_exact_bytes(
                 Err(_) => Some("transaction submission RPC timed out".to_owned()),
             };
         if let Some(failure) = failure {
-            return Ok(reconcile_failed_send(signed, network, &provider, hash, failure).await);
+            return Ok(reconcile_failed_send(signed, network, provider, hash, failure).await);
         }
     }
     if let Ok(Some(receipt)) = transaction_receipt(network, &signed.transaction_hash).await {

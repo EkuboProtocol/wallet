@@ -1,70 +1,205 @@
 # Networks
 
-These presets are configured on first run. `network presets` prints the built-in
-catalog, and `network reset` asks for a yes or no and then replaces the
-configured list with fresh copies of the presets, preserving wallets and
-policies. Configuration permits one RPC
-profile per chain ID so MCP calls remain unambiguous.
+`network presets` prints the built-in defaults; `network presets --search <term>`
+and `network presets --all` search the complete compiled-in registry. `network
+reset` asks for a yes or no and then replaces the configured list with fresh
+copies of the defaults, preserving wallets and policies. Configuration permits
+one profile per chain ID so MCP calls remain unambiguous.
 
-`network list` prints each profile in full, including its complete RPC URL, so
-the configuration can be read back and edited. RPC URLs are configuration rather
-than key material, and nothing redacts them: the CLI, MCP tools (`wallet_list`
-returns each network's RPC URL), and surfaced RPC errors all show the endpoint
-verbatim. A provider credential embedded in an RPC URL is read-only and easy to
-rotate, so use one whose disclosure would be an inconvenience, not a loss.
+## Several endpoints per network
 
-| CLI name | Chain ID | Max transaction gas | Default public RPC |
-| --- | ---: | ---: | --- |
-| `ethereum` | 1 | 16,777,216 | `https://rpc.mevblocker.io` |
-| `base` | 8453 | 16,777,216 | `https://mainnet.base.org` |
-| `arbitrum` | 42161 | 32,000,000 | `https://arb1.arbitrum.io/rpc` |
-| `robinhood` | 4663 | 32,000,000 | `https://rpc.mainnet.chain.robinhood.com` |
-| `monad` | 143 | 30,000,000 | `https://rpc.monad.xyz` |
-| `ink` | 57073 | 16,777,216 | `https://rpc-gel.inkonchain.com` |
-| `optimism` | 10 | 16,777,216 | `https://mainnet.optimism.io` |
-| `gnosis` | 100 | 16,777,216 | `https://rpc.gnosischain.com` |
-| `berachain` | 80094 | 16,777,216 | `https://rpc.berachain.com` |
-| `megaeth` | 4326 | 10,000,000,000 | `https://mainnet.megaeth.com/rpc` |
+A network carries a **list** of RPC endpoints rather than one, and every read
+walks that list in order until one answers. That is the difference between a
+wallet that stops working when a public endpoint rate-limits it and one that
+does not: simulation gates signing, so a single refused request used to mean
+nothing could be signed on that chain until the endpoint recovered.
 
-Each is an endpoint its own chain or its operator publishes for wallet use, so
-what you are connecting to is documented somewhere you can read rather than
-aggregated from a directory. They are public, shared, rate-limited, and carry
-no availability guarantee. They are not contacted merely by starting the
-server. The configured RPC must support `eth_simulateV1` including sequential
-calls, logs, native-transfer tracing, and state overrides; it also observes the
-full simulation intent, so prefer a trusted dedicated provider.
+Failover is per request, not a choice made once at startup, because public RPCs
+do not fail as a unit — they refuse one request and serve the next, or answer
+reads while refusing `eth_simulateV1`. Each attempt re-verifies the chain ID
+before its answer is used, so an endpoint pointed at the wrong chain is skipped
+rather than believed. When every endpoint fails, the error names each one and
+what it said.
 
-The published Monad and MegaETH endpoints do not implement `eth_simulateV1`, so
-nothing can be simulated on those chains and nothing signs automatically: every
-plan fails simulation and queues for explicit approval. Point them at a provider
-that supports the method before using them.
+Two things are deliberately *not* failed over. Simulation moves to the next
+endpoint only on an RPC-level failure — a revert or a setup error is a fact
+about the plan or the chain, and asking five more endpoints returns the same
+answer more slowly. Broadcasting runs its full send-and-reconcile against each
+endpoint in turn, because a rejection such as `already known` or `nonce too
+low` describes a submission that *succeeded*, and only the endpoint that
+produced it can be asked what it meant.
 
-`network add` starts from whatever already describes the chain — the
-configured network with that name or alias, otherwise the built-in preset — so
-changing one field means naming only that field. Point a preset chain at a
-dedicated endpoint, keeping everything else:
+`network list` prints every configured endpoint in full, so the configuration
+can be read back and edited. RPC URLs are configuration rather than key
+material, and nothing redacts them: the CLI, MCP tools (`wallet_list` returns
+each network's endpoint list), and surfaced RPC errors all show them verbatim.
+A provider credential embedded in an RPC URL is read-only and easy to rotate,
+so use one whose disclosure would be an inconvenience, not a loss.
+
+## Where the endpoints come from
+
+Releases before this one shipped one endpoint per network, each chosen because
+the chain or its operator published it for wallet use. The defaults are now
+**measured** instead: candidates come from chainlist.org — the
+ethereum-lists/chains registry plus DefiLlama's curated extras — and
+`contrib/rpc-probe` asks each one for the exact requests this wallet makes,
+including an `eth_simulateV1` pinned to a block with an EIP-7702 delegation
+designator installed by a state override. Only endpoints that answered are
+shipped, ranked by capability first, then by operator diversity (so the first
+two entries are never the same provider), then by latency. Endpoints requiring
+an API key are excluded outright: shipping one hands out a credential nobody
+here owns or can rotate.
+
+Where a chain publishes its own endpoint, that one still leads the list — but
+never when doing so would put a node without `eth_simulateV1` ahead of one that
+has it.
+
+An endpoint being listed means it answered correctly on the day it was
+measured. It does **not** mean its operator is trustworthy: a public RPC sees
+every address the wallet asks about and every transaction it broadcasts, and
+can lie about any answer. Nothing in the signing path treats an endpoint as
+authoritative — see [threat-model.md](threat-model.md) — but for a wallet
+holding value worth protecting, point it at a dedicated provider or your own
+node.
+
+## Defaults
+
+The 45 networks below are configured on first run: every EVM mainnet Alchemy
+serves that has at least one working public endpoint. The registry compiled
+into the binary is much larger — 852 chains, 1,462 endpoints, 224 of them
+simulation-capable — and any of it can be configured with one command.
+
+| CLI name | Chain ID | Max transaction gas | Endpoints | Can simulate |
+| --- | ---: | ---: | ---: | --- |
+| `ethereum` | 1 | 16,777,216 | 6 | 6 of 6 |
+| `optimism` | 10 | 16,777,216 | 6 | 6 of 6 |
+| `rootstock` | 30 | 6,800,000 | 2 | **none** |
+| `bnb` | 56 | 16,777,216 | 6 | 6 of 6 |
+| `gnosis` | 100 | 16,777,216 | 6 | 4 of 6 |
+| `unichain` | 130 | 16,777,216 | 4 | 2 of 4 |
+| `polygon` | 137 | 16,777,216 | 6 | 6 of 6 |
+| `monad` | 143 | 30,000,000 | 5 | **none** |
+| `sonic` | 146 | 16,777,216 | 6 | 3 of 6 |
+| `opbnb` | 204 | 16,777,216 | 4 | **none** |
+| `lens` | 232 | 16,777,216 | 2 | **none** |
+| `fraxtal` | 252 | 16,777,216 | 6 | 3 of 6 |
+| `boba` | 288 | 16,777,216 | 4 | **none** |
+| `zksync` | 324 | 16,777,216 | 6 | **none** |
+| `shape` | 360 | 16,777,216 | 2 | 1 of 2 |
+| `worldchain` | 480 | 16,777,216 | 5 | **none** |
+| `astar` | 592 | 16,777,216 | 2 | **none** |
+| `flow` | 747 | 16,777,216 | 1 | **none** |
+| `metis` | 1088 | 16,777,216 | 6 | **none** |
+| `moonbeam` | 1284 | 16,777,216 | 6 | **none** |
+| `sei` | 1329 | 16,777,216 | 3 | **none** |
+| `story` | 1514 | 16,777,216 | 6 | 6 of 6 |
+| `soneium` | 1868 | 16,777,216 | 3 | 1 of 3 |
+| `ronin` | 2020 | 16,777,216 | 1 | **none** |
+| `abstract` | 2741 | 16,777,216 | 1 | **none** |
+| `megaeth` | 4326 | 10,000,000,000 | 4 | 2 of 4 |
+| `robinhood` | 4663 | 32,000,000 | 5 | 5 of 5 |
+| `mantle` | 5000 | 16,777,216 | 4 | **none** |
+| `superseed` | 5330 | 16,777,216 | 2 | 1 of 2 |
+| `race` | 6805 | 16,777,216 | 1 | **none** |
+| `zetachain` | 7000 | 16,777,216 | 4 | **none** |
+| `base` | 8453 | 16,777,216 | 6 | 6 of 6 |
+| `plasma` | 9745 | 16,777,216 | 1 | 1 of 1 |
+| `apechain` | 33139 | 16,777,216 | 2 | 1 of 2 |
+| `mode` | 34443 | 16,777,216 | 3 | 2 of 3 |
+| `arbitrum` | 42161 | 32,000,000 | 6 | 6 of 6 |
+| `celo` | 42220 | 16,777,216 | 3 | 2 of 3 |
+| `avalanche` | 43114 | 16,777,216 | 6 | **none** |
+| `ink` | 57073 | 16,777,216 | 4 | 3 of 4 |
+| `linea` | 59144 | 16,777,216 | 5 | 3 of 5 |
+| `bob` | 60808 | 16,777,216 | 4 | 2 of 4 |
+| `berachain` | 80094 | 16,777,216 | 6 | 5 of 6 |
+| `blast` | 81457 | 16,777,216 | 5 | **none** |
+| `scroll` | 534352 | 16,777,216 | 6 | 1 of 6 |
+| `zora` | 7777777 | 16,777,216 | 2 | 1 of 2 |
+
+Endpoints are public, shared, rate-limited, and carry no availability
+guarantee. They are not contacted merely by starting the server.
+
+### Chains where nothing signs automatically
+
+Simulation is the whole signing path — there is no local EVM and no `eth_call`
+fallback — so a chain whose public endpoints do not implement `eth_simulateV1`
+cannot sign automatically: every plan fails simulation and queues for explicit
+approval. Nineteen of the defaults are in that position today, marked **none**
+above: `rootstock`, `monad`, `opbnb`, `lens`, `boba`, `zksync`, `worldchain`,
+`astar`, `flow`, `metis`, `moonbeam`, `sei`, `ronin`, `abstract`, `mantle`,
+`race`, `zetachain`, `avalanche`, and `blast`. Their nodes answer `-32601
+method not found`; this is a property of those chains' clients, not of the
+selection. Point them at a provider that implements the method to sign on them:
 
 ```sh
-ekubo-wallet network add base --rpc-url https://your-provider.example/base
+ekubo-wallet network add avalanche --rpc-url https://your-provider.example/avax
+```
+
+MegaETH used to be in that list and no longer is — its published endpoint still
+lacks the method, but two others in its list have it, and failover finds them.
+
+### Upgrading from a single-endpoint configuration
+
+An existing `config.json` is never rewritten by an upgrade, so a wallet
+installed before this change keeps the exact networks it had: its single
+`rpc_url` is read as a one-entry list, and an endpoint you configured yourself
+stays the only one used. That is deliberate — silently adding third-party
+endpoints to a network someone pointed at their own node would send their
+traffic somewhere they did not choose.
+
+To take the new fallbacks for a network, name it again:
+
+```sh
+ekubo-wallet network add ethereum      # re-offers the built-in list, for review
+```
+
+or `network reset` to replace every configured network with fresh defaults,
+which discards custom endpoints. Either way the shipped endpoint list is
+disclosed in the privacy policy, and changing it requires a fresh
+acknowledgment before signing resumes.
+
+## Adding a network
+
+`network add` starts from whatever already describes the chain: the configured
+network with that name or alias, otherwise the compiled-in registry — all 852
+chains of it, not just the defaults. So configuring a chain the wallet did not
+default to is a chain ID and a confirmation rather than a hunt for a working
+endpoint:
+
+```sh
+ekubo-wallet network presets --search celo
+ekubo-wallet network add 42220
+```
+
+Point any chain at a dedicated endpoint, keeping everything else. `--rpc-url`
+is repeatable, and supplying it replaces the whole list rather than appending
+to it, so the command says what the network should reach:
+
+```sh
+ekubo-wallet network add base \
+  --rpc-url https://your-provider.example/base \
+  --rpc-url https://mainnet.base.org
 ```
 
 Run it with no arguments and the first question is the chain ID, because that
-is what says which network you mean. A chain that a preset or the
-configuration already describes keeps its own name and settings, and the only
-remaining question is the endpoint; a chain nothing here knows about is named
-and described from scratch. Naming a chain ID that is already configured
-replaces that profile rather than failing: one profile per chain ID is the
-rule, so there is nothing else the second definition could mean.
+is what says which network you mean. A chain the configuration or the registry
+already describes keeps its own name and settings, and the only remaining
+question is the endpoints; a chain nothing here knows about is named and
+described from scratch. Naming a chain ID that is already configured replaces
+that profile rather than failing: one profile per chain ID is the rule, so
+there is nothing else the second definition could mean.
 
 Omitting `--rpc-url` makes the CLI prompt for it, which keeps an endpoint key
-out of shell history. The prompt shows what you type: an RPC URL is
-configuration this machine's owner already owns, not a signing credential, and
-`network list` prints configured URLs in full. The complete URL is also shown
-in the authorization prompt, so a typo is caught before it is saved.
+out of shell history; several endpoints can be typed separated by commas or
+spaces. The prompt shows what you type: an RPC URL is configuration this
+machine's owner already owns, not a signing credential, and `network list`
+prints configured URLs in full. Every endpoint is shown in the authorization
+prompt, so a typo is caught before it is saved.
 
-A chain that is neither configured nor a preset needs its complete profile.
-Run it in a terminal and every missing value is prompted for in one pass, with
-defaults for the usual answers:
+A chain that is in neither the configuration nor the registry needs its
+complete profile. Run it in a terminal and every missing value is prompted for
+in one pass, with defaults for the usual answers:
 
 ```sh
 ekubo-wallet network add mychain 987654
@@ -84,21 +219,46 @@ ekubo-wallet network add mychain 987654 \
   --max-gas-limit 16777216 \
   --block-explorer-url https://explorer.example.com \
   --documentation-url https://docs.example.com \
-  --rpc-url https://rpc.example.com
+  --rpc-url https://rpc.example.com \
+  --rpc-url https://rpc-backup.example.com
 ```
+
+A network may list at most 8 endpoints. Failover walks them in order, so the
+length of the list is also the worst case a caller waits through when the chain
+is genuinely unreachable: every endpoint ahead of the working one costs its own
+timeout.
 
 Transaction gas never comes from an agent or execution plan. The wallet doubles
 the gas reported by `eth_simulateV1`, adds the EIP-7702 authorization cost when
 needed, and caps the signed limit at the lower of the network profile's
 `max_gas_limit` and the simulated block gas limit.
 
-**Set `max_gas_limit` on any custom network.** Every built-in preset carries
-one. Without it the only ceiling left is the block gas limit the endpoint
-itself reported, so the endpoint bounds its own pricing — and on the automatic
-path no human sees the fee before it is signed. Gas is native value the policy
-does not score: `native_value` guards what a call *sends*, not what it costs.
-A profile-level ceiling is the one bound on that which does not depend on the
+**Set `max_gas_limit` on any custom network.** Every default carries one.
+Without it the only ceiling left is the block gas limit the endpoint itself
+reported, so the endpoint bounds its own pricing — and on the automatic path no
+human sees the fee before it is signed. Gas is native value the policy does not
+score: `native_value` guards what a call *sends*, not what it costs. A
+profile-level ceiling is the one bound on that which does not depend on the
 endpoint being honest.
+
+## Regenerating the registry
+
+The vendored `crates/ekubo-wallet-core/networks.json` is produced by
+`contrib/rpc-probe`, which talks to the network and is never run at build time
+or at run time — a release carries exactly what was measured and reviewed:
+
+```sh
+bun contrib/rpc-probe/collect.mjs /tmp/probe          # gather candidates
+bun contrib/rpc-probe/probe.mjs   /tmp/probe          # measure them (~25 min)
+bun contrib/rpc-probe/select.mjs  /tmp/probe \
+  --out crates/ekubo-wallet-core/networks.json        # rank and write
+```
+
+`curated.json` holds the hand-written names, aliases, gas ceilings, and pinned
+first endpoints for the chains that ship as defaults; `alchemy-chains.json`
+holds the chain IDs that decide which chains are defaults. Regenerating changes
+the disclosed endpoint list, which changes the privacy policy text and requires
+a fresh acknowledgment before signing resumes — that is deliberate.
 
 ## Running your own node
 
@@ -116,6 +276,10 @@ A loopback endpoint is accepted from your own configuration:
 ```sh
 ekubo-wallet network add ethereum --rpc-url http://127.0.0.1:8545
 ```
+
+That replaces the whole endpoint list with your node. To keep public endpoints
+behind it as fallbacks, list them after it — but note that doing so means a
+request your node cannot answer silently goes to a third party instead.
 
 `http` and loopback are admitted here deliberately. An owner configuring a local
 node from their own terminal is naming a machine they already control, so the

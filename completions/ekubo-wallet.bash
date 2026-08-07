@@ -5,6 +5,11 @@ _ekubo_wallet() {
   first="${COMP_WORDS[1]}"
   second="${COMP_WORDS[2]}"
 
+  if [[ "$first:$second" == "network:presets" && "$COMP_CWORD" -ge 3 ]]; then
+    COMPREPLY=( $(compgen -W "--search --all" -- "$current") )
+    return
+  fi
+
   if [[ "$first:$second" == "network:add" && "$COMP_CWORD" -ge 4 ]]; then
     choices="--rpc-url --display-name --alias --native-currency-name --native-currency-symbol --native-currency-decimals --max-gas-limit --block-explorer-url --documentation-url"
     COMPREPLY=( $(compgen -W "$choices" -- "$current") )

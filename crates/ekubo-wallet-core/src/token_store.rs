@@ -37,7 +37,7 @@ use alloy::{
     eips::BlockId,
     network::TransactionBuilder,
     primitives::{Address, U256, address},
-    providers::{Provider, ProviderBuilder},
+    providers::Provider,
     rpc::types::TransactionRequest,
     sol,
     sol_types::SolCall,
@@ -836,7 +836,26 @@ async fn fetch_nonzero_balances(
     tokens: &[Address],
     fork: Option<&ForkPreface>,
 ) -> Result<NonzeroBalances> {
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    crate::rpc::try_endpoints(network, |provider| async move {
+        nonzero_balances_through(network, &provider, owner, tokens, fork).await
+    })
+    .await
+}
+
+/// The chunked read itself, against one endpoint.
+///
+/// Split out so failover can run the whole read again elsewhere rather than
+/// half of it: the chunks after the first are pinned to the block the first
+/// one reported, so a chunk that fails partway cannot simply be re-sent to
+/// another endpoint and appended — the answer would mix two chains' views of
+/// one wallet.
+async fn nonzero_balances_through(
+    network: &NetworkConfig,
+    provider: &alloy::providers::DynProvider,
+    owner: Address,
+    tokens: &[Address],
+    fork: Option<&ForkPreface>,
+) -> Result<NonzeroBalances> {
     let mut block_number: Option<String> = None;
     let mut pinned = None;
     let mut balances = Vec::new();
@@ -858,7 +877,7 @@ async fn fetch_nonzero_balances(
             }
             .abi_encode(),
         ));
-        let results = aggregate(network, &provider, calls, fork, pinned).await?;
+        let results = aggregate(network, provider, calls, fork, pinned).await?;
         let mut results = results.into_iter();
         if index == 0 {
             let block = results.next().context("missing block number result")?;
@@ -925,7 +944,7 @@ async fn fetch_nonzero_balances(
                     }
                 })
                 .collect();
-            let results = aggregate(network, &provider, calls, fork, pinned).await?;
+            let results = aggregate(network, provider, calls, fork, pinned).await?;
             ensure!(
                 results.len() == chunk.len(),
                 "Multicall3 returned an unexpected result count"

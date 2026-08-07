@@ -243,7 +243,7 @@ fn stub_network(address: SocketAddr) -> NetworkConfig {
         display_name: Some("Stub Network".into()),
         aliases: Vec::new(),
         chain_id: CHAIN_ID,
-        rpc_url: format!("http://{address}/").parse().unwrap(),
+        rpc_urls: vec![format!("http://{address}/").parse().unwrap()],
         max_gas_limit: Some(BLOCK_GAS_LIMIT.to_string()),
         native_currency: None,
         block_explorer_url: None,

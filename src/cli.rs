@@ -242,7 +242,16 @@ enum NetworkCommand {
     /// List configured networks, including their complete RPC URLs.
     List,
     /// Print the built-in public network presets.
-    Presets,
+    Presets {
+        /// Search the complete compiled-in registry instead of the defaults:
+        /// every chain chainlist knows of that answered this wallet's probe.
+        /// Matches a chain ID, a name, or part of a display name.
+        #[arg(long)]
+        search: Option<String>,
+        /// List every chain in the registry. Long — hundreds of entries.
+        #[arg(long, conflicts_with = "search")]
+        all: bool,
+    },
     /// Replace configured networks with the built-in presets.
     Reset,
     /// Add or update a preset, or configure a complete custom network.
@@ -265,8 +274,12 @@ struct NetworkAddArgs {
     /// the chain ID when omitted.
     name: Option<String>,
     chain_id: Option<u64>,
-    #[arg(long)]
-    rpc_url: Option<Url>,
+    /// RPC endpoint, repeatable. Each `--rpc-url` appends one fallback, tried
+    /// in the order given, and supplying any replaces the whole list rather
+    /// than adding to what is configured — so an edit says what the network
+    /// should reach, not what to append to something already there.
+    #[arg(long = "rpc-url")]
+    rpc_urls: Vec<Url>,
     #[arg(long)]
     display_name: Option<String>,
     #[arg(long = "alias")]
@@ -2368,7 +2381,7 @@ fn pending_approval_rows(
                 "network proposal",
                 &proposal.name,
                 &proposal.chain_id.to_string(),
-                proposal.rpc_url.as_str(),
+                proposal.primary_rpc_url().as_str(),
             ],
         ));
         choices.push(PendingChoice::Network(proposal.chain_id));
@@ -3291,8 +3304,19 @@ async fn run_network(
                 Ok(networks_human(&networks))
             })
         }
-        NetworkCommand::Presets => {
-            let networks = default_networks();
+        NetworkCommand::Presets { search, all } => {
+            let networks = match (search, all) {
+                (None, false) => default_networks(),
+                (None, true) => registry_networks(None),
+                (Some(query), _) => {
+                    let networks = registry_networks(Some(&query));
+                    ensure!(
+                        !networks.is_empty(),
+                        "nothing in the built-in registry matches {query}"
+                    );
+                    networks
+                }
+            };
             emit(
                 mode,
                 &serde_json::json!({ "networks": describe_networks(&networks) }),
@@ -3396,7 +3420,7 @@ async fn run_network(
                 vec![
                     ("Network", candidate.name.clone()),
                     ("Chain ID", candidate.chain_id.to_string()),
-                    ("RPC URL", candidate.rpc_url.to_string()),
+                    ("RPC URLs", endpoint_lines(&candidate, "")),
                 ],
             )? {
                 crate::tui::outro_cancel("No network added.");
@@ -3420,8 +3444,11 @@ async fn run_network(
                 }),
                 || {
                     Ok(format!(
-                        "Configured {} (chain {}) via {}; the RPC verified its chain ID.",
-                        candidate.name, candidate.chain_id, candidate.rpc_url,
+                        "Configured {} (chain {}) via {} endpoint(s), starting with {}; the RPC verified its chain ID.",
+                        candidate.name,
+                        candidate.chain_id,
+                        candidate.rpc_urls.len(),
+                        candidate.primary_rpc_url(),
                     ))
                 },
             )
@@ -3478,6 +3505,62 @@ async fn run_network(
     }
 }
 
+/// Every configured endpoint, one per line, for a review or listing screen.
+///
+/// All of them, always. Failover reaches any endpoint in the list, so a
+/// display that showed only the first would be describing a different wallet
+/// than the one that runs.
+fn endpoint_lines(network: &NetworkConfig, indent: &str) -> String {
+    network
+        .rpc_urls
+        .iter()
+        .map(|url| format!("{indent}{url}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Registry entries, optionally narrowed to a query.
+///
+/// A chain ID matches exactly and nothing else, because someone who typed a
+/// number knows which chain they mean; anything else is matched loosely
+/// against the name, aliases, and display name.
+fn registry_networks(query: Option<&str>) -> Vec<NetworkConfig> {
+    let query = query.map(str::trim);
+    ekubo_wallet_core::networks::known_networks()
+        .iter()
+        .filter(|profile| match query {
+            None => true,
+            Some(query) => {
+                if let Ok(chain_id) = query.parse::<u64>() {
+                    return profile.config.chain_id == chain_id;
+                }
+                let needle = query.to_lowercase();
+                profile.config.name.contains(&needle)
+                    || profile
+                        .config
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.contains(&needle))
+                    || profile
+                        .config
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&needle))
+            }
+        })
+        .map(|profile| profile.config.clone())
+        .collect()
+}
+
+/// One line for a table cell that cannot hold the whole list: the endpoint
+/// that will actually be tried first, and how many stand behind it.
+fn endpoint_summary(network: &NetworkConfig) -> String {
+    match network.rpc_urls.len() {
+        1 => network.primary_rpc_url().to_string(),
+        count => format!("{} (+{} fallback)", network.primary_rpc_url(), count - 1),
+    }
+}
+
 fn describe_networks(networks: &[NetworkConfig]) -> Vec<serde_json::Value> {
     networks.iter().map(describe_network).collect()
 }
@@ -3489,7 +3572,7 @@ fn networks_human(networks: &[NetworkConfig]) -> String {
         .iter()
         .map(|network| {
             format!(
-                "{} (chain {}){}\n  rpc: {}{}",
+                "{} (chain {}){}\n  rpc:\n{}{}",
                 network.name,
                 network.chain_id,
                 if network.aliases.is_empty() {
@@ -3497,7 +3580,7 @@ fn networks_human(networks: &[NetworkConfig]) -> String {
                 } else {
                     format!(" — aliases: {}", network.aliases.join(", "))
                 },
-                network.rpc_url,
+                endpoint_lines(network, "       "),
                 network
                     .block_explorer_url
                     .as_ref()
@@ -3517,7 +3600,11 @@ fn describe_network(network: &NetworkConfig) -> serde_json::Value {
         "display_name": network.display_name,
         "aliases": network.aliases,
         "chain_id": network.chain_id.to_string(),
-        "rpc_url": network.rpc_url.as_str(),
+        "rpc_urls": network
+            .rpc_urls
+            .iter()
+            .map(url::Url::as_str)
+            .collect::<Vec<_>>(),
         "max_gas_limit": network.max_gas_limit,
         "native_currency": network.native_currency,
         "block_explorer_url": network.block_explorer_url,
@@ -3585,12 +3672,19 @@ fn prompt_network_choice(
             "Chain {chain_id} is {origin} {}; its settings are the starting point.",
             known.name
         ));
-        if args.rpc_url.is_none() {
+        if args.rpc_urls.is_empty() {
             let answer = prompt_network_field(
                 custom_network_field("--rpc-url"),
-                Some(known.rpc_url.as_str()),
+                Some(
+                    &known
+                        .rpc_urls
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
             )?;
-            args.rpc_url = Some(answer.trim().parse().context("RPC URL is invalid")?);
+            args.rpc_urls = parse_endpoint_list(&answer)?;
         }
         return Ok(Some(known.name));
     }
@@ -3622,6 +3716,13 @@ fn prompt_network_choice(
 /// Whatever already describes this chain ID, and where it came from. A
 /// configured network wins over the preset it started from, so an endpoint
 /// someone already changed is not quietly described by the shipped default.
+/// What already describes a chain: the owner's own configuration first, then
+/// the compiled-in registry.
+///
+/// The registry is every chain chainlist knows of that answered this wallet's
+/// probe, not merely the ones configured by default, so adding a chain the
+/// wallet did not default to is a chain ID and a confirmation rather than a
+/// hunt for a working endpoint.
 fn network_for_chain(
     chain_id: u64,
     configured: &[NetworkConfig],
@@ -3632,10 +3733,16 @@ fn network_for_chain(
         .cloned()
         .map(|network| (network, "configured as"))
         .or_else(|| {
-            default_networks()
-                .into_iter()
-                .find(|network| network.chain_id == chain_id)
-                .map(|network| (network, "the built-in preset"))
+            ekubo_wallet_core::networks::known_network(chain_id).map(|profile| {
+                (
+                    profile.config.clone(),
+                    if profile.is_default {
+                        "the built-in preset"
+                    } else {
+                        "known to the built-in registry"
+                    },
+                )
+            })
         })
 }
 
@@ -3677,14 +3784,17 @@ fn pick_network(networks: &[NetworkConfig], action: &str) -> Result<Option<usize
                         Span::plain(&display_name)
                     },
                     Span::plain(network.chain_id.to_string()),
-                    Span::toned(network.rpc_url.as_str(), crate::tui::Tone::Muted),
+                    Span::toned(endpoint_summary(network), crate::tui::Tone::Muted),
                 ],
                 &[
                     &network.name,
                     &display_name,
                     &aliases,
                     &network.chain_id.to_string(),
-                    network.rpc_url.as_str(),
+                    // Every endpoint is searchable even though one row cannot
+                    // show them all: someone looking for which network uses a
+                    // given provider is asking about the whole list.
+                    &endpoint_lines(network, ""),
                     &explorer,
                 ],
             )
@@ -3773,7 +3883,7 @@ async fn run_network_edit(
             &[
                 ("Network", draft.name.clone()),
                 ("Chain ID", draft.chain_id.to_string()),
-                ("RPC URL", draft.rpc_url.to_string()),
+                ("RPC URLs", endpoint_lines(&draft, "")),
             ],
         ),
         "Save these changes to this network?",
@@ -3802,7 +3912,9 @@ async fn run_network_edit(
         || {
             Ok(format!(
                 "Updated {} (chain {}) via {}; the RPC verified its chain ID.",
-                draft.name, draft.chain_id, draft.rpc_url,
+                draft.name,
+                draft.chain_id,
+                draft.primary_rpc_url(),
             ))
         },
     )
@@ -3835,7 +3947,12 @@ fn network_field_value(network: &NetworkConfig, flag: &str) -> String {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default(),
-        "--rpc-url" => network.rpc_url.to_string(),
+        "--rpc-url" => network
+            .rpc_urls
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => unreachable!("unknown network field {flag}"),
     }
 }
@@ -3889,7 +4006,7 @@ fn set_network_field(network: &mut NetworkConfig, flag: &str, value: &str) -> Re
                     .context("documentation URL is invalid")?,
             );
         }
-        "--rpc-url" => network.rpc_url = value.trim().parse().context("RPC URL is invalid")?,
+        "--rpc-url" => network.rpc_urls = parse_endpoint_list(value)?,
         _ => unreachable!("unknown network field {flag}"),
     }
     Ok(())
@@ -3914,7 +4031,13 @@ fn network_base(
         .iter()
         .find(|network| matches(network))
         .cloned()
-        .or_else(|| default_networks().into_iter().find(matches))
+        .or_else(|| {
+            ekubo_wallet_core::networks::known_networks()
+                .iter()
+                .map(|profile| &profile.config)
+                .find(|network| matches(network))
+                .cloned()
+        })
 }
 
 /// Refuse a network write whose reviewed premise no longer holds.
@@ -3943,10 +4066,35 @@ fn ensure_reviewed_network(
     Ok(())
 }
 
+/// One or more RPC endpoints, however a human typed them: separated by
+/// commas, spaces, or newlines.
+///
+/// Duplicates are refused rather than dropped. A list naming one endpoint
+/// twice has fewer fallbacks than it looks like it has — the second attempt
+/// reaches the service that just failed — and silently collapsing it would
+/// leave the owner believing in a redundancy they do not have.
+fn parse_endpoint_list(value: &str) -> Result<Vec<Url>> {
+    let endpoints = value
+        .split([',', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.parse::<Url>().context("RPC URL is invalid"))
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(!endpoints.is_empty(), "at least one RPC URL is required");
+    let mut seen = std::collections::BTreeSet::new();
+    for endpoint in &endpoints {
+        ensure!(
+            seen.insert(endpoint.as_str()),
+            "{endpoint} is listed twice; each fallback must be a different endpoint"
+        );
+    }
+    Ok(endpoints)
+}
+
 /// Apply only the fields this invocation actually supplied.
 fn apply_network_overrides(mut base: NetworkConfig, args: NetworkAddArgs) -> Result<NetworkConfig> {
-    if let Some(rpc_url) = args.rpc_url {
-        base.rpc_url = rpc_url;
+    if !args.rpc_urls.is_empty() {
+        base.rpc_urls = args.rpc_urls;
     }
     if let Some(display_name) = args.display_name {
         base.display_name = Some(display_name);
@@ -4102,7 +4250,16 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
             "--documentation-url",
             args.documentation_url.as_ref().map(ToString::to_string),
         ),
-        ("--rpc-url", args.rpc_url.as_ref().map(ToString::to_string)),
+        (
+            "--rpc-url",
+            (!args.rpc_urls.is_empty()).then(|| {
+                args.rpc_urls
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            }),
+        ),
     ]);
     let answers = collect_custom_network_fields(&name, chain_id, &supplied)?;
     let field = |flag: &str| answers[flag].clone();
@@ -4122,7 +4279,7 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
         display_name: Some(field("--display-name")),
         aliases,
         chain_id,
-        rpc_url: field("--rpc-url").parse().context("RPC URL is invalid")?,
+        rpc_urls: parse_endpoint_list(&field("--rpc-url"))?,
         max_gas_limit: Some(field("--max-gas-limit")),
         native_currency: Some(NativeCurrency {
             name: field("--native-currency-name"),
@@ -4367,13 +4524,13 @@ async fn review_one_network_proposal(
         let mut facts = vec![
             ("Network", proposal.name.clone()),
             ("Chain ID", proposal.chain_id.to_string()),
-            ("RPC endpoint", proposal.rpc_url.to_string()),
+            ("RPC endpoints", endpoint_lines(proposal, "")),
         ];
         // An edit is the dangerous shape: the chain keeps working and its
         // narrator changes. Say which endpoint is being replaced, because the
         // difference between the two URLs is the entire decision.
         let (title, summary) = if let Some(existing) = &existing {
-            facts.push(("Replaces endpoint", existing.rpc_url.to_string()));
+            facts.push(("Replaces endpoints", endpoint_lines(existing, "")));
             facts.push(("Configured name", existing.name.clone()));
             (
                 "Accept an edited network",
@@ -4398,8 +4555,9 @@ async fn review_one_network_proposal(
         // something about a moment that has since passed.
         verify_chain_id(proposal).await.map_err(|_| {
             anyhow::anyhow!(
-                "the RPC at {} did not answer eth_chainId with chain {}; nothing was written",
-                proposal.rpc_url,
+                "none of the {} RPC endpoints for {} answered eth_chainId with chain {}; nothing was written",
+                proposal.rpc_urls.len(),
+                proposal.name,
                 proposal.chain_id
             )
         })?;

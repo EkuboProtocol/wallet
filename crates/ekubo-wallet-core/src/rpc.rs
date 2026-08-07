@@ -6,15 +6,93 @@ use crate::{
 use alloy::{
     eips::BlockId,
     primitives::{Address, B256, Bytes},
-    providers::{Provider, ProviderBuilder},
+    providers::{DynProvider, Provider, ProviderBuilder},
 };
 use anyhow::{Context, Result, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::str::FromStr;
 use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A provider for one configured endpoint.
+///
+/// Type-erased because failover hands the same closure a different provider
+/// per attempt, and the builder's own type names the filler stack rather than
+/// anything a caller cares about.
+#[must_use]
+pub fn provider_for(endpoint: &url::Url) -> DynProvider {
+    ProviderBuilder::new()
+        .connect_http(endpoint.clone())
+        .erased()
+}
+
+/// Run one read against the network's endpoints, in configured order, until
+/// one of them answers.
+///
+/// This is the whole failover mechanism, and it is deliberately per-request
+/// rather than a sticky choice of endpoint: a public RPC does not fail as a
+/// unit. It rate-limits one request and serves the next, loses its archive
+/// state while still reporting a head, or answers reads and refuses
+/// `eth_simulateV1`. A wallet that picked one endpoint at startup would ride
+/// that endpoint's bad minute all the way to a refusal to sign.
+///
+/// `operation` must be safe to run more than once. Every caller here is a
+/// read; broadcasting is not routed through this, because deciding what a
+/// failed send meant needs the endpoint that failed it — see
+/// [`crate::execution`].
+///
+/// Failures accumulate rather than replace each other. When no endpoint
+/// answers, the error names every one that was tried and what it said, because
+/// "RPC request failed" about an unnamed member of a list of eight is not a
+/// diagnosis anyone can act on.
+pub async fn try_endpoints<T, F, Fut>(network: &NetworkConfig, operation: F) -> Result<T>
+where
+    F: Fn(DynProvider) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let mut failures = Vec::new();
+    for endpoint in &network.rpc_urls {
+        match operation(provider_for(endpoint)).await {
+            Ok(value) => return Ok(value),
+            Err(error) => failures.push((endpoint, error)),
+        }
+    }
+    Err(all_endpoints_failed(network, &failures))
+}
+
+/// The error raised when every endpoint a network lists has been tried.
+pub(crate) fn all_endpoints_failed(
+    network: &NetworkConfig,
+    failures: &[(&url::Url, anyhow::Error)],
+) -> anyhow::Error {
+    let mut message = format!(
+        "all {} RPC endpoints configured for {} failed",
+        failures.len(),
+        network.name
+    );
+    for (endpoint, error) in failures {
+        let _ = write!(message, "\n  {endpoint}: {error:#}");
+    }
+    anyhow::anyhow!(message)
+}
+
+/// Confirm a provider is serving the chain the network claims, and fail in a
+/// way failover understands.
+///
+/// Checked on every endpoint rather than once for the network: the list is
+/// several independent services, and one of them being pointed at the wrong
+/// chain must disqualify that endpoint instead of the request.
+pub async fn ensure_serving_chain(provider: &DynProvider, expected: u64) -> Result<()> {
+    let observed = with_timeout(provider.get_chain_id()).await?;
+    ensure!(
+        observed == expected,
+        "RPC reports chain {observed}, not {expected}"
+    );
+    Ok(())
+}
 
 /// The canonical Multicall3 deployment, at the same address on every chain.
 pub const MULTICALL3_ADDRESS: Address =
@@ -85,19 +163,10 @@ impl ReceiptStatus {
 }
 
 pub async fn verify_chain_id(network: &NetworkConfig) -> Result<()> {
-    let observed = with_timeout(async {
-        ProviderBuilder::new()
-            .connect_http(network.rpc_url.clone())
-            .get_chain_id()
-            .await
+    try_endpoints(network, |provider| async move {
+        ensure_serving_chain(&provider, network.chain_id).await
     })
-    .await?;
-    ensure!(
-        observed == network.chain_id,
-        "RPC reports chain {observed}, not {}",
-        network.chain_id
-    );
-    Ok(())
+    .await
 }
 
 pub async fn wallet_status(
@@ -108,18 +177,22 @@ pub async fn wallet_status(
     if let Some(preface) = fork {
         return fork_wallet_status(wallet, network, preface).await;
     }
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, balance, transaction_count, code) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(async { provider.get_balance(wallet.address).await }),
-        with_timeout(async { provider.get_transaction_count(wallet.address).await }),
-        with_timeout(async { provider.get_code_at(wallet.address).await }),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
+    let (chain_id, balance, transaction_count, code) =
+        try_endpoints(network, |provider| async move {
+            let (chain_id, balance, transaction_count, code) = tokio::try_join!(
+                with_timeout(provider.get_chain_id()),
+                with_timeout(async { provider.get_balance(wallet.address).await }),
+                with_timeout(async { provider.get_transaction_count(wallet.address).await }),
+                with_timeout(async { provider.get_code_at(wallet.address).await }),
+            )?;
+            ensure!(
+                chain_id == network.chain_id,
+                "RPC reports chain {chain_id}, not {}",
+                network.chain_id
+            );
+            Ok((chain_id, balance, transaction_count, code))
+        })
+        .await?;
     Ok(WalletStatus {
         wallet_id: wallet.id.clone(),
         address: format!("{:#x}", wallet.address),
@@ -151,23 +224,26 @@ async fn fork_wallet_status(
         preface.wallet == wallet.address,
         "fork belongs to a different wallet"
     );
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
     let pinned = BlockId::number(preface.parent.number);
-    let (chain_id, transaction_count, code) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(async {
-            provider
-                .get_transaction_count(wallet.address)
-                .block_id(pinned)
-                .await
-        }),
-        with_timeout(async { provider.get_code_at(wallet.address).block_id(pinned).await }),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
+    let (chain_id, transaction_count, code) = try_endpoints(network, |provider| async move {
+        let (chain_id, transaction_count, code) = tokio::try_join!(
+            with_timeout(provider.get_chain_id()),
+            with_timeout(async {
+                provider
+                    .get_transaction_count(wallet.address)
+                    .block_id(pinned)
+                    .await
+            }),
+            with_timeout(async { provider.get_code_at(wallet.address).block_id(pinned).await }),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok((chain_id, transaction_count, code))
+    })
+    .await?;
     let (balance, _) = native_balance(network, preface, wallet.address).await?;
     let delegated = if preface.requires_calibur() {
         Some(format!("{CANONICAL_CALIBUR:#x}"))
@@ -192,16 +268,19 @@ pub async fn transaction_receipt(
     transaction_hash: &str,
 ) -> Result<Option<ReceiptStatus>> {
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, receipt) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(provider.get_transaction_receipt(hash)),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
+    let receipt = try_endpoints(network, |provider| async move {
+        let (chain_id, receipt) = tokio::try_join!(
+            with_timeout(provider.get_chain_id()),
+            with_timeout(provider.get_transaction_receipt(hash)),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok(receipt)
+    })
+    .await?;
     receipt
         .map(|receipt| {
             Ok(ReceiptStatus {
@@ -240,16 +319,19 @@ pub async fn transaction_receipt_details(
     transaction_hash: &str,
 ) -> Result<Option<ReceiptDetails>> {
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, receipt) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(provider.get_transaction_receipt(hash)),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
+    let receipt = try_endpoints(network, |provider| async move {
+        let (chain_id, receipt) = tokio::try_join!(
+            with_timeout(provider.get_chain_id()),
+            with_timeout(provider.get_transaction_receipt(hash)),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok(receipt)
+    })
+    .await?;
     receipt
         .map(|receipt| {
             Ok(ReceiptDetails {
@@ -287,38 +369,42 @@ pub async fn native_balances_around_block(
     let parent = block_number
         .checked_sub(1)
         .context("the genesis block has no parent state to diff against")?;
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, before, after) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(async { provider.get_balance(address).block_id(parent.into()).await }),
-        with_timeout(async {
-            provider
-                .get_balance(address)
-                .block_id(block_number.into())
-                .await
-        }),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
-    Ok((before, after))
+    try_endpoints(network, |provider| async move {
+        let (chain_id, before, after) = tokio::try_join!(
+            with_timeout(provider.get_chain_id()),
+            with_timeout(async { provider.get_balance(address).block_id(parent.into()).await }),
+            with_timeout(async {
+                provider
+                    .get_balance(address)
+                    .block_id(block_number.into())
+                    .await
+            }),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok((before, after))
+    })
+    .await
 }
 
 /// The chain head height, used to count confirmations for a mined receipt.
 pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, block_number) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(provider.get_block_number()),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
-    Ok(block_number)
+    try_endpoints(network, |provider| async move {
+        let (chain_id, block_number) = tokio::try_join!(
+            with_timeout(provider.get_chain_id()),
+            with_timeout(provider.get_block_number()),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok(block_number)
+    })
+    .await
 }
 
 /// The account's mined transaction count (the `latest` tag): the next nonce
@@ -326,17 +412,19 @@ pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
 /// replacement detection must only trust nonces consumed by mined blocks,
 /// because a competing mempool transaction at the same nonce has not won yet.
 pub async fn mined_transaction_count(network: &NetworkConfig, address: Address) -> Result<u64> {
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, count) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(async { provider.get_transaction_count(address).latest().await }),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
-    Ok(count)
+    try_endpoints(network, |provider| async move {
+        let (chain_id, count) = tokio::try_join!(
+            with_timeout(provider.get_chain_id()),
+            with_timeout(async { provider.get_transaction_count(address).latest().await }),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok(count)
+    })
+    .await
 }
 
 /// Return whether the configured RPC already knows the exact transaction
@@ -345,17 +433,19 @@ pub async fn mined_transaction_count(network: &NetworkConfig, address: Address) 
 /// transaction when the hash is unknown.
 pub async fn transaction_known(network: &NetworkConfig, transaction_hash: &str) -> Result<bool> {
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, transaction) = tokio::try_join!(
-        with_timeout(provider.get_chain_id()),
-        with_timeout(provider.get_transaction_by_hash(hash)),
-    )?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
-    Ok(transaction.is_some())
+    try_endpoints(network, |provider| async move {
+        let (chain_id, transaction) = tokio::try_join!(
+            with_timeout(provider.get_chain_id()),
+            with_timeout(provider.get_transaction_by_hash(hash)),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok(transaction.is_some())
+    })
+    .await
 }
 
 async fn with_timeout<T, E>(future: impl Future<Output = std::result::Result<T, E>>) -> Result<T>

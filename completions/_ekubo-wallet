@@ -64,6 +64,11 @@ _ekubo-wallet() {
     esac
   fi
 
+  if (( CURRENT >= 4 )) && [[ "$words[2]:$words[3]" == "network:presets" ]]; then
+    _values "presets option" --search --all
+    return
+  fi
+
   if (( CURRENT > 5 )) && [[ "$words[2]:$words[3]" == "network:add" ]]; then
     _values "network option" --rpc-url --display-name --alias --native-currency-name \
       --native-currency-symbol --native-currency-decimals --max-gas-limit \

@@ -124,7 +124,7 @@ fn a_network_suggestion_waits_and_the_latest_one_prevails() {
     // An agent that changed its mind has not left two decisions to make,
     // so the newer suggestion for a chain replaces the older one.
     let superseded = profile.clone();
-    profile.rpc_url = "https://second.example.invalid/rpc".parse().unwrap();
+    profile.rpc_urls = vec!["https://second.example.invalid/rpc".parse().unwrap()];
     store.put_network_proposal(&profile).unwrap();
     assert_eq!(store.count_network_proposals().unwrap(), 1);
     assert_eq!(
@@ -132,7 +132,7 @@ fn a_network_suggestion_waits_and_the_latest_one_prevails() {
             .network_proposal(profile.chain_id)
             .unwrap()
             .unwrap()
-            .rpc_url
+            .primary_rpc_url()
             .as_str(),
         "https://second.example.invalid/rpc"
     );
@@ -182,7 +182,7 @@ fn network_suggestions_cannot_grow_without_bound() {
     revised.chain_id = 100_000;
     revised.name = "chain-0".into();
     revised.aliases = Vec::new();
-    revised.rpc_url = "https://revised.example.invalid/rpc".parse().unwrap();
+    revised.rpc_urls = vec!["https://revised.example.invalid/rpc".parse().unwrap()];
     store.put_network_proposal(&revised).unwrap();
 }
 

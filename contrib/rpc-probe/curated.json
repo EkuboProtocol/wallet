@@ -1,0 +1,349 @@
+{
+  "note": "Hand-written identity for the chains the wallet ships as defaults. Names and aliases are not cosmetic: they are what an owner types and what an MCP caller passes as `network`, so a regeneration that renamed `ethereum` to `eth` would break every stored habit and every script. Anything not listed here keeps the name derived from the registry's short name. `max_gas_limit` is the ceiling this wallet will simulate or sign at on that chain, independent of what a block would allow. `rpc_first` names the endpoint that should lead the list — the chain's own published endpoint, or on Ethereum an MEV-protecting one — so an owner's traffic goes to the operator the chain itself points at before it goes to anyone found in a directory. It is honoured only when that endpoint probed healthy, and never when pinning it would put a node without eth_simulateV1 ahead of one that has it.",
+  "chains": {
+    "1": {
+      "name": "ethereum",
+      "display_name": "Ethereum Mainnet",
+      "aliases": [
+        "mainnet",
+        "eth"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://ethereum.org/en/developers/docs/apis/json-rpc/",
+      "rpc_first": "https://rpc.mevblocker.io"
+    },
+    "10": {
+      "name": "optimism",
+      "display_name": "OP Mainnet",
+      "aliases": [
+        "op",
+        "op-mainnet"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.optimism.io/op-mainnet/network-information/connecting-to-op",
+      "rpc_first": "https://mainnet.optimism.io"
+    },
+    "56": {
+      "name": "bnb",
+      "display_name": "BNB Smart Chain",
+      "aliases": [
+        "bsc",
+        "binance"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "100": {
+      "name": "gnosis",
+      "display_name": "Gnosis",
+      "aliases": [
+        "gnosis-mainnet",
+        "xdai"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.gnosischain.com/about/networks/mainnet",
+      "rpc_first": "https://rpc.gnosischain.com"
+    },
+    "130": {
+      "name": "unichain",
+      "display_name": "Unichain",
+      "aliases": [
+        "uni"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "137": {
+      "name": "polygon",
+      "display_name": "Polygon",
+      "aliases": [
+        "matic",
+        "polygon-mainnet"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "143": {
+      "name": "monad",
+      "display_name": "Monad",
+      "aliases": [
+        "monad-mainnet"
+      ],
+      "max_gas_limit": "30000000",
+      "documentation_url": "https://docs.monad.xyz/developer-essentials/network-information",
+      "rpc_first": "https://rpc.monad.xyz"
+    },
+    "146": {
+      "name": "sonic",
+      "display_name": "Sonic",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "8453": {
+      "name": "base",
+      "display_name": "Base",
+      "aliases": [
+        "base-mainnet"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+      "rpc_first": "https://mainnet.base.org"
+    },
+    "42161": {
+      "name": "arbitrum",
+      "display_name": "Arbitrum One",
+      "aliases": [
+        "arbitrum-one",
+        "arb",
+        "arb1"
+      ],
+      "max_gas_limit": "32000000",
+      "documentation_url": "https://support.arbitrum.io/hc/en-gb/articles/19479729907483-How-can-I-add-Arbitrum-network-to-my-wallet",
+      "rpc_first": "https://arb1.arbitrum.io/rpc"
+    },
+    "42220": {
+      "name": "celo",
+      "display_name": "Celo",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "43114": {
+      "name": "avalanche",
+      "display_name": "Avalanche C-Chain",
+      "aliases": [
+        "avax"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "4326": {
+      "name": "megaeth",
+      "display_name": "MegaETH",
+      "aliases": [
+        "megaeth-mainnet",
+        "mega"
+      ],
+      "max_gas_limit": "10000000000",
+      "documentation_url": "https://docs.megaeth.com",
+      "rpc_first": "https://mainnet.megaeth.com/rpc"
+    },
+    "4663": {
+      "name": "robinhood",
+      "display_name": "Robinhood Chain",
+      "aliases": [
+        "robinhood-chain",
+        "hood"
+      ],
+      "max_gas_limit": "32000000",
+      "documentation_url": "https://docs.robinhood.com/chain/connecting/",
+      "rpc_first": "https://rpc.mainnet.chain.robinhood.com"
+    },
+    "57073": {
+      "name": "ink",
+      "display_name": "Ink",
+      "aliases": [
+        "ink-mainnet"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.inkonchain.com/general/connect-wallet",
+      "rpc_first": "https://rpc-gel.inkonchain.com"
+    },
+    "59144": {
+      "name": "linea",
+      "display_name": "Linea",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "80094": {
+      "name": "berachain",
+      "display_name": "Berachain",
+      "aliases": [
+        "bera"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.berachain.com/general/introduction/connect-to-berachain",
+      "rpc_first": "https://rpc.berachain.com"
+    },
+    "81457": {
+      "name": "blast",
+      "display_name": "Blast",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "324": {
+      "name": "zksync",
+      "display_name": "ZKsync Era",
+      "aliases": [
+        "zksync-era",
+        "era"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "480": {
+      "name": "worldchain",
+      "display_name": "World Chain",
+      "aliases": [
+        "world"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "534352": {
+      "name": "scroll",
+      "display_name": "Scroll",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "5000": {
+      "name": "mantle",
+      "display_name": "Mantle",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "1868": {
+      "name": "soneium",
+      "display_name": "Soneium",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "34443": {
+      "name": "mode",
+      "display_name": "Mode",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "252": {
+      "name": "fraxtal",
+      "display_name": "Fraxtal",
+      "aliases": [
+        "frax"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "7777777": {
+      "name": "zora",
+      "display_name": "Zora",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "60808": {
+      "name": "bob",
+      "display_name": "BOB",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "1284": {
+      "name": "moonbeam",
+      "display_name": "Moonbeam",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "1088": {
+      "name": "metis",
+      "display_name": "Metis Andromeda",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "204": {
+      "name": "opbnb",
+      "display_name": "opBNB",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "2020": {
+      "name": "ronin",
+      "display_name": "Ronin",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "1329": {
+      "name": "sei",
+      "display_name": "Sei",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "30": {
+      "name": "rootstock",
+      "display_name": "Rootstock",
+      "aliases": [
+        "rsk"
+      ],
+      "max_gas_limit": "6800000"
+    },
+    "2741": {
+      "name": "abstract",
+      "display_name": "Abstract",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "33139": {
+      "name": "apechain",
+      "display_name": "ApeChain",
+      "aliases": [
+        "ape"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "747": {
+      "name": "flow",
+      "display_name": "Flow EVM",
+      "aliases": [
+        "flow-evm"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "592": {
+      "name": "astar",
+      "display_name": "Astar",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "232": {
+      "name": "lens",
+      "display_name": "Lens",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "288": {
+      "name": "boba",
+      "display_name": "Boba Network",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "360": {
+      "name": "shape",
+      "display_name": "Shape",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "5330": {
+      "name": "superseed",
+      "display_name": "Superseed",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "6805": {
+      "name": "race",
+      "display_name": "RACE",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "7000": {
+      "name": "zetachain",
+      "display_name": "ZetaChain",
+      "aliases": [
+        "zeta"
+      ],
+      "max_gas_limit": "16777216"
+    },
+    "9745": {
+      "name": "plasma",
+      "display_name": "Plasma",
+      "aliases": [],
+      "max_gas_limit": "16777216"
+    },
+    "1514": {
+      "name": "story",
+      "display_name": "Story",
+      "aliases": [
+        "data-network"
+      ],
+      "max_gas_limit": "16777216"
+    }
+  }
+}

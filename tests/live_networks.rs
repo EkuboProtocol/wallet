@@ -28,7 +28,7 @@
 
 use alloy::{
     primitives::{Address, U256, address},
-    providers::{Provider, ProviderBuilder},
+    providers::Provider,
     rpc::types::simulate::{SimBlock, SimulatePayload},
     sol,
     sol_types::SolCall,
@@ -118,7 +118,7 @@ fn network(chain_id: u64) -> Option<NetworkConfig> {
         .find(|network| network.chain_id == chain_id)
         .unwrap_or_else(|| panic!("chain {chain_id} is not a default network"));
     if let Ok(url) = std::env::var(format!("EKUBO_WALLET_LIVE_RPC_{chain_id}")) {
-        network.rpc_url = url.parse().expect("override RPC URL is a URL");
+        network.rpc_urls = vec![url.parse().expect("override RPC URL is a URL")];
     }
     Some(network)
 }
@@ -433,7 +433,7 @@ struct Capabilities {
 }
 
 async fn capabilities(network: &NetworkConfig) -> Capabilities {
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
+    let provider = ekubo_wallet_core::rpc::provider_for(network.primary_rpc_url());
     let calibur = retrying("calibur code", || async {
         Ok(provider.get_code_at(CANONICAL_CALIBUR).await?)
     })
@@ -680,7 +680,7 @@ async fn run_matrix(chain_id: u64) {
     };
     eprintln!(
         "chain {chain_id} via {}",
-        network.rpc_url.host_str().unwrap()
+        network.primary_rpc_url().host_str().unwrap()
     );
     // Reads never depend on chain capabilities and must work everywhere.
     batch_reads_are_pinned_and_decoded(&network).await;
@@ -721,4 +721,62 @@ live_matrix! {
     ink => 57073,
     berachain => 80094,
     monad => 143,
+}
+
+/// Failover, proven against a real chain rather than a stub.
+///
+/// The unit tests in `rpc_test.rs` show that a read moves past a dead endpoint;
+/// this shows that the thing signing depends on — a complete `eth_simulateV1`
+/// against live state, with the pinned block and state override the wallet
+/// actually sends — still produces a successful simulation when the endpoints
+/// ahead of the working one are unreachable. That is the whole claim of the
+/// feature, and it is the one a stub cannot make.
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_survives_dead_endpoints_ahead_of_a_working_one() {
+    let Some(mut network) = network(1) else {
+        eprintln!("skipping failover check: set EKUBO_WALLET_LIVE_RPC_TESTS=1 to run");
+        return;
+    };
+    let working = network.rpc_urls.clone();
+    // Port 1 on loopback refuses immediately, so this measures failover rather
+    // than a stack of timeouts.
+    network.rpc_urls =
+        std::iter::repeat_n("http://127.0.0.1:1/".parse().expect("dead endpoint URL"), 2)
+            .chain(working.iter().take(1).cloned())
+            .collect();
+
+    let plan = approve_plan(1, Address::repeat_byte(0x42), 1);
+    let result = simulate_retrying(&network, &plan, None).await;
+    assert!(
+        result.simulation.success,
+        "simulation did not reach the working endpoint: {:?}",
+        result.simulation.failure
+    );
+    assert!(
+        result.block_number.parse::<u64>().expect("a block number") > 0,
+        "a successful simulation names the block it ran against"
+    );
+}
+
+/// The mirror image: when nothing answers, the failure names every endpoint
+/// tried. A wallet that cannot reach a chain is a support question, and an
+/// error that hides which of six endpoints failed does not answer it.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_endpoint_dead_reports_each_one() {
+    let Some(mut network) = network(1) else {
+        eprintln!("skipping failover check: set EKUBO_WALLET_LIVE_RPC_TESTS=1 to run");
+        return;
+    };
+    network.rpc_urls = vec![
+        "http://127.0.0.1:1/".parse().unwrap(),
+        "http://127.0.0.1:2/".parse().unwrap(),
+    ];
+    let error = format!(
+        "{:#}",
+        ekubo_wallet_core::rpc::latest_block_number(&network)
+            .await
+            .expect_err("no endpoint could answer")
+    );
+    assert!(error.contains("127.0.0.1:1"), "unexpected: {error}");
+    assert!(error.contains("127.0.0.1:2"), "unexpected: {error}");
 }

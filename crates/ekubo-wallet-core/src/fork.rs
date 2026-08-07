@@ -39,7 +39,7 @@ use alloy::{
     eips::BlockNumberOrTag,
     network::primitives::BlockResponse,
     primitives::{Address, B256, U256},
-    providers::{Provider, ProviderBuilder},
+    providers::Provider,
     rpc::types::{
         TransactionRequest,
         simulate::{SimCallResult, SimulatePayload},
@@ -400,22 +400,24 @@ pub struct ForkReadOutcome {
 /// Read the pinned parent a new fork should use, verifying the RPC's chain
 /// before anything is stored.
 pub async fn pin_parent_block(network: &NetworkConfig) -> Result<ForkParent> {
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let (chain_id, block) = tokio::time::timeout(FORK_RPC_TIMEOUT, async {
-        tokio::try_join!(
-            provider.get_chain_id(),
-            provider.get_block_by_number(BlockNumberOrTag::Latest),
-        )
+    let block = crate::rpc::try_endpoints(network, |provider| async move {
+        let (chain_id, block) = tokio::time::timeout(FORK_RPC_TIMEOUT, async {
+            tokio::try_join!(
+                provider.get_chain_id(),
+                provider.get_block_by_number(BlockNumberOrTag::Latest),
+            )
+        })
+        .await
+        .context("fork parent-block RPC timed out")?
+        .map_err(|error| rpc_error(&error))?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        block.context("RPC returned no latest block")
     })
-    .await
-    .context("fork parent-block RPC timed out")?
-    .map_err(|error| rpc_error(&error))?;
-    ensure!(
-        chain_id == network.chain_id,
-        "RPC reports chain {chain_id}, not {}",
-        network.chain_id
-    );
-    let block = block.context("RPC returned no latest block")?;
+    .await?;
     let header = block.header();
     Ok(ForkParent {
         number: header.number(),
@@ -472,14 +474,19 @@ pub async fn execute_reads(
         validation: false,
         return_full_transactions: false,
     };
-    let provider = ProviderBuilder::new().connect_http(network.rpc_url.clone());
-    let simulated = tokio::time::timeout(
-        FORK_RPC_TIMEOUT,
-        provider.simulate(&payload).number(preface.parent.number),
-    )
-    .await
-    .context("fork eth_simulateV1 request timed out")?
-    .map_err(|error| rpc_error(&error))?;
+    let simulated = crate::rpc::try_endpoints(network, |provider| {
+        let payload = &payload;
+        async move {
+            tokio::time::timeout(
+                FORK_RPC_TIMEOUT,
+                provider.simulate(payload).number(preface.parent.number),
+            )
+            .await
+            .context("fork eth_simulateV1 request timed out")?
+            .map_err(|error| rpc_error(&error))
+        }
+    })
+    .await?;
 
     let mut simulated = validate_replay(
         preface.parent,

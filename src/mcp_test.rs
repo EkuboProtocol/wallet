@@ -123,7 +123,7 @@ fn inventory_names_each_network_endpoint() {
         inventory
             .networks
             .iter()
-            .all(|network| network.rpc_url.starts_with("http"))
+            .all(|network| network.rpc_urls.iter().all(|url| url.starts_with("http")))
     );
 }
 
@@ -461,7 +461,7 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
             chain_id: "999999".into(),
             // Nothing listens here, so reaching it at all fails slowly and
             // with a connection error rather than the conflict below.
-            rpc_url: "http://127.0.0.1:9".parse().unwrap(),
+            rpc_urls: vec!["http://127.0.0.1:9".parse().unwrap()],
             max_gas_limit: "30000000".into(),
             native_currency: NativeCurrency {
                 name: "Test Ether".into(),
@@ -488,7 +488,7 @@ fn add_network_input(rpc_url: &str) -> AddNetworkInput {
         display_name: "Untrusted Test".into(),
         aliases: vec![],
         chain_id: "999999".into(),
-        rpc_url: rpc_url.parse().unwrap(),
+        rpc_urls: vec![rpc_url.parse().unwrap()],
         max_gas_limit: "30000000".into(),
         native_currency: NativeCurrency {
             name: "Test Ether".into(),

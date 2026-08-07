@@ -51,8 +51,7 @@ pub struct NativeCurrency {
     pub decimals: u8,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct NetworkConfig {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,8 +59,16 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     pub chain_id: u64,
-    #[schemars(with = "String")]
-    pub rpc_url: Url,
+    /// Every endpoint this network may be reached through, in preference
+    /// order. Never empty.
+    ///
+    /// A public RPC is a shared, rate-limited, individually unreliable
+    /// service, and the wallet cannot simulate — and therefore cannot sign —
+    /// while the one it holds is refusing requests. Carrying several means a
+    /// single healthy endpoint anywhere in the list is enough, and the order
+    /// is the order they are tried in.
+    #[schemars(with = "Vec<String>")]
+    pub rpc_urls: Vec<Url>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas_limit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,6 +79,96 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
     pub documentation_url: Option<Url>,
+}
+
+impl NetworkConfig {
+    /// The endpoint tried first, and the one shown wherever a single endpoint
+    /// identifies the network. Every constructor and the deserializer refuse
+    /// an empty list, so this cannot fail on a value that exists.
+    #[must_use]
+    pub fn primary_rpc_url(&self) -> &Url {
+        self.rpc_urls
+            .first()
+            .expect("a network config always carries at least one RPC URL")
+    }
+}
+
+/// The on-disk shape of a network, which still accepts the single `rpc_url`
+/// that every release through 1.0.0-rc.0 wrote.
+///
+/// Fallbacks turned the one endpoint into a list, and a configuration written
+/// before that change names exactly one. Reading it as a one-element list is
+/// the whole migration: the endpoint keeps working, and the next write records
+/// it in the new shape.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredNetwork {
+    name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    chain_id: u64,
+    #[serde(default)]
+    rpc_url: Option<Url>,
+    #[serde(default)]
+    rpc_urls: Vec<Url>,
+    #[serde(default)]
+    max_gas_limit: Option<String>,
+    #[serde(default)]
+    native_currency: Option<NativeCurrency>,
+    #[serde(default)]
+    block_explorer_url: Option<Url>,
+    #[serde(default)]
+    documentation_url: Option<Url>,
+}
+
+// Written by hand rather than derived through `#[serde(try_from)]`: the
+// derive would make the published JSON schema the *stored* shape, advertising
+// a legacy `rpc_url` alongside `rpc_urls` to every MCP caller reading the
+// schema. What this type accepts and what it documents are allowed to differ,
+// and here they must.
+impl<'de> Deserialize<'de> for NetworkConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Self::try_from(StoredNetwork::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<StoredNetwork> for NetworkConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(stored: StoredNetwork) -> Result<Self> {
+        // Both spellings at once is a file edited by hand into a state no
+        // build produces, and the two can disagree about which endpoint is
+        // primary. Refuse it rather than pick one.
+        ensure!(
+            stored.rpc_url.is_none() || stored.rpc_urls.is_empty(),
+            "network {} sets both rpc_url and rpc_urls; keep only rpc_urls",
+            stored.name
+        );
+        let rpc_urls = match stored.rpc_url {
+            Some(single) => vec![single],
+            None => stored.rpc_urls,
+        };
+        ensure!(
+            !rpc_urls.is_empty(),
+            "network {} has no RPC URL",
+            stored.name
+        );
+        Ok(Self {
+            name: stored.name,
+            display_name: stored.display_name,
+            aliases: stored.aliases,
+            chain_id: stored.chain_id,
+            rpc_urls,
+            max_gas_limit: stored.max_gas_limit,
+            native_currency: stored.native_currency,
+            block_explorer_url: stored.block_explorer_url,
+            documentation_url: stored.documentation_url,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -386,175 +483,13 @@ pub fn default_data_dir() -> Result<PathBuf> {
         .join("ekubo-wallet"))
 }
 
-/// The built-in network profiles.
+/// The networks a fresh configuration starts with.
 ///
-/// Each RPC is an endpoint its own chain or its operator publishes for wallet
-/// use, chosen so it is documented somewhere a user can read rather than
-/// aggregated from a directory. Each was checked against `eth_simulateV1` —
-/// without which this wallet cannot simulate and therefore cannot sign
-/// automatically — and the endpoints that do not answer it are called out
-/// inline below. They are public, shared, and rate-limited: a funded wallet
-/// should be pointed at a dedicated provider with `ekubo-wallet network add`.
-#[must_use]
-pub fn default_networks() -> Vec<NetworkConfig> {
-    vec![
-        network(
-            "ethereum",
-            "Ethereum Mainnet",
-            &["mainnet", "eth"],
-            1,
-            "https://rpc.mevblocker.io",
-            "16777216",
-            "Ether",
-            "ETH",
-            "https://etherscan.io",
-            "https://mevblocker.io",
-        ),
-        network(
-            "base",
-            "Base",
-            &["base-mainnet"],
-            8453,
-            "https://mainnet.base.org",
-            "16777216",
-            "Ether",
-            "ETH",
-            "https://basescan.org",
-            "https://docs.base.org/base-chain/quickstart/connecting-to-base",
-        ),
-        network(
-            "arbitrum",
-            "Arbitrum One",
-            &["arbitrum-one", "arb", "arb1"],
-            42161,
-            "https://arb1.arbitrum.io/rpc",
-            "32000000",
-            "Ether",
-            "ETH",
-            "https://arbiscan.io",
-            "https://support.arbitrum.io/hc/en-gb/articles/19479729907483-How-can-I-add-Arbitrum-network-to-my-wallet",
-        ),
-        network(
-            "robinhood",
-            "Robinhood Chain",
-            &["robinhood-chain", "hood"],
-            4663,
-            "https://rpc.mainnet.chain.robinhood.com",
-            "32000000",
-            "Ether",
-            "ETH",
-            "https://robinhoodchain.blockscout.com",
-            "https://docs.robinhood.com/chain/connecting/",
-        ),
-        // The published Monad RPC does not answer `eth_simulateV1`, so
-        // simulation-gated automatic signing fails on this network until the
-        // operator adds it or the user configures an endpoint that has it.
-        network(
-            "monad",
-            "Monad",
-            &["monad-mainnet"],
-            143,
-            "https://rpc.monad.xyz",
-            "30000000",
-            "Monad",
-            "MON",
-            "https://monadvision.com",
-            "https://docs.monad.xyz/developer-essentials/network-information",
-        ),
-        network(
-            "ink",
-            "Ink",
-            &["ink-mainnet"],
-            57073,
-            "https://rpc-gel.inkonchain.com",
-            "16777216",
-            "Ether",
-            "ETH",
-            "https://explorer.inkonchain.com",
-            "https://docs.inkonchain.com/general/connect-wallet",
-        ),
-        network(
-            "optimism",
-            "OP Mainnet",
-            &["op", "op-mainnet"],
-            10,
-            "https://mainnet.optimism.io",
-            "16777216",
-            "Ether",
-            "ETH",
-            "https://explorer.optimism.io",
-            "https://docs.optimism.io/op-mainnet/network-information/connecting-to-op",
-        ),
-        network(
-            "gnosis",
-            "Gnosis",
-            &["gnosis-mainnet", "xdai"],
-            100,
-            "https://rpc.gnosischain.com",
-            "16777216",
-            "xDai",
-            "xDAI",
-            "https://gnosisscan.io",
-            "https://docs.gnosischain.com/about/networks/mainnet",
-        ),
-        network(
-            "berachain",
-            "Berachain",
-            &["bera"],
-            80094,
-            "https://rpc.berachain.com",
-            "16777216",
-            "BERA",
-            "BERA",
-            "https://berascan.com",
-            "https://docs.berachain.com/general/introduction/connect-to-berachain",
-        ),
-        // The published MegaETH RPC does not answer `eth_simulateV1` yet, so
-        // simulation-gated automatic signing fails on this network until the
-        // operator adds it or the user configures an endpoint that has it.
-        network(
-            "megaeth",
-            "MegaETH",
-            &["megaeth-mainnet", "mega"],
-            4326,
-            "https://mainnet.megaeth.com/rpc",
-            "10000000000",
-            "Ether",
-            "ETH",
-            "https://megaexplorer.xyz",
-            "https://docs.megaeth.com",
-        ),
-    ]
-}
-
-fn network(
-    name: &str,
-    display_name: &str,
-    aliases: &[&str],
-    chain_id: u64,
-    rpc_url: &str,
-    max_gas_limit: &str,
-    currency_name: &str,
-    currency_symbol: &str,
-    explorer: &str,
-    documentation: &str,
-) -> NetworkConfig {
-    NetworkConfig {
-        name: name.into(),
-        display_name: Some(display_name.into()),
-        aliases: aliases.iter().map(ToString::to_string).collect(),
-        chain_id,
-        rpc_url: rpc_url.parse().expect("static RPC URL"),
-        max_gas_limit: Some(max_gas_limit.into()),
-        native_currency: Some(NativeCurrency {
-            name: currency_name.into(),
-            symbol: currency_symbol.into(),
-            decimals: 18,
-        }),
-        block_explorer_url: Some(explorer.parse().expect("static explorer URL")),
-        documentation_url: Some(documentation.parse().expect("static documentation URL")),
-    }
-}
+/// Re-exported from [`crate::networks`], which is where they and every other
+/// chain the wallet knows about now live. It stays here because every caller
+/// in the tree already imports it from `config`, and because "what a new
+/// configuration contains" is a configuration question.
+pub use crate::networks::default_networks;
 
 pub fn validate_config(config: &WalletConfig) -> Result<()> {
     ensure!(config.version == 2, "unsupported configuration version");
@@ -615,16 +550,30 @@ pub const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 /// ceiling below this describes a network on which nothing can be sent.
 pub const INTRINSIC_GAS: u64 = 21_000;
 
-/// Networks one configuration may hold. A wallet talks to a handful of chains;
-/// a list longer than this is an accident or an attempt, and either way every
-/// subsequent `load` pays for it.
-pub const MAX_CONFIGURED_NETWORKS: usize = 64;
+/// Networks one configuration may hold.
+///
+/// Raised from 64 when the defaults grew to cover every EVM mainnet Alchemy
+/// serves: 64 left an owner barely a dozen slots of their own, and a cap that
+/// the shipped defaults nearly fill is a cap on the owner rather than on
+/// abuse. It is still a cap, because every `load` reads and validates the
+/// whole list, and a file naming thousands of networks is an accident or an
+/// attempt either way.
+pub const MAX_CONFIGURED_NETWORKS: usize = 192;
 
 /// Aliases one network may answer to. Enough for a canonical name, a short
 /// form, and the spellings people actually type.
 pub const MAX_NETWORK_ALIASES: usize = 8;
 
-pub(crate) fn validate_network(network: &NetworkConfig) -> Result<()> {
+/// Endpoints one network may list.
+///
+/// Failover walks this list in order, so its length is also the worst case a
+/// caller waits through before hearing that a request failed: every endpoint
+/// ahead of the working one costs its own timeout. Enough entries that a
+/// public chain keeps working when several providers are down at once, few
+/// enough that the wait when they are *all* down stays bounded.
+pub const MAX_NETWORK_RPC_URLS: usize = 8;
+
+pub fn validate_network(network: &NetworkConfig) -> Result<()> {
     validate_network_identifier(&network.name, "network name")?;
     ensure!(
         network.aliases.len() <= MAX_NETWORK_ALIASES,
@@ -640,9 +589,28 @@ pub(crate) fn validate_network(network: &NetworkConfig) -> Result<()> {
     }
     ensure!(network.chain_id > 0, "network chain ID must be positive");
     ensure!(
-        matches!(network.rpc_url.scheme(), "http" | "https"),
-        "RPC URL must use http:// or https://"
+        !network.rpc_urls.is_empty(),
+        "a network must have at least one RPC URL"
     );
+    ensure!(
+        network.rpc_urls.len() <= MAX_NETWORK_RPC_URLS,
+        "a network may have at most {MAX_NETWORK_RPC_URLS} RPC URLs"
+    );
+    let mut endpoints = BTreeSet::new();
+    for rpc_url in &network.rpc_urls {
+        ensure!(
+            matches!(rpc_url.scheme(), "http" | "https"),
+            "RPC URL must use http:// or https://"
+        );
+        // A list that names one endpoint twice is shorter than it looks: the
+        // second attempt reaches the service that just failed, so the network
+        // has fewer real fallbacks than its owner believes.
+        ensure!(
+            endpoints.insert(rpc_url),
+            "duplicate RPC URL {rpc_url} in network {}",
+            network.name
+        );
+    }
     if let Some(limit) = &network.max_gas_limit {
         ensure!(
             !limit.starts_with('0') && limit.bytes().all(|byte| byte.is_ascii_digit()),

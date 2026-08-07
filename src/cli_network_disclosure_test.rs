@@ -12,10 +12,22 @@ fn cli_listing_round_trips_the_complete_configuration() {
     // The listing is how an operator reads back and edits configuration, so
     // it must reproduce the RPC URL exactly rather than an abbreviation.
     let mut network = default_networks().remove(0);
-    network.rpc_url = "https://rpc.example.invalid:8545/v2/api-key-1234?token=abcd"
-        .parse()
-        .unwrap();
+    network.rpc_urls = vec![
+        "https://rpc.example.invalid:8545/v2/api-key-1234?token=abcd"
+            .parse()
+            .unwrap(),
+        "https://fallback.example.invalid/rpc".parse().unwrap(),
+    ];
     let value = describe_network(&network);
-    assert_eq!(value["rpc_url"].as_str(), Some(network.rpc_url.as_str()));
+    // Every endpoint, in order: the listing is what an operator edits
+    // against, and failover reaches all of them.
+    let listed: Vec<&str> = value["rpc_urls"]
+        .as_array()
+        .expect("rpc_urls is an array")
+        .iter()
+        .map(|url| url.as_str().expect("each endpoint is a string"))
+        .collect();
+    let expected: Vec<&str> = network.rpc_urls.iter().map(url::Url::as_str).collect();
+    assert_eq!(listed, expected);
     assert_eq!(value["chain_id"].as_str(), Some("1"));
 }
