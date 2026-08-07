@@ -118,6 +118,7 @@ impl Match {
 /// One address, and deliberately nothing else. Evaluation is a pure function of
 /// data — no I/O, no locks, and nothing the RPC reports can reach a policy
 /// decision — and the smaller this type is, the less there is to keep true.
+/// The `$self` literal is the only thing that reads it.
 ///
 /// It used to carry the confirmed-token and address-book sets, for `is_token`
 /// and `is_address_book`. Those are gone. Both stores exist to tell a person
@@ -288,7 +289,7 @@ impl JsonSchema for SelectorPredicate {
 
 /// One predicate over one value.
 ///
-/// Externally tagged, so a document reads `{"in": ["0x…"]}`, `"is_wallet"`, or
+/// Externally tagged, so a document reads `{"in": ["0x…"]}`, `"any_value"`, or
 /// `{"each": {"selector": {"abi": "…"}}}`.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -296,11 +297,11 @@ pub enum Predicate {
     /// Matches every value, including one this policy cannot decode. The only
     /// way to write an unconstrained slot explicitly.
     AnyValue,
+    /// Equal to one literal, which may be the `$self` variable standing for
+    /// this wallet's own address.
     Eq(String),
+    /// Equal to one of a set of literals, any of which may be `$self`.
     In(BTreeSet<String>),
-    /// The address is this wallet. The predicate that makes a rule portable:
-    /// "proceeds must come back to me" without naming an address.
-    IsWallet,
     Selector(Box<SelectorPredicate>),
     /// Every element of an array satisfies the inner predicate. An empty array
     /// satisfies it vacuously.
@@ -324,19 +325,12 @@ impl Predicate {
     pub fn check_applicable(&self, ty: &DynSolType) -> Result<()> {
         match self {
             Self::AnyValue => Ok(()),
-            Self::Eq(literal) => parse_literal(literal, ty).map(|_| ()),
+            Self::Eq(literal) => check_literal(literal, ty),
             Self::In(literals) => {
                 ensure!(!literals.is_empty(), "an `in` predicate needs a value");
                 literals
                     .iter()
-                    .try_for_each(|literal| parse_literal(literal, ty).map(|_| ()))
-            }
-            Self::IsWallet => {
-                ensure!(
-                    matches!(ty, DynSolType::Address),
-                    "an address predicate needs an address, not {ty:?}"
-                );
-                Ok(())
+                    .try_for_each(|literal| check_literal(literal, ty))
             }
             Self::Selector(_) => {
                 ensure!(
@@ -380,20 +374,17 @@ impl Predicate {
             Self::Eq(literal) => Match::of(render(value).is_some_and(|rendered| {
                 value
                     .as_type()
-                    .and_then(|ty| parse_literal(literal, &ty).ok())
+                    .and_then(|ty| resolve_literal(literal, &ty, context).ok())
                     .is_some_and(|canonical| canonical == rendered)
             })),
             Self::In(literals) => Match::of(render(value).is_some_and(|rendered| {
                 value.as_type().is_some_and(|ty| {
                     literals
                         .iter()
-                        .filter_map(|literal| parse_literal(literal, &ty).ok())
+                        .filter_map(|literal| resolve_literal(literal, &ty, context).ok())
                         .any(|canonical| canonical == rendered)
                 })
             })),
-            Self::IsWallet => {
-                Match::of(as_address(value).is_some_and(|address| address == context.wallet))
-            }
             Self::Selector(selector) => match value {
                 DynSolValue::Bytes(data) => selector.evaluate(data, context),
                 _ => Match::No,
@@ -489,7 +480,6 @@ impl Predicate {
             (Self::Eq(left), Self::In(right)) => right.contains(left),
             (Self::In(left), Self::In(right)) => left.is_subset(right),
             (Self::In(left), Self::Eq(right)) => left.len() == 1 && left.contains(right),
-            (Self::IsWallet, Self::IsWallet) => true,
             (Self::Each(left), Self::Each(right)) => left.is_narrower_than(right),
             // Containment reverses under negation: every value `not A` admits
             // is admitted by `not B` exactly when B admits everything A does.
@@ -515,7 +505,9 @@ impl Predicate {
     /// which describe a different value than the one this predicate names.
     ///
     /// Display only: callers use it to decide which token balances to pre-query
-    /// for the approval review. No policy decision reads it.
+    /// for the approval review. No policy decision reads it. A `$self` travels
+    /// unresolved — there is no wallet here to resolve it against — and the
+    /// callers that want addresses drop what does not parse as one.
     pub fn literals(&self, into: &mut BTreeSet<String>) {
         match self {
             Self::Eq(literal) => {
@@ -528,11 +520,7 @@ impl Predicate {
                 }
             }
             Self::Not(inner) => inner.literals(into),
-            Self::AnyValue
-            | Self::IsWallet
-            | Self::Selector(_)
-            | Self::Each(_)
-            | Self::Length(_) => {}
+            Self::AnyValue | Self::Selector(_) | Self::Each(_) | Self::Length(_) => {}
         }
     }
 
@@ -544,13 +532,19 @@ impl Predicate {
     pub fn describe(&self) -> String {
         match self {
             Self::AnyValue => "anything".into(),
-            Self::Eq(literal) => format!("exactly {literal}"),
+            Self::Eq(literal) => match Variable::parse(literal).ok().flatten() {
+                Some(variable) => variable.describe().to_string(),
+                None => format!("exactly {literal}"),
+            },
             Self::In(literals) => {
                 let mut items = literals.iter().cloned().collect::<Vec<_>>();
                 items.sort();
-                format!("one of {}", items.join(", "))
+                let described = items
+                    .iter()
+                    .map(|literal| describe_literal(literal))
+                    .collect::<Vec<_>>();
+                format!("one of {}", described.join(", "))
             }
-            Self::IsWallet => "this wallet".into(),
             Self::Selector(selector) => {
                 if selector.args.is_empty() {
                     format!(
@@ -611,13 +605,6 @@ fn length_of(value: &DynSolValue) -> Option<usize> {
     }
 }
 
-fn as_address(value: &DynSolValue) -> Option<Address> {
-    match value {
-        DynSolValue::Address(address) => Some(*address),
-        _ => None,
-    }
-}
-
 /// The canonical text of a value: lowercase `0x` hex for anything byte-shaped,
 /// decimal for integers. Both sides of a comparison go through this, so a
 /// literal spelled `0xABC…` and a decoded address compare equal.
@@ -648,6 +635,108 @@ fn decode_hex_literal(literal: &str) -> Result<Vec<u8>> {
         "{literal:?} has an odd number of hex digits"
     );
     hex::decode(digits).with_context(|| format!("{literal:?} is not valid hex"))
+}
+
+/// The literal standing for the wallet a policy governs, rather than for
+/// something written out in the document.
+///
+/// This is what makes a rule portable — "the proceeds must come back to me"
+/// without naming an address. It is a literal rather than a predicate of its
+/// own so that it composes with everything literals already compose with:
+/// `{"in": ["$self", "0x…"]}` says "me or my cold wallet" in vocabulary the
+/// reader already has, which a dedicated predicate could not do without an
+/// `any` wrapped around it.
+pub const SELF_LITERAL: &str = "$self";
+
+/// A literal naming something the wallet resolves instead of spelling out.
+///
+/// `$` introduces one, and it cannot collide with the two ways every other
+/// literal is written — 0x-prefixed hex, or unprefixed decimal — so an
+/// unrecognised `$name` is an error rather than a literal. A typo therefore
+/// fails the install instead of quietly becoming a value that never matches.
+///
+/// The cost is that a `string` argument whose text really does begin with `$`
+/// can no longer be named by a policy, and there is deliberately no escape for
+/// it. A document that means a variable but reads as text, or the reverse, is
+/// exactly the mistake this literal format exists to prevent, and refusing
+/// outright is the only reading that cannot be wrong in silence.
+#[derive(Clone, Copy, Debug)]
+enum Variable {
+    /// `$self`: the address of the wallet this policy governs.
+    SelfAddress,
+}
+
+impl Variable {
+    /// Which variable a literal names, if it names one at all.
+    fn parse(literal: &str) -> Result<Option<Self>> {
+        if !literal.starts_with('$') {
+            return Ok(None);
+        }
+        match literal {
+            SELF_LITERAL => Ok(Some(Self::SelfAddress)),
+            other => bail!("{other:?} is not a variable; the only one is {SELF_LITERAL:?}"),
+        }
+    }
+
+    /// Whether this variable can ever be compared against a value of type
+    /// `ty`, so a policy that could only ever fail is refused at install time.
+    fn check_applicable(self, ty: &DynSolType) -> Result<()> {
+        match self {
+            Self::SelfAddress => ensure!(
+                matches!(ty, DynSolType::Address),
+                "{SELF_LITERAL} is an address and cannot be compared against {ty:?}"
+            ),
+        }
+        Ok(())
+    }
+
+    /// What this variable stands for, in the same canonical text [`render`]
+    /// produces, so the two compare directly.
+    fn resolve(self, ty: &DynSolType, context: &PolicyContext) -> Result<String> {
+        self.check_applicable(ty)?;
+        match self {
+            Self::SelfAddress => Ok(format!("{:#x}", context.wallet)),
+        }
+    }
+
+    /// How this variable reads to someone approving the rule. The one place
+    /// the wording lives, so a variable cannot be added and rendered as its
+    /// own syntax in half the diff.
+    const fn describe(self) -> &'static str {
+        match self {
+            Self::SelfAddress => "this wallet",
+        }
+    }
+}
+
+/// Check a literal against the type it will be compared to, at install time,
+/// where there is no wallet to resolve a variable against and an error is the
+/// whole point.
+fn check_literal(literal: &str, ty: &DynSolType) -> Result<()> {
+    match Variable::parse(literal)? {
+        Some(variable) => variable.check_applicable(ty),
+        None => parse_literal(literal, ty).map(|_| ()),
+    }
+}
+
+/// The canonical text a literal compares against, resolving a variable through
+/// the context. An error here is a non-match rather than a failure —
+/// [`Predicate::evaluate`] discards it — and [`check_literal`] has already
+/// refused the document that could produce one.
+fn resolve_literal(literal: &str, ty: &DynSolType, context: &PolicyContext) -> Result<String> {
+    match Variable::parse(literal)? {
+        Some(variable) => variable.resolve(ty, context),
+        None => parse_literal(literal, ty),
+    }
+}
+
+/// How a literal reads in the permission diff and the approval review: a
+/// variable by what it means, so a reviewer sees "this wallet" and not `$self`.
+fn describe_literal(literal: &str) -> String {
+    match Variable::parse(literal).ok().flatten() {
+        Some(variable) => variable.describe().to_string(),
+        None => literal.to_string(),
+    }
 }
 
 /// Parse a policy literal the way the value it will be compared against is

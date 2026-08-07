@@ -298,7 +298,7 @@ fn a_rule_predicate_is_type_checked_against_its_slot_at_parse_time() {
     assert!(
         WalletPolicy::parse(json!({
             "version": 1,
-            "chains": { "1": { "rules": [{ "effect": "allow", "value": "is_wallet" }] } }
+            "chains": { "1": { "rules": [{ "effect": "allow", "value": { "eq": "$self" } }] } }
         }))
         .is_err()
     );

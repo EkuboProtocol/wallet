@@ -61,7 +61,6 @@ decoded argument underneath it.
 | `"any_value"` | Matches anything, including calldata this policy cannot decode. |
 | `{"eq": "…"}` | Equal to one literal. |
 | `{"in": ["…", "…"]}` | Equal to one of a set. |
-| `"is_wallet"` | The address is this wallet. |
 | `{"selector": {"abi": "…", "args": {…}}}` | Calldata is a call to this exact function; `args` constrain its parameters by name. |
 | `{"each": …}` | Every element of an array satisfies the inner predicate. |
 | `{"any": [...]}` / `{"all": [...]}` / `{"not": …}` | Boolean combinators. |
@@ -71,9 +70,38 @@ Literals are written one of exactly two ways: **hex with a `0x` prefix**, or
 **decimal with no prefix**. Bare hex is refused rather than guessed at, because
 `10` is a legal spelling of both sixteen and ten.
 
-`is_wallet` is what makes a rule portable — "the proceeds must come back to me"
-without naming an address. Every other address is named outright, with `eq` or
-`in`.
+### `$self`
+
+A literal beginning with `$` names something the wallet resolves instead of
+something written out. There is exactly one, `$self`, which is this wallet's own
+address:
+
+```json
+"to": { "eq": "$self" }
+```
+
+That is what makes a rule portable — "the proceeds must come back to me"
+without naming an address, so the same document means the right thing on
+whichever wallet it is installed on. Every other address is named outright.
+
+`$self` is a *literal* rather than a predicate of its own, so it goes wherever a
+literal goes and composes with what is already there. "Back to me or to my cold
+wallet" is one set, not a boolean tree:
+
+```json
+"to": { "in": ["$self", "0x…"] }
+```
+
+`$self` is an address, and a policy comparing it against anything else is
+refused when it is installed rather than silently never matching. So is any
+other `$name`: nothing else is a variable, and since every real literal is
+0x-hex or decimal, a `$` can only be a typo. The one thing this costs is that a
+`string` argument whose text really begins with `$` can no longer be named by a
+policy — there is deliberately no escape, because a document that means a
+variable but reads as text is the mistake this format exists to prevent.
+
+This predicate used to be spelled `"is_wallet"`. That spelling is gone, and a
+policy still using it is refused rather than translated.
 
 There were once two more: `is_token` and `is_address_book`, which deferred to
 the local token database and address book. They are gone, and a policy naming
@@ -192,7 +220,7 @@ so an example that stopped meaning what its label says would fail the build:
 | --- | --- |
 | [`transfers-to-named-addresses.json`](../examples/policies/transfers-to-named-addresses.json) | Move the tokens this policy names, only to the recipients it names. Any amount — a rule bounds which calls, not how much. |
 | [`revoke-approvals-only.json`](../examples/policies/revoke-approvals-only.json) | An argument deciding between two identical selectors: `approve(spender, 0)` passes, `approve(spender, 1)` does not. |
-| [`swap-proceeds-to-self.json`](../examples/policies/swap-proceeds-to-self.json) | `each` over an `address[]` path and `is_wallet` on the recipient, so proceeds must come back and every hop must be confirmed. |
+| [`swap-proceeds-to-self.json`](../examples/policies/swap-proceeds-to-self.json) | `each` over an `address[]` path and `$self` on the recipient, so proceeds must come back and every hop must be confirmed. |
 | [`deny-blanket-operators.json`](../examples/policies/deny-blanket-operators.json) | Deny-precedence: a blanket allow with `setApprovalForAll(true)` and allowance-growth refused over the top of it. |
 | [`native-sends-only.json`](../examples/policies/native-sends-only.json) | `{"eq": "0x"}` as the plain-send idiom, plus the `native_value` guard. |
 | [`batched-calls.json`](../examples/policies/batched-calls.json) | `each` composed with `selector` to constrain what a batching entry point may carry, with no recursion machinery. |

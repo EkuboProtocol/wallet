@@ -61,7 +61,7 @@
       "additionalProperties": false
     },
     "Predicate": {
-      "description": "One predicate over one value.\n\nExternally tagged, so a document reads `{\"in\": [\"0x…\"]}`, `\"is_wallet\"`, or\n`{\"each\": {\"selector\": {\"abi\": \"…\"}}}`.",
+      "description": "One predicate over one value.\n\nExternally tagged, so a document reads `{\"in\": [\"0x…\"]}`, `\"any_value\"`, or\n`{\"each\": {\"selector\": {\"abi\": \"…\"}}}`.",
       "oneOf": [
         {
           "description": "Matches every value, including one this policy cannot decode. The only\nway to write an unconstrained slot explicitly.",
@@ -69,6 +69,7 @@
           "const": "any_value"
         },
         {
+          "description": "Equal to one literal, which may be the `$self` variable standing for\nthis wallet's own address.",
           "type": "object",
           "properties": {
             "eq": {
@@ -81,6 +82,7 @@
           "additionalProperties": false
         },
         {
+          "description": "Equal to one of a set of literals, any of which may be `$self`.",
           "type": "object",
           "properties": {
             "in": {
@@ -95,11 +97,6 @@
             "in"
           ],
           "additionalProperties": false
-        },
-        {
-          "description": "The address is this wallet. The predicate that makes a rule portable:\n\"proceeds must come back to me\" without naming an address.",
-          "type": "string",
-          "const": "is_wallet"
         },
         {
           "type": "object",

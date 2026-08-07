@@ -22,7 +22,7 @@ use ekubo_wallet::core::{
 use serde_json::json;
 use std::{fs, path::PathBuf};
 
-/// Deliberately not the router: `is_wallet` and the router's own `eq` must be
+/// Deliberately not the router: `$self` and the router's own `eq` must be
 /// distinguishable, or a rule requiring proceeds to come back here would pass
 /// for proceeds sent to the router instead.
 const WALLET: Address = address!("9999999999999999999999999999999999999999");
@@ -253,7 +253,7 @@ fn swap_example_requires_confirmed_hops_and_proceeds_to_self() {
         &policy,
         &plan("1", ROUTER, &swap(vec![USDC, WETH], FRIEND), "0"),
         false,
-        "proceeds to someone else fail `is_wallet`",
+        "proceeds to someone else fail `$self`",
     );
     check(
         name,
@@ -416,6 +416,20 @@ fn the_edge_case_example_shows_each_corner_of_the_language() {
         &plan("1", USDC, &transfer(FRIEND, 1), "0"),
         true,
         "`all`: named recipient that is not the zero address",
+    );
+    check(
+        name,
+        &policy,
+        &plan("1", USDC, &transfer(WALLET, 1), "0"),
+        true,
+        "`$self` sits in the same `in` set as the named address",
+    );
+    check(
+        name,
+        &policy,
+        &plan("1", USDC, &transfer(STRANGER, 1), "0"),
+        false,
+        "and admits nobody else",
     );
     check(
         name,

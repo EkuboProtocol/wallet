@@ -21,7 +21,7 @@
         },
         {
           "effect": "allow",
-          "label": "all: both conditions must hold on the same argument",
+          "label": "all: both conditions must hold on the same argument, and $self sits in the set beside a named address",
           "to": { "eq": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
           "calldata": {
             "selector": {
@@ -29,7 +29,7 @@
               "args": {
                 "to": {
                   "all": [
-                    { "in": ["0x2222222222222222222222222222222222222222"] },
+                    { "in": ["$self", "0x2222222222222222222222222222222222222222"] },
                     { "not": { "eq": "0x0000000000000000000000000000000000000000" } }
                   ]
                 }

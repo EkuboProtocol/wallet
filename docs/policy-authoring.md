@@ -54,12 +54,15 @@ for `deny` when the user wants something foreclosed, not merely gated.
 
 ## Predicates
 
-`"any_value"`, `{"eq": …}`, `{"in": [...]}`, `"is_wallet"`,
+`"any_value"`, `{"eq": …}`, `{"in": [...]}`,
 `{"selector": {"abi": …, "args": {…}}}`, `{"each": …}`, `{"any": [...]}`,
 `{"all": [...]}`, `{"not": …}`, `{"length": …}`.
 
-- `is_wallet` keeps a rule portable: use it for the recipient of a swap or claim
-  rather than hard-coding the address.
+- The literal `"$self"` is this wallet's own address, and it keeps a rule
+  portable: write `{"eq": "$self"}` for the recipient of a swap or claim rather
+  than hard-coding the address. It is a literal, so it also sits in a set beside
+  named addresses — `{"in": ["$self", "0x…"]}`. It is the only variable there
+  is, and any other `$name` is refused when the policy is installed.
 - Every other address is named in the policy, with `eq` or `in`. There is no
   predicate that defers to the token database or the address book: those
   describe a transaction to the person approving it and decide nothing. Naming

@@ -92,8 +92,86 @@ fn odd_length_hex_is_refused() {
 #[test]
 fn the_only_thing_a_predicate_reads_beyond_the_call_is_the_wallet() {
     let ctx = context();
-    assert!(Predicate::IsWallet.matches(&DynSolValue::Address(WALLET), &ctx));
-    assert!(!Predicate::IsWallet.matches(&DynSolValue::Address(FRIEND), &ctx));
+    let is_self = predicate(serde_json::json!({ "eq": SELF_LITERAL }));
+    assert!(is_self.matches(&DynSolValue::Address(WALLET), &ctx));
+    assert!(!is_self.matches(&DynSolValue::Address(FRIEND), &ctx));
+}
+
+#[test]
+fn self_composes_with_the_literals_around_it() {
+    // The reason `$self` is a literal and not a predicate of its own: "me or
+    // one named address" is an ordinary `in`, with no `any` wrapped around it.
+    let ctx = context();
+    let me_or_friend = predicate(serde_json::json!({
+        "in": [SELF_LITERAL, format!("{FRIEND:#x}")]
+    }));
+    assert!(me_or_friend.matches(&DynSolValue::Address(WALLET), &ctx));
+    assert!(me_or_friend.matches(&DynSolValue::Address(FRIEND), &ctx));
+    assert!(!me_or_friend.matches(&DynSolValue::Address(STRANGER), &ctx));
+}
+
+#[test]
+fn self_resolves_against_the_wallet_being_asked_not_the_one_it_was_written_for() {
+    // What portability means: the same document, two wallets, two answers.
+    let is_self = predicate(serde_json::json!({ "eq": SELF_LITERAL }));
+    let theirs = PolicyContext { wallet: FRIEND };
+    assert!(is_self.matches(&DynSolValue::Address(FRIEND), &theirs));
+    assert!(!is_self.matches(&DynSolValue::Address(WALLET), &theirs));
+}
+
+#[test]
+fn an_unknown_variable_is_refused_rather_than_read_as_a_literal() {
+    // A typo that parsed as an ordinary literal would be an address that never
+    // matches anything, which is a rule silently doing nothing. Every literal
+    // is 0x-hex or decimal, so nothing legitimate begins with `$` and refusing
+    // the whole prefix costs nothing.
+    for unknown in ["$slef", "$wallet", "$", "$SELF"] {
+        assert!(
+            check_literal(unknown, &DynSolType::Address).is_err(),
+            "{unknown} must not parse as a literal"
+        );
+    }
+    assert!(check_literal(SELF_LITERAL, &DynSolType::Address).is_ok());
+}
+
+#[test]
+fn self_is_an_address_and_is_refused_anywhere_else() {
+    for ty in [
+        DynSolType::Uint(256),
+        DynSolType::Bool,
+        DynSolType::Bytes,
+        DynSolType::String,
+    ] {
+        assert!(
+            check_literal(SELF_LITERAL, &ty).is_err(),
+            "{SELF_LITERAL} must not be applicable to {ty:?}"
+        );
+    }
+}
+
+#[test]
+fn the_retired_is_wallet_spelling_no_longer_parses() {
+    // `$self` replaced it. A document still saying `is_wallet` is refused
+    // rather than guessed at: the two mean the same thing, but a policy that
+    // silently rewrites itself is a policy whose permission diff shows the
+    // owner something they did not write.
+    let error = serde_json::from_value::<Predicate>(serde_json::json!("is_wallet"))
+        .expect_err("the variant must not parse");
+    assert!(error.to_string().contains("unknown variant"), "{error}");
+}
+
+#[test]
+fn a_variable_reads_as_what_it_means_in_the_permission_diff() {
+    // A reviewer approving a rule sees the authority, not the syntax.
+    assert_eq!(
+        predicate(serde_json::json!({ "eq": SELF_LITERAL })).describe(),
+        "this wallet"
+    );
+    // Ordering follows the literals, so it does not move when the wording does.
+    assert_eq!(
+        predicate(serde_json::json!({ "in": [SELF_LITERAL, format!("{FRIEND:#x}")] })).describe(),
+        format!("one of this wallet, {FRIEND:#x}")
+    );
 }
 
 #[test]
@@ -121,7 +199,7 @@ fn an_empty_any_never_matches_and_an_empty_all_always_does() {
 fn each_over_an_empty_array_is_vacuously_true() {
     let ctx = context();
     let empty = DynSolValue::Array(Vec::new());
-    assert!(Predicate::Each(Box::new(Predicate::IsWallet)).matches(&empty, &ctx));
+    assert!(predicate(serde_json::json!({ "each": { "eq": SELF_LITERAL } })).matches(&empty, &ctx));
 }
 
 #[test]
@@ -143,15 +221,19 @@ fn each_requires_every_element() {
 #[test]
 fn a_predicate_applied_to_the_wrong_shape_is_a_non_match_not_a_panic() {
     let ctx = context();
-    // `each` over a scalar, an address literal over an integer, `is_wallet`
-    // over a bool: all unanswerable, all false.
+    // `each` over a scalar, an address literal over an integer, `$self` over a
+    // bool: all unanswerable, all false.
     assert!(
-        !Predicate::Each(Box::new(Predicate::IsWallet)).matches(&DynSolValue::Address(TOKEN), &ctx)
+        !predicate(serde_json::json!({ "each": { "eq": SELF_LITERAL } }))
+            .matches(&DynSolValue::Address(TOKEN), &ctx)
     );
     assert!(
         !Predicate::Eq(format!("{TOKEN:#x}")).matches(&DynSolValue::Uint(U256::from(1), 256), &ctx)
     );
-    assert!(!Predicate::IsWallet.matches(&DynSolValue::Bool(true), &ctx));
+    assert!(
+        !predicate(serde_json::json!({ "eq": SELF_LITERAL }))
+            .matches(&DynSolValue::Bool(true), &ctx)
+    );
 }
 
 // ------------------------------------------------------------ selector/ABI
@@ -350,7 +432,10 @@ fn a_signature_must_name_every_parameter() {
 
 #[test]
 fn a_predicate_on_an_unknown_parameter_is_refused() {
-    let args = BTreeMap::from([("recipient".to_string(), Predicate::IsWallet)]);
+    let args = BTreeMap::from([(
+        "recipient".to_string(),
+        Predicate::Eq(SELF_LITERAL.to_string()),
+    )]);
     assert!(SelectorPredicate::new("approve(address spender, uint256 amount)", args).is_err());
 }
 
@@ -361,11 +446,15 @@ fn a_predicate_that_could_never_match_its_type_is_refused_at_parse_time() {
     for (abi, args) in [
         (
             "approve(address spender, uint256 amount)",
-            serde_json::json!({ "amount": "is_wallet" }),
+            serde_json::json!({ "amount": { "eq": SELF_LITERAL } }),
         ),
         (
             "approve(address spender, uint256 amount)",
-            serde_json::json!({ "spender": { "each": "is_wallet" } }),
+            serde_json::json!({ "spender": { "each": { "eq": SELF_LITERAL } } }),
+        ),
+        (
+            "approve(address spender, uint256 amount)",
+            serde_json::json!({ "spender": { "eq": "$nonesuch" } }),
         ),
         (
             "approve(address spender, uint256 amount)",
@@ -449,8 +538,18 @@ fn a_selector_rule_is_narrower_when_it_constrains_more() {
 
 // ---------------------------------------------------------------- fuzzing
 
+/// The literals an address slot may compare against, including the variable —
+/// `$self` is one of these rather than a strategy of its own precisely because
+/// it is a literal, so `eq` and `in` exercise it exactly as they do the rest.
+///
+/// `WALLET` is in here alongside `$self`, which under [`context`] resolves to
+/// it. That the two are indistinguishable by evaluation and distinguishable by
+/// `is_narrower_than` is intended: subsumption may be incomplete, and a policy
+/// naming an address outright is not the same authority as one that follows
+/// whichever wallet it is installed on.
 fn address_literals() -> Vec<String> {
     vec![
+        SELF_LITERAL.to_string(),
         format!("{WALLET:#x}"),
         format!("{TOKEN:#x}"),
         format!("{FRIEND:#x}"),
@@ -463,7 +562,6 @@ fn address_leaf_predicate() -> impl Strategy<Value = Predicate> {
     let addresses = prop::sample::select(address_literals());
     prop_oneof![
         Just(Predicate::AnyValue),
-        Just(Predicate::IsWallet),
         addresses.clone().prop_map(Predicate::Eq),
         prop::collection::btree_set(addresses, 1..4).prop_map(Predicate::In),
     ]
@@ -474,7 +572,6 @@ fn address_predicate() -> impl Strategy<Value = Predicate> {
     let addresses = prop::sample::select(address_literals());
     let leaf = prop_oneof![
         Just(Predicate::AnyValue),
-        Just(Predicate::IsWallet),
         addresses.clone().prop_map(Predicate::Eq),
         prop::collection::btree_set(addresses, 1..4).prop_map(Predicate::In),
     ];
@@ -505,7 +602,7 @@ proptest! {
                 "multicall(bytes[] data)",
                 &serde_json::json!({ "data": { "each": { "selector": {
                     "abi": "transfer(address to, uint256 amount)",
-                    "args": { "to": "is_wallet" }
+                    "args": { "to": { "eq": SELF_LITERAL } }
                 }}}}),
             ),
             Predicate::Eq("0x".into()),
