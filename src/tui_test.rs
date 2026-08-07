@@ -77,3 +77,19 @@ fn text_editing_lands_on_character_boundaries() {
     assert_eq!(char_boundary("héllo", 5), 6);
     assert_eq!(char_boundary("", 0), 0);
 }
+
+/// Spending standard input on a document must not, by itself, conclude that a
+/// human is watching. The stderr check is the one that decides that, and
+/// `token import -` in a script — a pipe in, no terminal anywhere — has to
+/// keep confirming nothing rather than confirming everything.
+#[test]
+fn a_spent_stdin_does_not_manufacture_a_terminal() {
+    // The test harness gives this process no terminal on stderr, which is
+    // exactly the scripted case being asserted about.
+    assert!(!io::stderr().is_terminal());
+    note_stdin_consumed();
+    assert!(
+        !interactive(),
+        "a consumed stdin must not substitute for a terminal to draw on"
+    );
+}
