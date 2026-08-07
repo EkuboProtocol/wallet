@@ -370,10 +370,17 @@ fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
 
     let columns = (body.width as usize).saturating_sub(2).max(10);
     let wrapped = wrap_document(&review.document, columns);
-    review.viewport = (body.height as usize).max(1);
+    // `max(1)` keeps the scrolling arithmetic sane in a terminal too short to
+    // give the body any rows at all. It must not also stand in as evidence
+    // that the document was read: with no rows, `Paragraph` draws nothing, and
+    // a short document would otherwise satisfy "scrolled to the end" — and so
+    // enable approval — having shown the reviewer not one line of what they
+    // were approving.
+    let drawn_rows = body.height as usize;
+    review.viewport = drawn_rows.max(1);
     review.max_offset = wrapped.len().saturating_sub(review.viewport);
     review.offset = review.offset.min(review.max_offset);
-    if review.offset >= review.max_offset {
+    if drawn_rows > 0 && review.offset >= review.max_offset {
         review.reached_end = true;
     }
     let visible: Vec<UiLine> = wrapped
