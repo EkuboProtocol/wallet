@@ -1255,7 +1255,13 @@ async fn run_token_import(
             }
         ));
     }
-    confirm_and_store(config, vec![(source, parsed.tokens)], mode, &[]).await
+    confirm_and_store(
+        config,
+        vec![(source, parsed.tokens)],
+        mode,
+        &std::collections::BTreeMap::new(),
+    )
+    .await
 }
 
 /// Review what agents have suggested. Accepting writes the names; rejecting
@@ -1296,6 +1302,20 @@ async fn run_token_review(config: &ConfigStore, mode: OutputMode) -> Result<()> 
         );
     }
 
+    // Which row each suggestion was read from, captured before the store is
+    // released and the screen waits on a person. A decision reached about this
+    // reading must not consume a different one made under the same key while
+    // the owner was reading.
+    let proposed_at: std::collections::BTreeMap<(u64, Address), String> = proposals
+        .iter()
+        .map(|proposal| {
+            (
+                (proposal.token.chain_id, proposal.token.address),
+                proposal.proposed_at.clone(),
+            )
+        })
+        .collect();
+
     // Group by the list that vouched for them: that is the unit the owner
     // actually decides, and it keeps a hundred suggestions to a few choices.
     let mut grouped: std::collections::BTreeMap<String, Vec<crate::token_store::ListedToken>> =
@@ -1307,21 +1327,18 @@ async fn run_token_review(config: &ConfigStore, mode: OutputMode) -> Result<()> 
             .push(proposal.token);
     }
     let groups: Vec<(String, Vec<crate::token_store::ListedToken>)> = grouped.into_iter().collect();
-    let proposed: Vec<(u64, Address)> = groups
-        .iter()
-        .flat_map(|(_, tokens)| tokens.iter().map(|token| (token.chain_id, token.address)))
-        .collect();
-    confirm_and_store(config, groups, mode, &proposed).await
+    confirm_and_store(config, groups, mode, &proposed_at).await
 }
 
 /// Show the picker, verify what the owner accepted against the chain, and
-/// write it. `clear_proposals` is the set to drop from the proposal queue once
-/// a decision is made, so a reviewed suggestion is not asked about twice.
+/// write it. `clear_proposals` maps each reviewed suggestion to the
+/// `proposed_at` of the exact row it was read from, so a decision consumes
+/// that row and not whatever has since taken its place under the same key.
 async fn confirm_and_store(
     config: &ConfigStore,
     groups: Vec<(String, Vec<crate::token_store::ListedToken>)>,
     mode: OutputMode,
-    clear_proposals: &[(u64, Address)],
+    clear_proposals: &std::collections::BTreeMap<(u64, Address), String>,
 ) -> Result<()> {
     let sources: std::collections::BTreeMap<(u64, Address), String> = groups
         .iter()
@@ -1345,10 +1362,15 @@ async fn confirm_and_store(
     // thing left is to stop asking.
     let mut store = crate::token_store::TokenStore::production(config.data_dir())?;
     if !decision.rejected.is_empty() {
-        let keys: Vec<(u64, Address)> = decision
+        let keys: Vec<(u64, Address, String)> = decision
             .rejected
             .iter()
-            .map(|token| (token.chain_id, token.address))
+            .filter_map(|token| {
+                let key = (token.chain_id, token.address);
+                clear_proposals
+                    .get(&key)
+                    .map(|proposed_at| (key.0, key.1, proposed_at.clone()))
+            })
             .collect();
         let removed = store.discard_proposals(&keys)?;
         return emit(
@@ -1401,9 +1423,13 @@ async fn confirm_and_store(
         decided.push(key);
     }
     if !clear_proposals.is_empty() {
-        let clear: Vec<(u64, Address)> = decided
+        let clear: Vec<(u64, Address, String)> = decided
             .into_iter()
-            .filter(|key| clear_proposals.contains(key))
+            .filter_map(|key| {
+                clear_proposals
+                    .get(&key)
+                    .map(|proposed_at| (key.0, key.1, proposed_at.clone()))
+            })
             .collect();
         store.discard_proposals(&clear)?;
     }

@@ -402,14 +402,25 @@ impl TokenStore {
     /// Drop suggestions the owner has decided on, whether they accepted or
     /// rejected them: either way the decision is made and re-asking would
     /// train the owner to dismiss the screen.
-    pub fn discard_proposals(&mut self, tokens: &[(u64, Address)]) -> Result<u64> {
+    ///
+    /// Each entry names the exact row that was shown, by its `proposed_at` as
+    /// well as its key. The review screen holds no lock — it snapshots the
+    /// proposals, releases the store, and waits on a person — so an agent can
+    /// replace a suggestion for the same chain and address in the meantime,
+    /// with a different symbol, name, or decimals. Deleting by key alone
+    /// consumed that replacement under a decision made about its predecessor,
+    /// and the owner was never shown the row that disappeared. A row whose
+    /// timestamp has moved is left in place to be reviewed on its own terms.
+    pub fn discard_proposals(&mut self, tokens: &[(u64, Address, String)]) -> Result<u64> {
         let mut removed = 0;
-        for (chain_id, address) in tokens {
+        for (chain_id, address, proposed_at) in tokens {
             removed += self.database.connection.execute(
-                "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+                "DELETE FROM token_proposals
+                 WHERE chain_id = ?1 AND address = ?2 AND proposed_at = ?3",
                 params![
                     i64::try_from(*chain_id).context("chain ID out of range")?,
-                    format!("{address:#x}")
+                    format!("{address:#x}"),
+                    proposed_at
                 ],
             )?;
         }

@@ -360,13 +360,29 @@ impl PolicyStore {
     /// Matching on `created_at`, which `put_proposal` refreshes on every
     /// replacement, makes the delete identify the row rather than the wallet.
     ///
+    /// `created_at` alone is a weak name for a row, though. It is a clock
+    /// reading, and two writes that land in one tick of it are the same name
+    /// for different proposals — so the whole reviewed content is matched
+    /// instead. That needs no schema change and no better clock, and it fails
+    /// in the safe direction: a replacement that matches every column *is* the
+    /// proposal that was reviewed, so consuming it applies what the human saw.
+    ///
     /// One transaction, so a proposal is applied exactly when it is consumed.
     pub fn consume_proposal(&mut self, proposal: &PolicyProposal) -> Result<StoredPolicy> {
         validate_wallet_id(&proposal.wallet_id)?;
+        let policy_json = serde_json::to_string(&proposal.policy)?;
         let transaction = self.connection.transaction()?;
         let consumed = transaction.execute(
-            "DELETE FROM policy_proposals WHERE wallet_id = ?1 AND created_at = ?2",
-            params![proposal.wallet_id, proposal.created_at.to_rfc3339()],
+            "DELETE FROM policy_proposals
+             WHERE wallet_id = ?1 AND created_at = ?2 AND source_revision = ?3
+               AND policy_json = ?4 AND rationale = ?5",
+            params![
+                proposal.wallet_id,
+                proposal.created_at.to_rfc3339(),
+                i64::try_from(proposal.source_revision).context("source revision out of range")?,
+                policy_json,
+                proposal.rationale
+            ],
         )?;
         ensure!(
             consumed == 1,

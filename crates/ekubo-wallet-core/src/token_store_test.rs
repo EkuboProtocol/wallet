@@ -195,8 +195,18 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
         Some("USDC".into())
     );
 
-    // And once confirmed it is no longer a pending decision.
-    assert_eq!(store.discard_proposals(&[(1, token)]).unwrap(), 1);
+    // And once confirmed it is no longer a pending decision. The row is named
+    // by the timestamp it was read at, so a suggestion replaced since the
+    // owner looked is left for its own review rather than silently consumed.
+    let reviewed = store.proposals().unwrap()[0].proposed_at.clone();
+    assert_eq!(
+        store
+            .discard_proposals(&[(1, token, "1999-01-01T00:00:00+00:00".to_string())])
+            .unwrap(),
+        0,
+        "a stale reading must not consume the current row"
+    );
+    assert_eq!(store.discard_proposals(&[(1, token, reviewed)]).unwrap(), 1);
     assert_eq!(store.count_proposals().unwrap(), 0);
     let repeat = store.propose(&[usdc(1, token)], "another-list").unwrap();
     assert_eq!(repeat.already_confirmed, 1);
