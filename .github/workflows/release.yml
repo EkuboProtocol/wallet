@@ -161,6 +161,14 @@ jobs:
     outputs:
       signed: ${{ steps.detect.outputs.signed }}
     steps:
+      # Only the vendored Apple intermediate is needed here; the binaries
+      # themselves arrive as artifacts from the build job.
+      - name: Check out the vendored Apple intermediate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/apple
+          sparse-checkout-cone-mode: false
+
       - name: Download Intel binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -247,12 +255,36 @@ jobs:
             printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
             chmod 600 "$certificate_path" "$api_key_path"
 
+            # `security export` emits the identity alone, so a .p12 holds the
+            # leaf and its key and never the issuing chain. macOS trusts the
+            # Apple Root CA but not this intermediate, and the search list below
+            # replaces the user domain with this keychain, so nothing else can
+            # supply it. Left out, the identity imports fine and then fails as
+            # CSSMERR_TP_NOT_TRUSTED at signing time.
+            intermediate=.github/apple/DeveloperIDG2CA.cer
+            expected_digest=f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+            actual_digest="$(shasum -a 256 "$intermediate" | cut -d ' ' -f 1)"
+            if [ "$actual_digest" != "$expected_digest" ]; then
+              echo "::error::$intermediate does not match its pinned SHA-256."
+              exit 1
+            fi
+
             security create-keychain -p "$keychain_password" "$keychain_path"
             security set-keychain-settings -lut 21600 "$keychain_path"
             security unlock-keychain -p "$keychain_password" "$keychain_path"
             security import "$certificate_path" -k "$keychain_path" -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
+            security import "$intermediate" -k "$keychain_path"
             security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
             security list-keychains -d user -s "$keychain_path"
+
+            # Fail here rather than on the first codesign call, where the same
+            # cause reports only as an unusable identity.
+            valid="$(security find-identity -v -p codesigning "$keychain_path" |
+              sed -n 's/^ *\([0-9][0-9]*\) valid identities found.*/\1/p')"
+            if [ "${valid:-0}" -lt 1 ]; then
+              echo "::error::No valid codesigning identity in the release keychain. The .p12 may lack its private key, or its chain may not resolve against the vendored intermediate."
+              exit 1
+            fi
 
             for target in x86_64-apple-darwin aarch64-apple-darwin; do
               binary="unsigned/$target/ekubo-wallet"

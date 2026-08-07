@@ -187,7 +187,7 @@ this on the Mac that will hold the private key.
    while this is the sole one — check with `security find-identity -p codesigning`
    first. The export password it prompts for becomes
    `APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD`.
-5. Confirm the `.p12` carries the intermediate, not just the leaf:
+5. Inspect what the `.p12` actually holds:
 
    ```sh
    openssl pkcs12 -in ~/DeveloperID.p12 -nokeys | grep -c "BEGIN CERTIFICATE"
@@ -200,11 +200,24 @@ this on the Mac that will hold the private key.
    encryption `security export` produces. Homebrew's OpenSSL 3 is the one that
    needs `-legacy`, because it keeps those algorithms in its legacy provider.
 
-   Two or more is correct. One means the chain did not travel, and the release
-   job would hit the same `CSSMERR_TP_NOT_TRUSTED` seen locally: it points the
-   user keychain search list at its own temporary keychain, so an intermediate
-   sitting in someone's login keychain is not there to be found. Re-export after
-   installing the intermediate rather than papering over it in the workflow.
+   A count of `1` is normal and nothing to fix. `security export` offers only
+   `certs`, `allKeys`, `pubKeys`, `privKeys`, `identities`, and `all`; an
+   identity is a leaf and its private key, so no invocation of it produces a
+   chain, and re-exporting with the intermediate installed changes nothing.
+
+   The release job supplies the intermediate itself rather than depending on
+   how the `.p12` was made. `.github/apple/DeveloperIDG2CA.cer` is the Apple
+   G2 intermediate, vendored, pinned by SHA-256, and imported into the
+   temporary signing keychain next to the identity. That matters because the
+   job repoints the user keychain search list at that one keychain, so an
+   intermediate in someone's login keychain is not visible to it, and because
+   the alternative — letting macOS fetch the issuer from the leaf's
+   `CA Issuers` URI at `certs.apple.com` — makes every release depend on a
+   network call Apple could rate-limit or move.
+
+   The job then checks that the keychain holds at least one *valid* identity
+   before signing anything, so a missing chain or a keyless `.p12` fails with
+   that stated cause instead of an opaque `codesign` error.
 
 #### 2. Create the notarization API key
 
@@ -283,7 +296,8 @@ on 2026-08-06. Team ID `25NDUU3KKC`, so `APPLE_CODESIGN_IDENTITY` is
 The Developer ID Application certificate exists and its private key is paired
 and usable: with the G2 intermediate installed, a hardened-runtime test signature
 verified against the full `leaf → Developer ID Certification Authority → Apple
-Root CA` chain. What remains is exporting the `.p12` and setting all six
+Root CA` chain. `~/DeveloperID.p12` is exported and holds the expected single
+certificate. What remains is the App Store Connect team key and setting all six
 `release` environment secrets. Until then releases publish unsigned macOS
 archives and say so in their notes, which is the correct state.
 
