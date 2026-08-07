@@ -148,19 +148,57 @@ this on the Mac that will hold the private key.
    A team may hold only a small number of live Developer ID Application
    certificates, and they cannot be deleted — only revoked — so do not generate
    spares.
-3. Double-click the `.cer` to install it into the login keychain. Confirm the
-   private key came with it, and capture the exact identity string:
+3. Double-click the `.cer` to install it into the login keychain, and install
+   the **Developer ID Certification Authority (G2)** intermediate alongside it
+   from [Apple's certificate authority
+   page](https://www.apple.com/certificateauthority/). macOS ships the Apple
+   Root CA but not this intermediate, and without it the chain cannot be built.
 
    ```sh
+   security import ~/Downloads/DeveloperIDG2CA.cer -k ~/Library/Keychains/login.keychain-db
    security find-identity -v -p codesigning
    ```
 
    The quoted name — `Developer ID Application: Ekubo, Inc. (TEAMID1234)` — is
    `APPLE_CODESIGN_IDENTITY` verbatim, team ID included.
+
+   A missing intermediate presents as a confusing pair of symptoms: Keychain
+   Access offers only `.cer`, `.pem`, and `.p7b` on export with **no `.p12`
+   option**, and `find-identity -v` reports zero valid identities. Neither means
+   the private key is missing. Drop the `-v` to tell the two apart — it lists
+   invalid identities too, so a certificate that appears there with
+   `CSSMERR_TP_NOT_TRUSTED` is correctly paired with its key and only needs the
+   chain completed.
+
+   ```sh
+   security find-identity -p codesigning   # no -v: includes invalid identities
+   ```
 4. In **Keychain Access → login → My Certificates**, select that certificate,
    **File → Export Items**, and save it as a Personal Information Exchange
    (`.p12`) with a strong password. Export the certificate row, not the bare
-   key, so the `.p12` carries both halves.
+   key, so the `.p12` carries both halves. Equivalently, without the dropdown:
+
+   ```sh
+   security export -k ~/Library/Keychains/login.keychain-db \
+     -t identities -f pkcs12 -o ~/DeveloperID.p12
+   ```
+
+   That exports every identity in the keychain, which is what you want only
+   while this is the sole one — check with `security find-identity -p codesigning`
+   first. The export password it prompts for becomes
+   `APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD`.
+5. Confirm the `.p12` carries the intermediate, not just the leaf:
+
+   ```sh
+   openssl pkcs12 -in ~/DeveloperID.p12 -nokeys -legacy 2>/dev/null |
+     grep -c "BEGIN CERTIFICATE"
+   ```
+
+   Two or more is correct. One means the chain did not travel, and the release
+   job would hit the same `CSSMERR_TP_NOT_TRUSTED` seen locally: it points the
+   user keychain search list at its own temporary keychain, so an intermediate
+   sitting in someone's login keychain is not there to be found. Re-export after
+   installing the intermediate rather than papering over it in the workflow.
 
 #### 2. Create the notarization API key
 
@@ -233,9 +271,22 @@ Notary service's own verdict before a tag depends on it.
 #### Provisioning state
 
 The Apple Developer Program organization enrollment for Ekubo, Inc. was approved
-on 2026-08-06. None of the six `release` environment secrets are set yet, so
-releases still publish unsigned macOS archives and say so in their notes, which
-is the correct state until steps 1–3 are done.
+on 2026-08-06. Team ID `25NDUU3KKC`, so `APPLE_CODESIGN_IDENTITY` is
+`Developer ID Application: Ekubo, Inc. (25NDUU3KKC)`.
+
+The Developer ID Application certificate exists and its private key is paired
+and usable: with the G2 intermediate installed, a hardened-runtime test signature
+verified against the full `leaf → Developer ID Certification Authority → Apple
+Root CA` chain. What remains is exporting the `.p12` and setting all six
+`release` environment secrets. Until then releases publish unsigned macOS
+archives and say so in their notes, which is the correct state.
+
+One local caveat that does not affect CI: `codesign --timestamp` stalls
+indefinitely on the maintainer's machine even though Apple's timestamp service
+answers a direct request in under 100ms over both IPv4 and IPv6, and signing
+without `--timestamp` succeeds instantly. GitHub's runners timestamp normally.
+Drop `--timestamp` for a local smoke test, but never for a real signature: the
+Notary service rejects a signature without a secure timestamp.
 
 ### Microsoft Azure Artifact Signing
 
