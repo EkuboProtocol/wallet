@@ -144,9 +144,33 @@ enum Command {
     },
     /// Print a shell completion script, including local dynamic candidates.
     Completion { shell: Shell },
-    /// Print dynamic completion candidates.
+    /// Print the candidates for the cursor, given the words typed so far.
+    ///
+    /// The shipped completion scripts call this on every tab: they read the
+    /// current line, pass it here, and print what comes back. Deciding *what*
+    /// the cursor is on happens in `completion`, once, rather than three times
+    /// in three dialects.
     #[command(name = "__complete", hide = true)]
-    Complete { value_kind: String },
+    Complete {
+        /// How to render each candidate: `plain` for bash, `zsh` for
+        /// `value:description`, `fish` for a tab between the two.
+        format: CompletionFormat,
+        /// The words already on the line, program name included, without
+        /// whatever is half-typed at the cursor.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+}
+
+/// How a shell wants a candidate and its description written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CompletionFormat {
+    /// One value per line. bash shows no descriptions.
+    Plain,
+    /// `value:description`, for `_describe`.
+    Zsh,
+    /// `value<tab>description`.
+    Fish,
 }
 
 #[derive(Debug, Args)]
@@ -626,7 +650,9 @@ impl Cli {
                 artifact_type,
             } => run_reference(&path, artifact_type),
             Command::Completion { shell } => print_completion_script(shell),
-            Command::Complete { value_kind } => print_completion_values(&config, &value_kind),
+            Command::Complete { format, words } => {
+                print_completion_candidates(&config, format, &words)
+            }
         }
     }
 }
@@ -4696,101 +4722,50 @@ fn confirm_network_change(
     question.ask(prompt)
 }
 
-fn print_completion_values(config: &ConfigStore, requested: &str) -> Result<()> {
-    let (kind, format) = requested.strip_suffix("-described").map_or_else(
-        || {
-            requested
-                .strip_suffix("-fish")
-                .map_or((requested, "plain"), |kind| (kind, "fish"))
-        },
-        |kind| (kind, "zsh"),
-    );
-    let candidates = match kind {
-        "defaults" => default_networks()
-            .into_iter()
-            .map(|network| (network.name, format!("chain {}", network.chain_id)))
-            .collect::<Vec<_>>(),
-        "approvals" => {
-            if config.data_dir().join("policies.db").exists() {
-                let mut candidates = PendingStore::production(config.data_dir())?
-                    .awaiting_approval(None)?
-                    .into_iter()
-                    .map(|request| {
-                        (
-                            request.request_id.to_string(),
-                            format!("{} on chain {}", request.wallet_id, request.chain_id),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                candidates.extend(
-                    TypedDataStore::production(config.data_dir())?
-                        .awaiting_approval(None)?
-                        .into_iter()
-                        .map(|request| {
-                            (
-                                request.request_id.to_string(),
-                                format!(
-                                    "typed data for {} on chain {}",
-                                    request.wallet_id, request.chain_id
-                                ),
-                            )
-                        }),
-                );
-                candidates.extend(
-                    MessageStore::production(config.data_dir())?
-                        .awaiting_approval(None)?
-                        .into_iter()
-                        .map(|request| {
-                            (
-                                request.request_id.to_string(),
-                                format!("message for {}", request.wallet_id),
-                            )
-                        }),
-                );
-                candidates
-            } else {
-                Vec::new()
-            }
-        }
-        "wallets" => config
-            .load()?
-            .wallets
-            .into_iter()
-            .map(|wallet| {
-                (
-                    wallet.id,
-                    format!("{:#x} ({:?})", wallet.address, wallet.source),
-                )
-            })
-            .collect(),
-        "networks" => config
-            .load()?
-            .networks
-            .into_iter()
-            .map(|network| (network.name, format!("chain {}", network.chain_id)))
-            .collect(),
-        _ => anyhow::bail!("value kind must be wallets, networks, defaults, or approvals"),
-    };
+/// Print what the shell should offer at the cursor.
+///
+/// The candidate set is decided in `completion` against the live clap tree;
+/// what happens here is only the writing of it, in the one shape each shell
+/// can read. Every value passes `terminal_safe_line` on the way out: these are
+/// stored strings — an alias, a token symbol, a wallet id — being printed onto
+/// the line the owner is typing on.
+fn print_completion_candidates(
+    config: &ConfigStore,
+    format: CompletionFormat,
+    words: &[String],
+) -> Result<()> {
+    // The words arrive with the program name at the front, as every shell
+    // reports them; the resolver walks subcommands, so it never sees it.
+    let words = words.split_first().map_or(&[][..], |(_, rest)| rest);
     let mut stdout = io::stdout().lock();
-    for (value, description) in candidates {
-        match format {
-            "zsh" => writeln!(
-                stdout,
-                "{}:{}",
-                completion_safe(&value),
-                completion_safe(&description).replace(':', " ")
-            )?,
-            "fish" => writeln!(
-                stdout,
-                "{}\t{}",
-                completion_safe(&value),
-                completion_safe(&description)
-            )?,
-            _ => writeln!(stdout, "{}", completion_safe(&value))?,
+    match crate::completion::offer(config, words)? {
+        // The shells complete paths themselves. Saying so rather than listing
+        // a directory keeps their own filename handling — trailing slashes,
+        // spaces, `~` — which no list of candidates would reproduce.
+        crate::completion::Offer::Files => writeln!(stdout, "{FILE_COMPLETION_DIRECTIVE}")?,
+        crate::completion::Offer::Values(candidates) => {
+            for candidate in candidates {
+                let value = completion_safe(&candidate.value);
+                let description = completion_safe(&candidate.description);
+                match format {
+                    // `_describe` splits on the first colon, so a description
+                    // carrying one would cut the entry short.
+                    CompletionFormat::Zsh => {
+                        writeln!(stdout, "{value}:{}", description.replace(':', " "))?;
+                    }
+                    CompletionFormat::Fish => writeln!(stdout, "{value}\t{description}")?,
+                    CompletionFormat::Plain => writeln!(stdout, "{value}")?,
+                }
+            }
         }
     }
     Ok(())
 }
+
+/// What `__complete` prints instead of candidates when the cursor is on a
+/// path. Chosen to be something no value could be: a shell that does not
+/// recognise it offers one impossible word rather than the wrong list.
+pub const FILE_COMPLETION_DIRECTIVE: &str = "__ekubo_wallet_complete_files__";
 
 /// The artifact kinds a `file:` reference can name, spelled as the wire
 /// values that go into the envelope's `artifact_type`.

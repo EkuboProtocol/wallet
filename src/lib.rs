@@ -12,6 +12,7 @@ pub use ekubo_wallet_core::{
 pub mod approve_tui;
 pub mod batch_read;
 pub mod cli;
+pub mod completion;
 pub mod fullscreen;
 pub mod mcp;
 pub mod pager;

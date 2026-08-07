@@ -1,79 +1,21 @@
 #compdef ekubo-wallet ew
 
 _ekubo-wallet() {
-  local -a choices
+  local -a candidates
 
-  if (( CURRENT == 2 )); then
-    _values "command" server version status portfolio balance account network policy transaction tx token address-book agent legal review reference completion \
-      --data-dir --json --help --version
+  # Everything already on the line, the command name included and the
+  # half-typed word at the cursor excluded. The binary decides what belongs
+  # here — subcommands, flags, configured networks, account ids, queued
+  # requests — so this script never has to know which position means what.
+  candidates=("${(@f)$("${words[1]}" __complete zsh "${words[@]:1:$((CURRENT-1))}" 2>/dev/null)}")
+
+  if [[ "${candidates[1]}" == "__ekubo_wallet_complete_files__" ]]; then
+    _files
     return
   fi
 
-  if (( CURRENT == 3 )); then
-    case "$words[2]" in
-      account) _values "account command" list create import export remove ;;
-      network) _values "network command" list presets reset add edit remove delete review ;;
-      policy) _values "policy command" show set allow-all require-approval validate schema review ;;
-      transaction|tx) _values "transaction command" list show cancel rebroadcast discard ;;
-      token) _values "token command" list search review import remove delete ;;
-      address-book) _values "address book command" list add remove delete ;;
-      agent) _values "agent command" list add remove delete ;;
-      legal) _values "legal command" status show accept ;;
-      review)
-        choices=("${(@f)$(ekubo-wallet __complete approvals-described 2>/dev/null)}")
-        _describe "pending approval" choices
-        ;;
-      reference) _files -g '*.json' ;;
-      completion) _values "shell" bash zsh fish elvish powershell ;;
-    esac
-    return
-  fi
-
-  if (( CURRENT == 4 )); then
-    case "$words[2]:$words[3]" in
-      policy:validate) _files -g '*.json' ;;
-      account:export|account:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:show|tx:show)
-        choices=("${(@f)$(ekubo-wallet __complete wallets-described 2>/dev/null)}")
-        _describe "account" choices
-        ;;
-      network:add)
-        choices=("${(@f)$(ekubo-wallet __complete defaults-described 2>/dev/null)}")
-        _describe "default network" choices
-        ;;
-      network:edit|network:remove|network:delete)
-        choices=("${(@f)$(ekubo-wallet __complete networks-described 2>/dev/null)}")
-        _describe "network" choices
-        ;;
-      address-book:list|address-book:add|address-book:remove|address-book:delete)
-        choices=("${(@f)$(ekubo-wallet __complete networks-described 2>/dev/null)}")
-        _describe "network" choices
-        ;;
-      legal:show) _values "legal document" terms privacy licenses ;;
-    esac
-    return
-  fi
-
-  if (( CURRENT == 5 )); then
-    case "$words[2]:$words[3]" in
-      policy:set) _files -g '*.json' ;;
-      network:add)
-        _values "network option" --rpc-url --rpc-strategy --display-name --alias --native-currency-name \
-          --native-currency-symbol --native-currency-decimals --max-gas-limit \
-          --block-explorer-url --documentation-url
-        ;;
-    esac
-  fi
-
-  if (( CURRENT >= 4 )) && [[ "$words[2]:$words[3]" == "network:presets" ]]; then
-    _values "presets option" --search --all
-    return
-  fi
-
-  if (( CURRENT > 5 )) && [[ "$words[2]:$words[3]" == "network:add" ]]; then
-    _values "network option" --rpc-url --rpc-strategy --display-name --alias --native-currency-name \
-      --native-currency-symbol --native-currency-decimals --max-gas-limit \
-      --block-explorer-url --documentation-url
-  fi
+  # Each line is `value:description`, which is exactly what _describe reads.
+  _describe "candidate" candidates
 }
 
 _ekubo-wallet "$@"

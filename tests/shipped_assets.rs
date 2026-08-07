@@ -158,25 +158,51 @@ fn policy_validate_accepts_examples_and_rejects_malformed_documents() {
         .failure();
 }
 
-/// Every visible subcommand name clap knows about, at any depth.
-fn declared_subcommands(command: &clap::Command, into: &mut Vec<String>) {
-    for subcommand in command.get_subcommands() {
-        if subcommand.is_hide_set() {
-            continue;
+#[test]
+fn every_packaged_completion_asks_the_binary_and_reads_its_answer() {
+    // The scripts used to carry their own copy of the command tree, and this
+    // test used to compare three transcriptions of it against clap. They now
+    // pass the line to `__complete` and print what comes back, so the tree can
+    // no longer go stale in them — and what is left to get wrong is the
+    // handoff: asking in a format the binary does not print, or ignoring the
+    // one answer that is a directive rather than a candidate.
+    for (shell, format) in [("bash", "plain"), ("zsh", "zsh"), ("fish", "fish")] {
+        let output = cli().arg("completion").arg(shell).output().unwrap();
+        assert!(
+            output.status.success(),
+            "completion {shell} exited non-zero"
+        );
+        let script = String::from_utf8(output.stdout).expect("completion script is UTF-8");
+        assert!(
+            script.contains(&format!("__complete {format}")),
+            "{shell} completion does not ask for candidates in the {format} format"
+        );
+        assert!(
+            script.contains(ekubo_wallet::cli::FILE_COMPLETION_DIRECTIVE),
+            "{shell} completion would offer the file directive as a candidate"
+        );
+        // A script that still names a subcommand is a script that has started
+        // keeping its own list again.
+        for stale in ["address-book", "rebroadcast", "require-approval"] {
+            assert!(
+                !script.contains(stale),
+                "{shell} completion hardcodes `{stale}` rather than asking"
+            );
         }
-        into.push(subcommand.get_name().to_owned());
-        declared_subcommands(subcommand, into);
     }
 }
 
 #[test]
-fn packaged_completions_offer_every_subcommand() {
-    // The completion scripts are hand-written, because the candidates they
-    // offer are looked up at completion time from the live configuration.
-    // Nothing regenerates them when a subcommand is added, so this test is the
-    // only thing that notices — which is why the list it checks is read out of
-    // clap rather than kept by hand here. A hand-kept list goes stale in
-    // exactly the same way, and just as quietly, as the scripts do.
+fn the_completion_endpoint_answers_what_the_scripts_ask_it() {
+    // The other half of the handoff, against the real binary: the words a
+    // script passes come back as candidates, and a path argument comes back as
+    // the directive the scripts check for.
+    let root = cli()
+        .args(["__complete", "plain", "ekubo-wallet"])
+        .output()
+        .unwrap();
+    assert!(root.status.success());
+    let offered = String::from_utf8(root.stdout).unwrap();
     let mut expected = Vec::new();
     declared_subcommands(
         &<ekubo_wallet::cli::Cli as clap::CommandFactory>::command(),
@@ -186,28 +212,35 @@ fn packaged_completions_offer_every_subcommand() {
         expected.len() > 20,
         "clap reported implausibly few subcommands: {expected:?}"
     );
-    for shell in ["bash", "zsh", "fish"] {
-        let output = cli().arg("completion").arg(shell).output().unwrap();
+    for name in ["portfolio", "address-book", "review", "--json"] {
         assert!(
-            output.status.success(),
-            "completion {shell} exited non-zero"
+            offered.lines().any(|line| line == name),
+            "the root completion never offers `{name}`: {offered}"
         );
-        let script = String::from_utf8(output.stdout).expect("completion script is UTF-8");
-        for subcommand in &expected {
-            assert!(
-                script.contains(subcommand.as_str()),
-                "{shell} completion never offers `{subcommand}`"
-            );
+    }
+    assert!(
+        !offered.lines().any(|line| line == "__complete"),
+        "the root completion offers the hidden subcommand: {offered}"
+    );
+
+    let file = cli()
+        .args(["__complete", "plain", "ekubo-wallet", "policy", "validate"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(file.stdout).unwrap().trim(),
+        ekubo_wallet::cli::FILE_COMPLETION_DIRECTIVE
+    );
+}
+
+/// Every visible subcommand name clap knows about, at any depth.
+fn declared_subcommands(command: &clap::Command, into: &mut Vec<String>) {
+    for subcommand in command.get_subcommands() {
+        if subcommand.is_hide_set() {
+            continue;
         }
-        // The scripts call `ekubo-wallet __complete <kind>` to look candidates
-        // up, so the name appears legitimately. What must never happen is the
-        // hidden subcommand being offered as a candidate itself, which shows
-        // up as an occurrence that is not part of that invocation.
-        assert_eq!(
-            script.matches("__complete").count(),
-            script.matches("ekubo-wallet __complete").count(),
-            "{shell} completion offers the hidden __complete subcommand"
-        );
+        into.push(subcommand.get_name().to_owned());
+        declared_subcommands(subcommand, into);
     }
 }
 
