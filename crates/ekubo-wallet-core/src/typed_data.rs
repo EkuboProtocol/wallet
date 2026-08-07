@@ -127,37 +127,107 @@ pub fn parse_typed_data(value: &serde_json::Value) -> Result<(TypedData, u64, B2
 /// it is one whose author is describing something other than what they are
 /// asking for, and the wallet has no way to know which half was the mistake.
 fn reject_unsigned_members(value: &serde_json::Value, typed: &TypedData) -> Result<()> {
-    for (object_name, declared_type) in [
-        ("message", typed.primary_type.as_str()),
-        ("domain", "EIP712Domain"),
-    ] {
-        let Some(object) = value
-            .get(object_name)
-            .and_then(serde_json::Value::as_object)
-        else {
-            continue;
-        };
-        // Read from the payload's own `types` map, which is the same thing
-        // the hash is derived from. A type absent there is left alone:
-        // `EIP712Domain` is commonly omitted and its members are fixed by the
-        // standard, and a missing `primaryType` has already failed above.
-        let Some(members) = value
-            .get("types")
-            .and_then(|types| types.get(declared_type))
-            .and_then(serde_json::Value::as_array)
-        else {
-            continue;
-        };
-        let declared: std::collections::BTreeSet<&str> = members
-            .iter()
-            .filter_map(|member| member.get("name").and_then(serde_json::Value::as_str))
-            .collect();
-        for key in object.keys() {
+    let declarations = value.get("types");
+
+    // The domain is checked against its own declaration when the payload makes
+    // one, and against the standard member set when it does not. Omitting
+    // `EIP712Domain` from `types` is common and legal — the standard fixes
+    // what a domain may hold — but skipping the check on that basis meant a
+    // payload could carry an unsigned domain member simply by not declaring
+    // the type it was breaking.
+    if let Some(domain) = value.get("domain").and_then(serde_json::Value::as_object) {
+        let declared = declared_members(declarations, "EIP712Domain").unwrap_or_else(|| {
+            ["name", "version", "chainId", "verifyingContract", "salt"]
+                .into_iter()
+                .collect()
+        });
+        for key in domain.keys() {
             ensure!(
                 declared.contains(key.as_str()),
-                "typed data {object_name} carries \"{key}\", which type {declared_type} does not \
-                 declare; it would be displayed but not signed"
+                "typed data domain carries \"{key}\", which type EIP712Domain does not declare; \
+                 it would be displayed but not signed"
             );
+        }
+    }
+
+    if let Some(message) = value.get("message") {
+        reject_unsigned_within(message, &typed.primary_type, declarations, "message")?;
+    }
+    Ok(())
+}
+
+/// The member names a payload's own `types` map declares for `name`, or `None`
+/// when it declares no such type — which for a member's type means "not a
+/// struct", and so nothing to descend into.
+fn declared_members<'a>(
+    types: Option<&'a serde_json::Value>,
+    name: &str,
+) -> Option<std::collections::BTreeSet<&'a str>> {
+    Some(
+        types?
+            .get(name)?
+            .as_array()?
+            .iter()
+            .filter_map(|member| member.get("name").and_then(serde_json::Value::as_str))
+            .collect(),
+    )
+}
+
+/// Apply the same rule to a struct value at any depth.
+///
+/// EIP-712 structs nest, and the hash of a nested struct covers exactly the
+/// members its own type declares — so every level has the gap the top level
+/// has. Checking only `message`'s immediate keys left `message.details.note`
+/// as free text: displayed to the reviewer as part of what they are
+/// authorizing, and covered by no signature.
+///
+/// Recursion follows the *value*, not the type graph, so a payload declaring
+/// mutually recursive types cannot make this loop: each step consumes one
+/// level of JSON nesting, which `serde_json` has already bounded.
+fn reject_unsigned_within(
+    value: &serde_json::Value,
+    type_name: &str,
+    types: Option<&serde_json::Value>,
+    path: &str,
+) -> Result<()> {
+    // An array member repeats its element type; `Foo[2]` and `Foo[]` alike.
+    if let serde_json::Value::Array(items) = value {
+        for (index, item) in items.iter().enumerate() {
+            reject_unsigned_within(item, type_name, types, &format!("{path}[{index}]"))?;
+        }
+        return Ok(());
+    }
+    // Not an object, or not a struct this payload defines: nothing declares
+    // members for it, so there is nothing here that could go unsigned.
+    let (Some(object), Some(members)) = (
+        value.as_object(),
+        types
+            .and_then(|types| types.get(type_name))
+            .and_then(serde_json::Value::as_array),
+    ) else {
+        return Ok(());
+    };
+    let declared: std::collections::BTreeSet<&str> = members
+        .iter()
+        .filter_map(|member| member.get("name").and_then(serde_json::Value::as_str))
+        .collect();
+    for key in object.keys() {
+        ensure!(
+            declared.contains(key.as_str()),
+            "typed data {path} carries \"{key}\", which type {type_name} does not declare; it \
+             would be displayed but not signed"
+        );
+    }
+    for member in members {
+        let (Some(name), Some(member_type)) = (
+            member.get("name").and_then(serde_json::Value::as_str),
+            member.get("type").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        if let Some(child) = object.get(name) {
+            let element = member_type.split('[').next().unwrap_or(member_type);
+            reject_unsigned_within(child, element, types, &format!("{path}.{name}"))?;
         }
     }
     Ok(())

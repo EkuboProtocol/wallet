@@ -276,3 +276,73 @@ fn rejection_is_terminal_and_digest_is_bound() {
     );
     assert!(store.reject(request.request_id).is_err());
 }
+
+/// A payload whose primary type nests a struct and an array of structs.
+fn nested_payload() -> serde_json::Value {
+    json!({
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "chainId", "type": "uint256"}
+            ],
+            "Order": [
+                {"name": "maker", "type": "address"},
+                {"name": "details", "type": "Details"},
+                {"name": "legs", "type": "Leg[]"}
+            ],
+            "Details": [{"name": "amount", "type": "uint256"}],
+            "Leg": [{"name": "token", "type": "address"}]
+        },
+        "primaryType": "Order",
+        "domain": { "name": "Exchange", "chainId": 1 },
+        "message": {
+            "maker": "0x1111111111111111111111111111111111111111",
+            "details": { "amount": "1" },
+            "legs": [{ "token": "0x2222222222222222222222222222222222222222" }]
+        }
+    })
+}
+
+#[test]
+fn a_nested_member_the_type_does_not_declare_is_refused() {
+    // Structs nest, and each level's hash covers only the members its own type
+    // declares, so every level has the gap the top level has. Checking
+    // `message`'s immediate keys alone left a whole object of free text in the
+    // reviewed payload with no signature over it.
+    assert!(
+        parse_typed_data(&nested_payload()).is_ok(),
+        "the honest payload must still parse"
+    );
+
+    let mut nested = nested_payload();
+    nested["message"]["details"]["note"] = json!("Approving 10 USDC");
+    let error = parse_typed_data(&nested).unwrap_err().to_string();
+    assert!(error.contains("\"note\""), "{error}");
+    assert!(error.contains("message.details"), "{error}");
+    assert!(error.contains("not signed"), "{error}");
+
+    // An array of structs is the same gap once per element.
+    let mut in_array = nested_payload();
+    in_array["message"]["legs"][0]["note"] = json!("harmless");
+    let error = parse_typed_data(&in_array).unwrap_err().to_string();
+    assert!(error.contains("message.legs[0]"), "{error}");
+}
+
+#[test]
+fn an_undeclared_domain_type_still_bounds_the_domain() {
+    // Omitting `EIP712Domain` from `types` is legal and common, so the check
+    // cannot be skipped when it is absent: that made "do not declare the type
+    // you are breaking" a way to carry an unsigned member.
+    let mut payload = json!({
+        "types": { "Order": [{"name": "amount", "type": "uint256"}] },
+        "primaryType": "Order",
+        "domain": { "name": "Exchange", "chainId": 1 },
+        "message": { "amount": "1" }
+    });
+    assert!(parse_typed_data(&payload).is_ok());
+
+    payload["domain"]["note"] = json!("Approving 10 USDC");
+    let error = parse_typed_data(&payload).unwrap_err().to_string();
+    assert!(error.contains("\"note\""), "{error}");
+    assert!(error.contains("not signed"), "{error}");
+}
