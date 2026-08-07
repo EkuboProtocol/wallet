@@ -471,7 +471,11 @@ mod file_references {
     #[tokio::test]
     async fn refuses_a_file_url_naming_another_host() {
         // This process speaks to no file server, so an authority is not a
-        // fetch it declines to make — it is a path it refuses to invent.
+        // fetch it declines to make — it is a path it refuses to invent. On
+        // Windows the invented path is a real one: a host maps to the UNC
+        // share `\\files.example\plans\one.json`, so a refusal that arrived
+        // only as "could not be read" would mean the SMB read had already
+        // been attempted.
         let body = plan_json();
         let reference = reference_for(
             ArtifactType::ExecutionPlan,
@@ -483,6 +487,57 @@ mod file_references {
             .unwrap_err()
             .to_string();
         assert!(error.contains("absolute local path"), "{error}");
+        assert!(error.contains("files.example"), "{error}");
+        assert!(
+            !error.contains("could not be read"),
+            "the host was reached rather than refused: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_a_file_url_naming_another_host_by_address() {
+        // A literal address never looks like a normalized `localhost`, and
+        // parses to a host of a different shape than a name does.
+        let body = plan_json();
+        for authority in ["10.0.0.5", "[::1]", "127.0.0.1"] {
+            let reference = reference_for(
+                ArtifactType::ExecutionPlan,
+                format!("file://{authority}/plans/one.json"),
+                Some(&body),
+            );
+            let error = resolve(&reference, FetchPolicy::production())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("absolute local path"),
+                "{authority}: {error}"
+            );
+            assert!(
+                !error.contains("could not be read"),
+                "{authority} was reached rather than refused: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_the_local_path_an_empty_or_localhost_authority_names() {
+        // The two authorities that mean this machine. Both are folded to no
+        // host by the parser, which is what the refusal above relies on, so
+        // an accepted `file:` URL has to keep working through it.
+        let body = plan_json();
+        let (_directory, _path, url) = written(&body);
+        assert!(url.starts_with("file:///"), "{url}");
+        let localhost = url.replacen("file://", "file://localhost", 1);
+        for candidate in [url, localhost] {
+            let reference =
+                reference_for(ArtifactType::ExecutionPlan, candidate.clone(), Some(&body));
+            let (plan, source) = resolve(&reference, FetchPolicy::production())
+                .await
+                .unwrap_or_else(|error| panic!("{candidate}: {error}"));
+            assert_eq!(plan.ordered_steps.len(), 1);
+            assert_eq!(source, ArtifactSource::LocalFile);
+        }
     }
 
     #[tokio::test]

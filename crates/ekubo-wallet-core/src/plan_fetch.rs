@@ -418,9 +418,19 @@ fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
         parsed.fragment().is_none(),
         "{noun} file URLs must not carry a fragment"
     );
-    // `to_file_path` admits an empty authority or `localhost` and nothing
-    // else, so `file://files.example/plan.json` is refused here rather than
-    // turning into a request: this process speaks to no file server.
+    // An authority is refused here rather than turned into a request: this
+    // process speaks to no file server. The check cannot be left to
+    // `to_file_path`, which rejects a host on Unix but on Windows maps one to
+    // the UNC path `\\files.example\plan.json` — an SMB read of a remote host,
+    // reached without any of the admission rules the `https` path applies. The
+    // parser has already folded an empty authority and `localhost` (in any
+    // case) to no host at all, so anything left is a real one.
+    ensure!(
+        parsed.host().is_none(),
+        "{noun} file URL must name an absolute local path on this machine, as in \
+         file:///tmp/plan.json, not a path on the host {}",
+        parsed.host_str().unwrap_or_default()
+    );
     let path = parsed.to_file_path().map_err(|()| {
         anyhow!("{noun} file URL must name an absolute local path, as in file:///tmp/plan.json")
     })?;

@@ -4863,6 +4863,16 @@ fn run_reference(path: &Path, declared: Option<ReferenceType>) -> Result<()> {
         fs::canonicalize(path).with_context(|| format!("could not resolve {}", path.display()))?;
     let url = Url::from_file_path(&canonical)
         .map_err(|()| anyhow::anyhow!("{} has no file URL", canonical.display()))?;
+    // A Windows UNC path is reachable from here and gets a file URL, but it
+    // names a file server rather than this machine, and the wallet reads no
+    // file server. Say so now instead of printing an envelope it will refuse.
+    ensure!(
+        url.host().is_none(),
+        "{} is on the file server {}, and the wallet opens only this machine's own disk; \
+         copy the file here and describe the copy",
+        canonical.display(),
+        url.host_str().unwrap_or_default()
+    );
     print_json(&serde_json::json!({
         "kind": "artifact_reference",
         "artifact_type": artifact_type.wire_name(),
