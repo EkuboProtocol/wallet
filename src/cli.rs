@@ -888,12 +888,17 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
                 return Ok(());
             };
             let wallet = custody.create(&wallet_id)?;
-            initialize_wallet_policy(&config, &wallet.id, &starting.policy()).with_context(|| {
-                format!(
-                    "wallet {} was created but policy initialization failed; signing will fail closed",
-                    wallet.id
-                )
-            })?;
+            initialize_wallet_policy(&config, &wallet.id, &starting.policy()).with_context(
+                || {
+                    format!(
+                        "wallet {} was created but policy initialization failed. The wallet exists \
+                     and its key is stored; it has no policy, so signing fails closed and the \
+                     MCP server refuses to start until it has one. Give it one with \
+                     `ekubo-wallet policy require-approval {}`, then choose a policy from there.",
+                        wallet.id, wallet.id
+                    )
+                },
+            )?;
             emit(mode, &wallet, || {
                 Ok(format!(
                     "Created wallet {} at {:#x} with {}.",
@@ -928,8 +933,11 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
                     )
                     .with_context(|| {
                         format!(
-                            "wallet {} was imported but policy initialization failed; signing will fail closed",
-                            wallet.id
+                            "wallet {} was imported but policy initialization failed. The key is \
+                             stored; the wallet has no policy, so signing fails closed and the \
+                             MCP server refuses to start until it has one. Give it one with \
+                             `ekubo-wallet policy require-approval {}`.",
+                            wallet.id, wallet.id
                         )
                     })?;
                     progress.stop("Wallet imported");
