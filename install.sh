@@ -97,6 +97,18 @@ trap cleanup EXIT INT TERM
 # only characters that need escaping inside its quoted values.
 curl_authenticated() {
   if [ -n "${GITHUB_TOKEN:-}" ]; then
+    # A config document is line-oriented, so escaping the quoting characters is
+    # not enough on its own: a newline inside the value ends the `header`
+    # directive and everything after it is read as further configuration —
+    # `proxy`, `insecure`, `output`, any of them. Nothing legitimate puts a
+    # newline or a control character in a bearer token, so refuse rather than
+    # try to encode one.
+    case $GITHUB_TOKEN in
+      *[![:print:]]*)
+        fail "GITHUB_TOKEN contains a newline or control character; refusing to \
+build a curl configuration from it"
+        ;;
+    esac
     printf 'header = "Authorization: Bearer %s"\n' \
       "$(printf '%s' "$GITHUB_TOKEN" | sed 's/[\\"]/\\&/g')" \
       | curl --config - "$@"
@@ -212,8 +224,25 @@ failed or was tampered with. Retry, or set EKUBO_WALLET_ALLOW_UNSIGNED=1 to \
 install on the checksum alone."
     fi
   fi
+elif [ "${EKUBO_WALLET_ALLOW_UNSIGNED:-0}" = "1" ]; then
+  warn "cosign is not installed; verifying the checksum alone because \
+EKUBO_WALLET_ALLOW_UNSIGNED=1. Nothing here proves who built this archive."
 else
-  warn "cosign is not installed; verifying the checksum only. Install cosign to also verify the release signature."
+  # The checksum alone is not a second opinion. SHA256SUMS travels the same
+  # path as the archive, from the same host, under the same trust: whoever can
+  # substitute one can substitute both and the comparison still passes. It
+  # catches a truncated download, not a chosen one.
+  #
+  # The signature is what names a builder, so having no way to check it is the
+  # same downgrade as having no bundle to check — and that case, just above,
+  # already refuses rather than continuing. This one used to warn and carry on,
+  # which made the strength of the check depend on what happened to be
+  # installed. It is now the operator's stated decision either way.
+  fail "cosign is not installed, so the Sigstore signature over SHA256SUMS \
+cannot be verified — and the checksum alone proves nothing about who produced \
+this archive, since it is served from the same place. Install cosign \
+(https://docs.sigstore.dev/cosign/installation/) and retry, or set \
+EKUBO_WALLET_ALLOW_UNSIGNED=1 to install on the checksum alone."
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -381,9 +410,21 @@ if [ "$OS" = Linux ] && [ -f "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.
   fi
   log "owner authentication needs the polkit action installed once:"
   if [ -n "$POLKIT_DIGEST" ]; then
-    log "  printf '%s  %s\\n' $(shell_quote "$POLKIT_DIGEST") $(shell_quote "$POLKIT_FILE") | sha256sum -c \\"
-    log "    && sudo install -m 0644 $(shell_quote "$POLKIT_FILE") /usr/share/polkit-1/actions/"
-    log "the digest is checked first so a file replaced since now cannot be installed"
+    # Checking the digest and then installing names the path twice, and the
+    # path is one the user can replace: a file that passed `sha256sum -c` need
+    # not be the file `install` then reads. Copy once into a root-owned
+    # temporary instead, verify that copy, and install that same copy — so the
+    # bytes checked and the bytes installed cannot be different bytes.
+    #
+    # Single-quoted: none of this expands here. It is the text the operator
+    # runs, and the digest and path reach it as arguments rather than being
+    # spliced into the script.
+    # shellcheck disable=SC2016  # deliberate: this text is not for this shell
+    POLKIT_COMMAND='t=$(mktemp) || exit 1; cat "$2" > "$t" && printf "%s  %s\n" "$1" "$t" | sha256sum -c >/dev/null && install -m 0644 "$t" /usr/share/polkit-1/actions/com.ekubo.wallet.policy; status=$?; rm -f "$t"; exit $status'
+    log "  sudo sh -c $(shell_quote "$POLKIT_COMMAND") sh \\"
+    log "    $(shell_quote "$POLKIT_DIGEST") $(shell_quote "$POLKIT_FILE")"
+    log "that copies, verifies, and installs one set of bytes, so a file \
+replaced after the check cannot be the one that lands"
   else
     log "  sudo install -m 0644 $(shell_quote "$POLKIT_FILE") /usr/share/polkit-1/actions/"
     warn "no sha256sum or shasum available, so the command above cannot verify \

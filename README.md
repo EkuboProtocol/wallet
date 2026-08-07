@@ -22,9 +22,9 @@ nothing here should be read as a claim that it has.
 
 ## Quick install
 
-The installer downloads the archive for your platform, **verifies its SHA-256
-checksum against `SHA256SUMS` before extracting anything**, additionally
-verifies the Sigstore signature when `cosign` is installed, installs
+The installer downloads the archive for your platform, **verifies the Sigstore
+signature over `SHA256SUMS` and the archive's SHA-256 checksum against it
+before extracting anything**, installs
 `ekubo-wallet` and `ew`, registers the server with every agent CLI it detects
 (Codex, Claude Code, Gemini CLI, and Cursor), and installs completion for your
 login shell:
@@ -35,6 +35,11 @@ curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/mai
 
 Read [`install.sh`](install.sh) before piping it to a shell. Replace `main` with
 an exact release tag for a reproducible installation.
+
+`cosign` is required: the checksum file is served from the same place as the
+archive, so it catches a truncated download rather than a chosen one, and the
+signature is what names a builder. See
+[installation](docs/installation.md) if you need to install without it.
 
 Then accept the legal documents and create a wallet:
 

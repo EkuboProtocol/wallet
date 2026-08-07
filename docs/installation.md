@@ -4,9 +4,9 @@ Every release attaches prebuilt archives for Linux (x86-64, arm64), macOS
 (Intel, Apple Silicon), and Windows (x86-64), plus `SHA256SUMS`, keyless
 Sigstore bundles, and GitHub build-provenance attestations.
 
-The installer downloads the archive for your platform, **verifies its SHA-256
-checksum against `SHA256SUMS` before extracting anything**, additionally
-verifies the Sigstore signature when `cosign` is installed, installs
+The installer downloads the archive for your platform, **verifies the Sigstore
+signature over `SHA256SUMS` and the archive's SHA-256 checksum against it
+before extracting anything**, installs
 `ekubo-wallet` and `ew`, registers the server with every agent CLI it detects
 (Codex, Claude Code, Gemini CLI, and Cursor), and installs completion for your
 login shell:
@@ -17,6 +17,15 @@ curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/mai
 
 Read [`install.sh`](../install.sh) before piping it to a shell. Replace `main` with
 an exact release tag for a reproducible installation.
+
+`cosign` is required. The checksum file travels the same path as the archive it
+describes, from the same host, so whoever can substitute one can substitute both
+and the comparison still passes — it catches a truncated download, not a chosen
+one. The signature is the part that names a builder. If `cosign` is missing the
+installer stops and says so; install it from
+[the Sigstore docs](https://docs.sigstore.dev/cosign/installation/), or set
+`EKUBO_WALLET_ALLOW_UNSIGNED=1` to proceed on the checksum alone and accept what
+that does not prove.
 
 While the repository is private, the installer needs credentials to reach the
 release assets. It uses the GitHub CLI when you are logged in (`gh auth login`),
