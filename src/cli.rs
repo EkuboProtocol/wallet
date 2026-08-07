@@ -372,6 +372,7 @@ enum AddressBookCommand {
     /// Print address book entries as JSON, optionally scoped to one network.
     List {
         /// Network name, alias, or decimal chain ID.
+        #[arg(long)]
         network: Option<String>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
@@ -481,9 +482,11 @@ enum LegalCommand {
 
 #[derive(Debug, Subcommand)]
 enum TokenCommand {
-    /// Print stored tokens as JSON, optionally filtered by decimal chain ID.
+    /// Print stored tokens, optionally filtered to one network.
     List {
-        chain_id: Option<u64>,
+        /// Network name, alias, or decimal chain ID.
+        #[arg(long)]
+        chain: Option<String>,
         #[arg(long, default_value_t = 200)]
         limit: usize,
         #[arg(long, default_value_t = 0)]
@@ -493,9 +496,9 @@ enum TokenCommand {
     Search {
         /// A symbol, part of a name, or a full token address.
         query: String,
-        /// Restrict to one decimal chain ID.
+        /// Network name, alias, or decimal chain ID.
         #[arg(long)]
-        chain_id: Option<u64>,
+        chain: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
@@ -547,8 +550,15 @@ enum TokenCommand {
 #[derive(Debug, Subcommand)]
 enum TransactionCommand {
     /// Print recorded transaction lifecycle rows as JSON.
+    ///
+    /// There is no `--offset`: rows are reconciled against the chain as they
+    /// are read and ordered by time, so a second page would be numbered
+    /// against a list that has already moved. Narrow with `--account` and
+    /// `--limit`, then read one row with `transaction show`.
     List {
-        wallet_id: Option<String>,
+        /// Only rows for this account.
+        #[arg(long, alias = "wallet")]
+        account: Option<String>,
         #[arg(long, default_value_t = 100)]
         limit: u16,
     },
@@ -1058,11 +1068,15 @@ fn initialize_wallet_policy(
 async fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMode) -> Result<()> {
     match command {
         TokenCommand::List {
-            chain_id,
+            chain,
             limit,
             offset,
         } => {
-            let (chain_id, limit, offset) = (*chain_id, *limit, *offset);
+            let chain_id = chain
+                .as_deref()
+                .map(|chain| resolve_network(config, chain).map(|network| network.chain_id))
+                .transpose()?;
+            let (limit, offset) = (*limit, *offset);
             let store = crate::token_store::TokenStore::production(config.data_dir())?;
             let total = store.count(chain_id)?;
             let tokens = store.list(chain_id, limit, offset)?;
@@ -1095,11 +1109,15 @@ async fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMod
         }
         TokenCommand::Search {
             query,
-            chain_id,
+            chain,
             limit,
         } => {
+            let chain_id = chain
+                .as_deref()
+                .map(|chain| resolve_network(config, chain).map(|network| network.chain_id))
+                .transpose()?;
             let store = crate::token_store::TokenStore::production(config.data_dir())?;
-            let tokens = store.search(query, *chain_id, *limit)?;
+            let tokens = store.search(query, chain_id, *limit)?;
             emit(
                 mode,
                 &serde_json::json!({ "matches": tokens.len(), "tokens": tokens }),
@@ -1884,11 +1902,11 @@ async fn run_transaction(
 ) -> Result<()> {
     let pending = PendingStore::production(config.data_dir())?;
     match command {
-        TransactionCommand::List { wallet_id, limit } => {
-            if let Some(wallet_id) = wallet_id.as_deref() {
-                config.wallet(wallet_id)?;
+        TransactionCommand::List { account, limit } => {
+            if let Some(account) = account.as_deref() {
+                config.wallet(account)?;
             }
-            let transactions = pending.list(wallet_id.as_deref(), limit)?;
+            let transactions = pending.list(account.as_deref(), limit)?;
             // Settle in-flight rows against the chain before display. The
             // in-flight unique index bounds this at one row per wallet and
             // chain, so a long listing still costs at most a couple of RPCs.

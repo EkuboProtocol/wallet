@@ -42,7 +42,7 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from token; and not __fish_s
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from address-book; and not __fish_seen_subcommand_from list add remove delete' -a 'list add remove delete'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from legal; and not __fish_seen_subcommand_from status show accept' -a 'status show accept'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show; and __fish_seen_subcommand_from legal' -a 'terms privacy licenses'
-complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from list add remove delete; and __fish_seen_subcommand_from address-book' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add remove delete; and __fish_seen_subcommand_from address-book' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from address-book; and __fish_seen_subcommand_from add' -l note -r -d 'Attach a short note to the alias'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish elvish powershell' -a 'bash zsh fish elvish powershell'
 
@@ -50,7 +50,7 @@ complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subco
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add; and __fish_seen_subcommand_from network net' -a '(ekubo-wallet __complete defaults-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from edit remove delete; and __fish_seen_subcommand_from network net' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show set allow-all require-approval review; and __fish_seen_subcommand_from policy' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
-complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from list; and __fish_seen_subcommand_from transaction tx' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show; and __fish_seen_subcommand_from transaction tx' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 2; and __fish_seen_subcommand_from review' -a '(ekubo-wallet __complete approvals-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from review' -l decision -r -a 'reject approve' -d 'Decide without the interactive prompt'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 4; and __fish_seen_subcommand_from set; and __fish_seen_subcommand_from policy' -F
@@ -71,5 +71,9 @@ complete -c ekubo-wallet -n '__fish_seen_subcommand_from portfolio balance bal' 
 
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from agent; and not __fish_seen_subcommand_from list add remove delete' -a 'list add remove delete'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add remove delete; and __fish_seen_subcommand_from agent' -a 'codex claude-code gemini-cli cursor'
+
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from token' -l chain -r -a '(ekubo-wallet __complete networks-fish 2>/dev/null)' -d 'Network name, alias, or chain ID'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from address-book' -l network -r -a '(ekubo-wallet __complete networks-fish 2>/dev/null)' -d 'Network name, alias, or chain ID'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx' -l account -r -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)' -d 'Only rows for this account'
 
 complete -c ew -w ekubo-wallet

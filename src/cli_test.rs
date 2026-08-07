@@ -225,6 +225,7 @@ fn parses_transaction_network_and_completion_parity_commands() {
         "ekubo-wallet",
         "transaction",
         "list",
+        "--account",
         "primary",
         "--limit",
         "50",
@@ -234,10 +235,22 @@ fn parses_transaction_network_and_completion_parity_commands() {
         cli.command,
         Command::Transaction(TransactionArgs {
             command: TransactionCommand::List {
-                wallet_id: Some(ref wallet_id),
+                account: Some(ref account),
                 limit: 50,
             },
-        }) if wallet_id == "primary"
+        }) if account == "primary"
+    ));
+    // `--wallet` keeps working, so anything that already spelled the filter
+    // that way does not break on the rename.
+    let cli = Cli::try_parse_from(["ekubo-wallet", "tx", "list", "--wallet", "primary"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Transaction(TransactionArgs {
+            command: TransactionCommand::List {
+                account: Some(ref account),
+                ..
+            },
+        }) if account == "primary"
     ));
     let cli = Cli::try_parse_from(["ekubo-wallet", "completion", "zsh"]).unwrap();
     assert!(matches!(

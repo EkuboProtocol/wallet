@@ -31,7 +31,7 @@ _ekubo-wallet() {
   if (( CURRENT == 4 )); then
     case "$words[2]:$words[3]" in
       policy:validate) _files -g '*.json' ;;
-      account:export|account:remove|acct:export|acct:remove|wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:list|tx:list)
+      account:export|account:remove|acct:export|acct:remove|wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:show|tx:show)
         choices=("${(@f)$(ekubo-wallet __complete wallets-described 2>/dev/null)}")
         _describe "account" choices
         ;;

@@ -89,7 +89,12 @@ recipient, and the simulated result are what the review is actually for.
 
 Seeding happens only at creation. Nothing re-seeds on later launches, so a
 token you remove stays removed, and the database is yours after the first
-run. Add more at any time with `ekubo-wallet token import`, and confirm what
+run. Filters are named and take a network name, alias, or chain ID —
+`token list --chain base`, `address-book list --network arbitrum`,
+`transaction list --account primary`. Drop one name with
+`ekubo-wallet token remove <network> <address>`.
+
+Add more at any time with `ekubo-wallet token import`, and confirm what
 an agent suggests with `ekubo-wallet token review` — an agent's suggestion is
 never a name until you accept it.
 

@@ -36,7 +36,7 @@ _ekubo_wallet() {
           COMPREPLY=( $(compgen -f -- "$current") )
           return
           ;;
-        account:export|account:remove|acct:export|acct:remove|wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:list|tx:list)
+        account:export|account:remove|acct:export|acct:remove|wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:show|tx:show)
           choices="$(ekubo-wallet __complete wallets 2>/dev/null)"
           ;;
         network:add)
@@ -45,7 +45,7 @@ _ekubo_wallet() {
         network:edit|network:remove|network:delete)
           choices="$(ekubo-wallet __complete networks 2>/dev/null)"
           ;;
-        address-book:list|address-book:add|address-book:remove|address-book:delete|token:remove|token:delete)
+        address-book:add|address-book:remove|address-book:delete|token:remove|token:delete)
           choices="$(ekubo-wallet __complete networks 2>/dev/null)"
           ;;
         agent:add|agent:remove|agent:delete)
