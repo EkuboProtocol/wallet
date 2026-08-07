@@ -4321,7 +4321,7 @@ async fn review_one_network_proposal(
 
         if !confirm_network_change(title, summary, "Accept this network?", facts)? {
             let mut store = PolicyStore::production(config.data_dir())?;
-            store.discard_network_proposal(&proposal)?;
+            store.discard_network_proposal(proposal)?;
             return Ok(NetworkReviewOutcome::Discarded);
         }
 
@@ -4349,7 +4349,7 @@ async fn review_one_network_proposal(
                 add_configured_network(&mut state.networks, proposal.clone())
             }
         })?;
-        PolicyStore::production(config.data_dir())?.discard_network_proposal(&proposal)?;
+        PolicyStore::production(config.data_dir())?.discard_network_proposal(proposal)?;
         Ok(NetworkReviewOutcome::Accepted)
     }
 }
