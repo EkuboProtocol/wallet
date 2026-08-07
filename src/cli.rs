@@ -1619,7 +1619,10 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
             TypedDataStore::production(config.data_dir())?.awaiting_approval(None)?;
         let awaiting_messages =
             MessageStore::production(config.data_dir())?.awaiting_approval(None)?;
-        let proposals = PolicyStore::production(config.data_dir())?.list_proposals()?;
+        let policies = PolicyStore::production(config.data_dir())?;
+        let proposals = policies.list_proposals()?;
+        let network_proposals = policies.network_proposals()?;
+        drop(policies);
         if mode == OutputMode::Json || !crate::tui::interactive() {
             return print_pending_approvals(
                 mode,
@@ -1627,12 +1630,14 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
                 &awaiting_typed_data,
                 &awaiting_messages,
                 &proposals,
+                &network_proposals,
             );
         }
         if awaiting.is_empty()
             && awaiting_typed_data.is_empty()
             && awaiting_messages.is_empty()
             && proposals.is_empty()
+            && network_proposals.is_empty()
         {
             crate::tui::info("Nothing is awaiting approval.");
             return Ok(());
@@ -1643,6 +1648,7 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
             &awaiting_typed_data,
             &awaiting_messages,
             &proposals,
+            &network_proposals,
         );
         let Some(index) =
             crate::fullscreen::pick_table("Pending approvals", "review", approval_columns(), rows)?
@@ -1655,6 +1661,9 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
             }
             PendingChoice::Proposal(wallet_id) => {
                 review_policy_proposal(config, wallet_id, mode).await
+            }
+            PendingChoice::Network(chain_id) => {
+                review_network_proposal_by_chain(config, *chain_id).await
             }
         };
         // A failed review (expired mid-browse, declined authentication)
@@ -1673,6 +1682,8 @@ enum PendingChoice {
     Request(Uuid),
     /// A policy proposal, reviewed per wallet.
     Proposal(String),
+    /// A proposed network profile, reviewed per chain.
+    Network(u64),
 }
 
 fn approval_columns() -> Vec<crate::fullscreen::TableColumn> {
@@ -1687,14 +1698,21 @@ fn approval_columns() -> Vec<crate::fullscreen::TableColumn> {
     ]
 }
 
-/// The four pending queues flattened into browser rows, with the action each
+/// The five pending queues flattened into browser rows, with the action each
 /// row's Enter takes alongside.
+///
+/// Token suggestions are deliberately absent. One accepted list can propose
+/// hundreds of rows at once, and a queue that arrives by the hundred would
+/// bury the handful of things that actually block signing; `token review`
+/// stays its own screen, where the suggestions can be grouped by the list
+/// that carried them.
 fn pending_approval_rows(
     config: &ConfigStore,
     awaiting: &[PendingTransaction],
     awaiting_typed_data: &[PendingTypedData],
     awaiting_messages: &[PendingMessage],
     proposals: &[crate::policy_store::PolicyProposal],
+    network_proposals: &[crate::config::NetworkConfig],
 ) -> (Vec<crate::fullscreen::TableRow>, Vec<PendingChoice>) {
     use crate::fullscreen::{Span, TableRow};
     use crate::tui::Tone;
@@ -1802,6 +1820,24 @@ fn pending_approval_rows(
         ));
         choices.push(PendingChoice::Proposal(proposal.wallet_id.clone()));
     }
+    for proposal in network_proposals {
+        rows.push(TableRow::new(
+            vec![
+                none(),
+                Span::plain("network"),
+                none(),
+                none(),
+                Span::plain(&proposal.name),
+            ],
+            &[
+                "network proposal",
+                &proposal.name,
+                &proposal.chain_id.to_string(),
+                proposal.rpc_url.as_str(),
+            ],
+        ));
+        choices.push(PendingChoice::Network(proposal.chain_id));
+    }
     (rows, choices)
 }
 
@@ -1813,11 +1849,13 @@ fn print_pending_approvals(
     awaiting_typed_data: &[PendingTypedData],
     awaiting_messages: &[PendingMessage],
     proposals: &[crate::policy_store::PolicyProposal],
+    network_proposals: &[crate::config::NetworkConfig],
 ) -> Result<()> {
     if awaiting.is_empty()
         && awaiting_typed_data.is_empty()
         && awaiting_messages.is_empty()
         && proposals.is_empty()
+        && network_proposals.is_empty()
     {
         eprintln!("No requests are awaiting approval.");
     } else {
@@ -1834,6 +1872,12 @@ fn print_pending_approvals(
                 )
             },
         );
+        if !network_proposals.is_empty() {
+            eprintln!(
+                "{} network suggestion(s) await `ekubo-wallet network review`.",
+                network_proposals.len()
+            );
+        }
     }
     let proposal_summaries: Vec<serde_json::Value> = proposals
         .iter()
@@ -1853,6 +1897,7 @@ fn print_pending_approvals(
             "pending_typed_data": awaiting_typed_data,
             "pending_messages": awaiting_messages,
             "pending_policy_proposals": proposal_summaries,
+            "pending_network_proposals": network_proposals,
         }),
         || {
             let mut lines = Vec::new();
@@ -3684,6 +3729,62 @@ async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()
     let mut accepted = Vec::new();
     let mut discarded = Vec::new();
     for proposal in proposals {
+        match review_one_network_proposal(config, &proposal).await? {
+            NetworkReviewOutcome::Accepted => accepted.push(proposal.name.clone()),
+            NetworkReviewOutcome::Discarded => discarded.push(proposal.chain_id.to_string()),
+        }
+    }
+
+    emit(
+        mode,
+        &serde_json::json!({ "accepted": accepted, "discarded": discarded }),
+        || {
+            Ok(format!(
+                "Accepted {} network(s); discarded {}.",
+                accepted.len(),
+                discarded.len()
+            ))
+        },
+    )
+}
+
+/// Review the network proposal for one chain, named by chain ID.
+///
+/// The browser holds a chain ID rather than the profile it drew, so the row
+/// is re-read here immediately before it is shown. A proposal can be replaced
+/// or withdrawn while the list is open, and reviewing the copy that was on
+/// screen a minute ago would ask about an endpoint that is no longer the one
+/// being proposed.
+async fn review_network_proposal_by_chain(config: &ConfigStore, chain_id: u64) -> Result<()> {
+    let proposal = PolicyStore::production(config.data_dir())?
+        .network_proposals()?
+        .into_iter()
+        .find(|proposal| proposal.chain_id == chain_id)
+        .with_context(|| {
+            format!("the suggestion for chain {chain_id} is no longer waiting for review")
+        })?;
+    review_one_network_proposal(config, &proposal).await?;
+    Ok(())
+}
+
+/// What one network proposal's review settled.
+enum NetworkReviewOutcome {
+    Accepted,
+    Discarded,
+}
+
+/// Review exactly one proposed network profile and apply the answer.
+///
+/// Split out from the `network review` loop so the pending-approvals browser
+/// can reach the same review for one row. Both paths must ask identically:
+/// this is where an agent's claim about how to reach a chain becomes the
+/// wallet's, and a second copy of that screen would eventually disagree with
+/// this one about what it shows before writing.
+async fn review_one_network_proposal(
+    config: &ConfigStore,
+    proposal: &crate::config::NetworkConfig,
+) -> Result<NetworkReviewOutcome> {
+    {
         let existing = config
             .load()?
             .networks
@@ -3714,15 +3815,14 @@ async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()
         if !confirm_network_change(title, summary, "Accept this network?", facts)? {
             let mut store = PolicyStore::production(config.data_dir())?;
             store.discard_network_proposal(proposal.chain_id)?;
-            discarded.push(proposal.chain_id.to_string());
-            continue;
+            return Ok(NetworkReviewOutcome::Discarded);
         }
 
         // Verified here rather than when it was proposed. What matters is that
         // the endpoint being written answers for the chain it claims, checked
         // immediately before writing it — a probe at proposal time would prove
         // something about a moment that has since passed.
-        verify_chain_id(&proposal).await.map_err(|_| {
+        verify_chain_id(proposal).await.map_err(|_| {
             anyhow::anyhow!(
                 "the RPC at {} did not answer eth_chainId with chain {}; nothing was written",
                 proposal.rpc_url,
@@ -3743,20 +3843,8 @@ async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()
             }
         })?;
         PolicyStore::production(config.data_dir())?.discard_network_proposal(proposal.chain_id)?;
-        accepted.push(proposal.name.clone());
+        Ok(NetworkReviewOutcome::Accepted)
     }
-
-    emit(
-        mode,
-        &serde_json::json!({ "accepted": accepted, "discarded": discarded }),
-        || {
-            Ok(format!(
-                "Accepted {} network(s); discarded {}.",
-                accepted.len(),
-                discarded.len()
-            ))
-        },
-    )
 }
 
 /// The facts and the standing warning behind every network change, as a

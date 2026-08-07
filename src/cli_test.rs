@@ -177,6 +177,17 @@ fn transaction_lines_render_offline() {
         rationale: "allow the weekly compounding plan".into(),
         created_at: now,
     };
+    let network_proposal = crate::config::NetworkConfig {
+        name: "arbitrum".into(),
+        display_name: None,
+        aliases: Vec::new(),
+        chain_id: 42_161,
+        rpc_url: "https://example.invalid/rpc".parse().unwrap(),
+        max_gas_limit: None,
+        native_currency: None,
+        block_explorer_url: None,
+        documentation_url: None,
+    };
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
     let (rows, choices) = pending_approval_rows(
@@ -185,9 +196,10 @@ fn transaction_lines_render_offline() {
         std::slice::from_ref(&typed),
         std::slice::from_ref(&message),
         std::slice::from_ref(&proposal),
+        std::slice::from_ref(&network_proposal),
     );
-    assert_eq!(rows.len(), 4);
-    assert_eq!(choices.len(), 4);
+    assert_eq!(rows.len(), 5);
+    assert_eq!(choices.len(), 5);
     // The default configuration names chain 1, so the row says
     // "ethereum" — the chain ID lives in the haystack instead.
     assert!(rows[0].haystack.contains("ethereum"));
@@ -200,6 +212,11 @@ fn transaction_lines_render_offline() {
     // A proposal reviews per wallet, and its rationale is searchable.
     assert!(matches!(&choices[3], PendingChoice::Proposal(wallet) if wallet == "primary"));
     assert!(rows[3].haystack.contains("weekly compounding"));
+    // A suggested network reviews per chain, and is searchable by the endpoint
+    // being proposed — the URL is the whole decision for an edit.
+    assert!(matches!(choices[4], PendingChoice::Network(chain) if chain == 42_161));
+    assert!(rows[4].haystack.contains("example.invalid"));
+    assert!(rows[4].haystack.contains("42161"));
 }
 
 #[test]
