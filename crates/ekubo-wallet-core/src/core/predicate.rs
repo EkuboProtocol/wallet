@@ -115,17 +115,20 @@ impl Match {
 
 /// Everything a predicate may consult beyond the call itself.
 ///
-/// These are resolved into plain sets by the caller rather than looked up
-/// lazily, so evaluation stays a pure function of data: no I/O, no locks, and
-/// nothing the RPC reports can reach a policy decision. `known_tokens` and
-/// `address_book` are local, human-curated stores whose write paths are CLI
-/// operations — promoting them from display metadata to authorization inputs is
-/// exactly why those write paths must stay human-gated.
-#[derive(Clone, Debug, Default)]
+/// One address, and deliberately nothing else. Evaluation is a pure function of
+/// data — no I/O, no locks, and nothing the RPC reports can reach a policy
+/// decision — and the smaller this type is, the less there is to keep true.
+///
+/// It used to carry the confirmed-token and address-book sets, for `is_token`
+/// and `is_address_book`. Those are gone. Both stores exist to tell a person
+/// what they are looking at, and reading them into an authorization decision
+/// meant a row written to improve a label also widened what could be signed:
+/// the two uses could not be told apart afterwards, and the safer of them was
+/// paying for the other. Token and address-book metadata now only ever reaches
+/// the review display.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PolicyContext {
     pub wallet: Address,
-    pub known_tokens: BTreeSet<Address>,
-    pub address_book: BTreeSet<Address>,
 }
 
 /// A four-byte-selector-and-arguments predicate over a `bytes` value.
@@ -298,13 +301,6 @@ pub enum Predicate {
     /// The address is this wallet. The predicate that makes a rule portable:
     /// "proceeds must come back to me" without naming an address.
     IsWallet,
-    /// The address is a token the owner has confirmed in the local token
-    /// database. A broad predicate — it means "not a contract I have never
-    /// heard of", not "one of these tokens".
-    IsToken,
-    /// The address is a human-entered address-book entry. Narrow, because
-    /// entries are individually typed in by the owner with an alias.
-    IsAddressBook,
     Selector(Box<SelectorPredicate>),
     /// Every element of an array satisfies the inner predicate. An empty array
     /// satisfies it vacuously.
@@ -335,7 +331,7 @@ impl Predicate {
                     .iter()
                     .try_for_each(|literal| parse_literal(literal, ty).map(|_| ()))
             }
-            Self::IsWallet | Self::IsToken | Self::IsAddressBook => {
+            Self::IsWallet => {
                 ensure!(
                     matches!(ty, DynSolType::Address),
                     "an address predicate needs an address, not {ty:?}"
@@ -398,12 +394,6 @@ impl Predicate {
             Self::IsWallet => {
                 Match::of(as_address(value).is_some_and(|address| address == context.wallet))
             }
-            Self::IsToken => Match::of(
-                as_address(value).is_some_and(|address| context.known_tokens.contains(&address)),
-            ),
-            Self::IsAddressBook => Match::of(
-                as_address(value).is_some_and(|address| context.address_book.contains(&address)),
-            ),
             Self::Selector(selector) => match value {
                 DynSolValue::Bytes(data) => selector.evaluate(data, context),
                 _ => Match::No,
@@ -499,9 +489,7 @@ impl Predicate {
             (Self::Eq(left), Self::In(right)) => right.contains(left),
             (Self::In(left), Self::In(right)) => left.is_subset(right),
             (Self::In(left), Self::Eq(right)) => left.len() == 1 && left.contains(right),
-            (Self::IsWallet, Self::IsWallet)
-            | (Self::IsToken, Self::IsToken)
-            | (Self::IsAddressBook, Self::IsAddressBook) => true,
+            (Self::IsWallet, Self::IsWallet) => true,
             (Self::Each(left), Self::Each(right)) => left.is_narrower_than(right),
             // Containment reverses under negation: every value `not A` admits
             // is admitted by `not B` exactly when B admits everything A does.
@@ -542,8 +530,6 @@ impl Predicate {
             Self::Not(inner) => inner.literals(into),
             Self::AnyValue
             | Self::IsWallet
-            | Self::IsToken
-            | Self::IsAddressBook
             | Self::Selector(_)
             | Self::Each(_)
             | Self::Length(_) => {}
@@ -565,8 +551,6 @@ impl Predicate {
                 format!("one of {}", items.join(", "))
             }
             Self::IsWallet => "this wallet".into(),
-            Self::IsToken => "any confirmed token".into(),
-            Self::IsAddressBook => "any address-book entry".into(),
             Self::Selector(selector) => {
                 if selector.args.is_empty() {
                     format!(

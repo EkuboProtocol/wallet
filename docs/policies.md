@@ -62,8 +62,6 @@ decoded argument underneath it.
 | `{"eq": "…"}` | Equal to one literal. |
 | `{"in": ["…", "…"]}` | Equal to one of a set. |
 | `"is_wallet"` | The address is this wallet. |
-| `"is_token"` | The address is a token the owner has confirmed locally. |
-| `"is_address_book"` | The address is a human-entered address-book entry. |
 | `{"selector": {"abi": "…", "args": {…}}}` | Calldata is a call to this exact function; `args` constrain its parameters by name. |
 | `{"each": …}` | Every element of an array satisfies the inner predicate. |
 | `{"any": [...]}` / `{"all": [...]}` / `{"not": …}` | Boolean combinators. |
@@ -74,14 +72,23 @@ Literals are written one of exactly two ways: **hex with a `0x` prefix**, or
 `10` is a legal spelling of both sixteen and ten.
 
 `is_wallet` is what makes a rule portable — "the proceeds must come back to me"
-without naming an address. `is_address_book` is narrow, because entries are
-individually typed in by the owner. `is_token` is broad: it means "not a
-contract I have never heard of", not "one of these tokens".
+without naming an address. Every other address is named outright, with `eq` or
+`in`.
 
-Note that `is_token` and `is_address_book` make a policy depend on the local
-token database and address book. Both are written only by human CLI actions —
-nothing reachable from an agent can add a row — and that is load-bearing rather
-than incidental, so `tests/boundary.rs` holds a tripwire on it.
+There were once two more: `is_token` and `is_address_book`, which deferred to
+the local token database and address book. They are gone, and a policy naming
+either is now refused rather than parsed into something weaker. The reason is
+that those two stores exist to tell a person what they are looking at, and
+reading them into an authorization decision gave one row two jobs: an entry
+added so a transfer would read `Coinbase deposit` instead of `0x8f3c…21ab` also
+widened what could be signed without asking. Afterwards nothing could tell the
+two uses apart — not the owner confirming the row, and not a later reader of the
+policy. A policy that means to allow an address says so in the policy, where the
+permission diff can show it moving.
+
+Token names and address-book aliases still do the job they were for: they
+describe a transaction to the person approving it. They no longer decide
+anything.
 
 ## Naming the function, not the selector
 
@@ -112,7 +119,7 @@ using the same vocabulary as the outer one.
   "abi": "multicall(bytes[] data)",
   "args": { "data": { "each": { "selector": {
     "abi": "transfer(address to, uint256 amount)",
-    "args": { "to": "is_address_book" }
+    "args": { "to": { "in": ["0x2222222222222222222222222222222222222222"] } }
   }}}}
 }}
 ```
@@ -140,11 +147,13 @@ capping spend.
 
 ## What a policy never reads
 
-Every predicate is decided from the execution plan's own bytes plus the local
-stores above. Nothing the RPC reports — observed balances, transfer logs, gas,
-or whether the simulation succeeded — reaches a policy decision. The configured
-endpoint is the only witness to a simulation, so a rule scored against what it
-reported is one a dishonest endpoint could relax by misreporting what a
+Every predicate is decided from the execution plan's own bytes and the address
+of the signing wallet. That is the whole of it: not the token database, not the
+address book, and nothing the RPC reported — observed balances, transfer logs,
+gas, or whether the simulation succeeded.
+
+The endpoint is the only witness to a simulation, so a rule scored against what
+it reported is one a dishonest endpoint could relax by misreporting what a
 transaction did, while still reading like a limit that binds.
 
 Simulation still gates signing: a plan that does not simulate successfully is
@@ -181,7 +190,7 @@ so an example that stopped meaning what its label says would fail the build:
 
 | File | Shows |
 | --- | --- |
-| [`transfers-to-address-book.json`](../examples/policies/transfers-to-address-book.json) | `is_token` and `is_address_book`: move confirmed tokens only to addresses the owner has named. Any amount — a rule bounds which calls, not how much. |
+| [`transfers-to-named-addresses.json`](../examples/policies/transfers-to-named-addresses.json) | Move the tokens this policy names, only to the recipients it names. Any amount — a rule bounds which calls, not how much. |
 | [`revoke-approvals-only.json`](../examples/policies/revoke-approvals-only.json) | An argument deciding between two identical selectors: `approve(spender, 0)` passes, `approve(spender, 1)` does not. |
 | [`swap-proceeds-to-self.json`](../examples/policies/swap-proceeds-to-self.json) | `each` over an `address[]` path and `is_wallet` on the recipient, so proceeds must come back and every hop must be confirmed. |
 | [`deny-blanket-operators.json`](../examples/policies/deny-blanket-operators.json) | Deny-precedence: a blanket allow with `setApprovalForAll(true)` and allowance-growth refused over the top of it. |

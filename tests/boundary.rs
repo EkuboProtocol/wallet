@@ -140,10 +140,12 @@ fn no_token_contract_is_asked_for_its_decimals() {
 /// the way that erodes is a write helper called from a tool body because it was
 /// right there. These are the names of those helpers.
 ///
-/// Since `is_token` and `is_address_book` exist, these rows also decide policy:
-/// a confirmed token or alias can satisfy a predicate the owner wrote, so an
-/// agent able to write one could grant itself authority. Display was already
-/// reason enough; authorization makes it load-bearing.
+/// Display is the whole of why this matters, and it is reason enough. These
+/// rows no longer decide policy — `is_token` and `is_address_book` were removed
+/// from the predicate language precisely so a row could not have that second
+/// job — but an agent that could name an address would still choose the
+/// sentence the owner reads while deciding, which is the same outcome by a
+/// different route.
 #[test]
 fn the_mcp_server_cannot_write_stored_metadata() {
     // The whole file is production code: the tests that legitimately write
@@ -174,18 +176,12 @@ fn the_mcp_server_cannot_write_stored_metadata() {
 /// still reading, to whoever wrote the policy, like a limit that binds. The
 /// policy therefore decides everything from the execution plan's own bytes.
 ///
-/// `evaluate_policy` taking exactly the plan, the policy, and a resolved
-/// [`PolicyContext`] is what enforces that. The context carries only plain
-/// sets read out of the local, human-curated token and address-book databases,
-/// so `is_token` and `is_address_book` can be answered without giving the
-/// evaluator a store handle, a lock, or any way to reach the RPC. With no
-/// channel for an observation to arrive through, the property is structural
-/// rather than a rule someone has to remember. This pins the signature so
-/// restoring such a channel has to be a deliberate act.
-///
-/// Promoting those two stores from display metadata into authorization inputs
-/// is why their write paths must stay human-only; the assertion below is the
-/// tripwire for the MCP side of that.
+/// `evaluate_policy` taking exactly the plan, the policy, and a
+/// [`PolicyContext`] is what enforces that. The context is one address — the
+/// signing wallet — so the evaluator holds no store handle, no lock, and no way
+/// to reach the RPC. With no channel for an observation to arrive through, the
+/// property is structural rather than a rule someone has to remember. This pins
+/// the signature so restoring such a channel has to be a deliberate act.
 #[test]
 fn no_policy_predicate_can_consult_a_simulation() {
     let policy =

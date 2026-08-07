@@ -42,7 +42,7 @@ fn every_shipped_policy_example_parses() {
         "examples/policies/approval-wildcards.template.json",
         "examples/policies/deny-all.json",
         "examples/policies/token-budget.template.json",
-        "examples/policies/transfers-to-address-book.json",
+        "examples/policies/transfers-to-named-addresses.json",
         "examples/policies/revoke-approvals-only.json",
         "examples/policies/swap-proceeds-to-self.json",
         "examples/policies/deny-blanket-operators.json",

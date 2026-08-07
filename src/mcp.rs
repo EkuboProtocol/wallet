@@ -947,9 +947,7 @@ impl WalletMcpServer {
             )?;
         }
         let preface = session.as_ref().map(ForkSession::preface);
-        let policy_context = self
-            .policy_context(&wallet, network.chain_id)
-            .map_err(|error| tool_error(&error))?;
+        let policy_context = Self::policy_context(&wallet);
         let mut result = simulate_execution(
             &wallet,
             &network,
@@ -2160,23 +2158,16 @@ impl WalletMcpServer {
             .with_context(|| format!("wallet {wallet_id} has no local policy"))
     }
 
-    /// The local metadata a policy may consult, resolved for one wallet and
-    /// chain. Read here rather than inside the evaluator so a policy decision
-    /// stays a pure function of data.
+    /// Everything a policy may consult beyond the plan itself: the wallet the
+    /// plan is being signed for, and nothing else. Neither store is read here
+    /// any more — token names and address-book aliases describe a transaction
+    /// to a person and never decide whether it may be signed.
     fn policy_context(
-        &self,
         wallet: &crate::config::WalletMetadata,
-        chain_id: u64,
-    ) -> Result<crate::core::predicate::PolicyContext> {
-        let tokens = self
-            .tokens
-            .lock()
-            .map_err(|_| anyhow::anyhow!("token database lock was poisoned"))?;
-        let address_book = self
-            .address_book
-            .lock()
-            .map_err(|_| anyhow::anyhow!("address book lock was poisoned"))?;
-        crate::policy_context::resolve(wallet.address, chain_id, &tokens, &address_book)
+    ) -> crate::core::predicate::PolicyContext {
+        crate::core::predicate::PolicyContext {
+            wallet: wallet.address,
+        }
     }
 
     fn pending_record_by_id(&self, request_id: uuid::Uuid) -> Result<PendingTransaction> {
@@ -2244,7 +2235,7 @@ impl WalletMcpServer {
         // The sender, chain, and digest are checked against this wallet and
         // network below, on the path both kinds of send share.
         plan.validate()?;
-        let policy_context = self.policy_context(&wallet, network.chain_id)?;
+        let policy_context = Self::policy_context(&wallet);
         let simulation = simulate_execution(
             &wallet,
             &network,

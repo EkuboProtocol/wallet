@@ -28,7 +28,6 @@ pub mod message;
 pub mod orchestrator;
 pub mod pending;
 pub mod plan_fetch;
-pub mod policy_context;
 pub mod policy_store;
 pub mod reconcile;
 pub mod rpc;

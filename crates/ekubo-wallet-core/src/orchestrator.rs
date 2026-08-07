@@ -247,7 +247,6 @@ pub async fn approve_transaction(
     config: &ConfigStore,
     pending: PendingStore,
     tokens: &crate::token_store::TokenStore,
-    address_book: &crate::address_book::AddressBookStore,
     read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
     request: PendingTransaction,
     proof: InteractiveProof,
@@ -288,8 +287,9 @@ pub async fn approve_transaction(
         crate::reconcile::reconcile_record(&pending, &network, previous, true).await?;
     }
 
-    let policy_context =
-        crate::policy_context::resolve(wallet.address, network.chain_id, tokens, address_book)?;
+    let policy_context = crate::core::predicate::PolicyContext {
+        wallet: wallet.address,
+    };
     let simulation = simulate_execution(
         &wallet,
         &network,

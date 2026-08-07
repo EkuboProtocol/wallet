@@ -9,8 +9,8 @@
       "rules": [
         {
           "effect": "allow",
-          "label": "Approve the router for a confirmed token, any amount",
-          "to": "is_token",
+          "label": "Approve the router for a named token, any amount",
+          "to": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] },
           "calldata": {
             "selector": {
               "abi": "approve(address spender, uint256 amount)",
@@ -28,7 +28,7 @@
             "selector": {
               "abi": "swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)",
               "args": {
-                "path": { "each": "is_token" },
+                "path": { "each": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] } },
                 "to": "is_wallet"
               }
             }

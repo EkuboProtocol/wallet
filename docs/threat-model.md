@@ -119,7 +119,10 @@ it is not a control against in-process execution.
    state plainly. Nothing an MCP client hands this wallet is trusted, and
    that includes the data that never reaches a signature: token names and
    decimals, address-book aliases and notes, network profiles. None of it is
-   an input to the policy engine, and all of it is an input to the person.
+   an input to the policy engine — the `is_token` and `is_address_book`
+   predicates that once made it one have been removed, so a row written to
+   improve a label can no longer widen what signs — and all of it is an input
+   to the person.
    A transfer to `0x8f3c…21ab` reads one way and a transfer to
    `Coinbase deposit` reads another; `1.0 USDC` and `1000000 units of
    0xa0b8…eb48` are the same transaction described twice. An attacker who

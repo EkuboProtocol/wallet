@@ -14,11 +14,7 @@ const TOKEN: Address = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
 const ROUTER: Address = address!("2222222222222222222222222222222222222222");
 
 fn context() -> PolicyContext {
-    PolicyContext {
-        wallet: WALLET,
-        known_tokens: std::collections::BTreeSet::from([TOKEN]),
-        address_book: std::collections::BTreeSet::from([ROUTER]),
-    }
+    PolicyContext { wallet: WALLET }
 }
 
 /// A one-step plan calling `to` with `data` and `value` wei.
@@ -204,7 +200,7 @@ fn an_argument_predicate_decides_between_two_otherwise_identical_calls() {
             "to": { "eq": format!("{TOKEN:#x}") },
             "calldata": { "selector": {
                 "abi": "approve(address spender, uint256 amount)",
-                "args": { "spender": "is_address_book" }
+                "args": { "spender": { "in": ["0x2222222222222222222222222222222222222222"] } }
             }}
         }]}}
     }));
@@ -298,11 +294,11 @@ fn unknown_fields_are_refused_rather_than_ignored() {
 
 #[test]
 fn a_rule_predicate_is_type_checked_against_its_slot_at_parse_time() {
-    // `is_token` on the value slot could never match a uint.
+    // an address predicate on the value slot could never match a uint.
     assert!(
         WalletPolicy::parse(json!({
             "version": 1,
-            "chains": { "1": { "rules": [{ "effect": "allow", "value": "is_token" }] } }
+            "chains": { "1": { "rules": [{ "effect": "allow", "value": "is_wallet" }] } }
         }))
         .is_err()
     );

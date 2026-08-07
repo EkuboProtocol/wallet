@@ -96,10 +96,7 @@ fn wallet() -> WalletMetadata {
 }
 
 fn policy_context() -> ekubo_wallet::core::predicate::PolicyContext {
-    ekubo_wallet::core::predicate::PolicyContext {
-        wallet: sender(),
-        ..ekubo_wallet::core::predicate::PolicyContext::default()
-    }
+    ekubo_wallet::core::predicate::PolicyContext { wallet: sender() }
 }
 
 fn policy() -> StoredPolicy {

@@ -20,11 +20,7 @@ const FRIEND: Address = address!("2222222222222222222222222222222222222222");
 const STRANGER: Address = address!("3333333333333333333333333333333333333333");
 
 fn context() -> PolicyContext {
-    PolicyContext {
-        wallet: WALLET,
-        known_tokens: BTreeSet::from([TOKEN]),
-        address_book: BTreeSet::from([FRIEND]),
-    }
+    PolicyContext { wallet: WALLET }
 }
 
 fn predicate(json: serde_json::Value) -> Predicate {
@@ -94,14 +90,23 @@ fn odd_length_hex_is_refused() {
 // -------------------------------------------------------------- predicates
 
 #[test]
-fn metadata_predicates_read_the_resolved_context() {
+fn the_only_thing_a_predicate_reads_beyond_the_call_is_the_wallet() {
     let ctx = context();
     assert!(Predicate::IsWallet.matches(&DynSolValue::Address(WALLET), &ctx));
     assert!(!Predicate::IsWallet.matches(&DynSolValue::Address(FRIEND), &ctx));
-    assert!(Predicate::IsToken.matches(&DynSolValue::Address(TOKEN), &ctx));
-    assert!(!Predicate::IsToken.matches(&DynSolValue::Address(STRANGER), &ctx));
-    assert!(Predicate::IsAddressBook.matches(&DynSolValue::Address(FRIEND), &ctx));
-    assert!(!Predicate::IsAddressBook.matches(&DynSolValue::Address(STRANGER), &ctx));
+}
+
+#[test]
+fn the_metadata_predicates_are_gone_from_the_language() {
+    // `is_token` and `is_address_book` let a row written to improve a label
+    // widen what could be signed. A document naming either is refused rather
+    // than parsed into something weaker, so a policy that relied on one fails
+    // closed and visibly instead of quietly admitting less than it says.
+    for removed in ["is_token", "is_address_book"] {
+        let error = serde_json::from_value::<Predicate>(serde_json::json!(removed))
+            .expect_err("the variant must not parse");
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
 }
 
 #[test]
@@ -116,7 +121,7 @@ fn an_empty_any_never_matches_and_an_empty_all_always_does() {
 fn each_over_an_empty_array_is_vacuously_true() {
     let ctx = context();
     let empty = DynSolValue::Array(Vec::new());
-    assert!(Predicate::Each(Box::new(Predicate::IsToken)).matches(&empty, &ctx));
+    assert!(Predicate::Each(Box::new(Predicate::IsWallet)).matches(&empty, &ctx));
 }
 
 #[test]
@@ -130,7 +135,7 @@ fn each_requires_every_element() {
         DynSolValue::Address(TOKEN),
         DynSolValue::Address(STRANGER),
     ]);
-    let each_token = Predicate::Each(Box::new(Predicate::IsToken));
+    let each_token = Predicate::Each(Box::new(Predicate::Eq(format!("{TOKEN:#x}"))));
     assert!(each_token.matches(&all_known, &ctx));
     assert!(!each_token.matches(&one_unknown, &ctx));
 }
@@ -138,12 +143,14 @@ fn each_requires_every_element() {
 #[test]
 fn a_predicate_applied_to_the_wrong_shape_is_a_non_match_not_a_panic() {
     let ctx = context();
-    // `each` over a scalar, `is_token` over an integer, `selector` over a
-    // number: all unanswerable, all false.
+    // `each` over a scalar, an address literal over an integer, `is_wallet`
+    // over a bool: all unanswerable, all false.
     assert!(
-        !Predicate::Each(Box::new(Predicate::IsToken)).matches(&DynSolValue::Address(TOKEN), &ctx)
+        !Predicate::Each(Box::new(Predicate::IsWallet)).matches(&DynSolValue::Address(TOKEN), &ctx)
     );
-    assert!(!Predicate::IsToken.matches(&DynSolValue::Uint(U256::from(1), 256), &ctx));
+    assert!(
+        !Predicate::Eq(format!("{TOKEN:#x}")).matches(&DynSolValue::Uint(U256::from(1), 256), &ctx)
+    );
     assert!(!Predicate::IsWallet.matches(&DynSolValue::Bool(true), &ctx));
 }
 
@@ -161,7 +168,7 @@ fn a_selector_predicate_matches_a_well_formed_call() {
     );
     let rule = selector(
         "approve(address spender, uint256 amount)",
-        &serde_json::json!({ "spender": "is_address_book" }),
+        &serde_json::json!({ "spender": { "in": ["0x2222222222222222222222222222222222222222"] } }),
     );
     assert!(rule.matches(&bytes(data), &ctx));
 }
@@ -286,7 +293,7 @@ fn nested_calls_fall_out_of_each_plus_selector() {
         &serde_json::json!({
             "data": { "each": { "selector": {
                 "abi": "transfer(address to, uint256 amount)",
-                "args": { "to": "is_address_book" }
+                "args": { "to": { "in": ["0x2222222222222222222222222222222222222222"] } }
             }}}
         }),
     );
@@ -349,16 +356,16 @@ fn a_predicate_on_an_unknown_parameter_is_refused() {
 
 #[test]
 fn a_predicate_that_could_never_match_its_type_is_refused_at_parse_time() {
-    // `is_token` on a uint, `each` on a scalar, `selector` on a non-bytes:
+    // an address literal on a uint, `each` on a scalar, `selector` on a non-bytes:
     // each of these would silently never match at signing time.
     for (abi, args) in [
         (
             "approve(address spender, uint256 amount)",
-            serde_json::json!({ "amount": "is_token" }),
+            serde_json::json!({ "amount": "is_wallet" }),
         ),
         (
             "approve(address spender, uint256 amount)",
-            serde_json::json!({ "spender": { "each": "is_token" } }),
+            serde_json::json!({ "spender": { "each": "is_wallet" } }),
         ),
         (
             "approve(address spender, uint256 amount)",
@@ -434,7 +441,7 @@ fn a_selector_rule_is_narrower_when_it_constrains_more() {
     );
     let tight = selector(
         "approve(address spender, uint256 amount)",
-        &serde_json::json!({ "spender": "is_address_book" }),
+        &serde_json::json!({ "spender": { "in": ["0x2222222222222222222222222222222222222222"] } }),
     );
     assert!(tight.is_narrower_than(&loose));
     assert!(!loose.is_narrower_than(&tight));
@@ -457,8 +464,6 @@ fn address_leaf_predicate() -> impl Strategy<Value = Predicate> {
     prop_oneof![
         Just(Predicate::AnyValue),
         Just(Predicate::IsWallet),
-        Just(Predicate::IsToken),
-        Just(Predicate::IsAddressBook),
         addresses.clone().prop_map(Predicate::Eq),
         prop::collection::btree_set(addresses, 1..4).prop_map(Predicate::In),
     ]
@@ -470,8 +475,6 @@ fn address_predicate() -> impl Strategy<Value = Predicate> {
     let leaf = prop_oneof![
         Just(Predicate::AnyValue),
         Just(Predicate::IsWallet),
-        Just(Predicate::IsToken),
-        Just(Predicate::IsAddressBook),
         addresses.clone().prop_map(Predicate::Eq),
         prop::collection::btree_set(addresses, 1..4).prop_map(Predicate::In),
     ];

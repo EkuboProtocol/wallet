@@ -20,7 +20,6 @@ use chrono::Utc;
 fn context(wallet: &WalletMetadata) -> PolicyContext {
     PolicyContext {
         wallet: wallet.address,
-        ..PolicyContext::default()
     }
 }
 

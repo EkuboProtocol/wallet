@@ -3,18 +3,18 @@
   "version": 1,
   "chains": {
     "1": {
-      "label": "Move confirmed tokens, but only to addresses the owner has named",
+      "label": "Move named tokens, but only to addresses this policy names",
       "max_calls_per_batch": 4,
       "native_value": { "eq": "0" },
       "rules": [
         {
           "effect": "allow",
-          "label": "ERC-20 transfer to any address-book entry, in any amount",
-          "to": "is_token",
+          "label": "ERC-20 transfer to a named recipient, in any amount",
+          "to": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] },
           "calldata": {
             "selector": {
               "abi": "transfer(address to, uint256 amount)",
-              "args": { "to": "is_address_book" }
+              "args": { "to": { "in": ["0x2222222222222222222222222222222222222222"] } }
             }
           }
         }

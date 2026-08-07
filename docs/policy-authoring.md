@@ -54,16 +54,17 @@ for `deny` when the user wants something foreclosed, not merely gated.
 
 ## Predicates
 
-`"any_value"`, `{"eq": …}`, `{"in": [...]}`, `"is_wallet"`, `"is_token"`,
-`"is_address_book"`, `{"selector": {"abi": …, "args": {…}}}`, `{"each": …}`,
-`{"any": [...]}`, `{"all": [...]}`, `{"not": …}`, `{"length": …}`.
+`"any_value"`, `{"eq": …}`, `{"in": [...]}`, `"is_wallet"`,
+`{"selector": {"abi": …, "args": {…}}}`, `{"each": …}`, `{"any": [...]}`,
+`{"all": [...]}`, `{"not": …}`, `{"length": …}`.
 
 - `is_wallet` keeps a rule portable: use it for the recipient of a swap or claim
   rather than hard-coding the address.
-- `is_address_book` is narrow and good for transfer recipients.
-- `is_token` is broad — it means "a token the owner has confirmed", which can be
-  thousands of addresses. It is a "nothing I have never heard of" guard, not a
-  short allowlist.
+- Every other address is named in the policy, with `eq` or `in`. There is no
+  predicate that defers to the token database or the address book: those
+  describe a transaction to the person approving it and decide nothing. Naming
+  the addresses here is also what lets the permission diff show the owner
+  exactly what a proposal would add.
 - A `selector` predicate must give the function's full signature with every
   parameter named. The four-byte selector is derived from it.
 

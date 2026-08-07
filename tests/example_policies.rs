@@ -20,7 +20,7 @@ use ekubo_wallet::core::{
     predicate::PolicyContext,
 };
 use serde_json::json;
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 /// Deliberately not the router: `is_wallet` and the router's own `eq` must be
 /// distinguishable, or a rule requiring proceeds to come back here would pass
@@ -30,9 +30,9 @@ const WALLET: Address = address!("9999999999999999999999999999999999999999");
 const ROUTER: Address = address!("1111111111111111111111111111111111111111");
 const USDC: Address = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48");
 const WETH: Address = address!("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
-/// In the address book, so `is_address_book` accepts it.
+/// The recipient the examples name outright.
 const FRIEND: Address = address!("2222222222222222222222222222222222222222");
-/// In neither store: not a confirmed token, not an alias.
+/// Named by no example, so nothing should admit it.
 const STRANGER: Address = address!("3333333333333333333333333333333333333333");
 
 fn repository_root() -> PathBuf {
@@ -46,13 +46,9 @@ fn example(name: &str) -> WalletPolicy {
     WalletPolicy::parse(value).unwrap_or_else(|error| panic!("{name} is a valid policy: {error:#}"))
 }
 
-/// The wallet knows USDC and WETH, and the owner has named exactly one address.
+/// Everything a policy may consult beyond the plan: the signing wallet.
 fn context() -> PolicyContext {
-    PolicyContext {
-        wallet: WALLET,
-        known_tokens: BTreeSet::from([USDC, WETH]),
-        address_book: BTreeSet::from([FRIEND]),
-    }
+    PolicyContext { wallet: WALLET }
 }
 
 fn encode(abi: &str, values: &[DynSolValue]) -> String {
@@ -139,7 +135,7 @@ fn set_approval_for_all(operator: Address, approved: bool) -> String {
 
 #[test]
 fn transfers_to_address_book_permits_only_named_recipients() {
-    let name = "transfers-to-address-book.json";
+    let name = "transfers-to-named-addresses.json";
     let policy = example(name);
     check(
         name,
@@ -471,7 +467,7 @@ fn the_three_outcomes_are_distinguishable() {
         "a deny rule matched: refused outright, never queued, no approval path"
     );
 
-    let narrow = example("transfers-to-address-book.json");
+    let narrow = example("transfers-to-named-addresses.json");
     assert_eq!(
         outcome(&narrow, &plan("1", STRANGER, "0xdeadbeef", "0")),
         PolicyOutcome::RequiresApproval,
@@ -512,7 +508,7 @@ fn a_deny_rule_outranks_an_allow_that_also_matches() {
 #[test]
 fn an_unmatched_call_is_denied_and_says_why() {
     // The property every example above rests on: silence denies.
-    let policy = example("transfers-to-address-book.json");
+    let policy = example("transfers-to-named-addresses.json");
     let findings = evaluate_policy(&plan("1", STRANGER, "0xdeadbeef", "0"), &policy, &context());
     assert_eq!(
         findings
@@ -528,7 +524,7 @@ fn an_unmatched_call_is_denied_and_says_why() {
 fn a_chain_the_example_does_not_configure_is_refused() {
     // These examples key on chain 1 with no wildcard, so nothing else applies.
     for name in [
-        "transfers-to-address-book.json",
+        "transfers-to-named-addresses.json",
         "swap-proceeds-to-self.json",
         "native-sends-only.json",
         "batched-calls.json",
@@ -547,7 +543,7 @@ fn every_example_refuses_a_call_it_never_describes() {
     // A blanket sanity net: no example may permit an arbitrary call to an
     // unknown contract, except the two that exist to allow everything.
     for name in [
-        "transfers-to-address-book.json",
+        "transfers-to-named-addresses.json",
         "revoke-approvals-only.json",
         "swap-proceeds-to-self.json",
         "native-sends-only.json",
