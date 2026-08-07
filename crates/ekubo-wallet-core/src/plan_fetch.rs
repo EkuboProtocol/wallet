@@ -47,6 +47,13 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// decode instead of after it.
 const MAX_DATA_URI_PAYLOAD_BYTES: usize = MAX_SERIALIZED_PLAN_BYTES / 3 * 4 + 4;
 
+/// The longest a reference locator may be, checked before it is parsed.
+///
+/// A `data:` URI carrying a maximum-size body is the largest legitimate one;
+/// the allowance on top covers the scheme, media type, and `;base64`. An
+/// `https` URL is orders of magnitude below this.
+const MAX_REFERENCE_URL_BYTES: usize = MAX_DATA_URI_PAYLOAD_BYTES + 256;
+
 /// How long name resolution may take before a reference fetch gives up.
 ///
 /// `CONNECT_TIMEOUT` and `TOTAL_TIMEOUT` are configured on the HTTP client, so
@@ -250,6 +257,15 @@ pub async fn fetch_reference(
         reference.kind == "artifact_reference",
         "the reference's kind is {:?}, not \"artifact_reference\"",
         reference.kind
+    );
+    // Bound the locator before anything looks at it. The largest legitimate
+    // one is a `data:` URI carrying a maximum-size body, and a short prefix
+    // covers the scheme and media type; an `https` URL is far below that. The
+    // decoder's own limit is downstream of splitting and base64-decoding the
+    // string, so it bounded the body rather than the reference.
+    ensure!(
+        reference.url.len() <= MAX_REFERENCE_URL_BYTES,
+        "{noun} reference URL exceeds {MAX_REFERENCE_URL_BYTES} bytes"
     );
     ensure!(
         reference.artifact_type == expected_type,

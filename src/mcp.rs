@@ -2334,9 +2334,18 @@ impl WalletMcpServer {
         // is deliberately not covered — overriding policy is exactly the
         // decision only the user can make, so it still queues below.
         if !simulation.simulation.success && on_simulation_failure == OnSimulationFailure::Fail {
-            let guidance = simulation.simulation.failure.as_ref().map_or(
-                "Simulation failed; obtain guidance from the plan producer before continuing.",
-                |failure| failure.instruction.as_str(),
+            // Attributed, because this sentence was written by whoever produced
+            // the plan and travels outside the plan digest. It is advice about
+            // that producer's own protocol, not a finding of this wallet's, and
+            // an agent reading it should weigh it accordingly. It grants
+            // nothing either way: every action it might suggest still passes
+            // policy and, where required, human approval.
+            let guidance = simulation.simulation.failure.as_ref().map_or_else(
+                || {
+                    "Simulation failed; obtain guidance from the plan producer before continuing."
+                        .to_owned()
+                },
+                |failure| format!("The plan producer's guidance: {}", failure.instruction),
             );
             bail!(
                 "simulation failed and on_simulation_failure is \"fail\", so nothing was queued or \
@@ -2366,9 +2375,15 @@ impl WalletMcpServer {
                     output.request_id
                 )
             } else {
-                let guidance = simulation.simulation.failure.as_ref().map_or(
-                    "Simulation failed; obtain guidance from the plan producer before continuing.",
-                    |failure| failure.instruction.as_str(),
+                // Attributed for the same reason as above: producer-authored
+                // text, outside the digest, advisory only.
+                let guidance = simulation.simulation.failure.as_ref().map_or_else(
+                    || {
+                        "Simulation failed; obtain guidance from the plan producer before \
+                        continuing."
+                            .to_owned()
+                    },
+                    |failure| format!("The plan producer's guidance: {}", failure.instruction),
                 );
                 format!(
                     "{guidance} If the user instead explicitly chooses to override the failed simulation, they can run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them); in that case call wallet_wait_for_approval with this request_id until it resolves.",
