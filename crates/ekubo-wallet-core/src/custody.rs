@@ -258,21 +258,50 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 
         // Remove metadata first. If key deletion fails, reinsert the metadata
         // so a reachable credential is not orphaned without an inventory row.
-        // The mirror of `add`: an error here need not mean the row survived,
-        // and returning on it would leave a reachable credential with no
-        // inventory row naming it. Proceed to the deletion whenever the wallet
-        // is in fact gone from the configuration.
+        //
+        // Owner authentication above can take arbitrarily long, and no
+        // configuration lock is held while it waits. A concurrent process can
+        // remove this wallet and create another under the same name in that
+        // window, so the row is matched on the address the owner actually
+        // reviewed rather than on the name alone: removing by name would
+        // delete a replacement wallet's row — and then its key — on the
+        // strength of an approval given for its predecessor.
         if let Err(error) = self.config.update(|config| {
             let index = config
                 .wallets
                 .iter()
                 .position(|wallet| wallet.id == wallet_id)
                 .with_context(|| format!("unknown wallet {wallet_id}"))?;
+            ensure!(
+                config.wallets[index].address == metadata.address,
+                "wallet {wallet_id} now holds address {} rather than the {} that was reviewed; \
+                 it was replaced while this removal was being authorized",
+                config.wallets[index].address,
+                metadata.address
+            );
             config.wallets.remove(index);
             Ok(())
-        }) && self.config.wallet(wallet_id).is_ok()
-        {
-            return Err(error);
+        }) {
+            // The mirror of `add`: an error here need not mean the row
+            // survived, and returning on it would leave a reachable
+            // credential with no inventory row naming it. But deleting a
+            // credential cannot be undone, so it proceeds only on positive
+            // proof that no row bears this name — and a failed re-read is not
+            // that proof. `wallet` reports an unreadable configuration and an
+            // absent row the same way, so testing it with `is_ok` treated
+            // "cannot tell" as "already removed" and destroyed the only key of
+            // a wallet that was still listed.
+            match self.config.load() {
+                Ok(config) if !config.wallets.iter().any(|wallet| wallet.id == wallet_id) => {}
+                Ok(_) => return Err(error),
+                Err(unreadable) => {
+                    return Err(error).context(format!(
+                        "the configuration could not be re-read to establish whether the metadata \
+                         row for {wallet_id} survived, so its private key was left in place; \
+                         resolve that and retry: {unreadable:#}"
+                    ));
+                }
+            }
         }
         if let Err(error) = self.keys.delete(wallet_id) {
             let rollback = self.config.update(|config| {
