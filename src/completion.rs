@@ -494,7 +494,21 @@ fn lookup(config: &ConfigStore, source: Source, position: &Position<'_>) -> Resu
 /// terminal while it does, so `review ` followed by tab hung the shell outright
 /// — for as long as the prompt went unanswered, with no way to tell what was
 /// happening. Offering nothing is a worse completion and a far better shell.
-const LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+///
+/// A second rather than the couple of hundred milliseconds a warm lookup
+/// actually takes, because the two cases this bounds are not the same. A
+/// keychain that is going to answer answers in tens of milliseconds and never
+/// comes near this; a keychain that is waiting on a dialog was never going to
+/// answer at all, and a second is short enough to read as the shell thinking.
+/// What the extra headroom buys is the case in between — a cold disk, a large
+/// database, another process just letting go of the lock — where a tighter
+/// budget would give up on a store that was about to succeed and leave the
+/// owner with an empty list and no idea why.
+///
+/// Nothing but completion is bounded this way. This is the one place in the
+/// binary that would rather answer wrongly than slowly, because it is the one
+/// place whose answer is a convenience and whose delay is a stuck terminal.
+const LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Run a store lookup with that budget, answering with nothing if it runs out.
 ///
