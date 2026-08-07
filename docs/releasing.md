@@ -403,6 +403,26 @@ fails. Skip it and let `az trustedsigning create` report a name conflict.
 5. Verify the release is shown as immutable and independently verify at least
    one asset using the commands below.
 
+### Release candidates
+
+A version carrying a semver prerelease identifier — `1.0.0-rc.0` — publishes as
+a GitHub prerelease, and its notes say so and pin the install command to that
+exact version. That is not cosmetic. `install.sh` defaults to
+`EKUBO_WALLET_VERSION=latest` and resolves it through `releases/latest`, which
+skips prereleases; without the flag a candidate would be marked Latest and
+every default install would move onto it.
+
+The consequence to expect: while no stable release exists, the plain install
+one-liner cannot resolve a version and fails. Testers pass the version
+explicitly, which is what the generated notes tell them to do.
+
+```sh
+curl -fsSL .../install.sh | EKUBO_WALLET_VERSION=1.0.0-rc.0 sh
+```
+
+A candidate is still a real release. It is immutable, it consumes its tag
+permanently, and it is signed and notarized exactly like a stable one.
+
 Linux users must install the packaged polkit action before signing, key
 export, or wallet removal can authenticate:
 

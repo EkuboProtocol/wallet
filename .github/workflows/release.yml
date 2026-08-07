@@ -497,13 +497,27 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
           MACOS_SIGNED: ${{ needs.package-macos.outputs.signed }}
           WINDOWS_SIGNED: ${{ needs.package-windows.outputs.signed }}
           ATTESTED: ${{ steps.attest.outcome }}
         run: |
           set -euo pipefail
+
+          # A semver prerelease carries a hyphenated identifier: 1.0.0-rc.0.
+          # Publishing one as a normal release would mark it Latest, and
+          # install.sh defaults to the `releases/latest` endpoint, so every
+          # default install would silently move to a candidate build.
+          case "$VERSION" in
+            *-*) prerelease=true ;;
+            *) prerelease=false ;;
+          esac
+
           notes="$RUNNER_TEMP/release-notes.md"
           {
+            if [ "$prerelease" = true ]; then
+              printf '%s\n\n' '**This is a prerelease.** `install.sh` resolves `latest` through an endpoint that skips prereleases, so it will not install this build unless asked for by version.'
+            fi
             if [ "$ATTESTED" = "success" ]; then
               printf '%s\n\n' 'Prebuilt archives are attached below. Every archive and SHA256SUMS carries a keyless Sigstore bundle, verified before publishing, and a GitHub build-provenance attestation.'
             else
@@ -523,14 +537,25 @@ jobs:
             printf '%s\n' '- Linux: unsigned by platform convention; verify the checksum and Sigstore bundle.'
             printf '\n%s\n' 'Install with:'
             printf '\n%s\n' '```sh'
-            printf '%s\n' 'curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/install.sh | sh'
+            if [ "$prerelease" = true ]; then
+              printf 'curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/install.sh | EKUBO_WALLET_VERSION=%s sh\n' "$VERSION"
+            else
+              printf '%s\n' 'curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/install.sh | sh'
+            fi
             printf '%s\n\n' '```'
             printf '%s\n' 'Verification instructions: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/releasing.md#verify-a-download'
           } > "$notes"
+
+          release_flags=()
+          if [ "$prerelease" = true ]; then
+            release_flags+=(--prerelease)
+          fi
+
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --target "$GITHUB_SHA" \
-            --title "Ekubo Wallet ${{ needs.validate.outputs.version }}" \
+            --title "Ekubo Wallet $VERSION" \
             --generate-notes \
-            --notes-file "$notes"
+            --notes-file "$notes" \
+            ${release_flags[@]+"${release_flags[@]}"}
