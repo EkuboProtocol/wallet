@@ -958,6 +958,22 @@ impl PendingRow {
             self.cancel_serialized_transaction.is_some() != cancel_transaction_hashes.is_empty(),
             "stored cancellation is incomplete"
         );
+        // The pair has to agree, exactly as the original envelope's does. A
+        // ceiling resend rebroadcasts these bytes under the newest recorded
+        // hash without re-deriving one, so a disagreement was caught only at
+        // broadcast — by which point the row holds the wallet's one in-flight
+        // slot and the owner is trying to stop a transaction.
+        if let (Some(serialized), Some(hash)) = (
+            &self.cancel_serialized_transaction,
+            cancel_transaction_hashes.last(),
+        ) {
+            let bytes = hex::decode(serialized.trim_start_matches("0x"))
+                .context("stored cancellation transaction is not hexadecimal")?;
+            ensure!(
+                format!("{:#x}", alloy::primitives::keccak256(&bytes)) == *hash,
+                "stored cancellation transaction does not hash to its newest recorded hash"
+            );
+        }
         ensure!(
             self.cancel_serialized_transaction.is_none() || self.serialized_transaction.is_some(),
             "stored cancellation has no original signed transaction"

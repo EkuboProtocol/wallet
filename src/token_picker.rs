@@ -261,8 +261,11 @@ impl App {
 fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let (header, body, footer) = chrome(frame.area());
     frame.render_widget(
+        // The list name is the agent's own claim, not a verified curator, and
+        // it is the grouping the owner judges a batch of names by. Say so
+        // where it is read rather than letting emphasis imply provenance.
         title_line(&format!(
-            "Token names to confirm — {} of {} selected",
+            "Token names to confirm — {} of {} selected · list names are the agent's own claim",
             app.total_selected(),
             app.total_tokens()
         )),
