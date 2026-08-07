@@ -195,7 +195,9 @@ pub(crate) fn wrap_lines(lines: &[Line], columns: usize) -> Vec<Line> {
 
 /// Whether a row matches the search: every whitespace-separated term appears
 /// somewhere in the haystack, so "reverted base" or a pasted hash both work.
-fn matches_filter(haystack: &str, filter: &str) -> bool {
+///
+/// `haystack` is expected lowercased, as [`TableRow::new`] builds it.
+pub(crate) fn matches_filter(haystack: &str, filter: &str) -> bool {
     filter
         .split_whitespace()
         .all(|term| haystack.contains(&term.to_lowercase()))

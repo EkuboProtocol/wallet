@@ -12,17 +12,28 @@
 //! cases where they want to look. Accepting is deliberate: nothing is written
 //! until the owner presses the accept key, and what gets written is exactly
 //! what the checkboxes show.
+//!
+//! A list is too long to look at whole, so `/` searches it by symbol, name, or
+//! address and `c` narrows it to one chain. Filtering only ever changes what is
+//! on screen and what the bulk keys reach — never what a decision writes, which
+//! stays every checked token. The title therefore always reports the whole
+//! selection rather than the visible part of it, and a decision taken while a
+//! filter hides checked suggestions asks for a second keypress, because
+//! "accept" against eight visible rows must not quietly name three thousand.
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    layout::Rect,
+    layout::{Alignment, Rect},
     text::Line as UiLine,
-    widgets::{List, ListItem, ListState},
+    widgets::{List, ListItem, ListState, Paragraph},
 };
 
 use crate::{
-    fullscreen::{Line, Screen, Span, chrome, footer_line, is_interrupt, title_line, ui_span},
+    fullscreen::{
+        Line, Screen, Span, chrome, footer_line, is_interrupt, matches_filter, title_line, ui_span,
+    },
+    render::terminal_safe_line,
     token_store::ListedToken,
     tui::Tone,
 };
@@ -52,8 +63,15 @@ enum Row {
 struct Group {
     source: String,
     tokens: Vec<ListedToken>,
+    /// Lowercased symbol, name, and address per token: what the search matches
+    /// against, rather than the text a row happens to have room to show.
+    haystacks: Vec<String>,
     checked: Vec<bool>,
     expanded: bool,
+    /// Indices into `tokens` passing the current filters, recomputed whenever
+    /// either filter changes. With no filter this is every index, which is why
+    /// the unfiltered screen behaves exactly as it did before there was one.
+    shown: Vec<usize>,
 }
 
 impl Group {
@@ -63,6 +81,10 @@ impl Group {
 
     /// Tri-state, because "some" has to be visually distinct from "all" or a
     /// partially selected group collapses into a checkbox that lies.
+    ///
+    /// Counted over the whole group rather than the visible part of it: the
+    /// mark describes what the group would contribute to a decision, and a
+    /// filter does not change that.
     fn mark(&self) -> &'static str {
         match self.selected() {
             0 => "[ ]",
@@ -71,8 +93,30 @@ impl Group {
         }
     }
 
-    fn set_all(&mut self, checked: bool) {
-        self.checked.fill(checked);
+    fn shown_selected(&self) -> usize {
+        self.shown
+            .iter()
+            .filter(|&&token| self.checked[token])
+            .count()
+    }
+
+    /// Check or uncheck everything the filters currently show. Bulk keys act
+    /// on what the owner can see — that is the point of narrowing the list —
+    /// and the title keeps reporting the whole selection so what a filter
+    /// hides is never mistaken for what a decision writes.
+    fn set_shown(&mut self, checked: bool) {
+        for &token in &self.shown {
+            self.checked[token] = checked;
+        }
+    }
+
+    fn refilter(&mut self, filter: &str, chain: Option<u64>) {
+        self.shown = (0..self.tokens.len())
+            .filter(|&token| {
+                chain.is_none_or(|chain| self.tokens[token].chain_id == chain)
+                    && matches_filter(&self.haystacks[token], filter)
+            })
+            .collect();
     }
 }
 
@@ -82,14 +126,36 @@ struct App {
     cursor: usize,
     state: ListState,
     notice: Option<String>,
+    /// The `/` search: every whitespace-separated term must appear in a
+    /// token's symbol, name, or address.
+    filter: String,
+    /// Whether keystrokes edit the search instead of driving the list.
+    typing: bool,
+    /// Every chain the suggestions cover, ascending; `c` cycles through them.
+    chains: Vec<u64>,
+    /// Position in `chains` of the only chain being shown, or `None` for all.
+    chain: Option<usize>,
+    /// A decision that asked for confirmation because a filter is hiding part
+    /// of what it would write. Cleared by any other key.
+    pending: Option<Outcome>,
+    /// Body rows the last frame had, so paging moves by what is on screen.
+    viewport: usize,
 }
 
 impl App {
     fn new(groups: Vec<TokenGroup>) -> Self {
+        let mut chains: Vec<u64> = groups
+            .iter()
+            .flat_map(|group| group.tokens.iter().map(|token| token.chain_id))
+            .collect();
+        chains.sort_unstable();
+        chains.dedup();
         let groups = groups
             .into_iter()
             .map(|group| Group {
                 checked: vec![true; group.tokens.len()],
+                shown: (0..group.tokens.len()).collect(),
+                haystacks: group.tokens.iter().map(haystack).collect(),
                 // A single group is the common case — one list, freshly
                 // suggested — and collapsing it would hide the only thing on
                 // screen behind a keystroke.
@@ -104,6 +170,12 @@ impl App {
             cursor: 0,
             state: ListState::default(),
             notice: None,
+            filter: String::new(),
+            typing: false,
+            chains,
+            chain: None,
+            pending: None,
+            viewport: 1,
         };
         if app.groups.len() == 1 {
             app.groups[0].expanded = true;
@@ -112,16 +184,64 @@ impl App {
         app
     }
 
-    /// The visible rows, recomputed whenever expansion changes. Keeping the
-    /// flattened list derived rather than stored means a group cannot get out
-    /// of step with the rows that represent it.
+    /// The chain the list is narrowed to, or `None` when it shows all of them.
+    fn chain_filter(&self) -> Option<u64> {
+        self.chain.and_then(|index| self.chains.get(index).copied())
+    }
+
+    fn filtering(&self) -> bool {
+        !self.filter.is_empty() || self.chain.is_some()
+    }
+
+    /// Re-derive what each group shows, then the rows built from it.
+    fn refilter(&mut self) {
+        let chain = self.chain_filter();
+        for group in &mut self.groups {
+            group.refilter(&self.filter, chain);
+        }
+        self.rebuild_rows();
+    }
+
+    fn clear_filters(&mut self) {
+        self.filter.clear();
+        self.chain = None;
+        self.refilter();
+    }
+
+    fn cycle_chain(&mut self) {
+        if self.chains.len() < 2 {
+            self.notice = Some(match self.chains.first() {
+                Some(chain) => format!("Every suggestion is on chain {chain}; nothing to narrow."),
+                None => "There is nothing to narrow.".into(),
+            });
+            return;
+        }
+        self.chain = match self.chain {
+            None => Some(0),
+            Some(index) if index + 1 < self.chains.len() => Some(index + 1),
+            Some(_) => None,
+        };
+        self.refilter();
+    }
+
+    /// The visible rows, recomputed whenever expansion or a filter changes.
+    /// Keeping the flattened list derived rather than stored means a group
+    /// cannot get out of step with the rows that represent it.
     fn rebuild_rows(&mut self) {
         let anchor = self.rows.get(self.cursor).copied();
+        let filtering = self.filtering();
         self.rows.clear();
         for (index, group) in self.groups.iter().enumerate() {
+            // A group a filter emptied is dropped entirely: a header over no
+            // rows is just something to scroll past.
+            if filtering && group.shown.is_empty() {
+                continue;
+            }
             self.rows.push(Row::Group(index));
-            if group.expanded {
-                for token in 0..group.tokens.len() {
+            // Searching is a request to see the hits, so a filter expands what
+            // it matched; the owner's own expansion returns when it clears.
+            if group.expanded || filtering {
+                for &token in &group.shown {
                     self.rows.push(Row::Token(index, token));
                 }
             }
@@ -152,12 +272,22 @@ impl App {
         self.groups.iter().map(|group| group.tokens.len()).sum()
     }
 
+    fn total_shown(&self) -> usize {
+        self.groups.iter().map(|group| group.shown.len()).sum()
+    }
+
+    /// Checked tokens the filters are hiding: what a decision would write
+    /// without the screen having shown it.
+    fn hidden_selected(&self) -> usize {
+        self.total_selected() - self.groups.iter().map(Group::shown_selected).sum::<usize>()
+    }
+
     fn toggle(&mut self) {
         match self.rows.get(self.cursor).copied() {
             Some(Row::Group(index)) => {
                 let group = &mut self.groups[index];
-                let all = group.selected() == group.tokens.len();
-                group.set_all(!all);
+                let all = group.shown_selected() == group.shown.len();
+                group.set_shown(!all);
             }
             Some(Row::Token(group, token)) => {
                 let checked = &mut self.groups[group].checked[token];
@@ -168,6 +298,10 @@ impl App {
     }
 
     fn set_expanded(&mut self, expanded: bool) {
+        if !expanded && self.filtering() {
+            self.notice = Some("Clear the filter (Esc) to collapse groups again.".into());
+            return;
+        }
         if let Some(Row::Group(index) | Row::Token(index, _)) = self.rows.get(self.cursor).copied()
         {
             // Collapsing from inside a group should land on that group's
@@ -213,6 +347,92 @@ impl App {
         Decision { accepted, rejected }
     }
 
+    /// Guard a decision before it leaves the screen: refuse an empty one, and
+    /// make one taken while a filter hides checked suggestions cost a second,
+    /// deliberate keypress. Narrowing to eight rows and pressing accept must
+    /// not silently name the three thousand still checked behind the filter.
+    fn decide(&mut self, outcome: Outcome, pending: Option<Outcome>) -> Outcome {
+        let selected = self.total_selected();
+        if selected == 0 {
+            self.notice = Some(if outcome == Outcome::Reject {
+                "Nothing selected to reject.".into()
+            } else {
+                "Nothing selected. Press q to leave these undecided.".into()
+            });
+            return Outcome::Stay;
+        }
+        let hidden = self.hidden_selected();
+        if hidden > 0 && pending != Some(outcome) {
+            let (verb, key) = if outcome == Outcome::Reject {
+                ("Rejecting", "r")
+            } else {
+                ("Accepting", "\u{23ce}")
+            };
+            self.notice = Some(format!(
+                "{verb} all {selected} selected, including {hidden} the filter is hiding. \
+                 Press {key} again to confirm."
+            ));
+            self.pending = Some(outcome);
+            return Outcome::Stay;
+        }
+        outcome
+    }
+
+    /// The header: the whole selection first, because that is what a decision
+    /// writes, and only then what the filters are showing of it.
+    ///
+    /// The list name is the agent's own claim, not a verified curator, and it
+    /// is the grouping the owner judges a batch of names by. Say so where it
+    /// is read rather than letting emphasis imply provenance — and say it
+    /// ahead of the filter status, so a narrow terminal clips the filter
+    /// rather than the disclosure. What a filter is doing is also on every
+    /// group row and in the footer; where the list names came from is said
+    /// here or nowhere.
+    fn title(&self) -> String {
+        let selection = format!(
+            "Token names to confirm — {} of {} selected · list names are the agent's own claim",
+            self.total_selected(),
+            self.total_tokens()
+        );
+        let mut filters = Vec::new();
+        if let Some(chain) = self.chain_filter() {
+            filters.push(format!("chain {chain}"));
+        }
+        if !self.filter.is_empty() {
+            filters.push(format!(
+                "\u{201c}{}\u{201d}",
+                terminal_safe_line(&self.filter)
+            ));
+        }
+        if filters.is_empty() {
+            selection
+        } else {
+            format!(
+                "{selection} · showing {} for {}",
+                self.total_shown(),
+                filters.join(" + ")
+            )
+        }
+    }
+
+    fn footer_hints(&self) -> String {
+        if self.typing {
+            return format!(
+                "Search: {}\u{258f}  Enter to keep · Esc to clear",
+                terminal_safe_line(&self.filter)
+            );
+        }
+        let mut hints = String::from("space toggle · →/← expand · a all · n none · / search");
+        if self.chains.len() > 1 {
+            hints.push_str(" · c chain");
+        }
+        if self.filtering() {
+            hints.push_str(" · Esc clear filter");
+        }
+        hints.push_str(" · ⏎ accept · r reject · q cancel");
+        hints
+    }
+
     fn lines(&self) -> Vec<(Line, bool)> {
         self.rows
             .iter()
@@ -222,20 +442,34 @@ impl App {
                 let line = match row {
                     Row::Group(group) => {
                         let group = &self.groups[*group];
-                        vec![
+                        let mut line = vec![
                             Span::plain(format!("{} ", group.mark())),
-                            Span::toned(if group.expanded { "▼ " } else { "▶ " }, Tone::Muted),
+                            Span::toned(
+                                if group.expanded || self.filtering() {
+                                    "▼ "
+                                } else {
+                                    "▶ "
+                                },
+                                Tone::Muted,
+                            ),
                             Span::toned(&group.source, Tone::Emphasis),
                             Span::toned(
                                 format!("  {} of {} tokens", group.selected(), group.tokens.len()),
                                 Tone::Muted,
                             ),
-                        ]
+                        ];
+                        if self.filtering() {
+                            line.push(Span::toned(
+                                format!(" · {} shown", group.shown.len()),
+                                Tone::Info,
+                            ));
+                        }
+                        line
                     }
                     Row::Token(group, token) => {
                         let entry = &self.groups[*group];
                         let listed = &entry.tokens[*token];
-                        vec![
+                        let mut line = vec![
                             Span::plain(format!(
                                 "    {} ",
                                 if entry.checked[*token] { "[x]" } else { "[ ]" }
@@ -249,7 +483,15 @@ impl App {
                                 ),
                                 Tone::Muted,
                             ),
-                        ]
+                        ];
+                        // The name is searchable, so it is shown: a search that
+                        // matched on something invisible reads as a wrong hit,
+                        // and "USDC" carrying the name of something else is
+                        // exactly what this screen exists to catch.
+                        if let Some(name) = &listed.name {
+                            line.push(Span::toned(format!("  {name}"), Tone::Muted));
+                        }
+                        line
                     }
                 };
                 (line, selected)
@@ -258,25 +500,39 @@ impl App {
     }
 }
 
+/// What the search matches a token by: the values a person knows it by, all
+/// lowercased so the terms can be compared directly.
+fn haystack(token: &ListedToken) -> String {
+    format!(
+        "{} {} {}",
+        token.symbol,
+        token.name.as_deref().unwrap_or_default(),
+        token.address.to_checksum(None)
+    )
+    .to_lowercase()
+}
+
 fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let (header, body, footer) = chrome(frame.area());
-    frame.render_widget(
-        // The list name is the agent's own claim, not a verified curator, and
-        // it is the grouping the owner judges a batch of names by. Say so
-        // where it is read rather than letting emphasis imply provenance.
-        title_line(&format!(
-            "Token names to confirm — {} of {} selected · list names are the agent's own claim",
-            app.total_selected(),
-            app.total_tokens()
-        )),
-        header,
-    );
+    frame.render_widget(title_line(&app.title()), header);
     render_rows(frame, app, body);
-    let hints = "space toggle · →/← expand · a all · n none · ⏎ accept · r reject · q cancel";
-    frame.render_widget(footer_line(app.notice.as_deref(), hints), footer);
+    let hints = app.footer_hints();
+    frame.render_widget(footer_line(app.notice.as_deref(), &hints), footer);
 }
 
 fn render_rows(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    app.viewport = usize::from(area.height).max(1);
+    if app.rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(UiLine::from(ui_span(&Span::toned(
+                "No suggestion matches this filter.",
+                Tone::Muted,
+            ))))
+            .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
     let items: Vec<ListItem<'static>> = app
         .lines()
         .into_iter()
@@ -333,35 +589,60 @@ enum Outcome {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) -> Outcome {
+    // While the search is being typed every letter belongs to it, so none of
+    // the bindings below can fire from inside a query.
+    if app.typing {
+        match key.code {
+            KeyCode::Esc => {
+                app.filter.clear();
+                app.typing = false;
+                app.refilter();
+            }
+            // Enter only keeps the query and hands the keys back to the list;
+            // deciding anything takes a second, deliberate Enter.
+            KeyCode::Enter => app.typing = false,
+            KeyCode::Backspace => {
+                app.filter.pop();
+                app.refilter();
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                app.filter.push(character);
+                app.refilter();
+            }
+            KeyCode::Up => app.move_cursor(-1),
+            KeyCode::Down => app.move_cursor(1),
+            _ => {}
+        }
+        return Outcome::Stay;
+    }
+    // A confirmation survives only the keypress that asked for it: the second
+    // Enter has to be the very next key, not one arrived at later.
+    let pending = app.pending.take();
+    let page = app.viewport.max(1).cast_signed();
     match key.code {
+        // Esc backs out one layer at a time, so a filter is cleared before Esc
+        // ever means "decide nothing and leave".
+        KeyCode::Esc if app.filtering() => app.clear_filters(),
         KeyCode::Char('q') | KeyCode::Esc => return Outcome::Cancel,
-        KeyCode::Enter => {
-            if app.total_selected() == 0 {
-                app.notice = Some("Nothing selected. Press q to leave these undecided.".into());
-                return Outcome::Stay;
-            }
-            return Outcome::Accept;
-        }
-        KeyCode::Char('r') => {
-            if app.total_selected() == 0 {
-                app.notice = Some("Nothing selected to reject.".into());
-                return Outcome::Stay;
-            }
-            return Outcome::Reject;
-        }
+        KeyCode::Enter => return app.decide(Outcome::Accept, pending),
+        KeyCode::Char('r') => return app.decide(Outcome::Reject, pending),
+        KeyCode::Char('/') => app.typing = true,
+        KeyCode::Char('c') => app.cycle_chain(),
         KeyCode::Up | KeyCode::Char('k') => app.move_cursor(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_cursor(1),
+        KeyCode::PageUp => app.move_cursor(-page),
+        KeyCode::PageDown => app.move_cursor(page),
         KeyCode::Char(' ') => app.toggle(),
         KeyCode::Right | KeyCode::Char('l') => app.set_expanded(true),
         KeyCode::Left | KeyCode::Char('h') => app.set_expanded(false),
         KeyCode::Char('a') => {
             for group in &mut app.groups {
-                group.set_all(true);
+                group.set_shown(true);
             }
         }
         KeyCode::Char('n') => {
             for group in &mut app.groups {
-                group.set_all(false);
+                group.set_shown(false);
             }
         }
         KeyCode::Home | KeyCode::Char('g') => app.move_cursor(isize::MIN / 2),
