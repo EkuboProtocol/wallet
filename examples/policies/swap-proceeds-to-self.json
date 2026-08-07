@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 1,
+  "chains": {
+    "1": {
+      "label": "Swap on one router, through confirmed tokens, paying back to this wallet",
+      "max_calls_per_batch": 8,
+      "native_value": { "eq": "0" },
+      "rules": [
+        {
+          "effect": "allow",
+          "label": "Approve the router for a confirmed token, any amount",
+          "to": "is_token",
+          "calldata": {
+            "selector": {
+              "abi": "approve(address spender, uint256 amount)",
+              "args": {
+                "spender": { "eq": "0x1111111111111111111111111111111111111111" }
+              }
+            }
+          }
+        },
+        {
+          "effect": "allow",
+          "label": "Every hop must be a confirmed token and the proceeds must come back here",
+          "to": { "eq": "0x1111111111111111111111111111111111111111" },
+          "calldata": {
+            "selector": {
+              "abi": "swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)",
+              "args": {
+                "path": { "each": "is_token" },
+                "to": "is_wallet"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

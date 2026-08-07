@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 1,
+  "chains": {
+    "1": {
+      "label": "The corners of the predicate language, each rule demonstrating one",
+      "max_calls_per_batch": 8,
+      "native_value": { "in": ["0", "1000000000000000000"] },
+      "rules": [
+        {
+          "effect": "deny",
+          "label": "not: everything except two known contracts is refused outright",
+          "to": {
+            "not": {
+              "in": [
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "0x1111111111111111111111111111111111111111"
+              ]
+            }
+          }
+        },
+        {
+          "effect": "allow",
+          "label": "all: both conditions must hold on the same argument",
+          "to": { "eq": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
+          "calldata": {
+            "selector": {
+              "abi": "transfer(address to, uint256 amount)",
+              "args": {
+                "to": {
+                  "all": [
+                    "is_address_book",
+                    { "not": { "eq": "0x0000000000000000000000000000000000000000" } }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "effect": "allow",
+          "label": "any: one of several accepted shapes, and length bounds an array",
+          "to": { "eq": "0x1111111111111111111111111111111111111111" },
+          "calldata": {
+            "any": [
+              {
+                "selector": {
+                  "abi": "multicall(bytes[] data)",
+                  "args": { "data": { "length": { "in": ["1", "2"] } } }
+                }
+              },
+              { "selector": { "abi": "poke()" } }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

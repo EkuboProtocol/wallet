@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 1,
+  "chains": {
+    "1": {
+      "label": "Plain ETH sends to named addresses, and nothing else",
+      "max_calls_per_batch": 2,
+      "native_value": "any_value",
+      "rules": [
+        {
+          "effect": "allow",
+          "label": "Empty calldata is a plain send; the recipient must be in the address book",
+          "to": "is_address_book",
+          "calldata": { "eq": "0x" }
+        }
+      ]
+    }
+  }
+}

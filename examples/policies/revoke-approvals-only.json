@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 1,
+  "chains": {
+    "*": {
+      "label": "Let an agent clean up allowances without ever granting one",
+      "max_calls_per_batch": 32,
+      "native_value": { "eq": "0" },
+      "rules": [
+        {
+          "effect": "allow",
+          "label": "approve(spender, 0) only: the amount decides, not the selector",
+          "calldata": {
+            "selector": {
+              "abi": "approve(address spender, uint256 amount)",
+              "args": { "amount": { "eq": "0" } }
+            }
+          }
+        },
+        {
+          "effect": "allow",
+          "label": "Revoking an operator is also a revocation",
+          "calldata": {
+            "selector": {
+              "abi": "setApprovalForAll(address operator, bool approved)",
+              "args": { "approved": { "eq": "false" } }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

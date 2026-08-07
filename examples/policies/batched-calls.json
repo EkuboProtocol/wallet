@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 1,
+  "chains": {
+    "1": {
+      "label": "Constrain a batching entry point by constraining what it may carry",
+      "max_calls_per_batch": 4,
+      "native_value": { "eq": "0" },
+      "rules": [
+        {
+          "effect": "allow",
+          "label": "Every nested call must itself be a transfer to an address-book entry",
+          "to": { "eq": "0x1111111111111111111111111111111111111111" },
+          "calldata": {
+            "selector": {
+              "abi": "multicall(bytes[] data)",
+              "args": {
+                "data": {
+                  "each": {
+                    "selector": {
+                      "abi": "transfer(address to, uint256 amount)",
+                      "args": { "to": "is_address_book" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

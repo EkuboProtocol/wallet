@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
+  "version": 1,
+  "chains": {
+    "*": {
+      "label": "A broad grant with one blanket refusal layered over it",
+      "max_calls_per_batch": 16,
+      "native_value": "any_value",
+      "rules": [
+        {
+          "effect": "deny",
+          "label": "Never hand an operator a whole collection, whatever else this policy allows",
+          "calldata": {
+            "selector": {
+              "abi": "setApprovalForAll(address operator, bool approved)",
+              "args": { "approved": { "eq": "true" } }
+            }
+          }
+        },
+        {
+          "effect": "deny",
+          "label": "Never grow an allowance outside approve, where the amount is visible",
+          "calldata": {
+            "any": [
+              { "selector": { "abi": "increaseAllowance(address spender, uint256 addedValue)" } },
+              { "selector": { "abi": "increaseApproval(address spender, uint256 addedValue)" } }
+            ]
+          }
+        },
+        {
+          "effect": "allow",
+          "label": "Everything else on this chain signs automatically"
+        }
+      ]
+    }
+  }
+}

@@ -151,6 +151,25 @@ for editor completion. Starting points live in [`examples/`](../examples):
 | [`policies/approval-wildcards.template.json`](../examples/policies/approval-wildcards.template.json) | How an exact chain entry replaces the wildcard, and how the metadata predicates read. |
 | [`policies/allow-all-with-approval.template.json`](../examples/policies/allow-all-with-approval.template.json) | Exactly what `policy allow-all` installs. |
 
+Worked examples, each demonstrating one thing the engine can express. Every
+verdict below is asserted in [`tests/example_policies.rs`](../tests/example_policies.rs),
+so an example that stopped meaning what its label says would fail the build:
+
+| File | Shows |
+| --- | --- |
+| [`transfers-to-address-book.json`](../examples/policies/transfers-to-address-book.json) | `is_token` and `is_address_book`: move confirmed tokens only to addresses the owner has named. Any amount — a rule bounds which calls, not how much. |
+| [`revoke-approvals-only.json`](../examples/policies/revoke-approvals-only.json) | An argument deciding between two identical selectors: `approve(spender, 0)` passes, `approve(spender, 1)` does not. |
+| [`swap-proceeds-to-self.json`](../examples/policies/swap-proceeds-to-self.json) | `each` over an `address[]` path and `is_wallet` on the recipient, so proceeds must come back and every hop must be confirmed. |
+| [`deny-blanket-operators.json`](../examples/policies/deny-blanket-operators.json) | Deny-precedence: a blanket allow with `setApprovalForAll(true)` and allowance-growth refused over the top of it. |
+| [`native-sends-only.json`](../examples/policies/native-sends-only.json) | `{"eq": "0x"}` as the plain-send idiom, plus the `native_value` guard. |
+| [`batched-calls.json`](../examples/policies/batched-calls.json) | `each` composed with `selector` to constrain what a batching entry point may carry, with no recursion machinery. |
+| [`predicate-edge-cases.json`](../examples/policies/predicate-edge-cases.json) | `not`, `all`, `any`, `length`, and a `native_value` set. The corners, one per rule. |
+
+Two corners worth knowing, both exercised by those tests: `each` over an empty
+array is vacuously true, so an empty batch is permitted — it carries nothing to
+object to. And an `any` with no branches never matches, while an `all` with no
+branches always does.
+
 Template chain IDs, addresses, and signatures must be replaced and verified
 before use. An agent can help draft a copy, but applying it stays an explicit
 human CLI action:

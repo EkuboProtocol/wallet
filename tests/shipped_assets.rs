@@ -42,6 +42,13 @@ fn every_shipped_policy_example_parses() {
         "examples/policies/approval-wildcards.template.json",
         "examples/policies/deny-all.json",
         "examples/policies/token-budget.template.json",
+        "examples/policies/transfers-to-address-book.json",
+        "examples/policies/revoke-approvals-only.json",
+        "examples/policies/swap-proceeds-to-self.json",
+        "examples/policies/deny-blanket-operators.json",
+        "examples/policies/native-sends-only.json",
+        "examples/policies/batched-calls.json",
+        "examples/policies/predicate-edge-cases.json",
     ] {
         let policy = WalletPolicy::parse(read_json(relative))
             .unwrap_or_else(|error| panic!("{relative} is not a valid policy: {error:#}"));
@@ -52,7 +59,7 @@ fn every_shipped_policy_example_parses() {
         assert!(!policy.chains.is_empty(), "{relative} configures no chains");
         checked += 1;
     }
-    assert_eq!(checked, 5);
+    assert_eq!(checked, 12);
 }
 
 #[test]
