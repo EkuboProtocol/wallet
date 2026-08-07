@@ -159,18 +159,13 @@ where
     // urgent one, than an owner whose endpoints are down.
     if answers.len() > 1 {
         let mut message = format!(
-            "the RPC endpoints configured for {} do not agree, so the answer was refused;              {} distinct answers from",
+            "the RPC endpoints configured for {} do not agree, so the answer was refused; {} distinct answers from",
             network.name,
             answers.len()
         );
         for (_, witnesses) in &answers {
             let names: Vec<&str> = witnesses.iter().map(|url| url.as_str()).collect();
-            let _ = write!(
-                message,
-                "
-  {}",
-                names.join(", ")
-            );
+            let _ = write!(message, "\n  {}", names.join(", "));
         }
         return Err(anyhow::anyhow!(message));
     }
@@ -180,11 +175,7 @@ where
         network.name
     );
     for (endpoint, error) in &failures {
-        let _ = write!(
-            message,
-            "
-  {endpoint}: {error:#}"
-        );
+        let _ = write!(message, "\n  {endpoint}: {error:#}");
     }
     Err(anyhow::anyhow!(message))
 }

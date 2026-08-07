@@ -2768,7 +2768,7 @@ async fn wait_for_decision<R>(
     let _slot = WAIT_SLOTS.try_acquire().map_err(|_| {
         ErrorData::invalid_request(
             format!(
-                "this wallet is already polling {MAX_CONCURRENT_WAITS} approval waits; retry once                  one of them finishes"
+                "this wallet is already polling {MAX_CONCURRENT_WAITS} approval waits; retry once one of them finishes"
             ),
             None,
         )

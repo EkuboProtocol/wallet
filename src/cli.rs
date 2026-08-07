@@ -4087,7 +4087,7 @@ fn ensure_reviewed_network(
     let current = networks.iter().find(|network| network.chain_id == chain_id);
     ensure!(
         current == reviewed,
-        "chain {chain_id} changed while this was being reviewed; nothing was written.          Run the command again to decide against the current configuration."
+        "chain {chain_id} changed while this was being reviewed; nothing was written. Run the command again to decide against the current configuration."
     );
     Ok(())
 }

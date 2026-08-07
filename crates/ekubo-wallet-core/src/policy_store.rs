@@ -1132,7 +1132,7 @@ fn load_or_create_database_key(database_exists: bool) -> Result<DatabaseKey> {
             stored.zeroize();
             ensure!(
                 matches,
-                "another process initialized the policy database key at the same time;                  run this command again"
+                "another process initialized the policy database key at the same time; run this command again"
             );
             Ok(DatabaseKey::new(bytes))
         }
