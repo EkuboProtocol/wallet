@@ -466,6 +466,16 @@ impl App {
                         }
                         line
                     }
+                    // What the wallet knows comes first, what the list claims
+                    // comes last. The address, chain, and decimals are fixed
+                    // width and are the whole of what confirming decides; the
+                    // symbol and name are the curator's text, and a row is
+                    // clipped at the right edge, so putting them first let a
+                    // long enough symbol — or a short one padded with spaces —
+                    // push the address off the screen and leave the owner
+                    // ticking a familiar ticker against an address they were
+                    // never shown. Nothing written by the party being reviewed
+                    // decides where anything else on its row appears.
                     Row::Token(group, token) => {
                         let entry = &self.groups[*group];
                         let listed = &entry.tokens[*token];
@@ -474,15 +484,15 @@ impl App {
                                 "    {} ",
                                 if entry.checked[*token] { "[x]" } else { "[ ]" }
                             )),
-                            Span::toned(&listed.symbol, Tone::Info),
-                            Span::plain(format!("  {}", listed.address.to_checksum(None))),
+                            Span::plain(listed.address.to_checksum(None)),
                             Span::toned(
                                 format!(
-                                    "  chain {}  {} decimals",
+                                    "  chain {}  {} decimals  ",
                                     listed.chain_id, listed.decimals
                                 ),
                                 Tone::Muted,
                             ),
+                            Span::toned(&listed.symbol, Tone::Info),
                         ];
                         // The name is searchable, so it is shown: a search that
                         // matched on something invisible reads as a wrong hit,

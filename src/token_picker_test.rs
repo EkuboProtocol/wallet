@@ -346,3 +346,37 @@ fn one_chain_has_nothing_to_narrow() {
     assert_eq!(app.chain_filter(), None);
     assert!(app.notice.is_some_and(|notice| notice.contains("chain 1")));
 }
+
+#[test]
+fn nothing_a_list_wrote_can_push_the_address_off_its_row() {
+    // A row is clipped at the right edge, so what comes first is what survives
+    // a terminal narrower than the row. The address, chain, and decimals are
+    // what confirming actually decides and are the wallet's own text; the
+    // symbol and name are the claim being judged. So the claim goes last. A
+    // symbol wide enough to fill the screen — spaces count, and a stored
+    // symbol may be sixty-four characters — can then cost the owner sight of
+    // the curator's own text and never of the address it would name.
+    let padded = ListedToken {
+        symbol: format!("USDC{}X", " ".repeat(50)),
+        name: Some("USD Coin".into()),
+        ..token("USDC", 0x11)
+    };
+    let app = App::new(vec![TokenGroup {
+        source: "hostile-list".into(),
+        tokens: vec![padded],
+    }]);
+    let lines: Vec<Line> = app.lines().into_iter().map(|(line, _)| line).collect();
+    let row = crate::fullscreen::lines_to_text(&lines, |text, _| text.to_owned());
+
+    let address = Address::repeat_byte(0x11).to_checksum(None);
+    let address_at = row.find(&address).expect("the row shows the address");
+    for claim in ["USDC", "USD Coin"] {
+        assert!(
+            row.rfind(claim).expect("the row shows the claim") > address_at,
+            "`{claim}` precedes the address it would name: {row}"
+        );
+    }
+    // The derived facts are between them, so neither can be displaced either.
+    assert!(row.find("chain 1").expect("the row shows the chain") > address_at);
+    assert!(row.find("18 decimals").expect("the row shows decimals") > address_at);
+}
