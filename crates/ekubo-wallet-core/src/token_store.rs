@@ -921,7 +921,7 @@ fn escape_like(value: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn sanitize(text: &str) -> String {
+pub(crate) fn sanitize(text: &str) -> String {
     crate::sanitize::stripped_capped(text, MAX_TEXT_LEN)
         .trim()
         .to_string()

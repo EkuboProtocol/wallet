@@ -18,6 +18,7 @@ pub mod clear_signing;
 pub mod config;
 pub mod core;
 pub mod custody;
+pub mod default_tokens;
 pub mod execution;
 pub mod fork;
 pub mod human_presence;

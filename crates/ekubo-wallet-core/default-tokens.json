@@ -1,0 +1,1184 @@
+{
+  "name": "Ekubo curated defaults",
+  "source_url": "https://raw.githubusercontent.com/EkuboProtocol/default-tokens/refs/heads/main/curated-tokens.json",
+  "source_sha256": "fb0d441cb35f73fbb0d6b00bc887c69544edc4f06e2f3e0e8a83a8c6cd3e7608",
+  "skipped_non_evm": 129,
+  "tokens": [
+    {
+      "chain_id": 1,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+      "symbol": "AUSD",
+      "name": "Agora USD",
+      "decimals": 6
+    },
+    {
+      "chain_id": 1,
+      "address": "0x01791f726b4103694969820be083196cc7c045ff",
+      "symbol": "YB",
+      "name": "Yield Basis",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x04c46e830bb56ce22735d5d8fc9cb90309317d0f",
+      "symbol": "EKUBO",
+      "name": "Ekubo Protocol",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x09fd37d9aa613789c517e76df1c53aece2b60df4",
+      "symbol": "ebUSD",
+      "name": "ebUSD Stablecoin",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x0c93b16cb1d8691e629514fc98f02cbad340da3c",
+      "symbol": "gEKUBO-26Q2",
+      "name": "Ekubo Protocol Apr/1/2026",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x15700b564ca08d9439c58ca5053166e8317aa138",
+      "symbol": "deUSD",
+      "name": "Elixir deUSD",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x1abaea1f7c830bd89acc67ec4af516284b1bc33c",
+      "symbol": "EURC",
+      "name": "EURC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 1,
+      "address": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "symbol": "UNI",
+      "name": "Uniswap",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "symbol": "WBTC",
+      "name": "Wrapped BTC",
+      "decimals": 8
+    },
+    {
+      "chain_id": 1,
+      "address": "0x232ce3bd40fcd6f80f3d55a522d03f25df784ee2",
+      "symbol": "LIT",
+      "name": "Lighter",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x23b608675a2b2fb1890d3abbd85c5775c51691d5",
+      "symbol": "SOCKS",
+      "name": "SOCKS",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x40d16fc0246ad3160ccc09b8d0d3a2cd28ae6c2f",
+      "symbol": "GHO",
+      "name": "GHO token",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x48c3399719b582dd63eb5aadf12a40b4c3f52fa2",
+      "symbol": "SWISE",
+      "name": "StakeWise",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x4956b52ae2ff65d74ca2d61207523288e4528f96",
+      "symbol": "RLP",
+      "name": "Resolv Liquidity Provider Token",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+      "symbol": "USDe",
+      "name": "USDe",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x57e114b691db790c35207b2e685d4a43181e6061",
+      "symbol": "ENA",
+      "name": "Ethena",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x5f98805a4e8be255a32880fdec7f6728c6568ba0",
+      "symbol": "LUSD",
+      "name": "LUSD Stablecoin",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x6440f144b7e50d6a8439336510312d2f54beb01d",
+      "symbol": "BOLD",
+      "name": "BOLD Stablecoin",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x66a1e37c9b0eaddca17d3662d6c05f4decf3e110",
+      "symbol": "USR",
+      "name": "Resolv USD",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "symbol": "DAI",
+      "name": "Dai Stablecoin",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x6bef15d938d4e72056ac92ea4bdd0d76b1c4ad29",
+      "symbol": "PROVE",
+      "name": "Succinct",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x6dea81c8171d0ba574754ef6f8b412f2ed88c54d",
+      "symbol": "LQTY",
+      "name": "Liquity",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x7c1156e515aa1a2e851674120074968c905aaf37",
+      "symbol": "lvlUSD",
+      "name": "Level USD",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x7c5097b11b7bc856f603fb60287833cf9a829fe3",
+      "symbol": "gEKUBO-26Q2",
+      "name": "Ekubo Protocol Apr/15/2026",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+      "symbol": "wstETH",
+      "name": "Wrapped liquid staked Ether 2.0",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+      "symbol": "sUSDe",
+      "name": "Staked USDe",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "symbol": "USDC",
+      "name": "USDC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 1,
+      "address": "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd",
+      "symbol": "sUSDS",
+      "name": "Savings USDS",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xae78736cd615f374d3085123a210448e74fc6393",
+      "symbol": "rETH",
+      "name": "Rocket Pool ETH",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xca14007eff0db1f8135f4c25b34de49ab0d42766",
+      "symbol": "STRK",
+      "name": "Starknet Token",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+      "symbol": "weETH",
+      "name": "Wrapped eETH",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xd9fcd98c322942075a5c3860693e9f4f03aae07b",
+      "symbol": "EUL",
+      "name": "Euler",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "symbol": "USDT",
+      "name": "Tether USD",
+      "decimals": 6
+    },
+    {
+      "chain_id": 1,
+      "address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+      "symbol": "USDS",
+      "name": "USDS Stablecoin",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xf1c9acdc66974dfb6decb12aa385b9cd01190e38",
+      "symbol": "osETH",
+      "name": "StakeWise Staked ETH",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e",
+      "symbol": "crvUSD",
+      "name": "Curve.Fi USD",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4326,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4326,
+      "address": "0x28b7e77f82b25b95953825f1e3ea0e36c1c29861",
+      "symbol": "MEGA",
+      "name": "MEGA",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4326,
+      "address": "0xfafddbb3fc7688494971a79cc65dca3ef82079e7",
+      "symbol": "USDM",
+      "name": "MegaUSD",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x05b37fb53a299a1b874a619e1c4c404d52c36f4c",
+      "symbol": "RDDT",
+      "name": "Reddit",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x0c3260af4b8f13a69c4c2dfb84fd667890cdfa14",
+      "symbol": "NOW",
+      "name": "ServiceNow",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x0e6e67ba88e7b5d9b67636a215c76779b948de79",
+      "symbol": "UMC",
+      "name": "United Microelectronics",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x0f17206447090e464c277571124dd2688e48aea9",
+      "symbol": "QCOM",
+      "name": "Qualcomm",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x117cc2133c37b721f49de2a7a74833232b3b4c0c",
+      "symbol": "SPY",
+      "name": "SPDR S&P 500 ETF Trust",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x12f190a9f9d7d37a250758b26824b97ce941bf54",
+      "symbol": "AMZN",
+      "name": "Amazon",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x156e175dd063a8ce274c50654ef40e0032b3fbcf",
+      "symbol": "AVGO",
+      "name": "Broadcom",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x15cd20759ce7f3285c29a319de2d1a2e098c6f43",
+      "symbol": "XLK",
+      "name": "State Street Technology Select Sector SPDR ETF",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x1af6446f07eb1d97c546afc8c9544cbdf3ad5137",
+      "symbol": "ASTS",
+      "name": "AST SpaceMobile",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x1b0e319c6a659f002271b69db8a7df2f911c153e",
+      "symbol": "GME",
+      "name": "GameStop",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x1cdad396db64bda184d5182a97dd9b3c62100b7d",
+      "symbol": "P",
+      "name": "Everpure",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x25c288e6d899b9bc30160965ad9644c67e73be0c",
+      "symbol": "F",
+      "name": "Ford Motor",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x27c99fbde9d0d2aa4f4bfb4943f237843ddf6958",
+      "symbol": "DDOG",
+      "name": "Datadog",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x282e87451e10fa6679bc7d76c69be44cd3fc777c",
+      "symbol": "FLNC",
+      "name": "Fluence Energy",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x284358abc07f9359f19f4b5b4ac91901be2597ba",
+      "symbol": "RGTI",
+      "name": "Rigetti Computing",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x2e0847e8910a9732eb3fb1bb4b70a580adad4fe3",
+      "symbol": "GOOGL",
+      "name": "Alphabet Class A",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x322f0929c4625ed5bad873c95208d54e1c003b2d",
+      "symbol": "TSLA",
+      "name": "Tesla",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x36046893810a7e7fce501229d57dc3fc8c8716d0",
+      "symbol": "AMAT",
+      "name": "Applied Materials",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x39ec44bee4f6a116c6f9b8de566848a985c53c60",
+      "symbol": "ELF",
+      "name": "e.l.f. Beauty",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x3b14c39e89d60d627b42a1a4ca45b5bb45fc12e2",
+      "symbol": "RKLB",
+      "name": "Rocket Lab Corporation",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x408c14038a04f7bd235329e26d2bf569ee20e250",
+      "symbol": "NU",
+      "name": "Nu",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x411efb0e7f985935daec3d4c3ebaea0d0ad7d89f",
+      "symbol": "SLV",
+      "name": "iShares Silver Trust",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x4189f0c66ebbb0bfef1c31f763131361ef32f77c",
+      "symbol": "PR",
+      "name": "Permian Resources",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x44c4f142009036cf477ed2d09932051843137cf1",
+      "symbol": "ZM",
+      "name": "Zoom",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x47f93d52cbec7c6d2cfc080e154002370a60daea",
+      "symbol": "ASML",
+      "name": "ASML Holding NV",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x48961813349333209994750ffa89b3c5c22ec969",
+      "symbol": "MXL",
+      "name": "MaxLinear",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x4a0e65a3eccec6dbe60ae065f2e7bb85fae35eea",
+      "symbol": "SPCX",
+      "name": "Space Exploration Technologies Corp",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x4d21483a44bf67a86b77e3da301411880797d452",
+      "symbol": "BA",
+      "name": "Boeing",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x4e62068525ab11fe768e29dfd00ef909b9803016",
+      "symbol": "LULU",
+      "name": "Lululemon",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x4ea005168d7f09a7a0ba9d1def21a479950e44c2",
+      "symbol": "COST",
+      "name": "Costco",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x521cf887e6531c6f667b5bc4d896e5d9bfe8eb2e",
+      "symbol": "AAOI",
+      "name": "Applied Optoelectronics",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x558378e000d634a36593e338ebacdd6207640efe",
+      "symbol": "IONQ",
+      "name": "IonQ",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x56d23bee5f41a7120170b0c603dae30128e460e9",
+      "symbol": "INTU",
+      "name": "Intuit",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x570c5aa79c798e7a418412cc8399ae5bcce570c5",
+      "symbol": "STONX",
+      "name": "Ekubo Stock Liquidity Token",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x58ffe4a942d3885baa22d7520691f611ef09e7aa",
+      "symbol": "TSM",
+      "name": "Taiwan Semiconductor Manufacturing",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x59818904ab4ce163b3ce4ffb64f2d6ca02c434b4",
+      "symbol": "QUBT",
+      "name": "Quantum Computing",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x5c90450bbb4273d7b2f17cf6917aeb237a569679",
+      "symbol": "CBRS",
+      "name": "Cerebras Systems",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x5e81213613b6b86eab4c6c50d718d34359459786",
+      "symbol": "TTWO",
+      "name": "Take-Two Interactive Software",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x5f10a1c971b69e47e059e1dc91901b59b3fb49c3",
+      "symbol": "CRWV",
+      "name": "CoreWeave",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+      "symbol": "USDG",
+      "name": "Global Dollar",
+      "decimals": 6
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x62fd0668e10d8b72339be2dcf7643001688ff13b",
+      "symbol": "MRVL",
+      "name": "Marvell Technology",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x6330d8c3178a418788df01a47479c0ce7ccf450b",
+      "symbol": "COIN",
+      "name": "Coinbase",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x75742c18bc1f1c5c5f448f4c9d9c6f66dafaaa38",
+      "symbol": "SOXX",
+      "name": "iShares Semiconductor ETF",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x7c04e6a3368f2a1de3874f0e80d2e0a1a9915da6",
+      "symbol": "GLW",
+      "name": "Corning",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x7dc013eb55e436f30d7ed1afe4e36d6e45e3c3f7",
+      "symbol": "ZS",
+      "name": "Zscaler",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x7f0abef0c07280f82c6a08ead09ded6bae2c13fc",
+      "symbol": "EWY",
+      "name": "iShares MSCI South Korea fund",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x8005d266423c7ea827372c9c864491e5786600ea",
+      "symbol": "LLY",
+      "name": "Eli Lilly",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x822cc93ffd030293e9842c30bbd678f530701867",
+      "symbol": "BE",
+      "name": "Bloom Energy",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x82da4646242e1d962e96e932269dc644c94a9caa",
+      "symbol": "WDAY",
+      "name": "Workday",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x86923f96303d656e4aa86d9d42d1e57ad2023fdc",
+      "symbol": "AMD",
+      "name": "AMD",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x894e1ec2d74ffe5aef8dc8a9e84686accb964f2a",
+      "symbol": "PLTR",
+      "name": "Palantir Technologies",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x89776d4cd68193597a2fc132cfac1fde36ccea8a",
+      "symbol": "TSEM",
+      "name": "Tower Semiconductor",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x8cf07c5a878945185d327aaa6e33faa95f95e7bf",
+      "symbol": "CELH",
+      "name": "Celsius",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x8ef20885f94e3d9bc7eb3080279188bd5ed7c08c",
+      "symbol": "LITE",
+      "name": "Lumentum",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x92ef19e82bd8ff36661de838d5eae7e5cef0effe",
+      "symbol": "RDW",
+      "name": "Redwire",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x92fd66527192e3e61d4ddd13322aa222de86f9b5",
+      "symbol": "SGOV",
+      "name": "iShares 0-3 Month Treasury Bond ETF",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x941ae714ec6d8130c7b75d67160ca08f1e7d11dd",
+      "symbol": "DELL",
+      "name": "Dell",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x95052ddcd5dc25641657424a8cf04834997e1730",
+      "symbol": "SATS",
+      "name": "EchoStar",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x9651342cea770ae9a2969ba2a52611523146aef9",
+      "symbol": "CCL",
+      "name": "Carnival Corporation",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x98e75885157c80992a8d41b696d8c9c6fb30a926",
+      "symbol": "SOFI",
+      "name": "SoFi Technologies",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x9b23573b156b52565012f5ce02cdf60afbaa70be",
+      "symbol": "PENG",
+      "name": "Penguin Solutions",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x9d9c6684f596f66a64c030b93a886d51fd4d7931",
+      "symbol": "NBIS",
+      "name": "Nebius Group",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xa30fa36db767ad9ed3f7a60fc79526fb4d56d344",
+      "symbol": "USO",
+      "name": "United States Oil Fund",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xa5d4968421ba94814be3b136b15cf422101ac1a3",
+      "symbol": "LUNR",
+      "name": "Intuitive Machines",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xa8eb3bccbf2017ee7cbfb652eb51cf2e1b153289",
+      "symbol": "XNDU",
+      "name": "Xanadu Quantum",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xad25ac6c84d497db898fa1e8387bf6af3532a1c4",
+      "symbol": "BABA",
+      "name": "Alibaba",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xad622320e520de39e72d41ef07438c3fd3354875",
+      "symbol": "SPMO",
+      "name": "Invesco S&P 500 Momentum ETF",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xaf3d76f1834a1d425780943c99ea8a608f8a93f9",
+      "symbol": "AAPL",
+      "name": "Apple",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xb0992820e760d836549ba69bc7598b4af75dee03",
+      "symbol": "ORCL",
+      "name": "Oracle",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xb1bf26c1d20ff267a4f93550d1e0d06ac40a114b",
+      "symbol": "RIVN",
+      "name": "Rivian Automotive",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xb8dbf92f9741c9ac1c32115e78581f23509916fd",
+      "symbol": "APLD",
+      "name": "Applied Digital",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xb90a19ff0af67f7779aff50a882a9cff42446400",
+      "symbol": "SNDK",
+      "name": "Sandisk Corporation",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xbe6702d7b70315376dc48a3293f24f0982f86386",
+      "symbol": "NVTS",
+      "name": "Navitas Semiconductor",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xbef75684c43c4ea7bd18dd532a2244674ee8b926",
+      "symbol": "NNE",
+      "name": "Nano Nuclear Energy",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xc01aa1fecec0605b13bc84874ff7256c0f5f562a",
+      "symbol": "SMCI",
+      "name": "Super Micro Computer",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xc0d6457c16cc70d6790dd43521c899c87ce02f35",
+      "symbol": "META",
+      "name": "Meta Platforms",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xc583c60aef9dc401da72cec1b404743a93cea1cc",
+      "symbol": "QBTS",
+      "name": "D-Wave Quantum",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xc72b96e0e48ecd4dc75e1e45396e26300bc39681",
+      "symbol": "INTC",
+      "name": "Intel",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xcbb95bbf36099d34da091dc6fa6f49efa257cee3",
+      "symbol": "CLSK",
+      "name": "CleanSpark",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xcf6b2d875361be807eafa57458c80f28521f9333",
+      "symbol": "POET",
+      "name": "POET Technologies",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec",
+      "symbol": "NVDA",
+      "name": "NVIDIA",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xd5f3879160bc7c32ebb4dc785f8a4f505888de68",
+      "symbol": "QQQ",
+      "name": "Invesco QQQ",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xd917b029c761d264c6a312bbbcda868658ef86a6",
+      "symbol": "USAR",
+      "name": "USA Rare Earth",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xddf2266b79abf0b48898959b0ed6e6adf512be74",
+      "symbol": "MDB",
+      "name": "MongoDB",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xdf0992e440dd0be65bd8439b609d6d4366bf1cb5",
+      "symbol": "CRCL",
+      "name": "Circle Internet Group",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xe0444ef8bf4ed74f74fd73686e2ddf4c1c5591e8",
+      "symbol": "NFLX",
+      "name": "Netflix",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xe93237c50d904957cf27e7b1133b510c669c2e74",
+      "symbol": "MSFT",
+      "name": "Microsoft",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xea72ecca2d0f6bfa1394dbbcff85b52cd4233931",
+      "symbol": "CRWD",
+      "name": "CrowdStrike Holdings",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xeb30663bdff0622ef4e4e5cbb4e975f19f33f51d",
+      "symbol": "FUTU",
+      "name": "Futu Holdings",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xec262a75e413fafd0df80480274532c79d42da09",
+      "symbol": "MSTR",
+      "name": "Strategy Inc.",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xf0ab0c93be6f41369d302e55db1a96b3c430212d",
+      "symbol": "IREN",
+      "name": "IREN Limited",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xf0c4bf4c582cb3836e98394b1d4e7b7281101be8",
+      "symbol": "RBLX",
+      "name": "Roblox",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xf1953dab6fad537488d5a022361ffaa8b4c95ec6",
+      "symbol": "INOD",
+      "name": "Innodata",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xf23250dac154d05bb671cb0d0ebef3c635c79ce2",
+      "symbol": "UPS",
+      "name": "UPS",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xf53f66751b1eff985311b693531e3290f600c410",
+      "symbol": "SHOP",
+      "name": "Shopify",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xf9b46d3d1b22199d4d1025a9cedb540a33f1a2d5",
+      "symbol": "XOM",
+      "name": "Exxon Mobil",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xff080c8ce2e5feadaca0da81314ae59d232d4afd",
+      "symbol": "MU",
+      "name": "Micron Technology",
+      "decimals": 18
+    },
+    {
+      "chain_id": 8453,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 8453,
+      "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "symbol": "USDC",
+      "name": "USDC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 42161,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 42161,
+      "address": "0x040d1edc9569d4bab2d15287dc5a4f10f56a56b8",
+      "symbol": "BAL",
+      "name": "Balancer",
+      "decimals": 18
+    },
+    {
+      "chain_id": 42161,
+      "address": "0x0a08e175c0350df6119d21e32fe628799f804179",
+      "symbol": "EKUBO",
+      "name": "Ekubo Protocol",
+      "decimals": 18
+    },
+    {
+      "chain_id": 42161,
+      "address": "0x0c880f6761f1af8d9aa9c466984b80dab9a8c9e8",
+      "symbol": "PENDLE",
+      "name": "Pendle",
+      "decimals": 18
+    },
+    {
+      "chain_id": 42161,
+      "address": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "symbol": "WBTC",
+      "name": "Wrapped BTC",
+      "decimals": 8
+    },
+    {
+      "chain_id": 42161,
+      "address": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+      "symbol": "ARB",
+      "name": "Arbitrum",
+      "decimals": 18
+    },
+    {
+      "chain_id": 42161,
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "symbol": "USDC",
+      "name": "USDC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 42161,
+      "address": "0xba5ddd1f9d7f570dc94a51479a000e3bce967196",
+      "symbol": "AAVE",
+      "name": "Aave",
+      "decimals": 18
+    },
+    {
+      "chain_id": 42161,
+      "address": "0xf97f4df75117a78c1a5a0dbb814af92458539fb4",
+      "symbol": "LINK",
+      "name": "ChainLink Token",
+      "decimals": 18
+    },
+    {
+      "chain_id": 42161,
+      "address": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "symbol": "USDT",
+      "name": "Tether USD",
+      "decimals": 6
+    },
+    {
+      "chain_id": 46630,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 46630,
+      "address": "0x1fbe1a0e43594b3455993b5de5fd0a7a266298d0",
+      "symbol": "PLTR",
+      "name": "Palantir",
+      "decimals": 18
+    },
+    {
+      "chain_id": 46630,
+      "address": "0x3b8262a63d25f0477c4dde23f83cfe22cb768c93",
+      "symbol": "NFLX",
+      "name": "Netflix",
+      "decimals": 18
+    },
+    {
+      "chain_id": 46630,
+      "address": "0x570c5aa79c798e7a418412cc8399ae5bcce570c5",
+      "symbol": "STONX",
+      "name": "Ekubo Stock Liquidity Token",
+      "decimals": 18
+    },
+    {
+      "chain_id": 46630,
+      "address": "0x5884ad2f920c162cfbbacc88c9c51aa75ec09e02",
+      "symbol": "AMZN",
+      "name": "Amazon",
+      "decimals": 18
+    },
+    {
+      "chain_id": 46630,
+      "address": "0x71178bac73cbeb415514eb542a8995b82669778d",
+      "symbol": "AMD",
+      "name": "AMD",
+      "decimals": 18
+    },
+    {
+      "chain_id": 46630,
+      "address": "0x9367e29667db75cb91788330a8509b3b4ac66c8f",
+      "symbol": "USDG",
+      "name": "Global Dollar",
+      "decimals": 6
+    },
+    {
+      "chain_id": 46630,
+      "address": "0xc9f9c86933092bbbfff3ccb4b105a4a94bf3bd4e",
+      "symbol": "TSLA",
+      "name": "Tesla",
+      "decimals": 18
+    },
+    {
+      "chain_id": 84532,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 84532,
+      "address": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+      "symbol": "USDC",
+      "name": "USDC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 421614,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 421614,
+      "address": "0x75faf114eafb1bdbe2f0316df893fd58ce46aa4d",
+      "symbol": "USDC",
+      "name": "USDC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 11155111,
+      "address": "0x0000000000000000000000000000000000000000",
+      "symbol": "ETH",
+      "name": "Ether",
+      "decimals": 18
+    },
+    {
+      "chain_id": 11155111,
+      "address": "0x08210f9170f89ab7658f0b5e3ff39b0e03c594d4",
+      "symbol": "EURC",
+      "name": "EURC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 11155111,
+      "address": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
+      "symbol": "USDC",
+      "name": "USDC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 11155111,
+      "address": "0x618c25b11a5e9b5ad60b04bb64fcbdfbad7621d1",
+      "symbol": "EKUBO",
+      "name": "Ekubo Protocol",
+      "decimals": 18
+    },
+    {
+      "chain_id": 11155111,
+      "address": "0xaa8e23fb1079ea71e0a56f48a2aa51851d8433d0",
+      "symbol": "USDT",
+      "name": "USDT",
+      "decimals": 6
+    },
+    {
+      "chain_id": 11155111,
+      "address": "0xca14007eff0db1f8135f4c25b34de49ab0d42766",
+      "symbol": "STRK",
+      "name": "Starknet Token",
+      "decimals": 18
+    }
+  ]
+}

@@ -40,5 +40,26 @@ Or point an MCP client directly at `target/release/ekubo-wallet server`. Regener
 with `cargo run --bin ekubo-wallet -- policy schema > schemas/policy.schema.json`;
 a test fails if it is stale.
 
+## Vendored data
+
+Two data sets are compiled into the binary rather than fetched: the
+clear-signing registry under `crates/ekubo-wallet-core/clearsign/`, and the
+curated default token list at `crates/ekubo-wallet-core/default-tokens.json`.
+Both decide what a reviewer reads before signing, so both are committed and
+reviewable in a diff instead of being downloaded during the build.
+
+Refresh the token list — the only step that reaches the network — with:
+
+```sh
+contrib/vendor-default-tokens.py          # rewrite the vendored snapshot
+contrib/vendor-default-tokens.py --check  # fail if it is stale
+```
+
+It drops logo URLs and interface ranking hints the wallet cannot use, drops
+non-EVM rows, and renames fields to the ones `parse_token_list` already
+accepts, so the embedded list is read by exactly the same parser as a list
+imported by hand. Review the resulting diff: a new row here is a new address
+that a release will display a familiar symbol next to.
+
 Releases are cut by pushing a `v<version>` tag matching `Cargo.toml`. See
 [the release guide](releasing.md).

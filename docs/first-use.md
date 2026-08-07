@@ -61,6 +61,26 @@ authenticated like signing even though it never touches the key. Network,
 address book, and token changes touch neither the key nor the policy and are
 a yes-or-no in the terminal alone.
 
+## Tokens you start with
+
+A new database is seeded once, when it is created, with a curated list of
+around 170 EVM tokens compiled into the binary. That list is what lets an
+approval screen show `USDC` instead of a bare address for the tokens most
+people will actually touch, without anyone having to import a list first.
+
+The list ships inside the executable and is never fetched at runtime. It is
+vendored into the repository by `contrib/vendor-default-tokens.py` and
+reviewed in a diff before release, for the same reason the clear-signing
+registry is: these names are what a reviewer reads when deciding whether to
+sign, so which addresses carry which symbol is decided at review time rather
+than by whatever a URL returned on build day.
+
+Seeding happens only at creation. Nothing re-seeds on later launches, so a
+token you remove stays removed, and the database is yours after the first
+run. Add more at any time with `ekubo-wallet token import`, and confirm what
+an agent suggests with `ekubo-wallet token review` — an agent's suggestion is
+never a name until you accept it.
+
 On Linux, install the polkit action shipped in the archive before signing:
 
 ```sh

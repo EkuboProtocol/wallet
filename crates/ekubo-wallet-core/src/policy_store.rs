@@ -140,6 +140,18 @@ pub struct PolicyStore {
     pub(crate) connection: Connection,
 }
 
+/// Whether creating a schema also installs the compiled-in curated token list.
+///
+/// Only [`PolicyStore::production`] says yes. Every production store opens
+/// through it, so whichever one finds the database missing is the one that
+/// creates *and* seeds it — there is no ordering in which a real installation
+/// ends up with a schema nobody seeded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SeedDefaults {
+    Yes,
+    No,
+}
+
 impl PolicyStore {
     /// Opens the production policy database, creating its credential-store key
     /// only when no database exists. A missing key for an existing database is
@@ -159,7 +171,7 @@ impl PolicyStore {
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
         let path = data_dir.join(DATABASE_FILE);
         let key = load_or_create_database_key(path.exists())?;
-        let result = Self::open(&path, &key);
+        let result = Self::open_with(&path, &key, SeedDefaults::Yes);
         // The work's own error is the one worth reporting. Unlocking after a
         // failure and propagating *that* replaces "the database key is wrong"
         // or "the schema is unrecognized" with "failed to unlock a lock file",
@@ -170,7 +182,21 @@ impl PolicyStore {
         result.and_then(|store| unlocked.map(|()| store))
     }
 
+    /// Opens a database with a bare schema, seeding nothing.
+    ///
+    /// This is the storage primitive. Which tokens a *product* trusts on a new
+    /// installation is not a property of the schema, so it is decided by
+    /// [`Self::production`] instead — otherwise every test that touches storage
+    /// would inherit the curated list and start asserting against its contents.
     pub fn open(path: &Path, key: &DatabaseKey) -> Result<Self> {
+        Self::open_with(path, key, SeedDefaults::No)
+    }
+
+    pub(crate) fn open_with(
+        path: &Path,
+        key: &DatabaseKey,
+        seed_defaults: SeedDefaults,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             create_private_dir(parent)?;
         }
@@ -230,6 +256,13 @@ impl PolicyStore {
                      by ekubo-wallet"
                 );
                 create_current_schema(&connection)?;
+                // The one moment a database is new. Seeding here rather than at
+                // startup is what makes the default list a starting point
+                // instead of a policy: after this, a token the owner removed
+                // stays removed.
+                if seed_defaults == SeedDefaults::Yes {
+                    crate::default_tokens::seed(&connection)?;
+                }
                 SCHEMA_VERSION
             }
             Some(version) => version,
