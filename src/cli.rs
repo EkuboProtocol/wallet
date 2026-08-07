@@ -2000,15 +2000,43 @@ async fn run_transaction(
             Ok(())
         }
         TransactionCommand::Discard { identifier } => {
-            let mut pending = pending;
             let record = pending.get_by_identifier(&identifier)?;
-            let record = pending.discard_unsent(record.request_id)?;
+            let network = config.network_by_chain_id(&record.chain_id)?;
+            // `signed` does not by itself mean "never sent". A submission whose
+            // process died mid-send is recovered by returning the row to
+            // `signed`, and that recovery turns on `transaction_known`, whose
+            // negative answer is not authoritative: a node that has evicted or
+            // never saw the envelope answers exactly as one that was never
+            // offered it, while a peer may still hold it.
+            //
+            // So settle it against the chain first, and then ask the node
+            // directly about the hash. Neither can prove the bytes are
+            // unreachable — nothing can — but both catch the case where the
+            // wallet is about to tell its owner something false.
+            let pending = std::sync::Mutex::new(pending);
+            let record =
+                crate::reconcile::reconcile_record(&pending, &network, record, true).await?;
+            if let Some(hash) = record.signed_transaction_hash.as_deref()
+                && crate::rpc::transaction_known(&network, hash).await?
+            {
+                anyhow::bail!(
+                    "{} is known to the configured node, so it can still mine; cancel it on \
+                     chain with `ekubo-wallet transaction cancel` rather than discarding it \
+                     locally",
+                    record.request_id
+                );
+            }
+            let record = pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                .discard_unsent(record.request_id)?;
             if mode.effective() == OutputMode::Json {
                 return print_json(&record);
             }
             println!(
-                "Discarded {}: the signed bytes were never broadcast, so nothing can mine and \
-                 the wallet's in-flight slot is free again.",
+                "Discarded {}: the wallet has stopped tracking it and its in-flight slot is \
+                 free again. Nothing was found on chain or in the configured node's mempool, \
+                 but a signed envelope that did reach the network can still mine at its nonce.",
                 record.request_id
             );
             Ok(())

@@ -292,10 +292,20 @@ impl PendingStore {
             .transpose()
     }
 
-    /// Discard a signed envelope that was never submitted: the bytes exist
-    /// nowhere but this database, so marking the record cancelled is honest
-    /// and frees the wallet+chain in-flight slot. Anything that may have
-    /// reached the network is refused — cancel that on chain instead.
+    /// Discard a signed envelope, freeing the wallet+chain in-flight slot.
+    ///
+    /// `signed` usually means the bytes exist nowhere but this database, and
+    /// then marking the record cancelled is simply honest. It does not always
+    /// mean that: recovering a submission whose process died mid-send returns
+    /// the row here, and that recovery rests on `transaction_known` answering
+    /// no — which a node that evicted the envelope, or never saw it, says
+    /// exactly as one that was never offered it.
+    ///
+    /// The status alone therefore cannot carry the claim, and this method does
+    /// not make it. Callers settle the record against the chain and ask the
+    /// node about the hash before reaching here, and say only what those
+    /// answers support. Anything still in a submitted state is refused
+    /// outright — cancel that on chain instead.
     pub fn discard_unsent(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2
