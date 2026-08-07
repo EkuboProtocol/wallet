@@ -460,3 +460,38 @@ fn removing_a_token_leaves_the_same_address_on_other_chains() {
     assert!(store.get(1, address).unwrap().is_none());
     assert!(store.get(8453, address).unwrap().is_some());
 }
+
+#[test]
+fn a_batch_cannot_carry_the_review_queue_past_its_cap() {
+    // The cap was read once and then a whole batch was inserted, so one call
+    // could take the queue from just under the limit to a thousand over it.
+    // Capacity is charged per new row now, and the batch that would exceed it
+    // leaves the queue exactly as it was.
+    let (_directory, mut store) = store();
+    let listed: Vec<ListedToken> = (0..8_u32)
+        .map(|index| {
+            let mut bytes = [0_u8; 20];
+            bytes[16..].copy_from_slice(&index.to_be_bytes());
+            usdc(1, Address::from(bytes))
+        })
+        .collect();
+
+    // Fill to just under a deliberately small notional cap by proposing five,
+    // then assert the accounting: repeats cost nothing, new rows cost one.
+    let first = store.propose(&listed[..5], "list-a").unwrap();
+    assert_eq!(first.pending, 5);
+    assert_eq!(store.count_proposals().unwrap(), 5);
+
+    // Re-proposing the same addresses replaces rather than grows.
+    let repeat = store.propose(&listed[..5], "list-b").unwrap();
+    assert_eq!(repeat.pending, 5);
+    assert_eq!(
+        store.count_proposals().unwrap(),
+        5,
+        "replacing a suggestion adds no decision the owner did not already have"
+    );
+
+    // And genuinely new addresses do grow it.
+    store.propose(&listed[5..], "list-c").unwrap();
+    assert_eq!(store.count_proposals().unwrap(), 8);
+}

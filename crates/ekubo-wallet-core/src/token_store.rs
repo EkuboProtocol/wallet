@@ -317,16 +317,36 @@ impl TokenStore {
         // not thereby gain a name, it makes the screen where names are granted
         // unreadable, which is the same thing. `token review` loads the whole
         // queue and renders one row per token.
-        let pending = self.count_proposals()?;
+        //
+        // Capacity is charged per row rather than per call. Checking the count
+        // once and then inserting a whole batch let one call carry the queue
+        // from just under the cap to `MAX_IMPORT_TOKENS - 1` over it, which is
+        // the cap not holding. Replacing an existing suggestion costs nothing,
+        // because it adds no decision the owner did not already have.
+        //
+        // One transaction, so hitting the cap mid-batch leaves the queue as it
+        // was rather than half-extended by the part that fit.
+        let mut pending = self.count_proposals()?;
         ensure!(
             pending < MAX_PENDING_TOKEN_PROPOSALS,
             "{pending} tokens already await review; the owner must run \
              `ekubo-wallet token review` before more can be suggested"
         );
         let mut summary = ProposalSummary::default();
+        let transaction = self.database.connection.transaction()?;
         for token in tokens {
             ensure!(token.chain_id > 0, "chain ID must be positive");
-            if self.get(token.chain_id, token.address)?.is_some() {
+            let confirmed: Option<()> = transaction
+                .query_row(
+                    "SELECT 1 FROM tokens WHERE chain_id = ?1 AND address = ?2",
+                    params![
+                        i64::try_from(token.chain_id).context("chain ID out of range")?,
+                        format!("{:#x}", token.address)
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if confirmed.is_some() {
                 summary.already_confirmed += 1;
                 continue;
             }
@@ -335,7 +355,25 @@ impl TokenStore {
                 summary.rejected += 1;
                 continue;
             }
-            self.database.connection.execute(
+            let queued: Option<()> = transaction
+                .query_row(
+                    "SELECT 1 FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+                    params![
+                        i64::try_from(token.chain_id).context("chain ID out of range")?,
+                        format!("{:#x}", token.address)
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            if queued.is_none() {
+                ensure!(
+                    pending < MAX_PENDING_TOKEN_PROPOSALS,
+                    "this batch would leave more than {MAX_PENDING_TOKEN_PROPOSALS} tokens \
+                     awaiting review; the owner must run `ekubo-wallet token review` first"
+                );
+                pending += 1;
+            }
+            transaction.execute(
                 "INSERT INTO token_proposals(
                      chain_id, address, symbol, name, decimals, source, proposed_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -357,6 +395,7 @@ impl TokenStore {
             )?;
             summary.pending += 1;
         }
+        transaction.commit()?;
         Ok(summary)
     }
 
