@@ -87,6 +87,18 @@ it is not a control against in-process execution.
    atomically verifies that revision — the store's final write is one SQLCipher
    transaction that re-reads revision and status before the signed bytes can
    enter the submission queue.
+
+   Policy governs signing, and the submission claim is where that authority
+   stops. `claim_for_submission` re-checks the revision and takes the lease in
+   one transaction, so a policy replacement either commits first — cancelling
+   the `signed` row, which then fails the claim — or commits after, and finds
+   a `submitting` row it deliberately does not touch. That is not a gap being
+   left open. The bytes are signed and durably stored by then, the holder may
+   already have handed them to an RPC, and a row cancelled underneath a live
+   submitter produces a broadcast reported as failed for a transaction that
+   succeeded, which invites a replacement for something that already executed.
+   Revoking a policy cannot unsign what is signed; the remedy for an envelope
+   already on its way is on-chain cancellation.
    The one exception to "only policy-checked plans reach signing" is
    owner-requested cancellation (`wallet_attempt_cancel`): it consults no
    policy because its envelope shape is fixed and derived entirely from the
