@@ -304,14 +304,57 @@ jobs:
             cp -R "unsigned/$target/completions" "dist/$package/completions"
             cp -R "unsigned/$target/examples" "unsigned/$target/schemas" "dist/$package/"
             ditto -c -k --sequesterRsrc --keepParent "dist/$package" "dist/$package.zip"
-            if [ "$SIGNED" = "true" ]; then
-              xcrun notarytool submit "dist/$package.zip" \
+          done
+
+          if [ "$SIGNED" = "true" ]; then
+            # Submit both archives before waiting on either. Notarization is
+            # queue time, not work this runner does, so two `submit --wait`
+            # calls in a row cost the sum of two queues. The first submission
+            # from this team took 3h45m; twice that exceeds the six-hour job
+            # limit and GitHub would cancel the release mid-notarization, with
+            # the tag already spent. Overlapping them costs the slower one.
+            submission_ids=""
+            for target in x86_64-apple-darwin aarch64-apple-darwin; do
+              package="ekubo-wallet-$VERSION-$target"
+              id="$(xcrun notarytool submit "dist/$package.zip" \
                 --key "$api_key_path" \
                 --key-id "$APPLE_NOTARY_KEY_ID" \
                 --issuer "$APPLE_NOTARY_ISSUER_ID" \
-                --wait
-            fi
-          done
+                --no-wait 2>&1 | sed -n 's/^ *id: *//p' | head -1)"
+              case "$id" in
+                ????????-????-????-????-????????????) ;;
+                *)
+                  echo "::error::Could not read a submission id back for $package."
+                  exit 1 ;;
+              esac
+              echo "submitted $package as $id"
+              submission_ids="$submission_ids $id"
+            done
+
+            # --timeout fails this step cleanly while the job still has room,
+            # rather than letting GitHub's own cancellation truncate it.
+            for id in $submission_ids; do
+              xcrun notarytool wait "$id" \
+                --key "$api_key_path" \
+                --key-id "$APPLE_NOTARY_KEY_ID" \
+                --issuer "$APPLE_NOTARY_ISSUER_ID" \
+                --timeout 4h
+              status="$(xcrun notarytool info "$id" \
+                --key "$api_key_path" \
+                --key-id "$APPLE_NOTARY_KEY_ID" \
+                --issuer "$APPLE_NOTARY_ISSUER_ID" 2>&1 |
+                sed -n 's/^ *status: *//p')"
+              if [ "$status" != "Accepted" ]; then
+                echo "::error::Notarization $id finished as ${status:-unknown}."
+                xcrun notarytool log "$id" \
+                  --key "$api_key_path" \
+                  --key-id "$APPLE_NOTARY_KEY_ID" \
+                  --issuer "$APPLE_NOTARY_ISSUER_ID" || true
+                exit 1
+              fi
+              echo "notarization $id accepted"
+            done
+          fi
 
       - name: Upload macOS archives
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

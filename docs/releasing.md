@@ -293,20 +293,36 @@ The Apple Developer Program organization enrollment for Ekubo, Inc. was approved
 on 2026-08-06. Team ID `25NDUU3KKC`, so `APPLE_CODESIGN_IDENTITY` is
 `Developer ID Application: Ekubo, Inc. (25NDUU3KKC)`.
 
-The Developer ID Application certificate exists and its private key is paired
-and usable: with the G2 intermediate installed, a hardened-runtime test signature
-verified against the full `leaf → Developer ID Certification Authority → Apple
-Root CA` chain. `~/DeveloperID.p12` is exported and holds the expected single
-certificate. What remains is the App Store Connect team key and setting all six
-`release` environment secrets. Until then releases publish unsigned macOS
-archives and say so in their notes, which is the correct state.
+All six `release` environment secrets are set, and the whole path is proven:
+`contrib/rehearse-macos-signing.sh` signed a real build against the imported
+`.p12`, resolved `leaf → Developer ID Certification Authority → Apple Root CA`
+inside a keychain holding nothing but the identity and the vendored
+intermediate, and the Notary service returned **Accepted**, "Ready for
+distribution", `issues: null`, for submission
+`a13d64ba-1c02-4ce3-8b91-5b005d163968` on 2026-08-07.
 
-One local caveat that does not affect CI: `codesign --timestamp` stalls
-indefinitely on the maintainer's machine even though Apple's timestamp service
-answers a direct request in under 100ms over both IPv4 and IPv6, and signing
-without `--timestamp` succeeds instantly. GitHub's runners timestamp normally.
-Drop `--timestamp` for a local smoke test, but never for a real signature: the
-Notary service rejects a signature without a secure timestamp.
+#### Notarization is slow enough to shape the workflow
+
+That first submission took **3 hours 45 minutes** (02:12Z to 05:57Z) for an
+8.6 MB archive. Apple's usual figure is minutes, and a new team's first
+submission is widely reported to attract extra review, so this is probably not
+the steady state — but it is the only measurement that exists for this team.
+
+It is why the release job submits both macOS archives and only then waits on
+both. Notarization is queue time rather than work the runner performs, so two
+`submit --wait` calls in sequence cost the sum of two queues: at this rate
+roughly 7.5 hours, against a **six-hour hard limit** after which GitHub cancels
+the job. That failure would arrive with the tag already spent and unusable,
+since tags cannot be reused. Overlapping the submissions costs the slower of
+the two instead, and `--timeout 4h` fails the step cleanly while the job still
+has room rather than letting the platform truncate it.
+
+Budget hours, not minutes, for the first signed release, and do not read a long
+wait as a hang.
+
+A stalled `codesign --timestamp` on the maintainer's machine turned out to be
+transient; it later completed in 8 seconds. Never drop `--timestamp` for a real
+signature — the Notary service rejects a signature without a secure timestamp.
 
 ### Microsoft Azure Artifact Signing
 
