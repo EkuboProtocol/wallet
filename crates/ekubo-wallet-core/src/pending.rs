@@ -666,13 +666,36 @@ impl PendingStore {
     /// that did mine. So `replaced` is reachable in error, and `finalize` and
     /// `mark_cancelled` both accept it as an origin: a receipt that turns up
     /// later corrects the verdict rather than being ignored by it.
-    pub fn mark_replaced(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
+    /// Retire the envelope the caller observed at `observed_at`.
+    ///
+    /// Leased for the same reason as `release_submission` and `mark_broadcast`:
+    /// a replacement verdict is reached from a snapshot read outside the lock,
+    /// against a node that answered about the state of the chain some moments
+    /// ago. Without the guard that verdict applied to whatever the row held by
+    /// the time it landed — including a submission lease taken since, whose
+    /// holder is at that moment putting the envelope on the wire. Retiring
+    /// that row frees the wallet's in-flight slot for a transaction that is
+    /// about to exist.
+    pub fn mark_replaced(
+        &mut self,
+        request_id: Uuid,
+        observed_at: DateTime<Utc>,
+    ) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = 'replaced', updated_at = ?2
-             WHERE request_id = ?1 AND status IN ('submitting', 'broadcast', 'cancelling')",
-            params![request_id.to_string(), Utc::now().to_rfc3339()],
+             WHERE request_id = ?1 AND status IN ('submitting', 'broadcast', 'cancelling')
+               AND updated_at = ?3",
+            params![
+                request_id.to_string(),
+                Utc::now().to_rfc3339(),
+                observed_at.to_rfc3339()
+            ],
         )?;
-        ensure!(changed == 1, "pending transaction is not in flight");
+        ensure!(
+            changed == 1,
+            "pending transaction is not in flight, or it moved after the observation that \
+             judged it replaced"
+        );
         self.get(request_id)
     }
 

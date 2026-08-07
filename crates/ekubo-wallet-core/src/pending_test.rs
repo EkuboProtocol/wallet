@@ -344,19 +344,36 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
 
     // Not yet in flight: a signed-but-never-submitted envelope cannot have
     // been replaced on chain.
-    assert!(store.mark_replaced(first.request_id).is_err());
+    assert!(
+        store
+            .mark_replaced(first.request_id, first.updated_at)
+            .is_err()
+    );
 
     let leased = store.claim_for_submission(first.request_id).unwrap();
-    store
+    let broadcast = store
         .mark_broadcast(first.request_id, first_hash, leased.updated_at)
         .unwrap();
-    let replaced = store.mark_replaced(first.request_id).unwrap();
+    // A verdict reached from a snapshot older than the row does not apply.
+    assert!(
+        store
+            .mark_replaced(first.request_id, leased.updated_at)
+            .is_err(),
+        "a stale observation must not retire a row that has moved since"
+    );
+    let replaced = store
+        .mark_replaced(first.request_id, broadcast.updated_at)
+        .unwrap();
     assert_eq!(replaced.status, PendingStatus::Replaced);
 
     // No rebroadcast and no second replacement: this envelope is done
     // being sent, and the verdict is not something to re-derive.
     assert!(store.claim_broadcast_retry(first.request_id).is_err());
-    assert!(store.mark_replaced(first.request_id).is_err());
+    assert!(
+        store
+            .mark_replaced(first.request_id, replaced.updated_at)
+            .is_err()
+    );
 
     // But a receipt still settles it. `replaced` is inferred from a
     // consumed nonce and a missing receipt, which is also what a node
@@ -599,7 +616,10 @@ fn foreign_replacement_can_win_the_race_against_a_cancellation() {
         )
         .unwrap();
     assert_eq!(
-        store.mark_replaced(request_id).unwrap().status,
+        store
+            .mark_replaced(request_id, store.get(request_id).unwrap().updated_at)
+            .unwrap()
+            .status,
         PendingStatus::Replaced
     );
 }

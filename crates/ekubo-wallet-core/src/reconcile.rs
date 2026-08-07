@@ -125,6 +125,20 @@ pub async fn reconcile_record(
         .context("submitted transaction is missing its hash")?;
     match observe(network, &record, &transaction_hash).await? {
         ChainObservation::Mined(receipt) => {
+            // The same rule the two branches below apply: a lease still inside
+            // its window belongs to whoever holds it. Taking the transition
+            // here made the holder's own `mark_broadcast` fail — after the RPC
+            // had already accepted the envelope — and a broadcast reported as
+            // failed invites a replacement for something that just executed.
+            //
+            // Nothing is lost by waiting. The receipt does not expire, the
+            // holder is about to record the broadcast it performed, and the
+            // next pass finalizes from there.
+            if record.status == PendingStatus::Submitting
+                && !(recover_stale_submission && submission_lease_expired(&record))
+            {
+                return Ok(record);
+            }
             let mut pending = lock(pending)?;
             if record.status == PendingStatus::Submitting {
                 record = pending.mark_broadcast(
@@ -149,7 +163,7 @@ pub async fn reconcile_record(
             {
                 return Ok(record);
             }
-            lock(pending)?.mark_replaced(record.request_id)
+            lock(pending)?.mark_replaced(record.request_id, record.updated_at)
         }
         ChainObservation::StillPending => {
             if record.status == PendingStatus::Submitting
@@ -280,7 +294,7 @@ async fn reconcile_cancelling(
             Some(&receipt.mined_fee()),
         );
     }
-    lock(pending)?.mark_replaced(record.request_id)
+    lock(pending)?.mark_replaced(record.request_id, record.updated_at)
 }
 
 /// Broadcast a claimed submission's exact persisted bytes and persist what
