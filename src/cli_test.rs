@@ -682,3 +682,121 @@ fn every_agent_has_a_distinct_key_and_label() {
     assert!(AgentName::Cursor.binary().is_none());
     assert!(AgentName::Codex.binary().is_some());
 }
+
+/// Every spelling a user can type at one level of the command tree, labelled
+/// by the command it reaches.
+///
+/// `get_all_aliases` rather than `get_visible_aliases`: an alias declared with
+/// `alias =` is hidden from `--help` and still typed, still offered by the
+/// hand-written completion scripts, and so still a candidate at the prompt.
+/// Hiding it from the help text is what let these accumulate unnoticed.
+fn spellings(command: &clap::Command) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+        out.push((sub.get_name().to_owned(), sub.get_name().to_owned()));
+        for alias in sub.get_all_aliases() {
+            out.push((alias.to_owned(), sub.get_name().to_owned()));
+        }
+    }
+    out
+}
+
+fn value_spellings(command: &clap::Command) -> Vec<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for argument in command.get_arguments() {
+        let values = argument.get_possible_values();
+        if values.len() < 2 {
+            continue;
+        }
+        out.push(
+            values
+                .iter()
+                .filter(|value| !value.is_hide_set())
+                .flat_map(|value| {
+                    let canonical = value.get_name().to_owned();
+                    value
+                        .get_name_and_aliases()
+                        .map(|spelling| (spelling.to_owned(), canonical.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+        );
+    }
+    out
+}
+
+/// Every command in the tree, the root included: one level of completion
+/// candidates each.
+fn every_command(command: &clap::Command, into: &mut Vec<clap::Command>) {
+    into.push(command.clone());
+    for sub in command.get_subcommands() {
+        every_command(sub, into);
+    }
+}
+
+#[test]
+fn no_spelling_is_a_prefix_of_a_sibling() {
+    // Tab completion stalls exactly when one whole word is the beginning of
+    // another: typing all of `net` still left `network` as a second
+    // candidate, so the shell completed nothing and the short spelling had
+    // bought a keystroke and cost a decision. Short aliases were where this
+    // crept in — `acct` beside `account`, `bal` beside `balance`, `claude`
+    // beside `claude-code` — and the rule is checked over the whole tree so
+    // the next one does not.
+    let mut commands = Vec::new();
+    every_command(&Cli::command(), &mut commands);
+    let mut levels = Vec::new();
+    for command in &commands {
+        levels.push(spellings(command));
+        levels.extend(value_spellings(command));
+    }
+
+    // An alias competes with the name it stands for, so the comparison is
+    // between spellings and never between the commands behind them: `net`
+    // and `network` are one command and still two candidates at the prompt.
+    for level in levels {
+        for (spelling, owner) in &level {
+            for (other, other_owner) in &level {
+                assert!(
+                    spelling == other || !other.starts_with(spelling.as_str()),
+                    "`{spelling}` ({owner}) is a prefix of `{other}` ({other_owner}), \
+                     so completing it can never decide between them"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn two_characters_pick_out_any_alias() {
+    // An alias earns its place by being faster to reach than the name it
+    // stands for, which means its first one or two characters have to decide
+    // it against every other spelling at that level — the sibling commands,
+    // and the long name it abbreviates. `acct` failed on the last of those:
+    // it saved three characters over `account` and cost two, because `ac` and
+    // `acc` now completed to nothing.
+    let mut commands = Vec::new();
+    every_command(&Cli::command(), &mut commands);
+    let mut aliases = Vec::new();
+    for command in &commands {
+        let level = spellings(command);
+        for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            for alias in sub.get_all_aliases() {
+                aliases.push((alias.to_owned(), sub.get_name().to_owned(), level.clone()));
+            }
+        }
+    }
+
+    for (alias, owner, level) in aliases {
+        let prefix: String = alias.chars().take(2).collect();
+        let rivals: Vec<&str> = level
+            .iter()
+            .map(|(spelling, _)| spelling.as_str())
+            .filter(|spelling| *spelling != alias && spelling.starts_with(&prefix))
+            .collect();
+        assert!(
+            rivals.is_empty(),
+            "`{prefix}` does not reach the `{alias}` alias of `{owner}`: {rivals:?} share it"
+        );
+    }
+}

@@ -82,17 +82,15 @@ enum Command {
     /// The one command here that talks to a chain. Balances come from the
     /// endpoint configured for the network, read at a single pinned block so
     /// the whole answer is one consistent view rather than a sequence of them.
-    #[command(alias = "balance", alias = "bal")]
+    #[command(alias = "balance")]
     Portfolio(PortfolioArgs),
     /// Keys this wallet holds, and the addresses they control.
     ///
     /// Named `account` rather than `wallet` because the program is already
     /// called that: `ekubo-wallet wallet create` said it twice and the second
     /// one carried nothing.
-    #[command(alias = "acct")]
     Account(AccountArgs),
     /// Configured EVM networks and the endpoints they are reached through.
-    #[command(alias = "net")]
     Network(Box<NetworkArgs>),
     /// What each account may sign without being asked.
     Policy(PolicyArgs),
@@ -330,9 +328,9 @@ enum AgentCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum AgentName {
     Codex,
-    #[value(name = "claude-code", alias = "claude")]
+    #[value(name = "claude-code")]
     ClaudeCode,
-    #[value(name = "gemini-cli", alias = "gemini")]
+    #[value(name = "gemini-cli")]
     Gemini,
     Cursor,
 }
