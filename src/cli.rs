@@ -87,9 +87,9 @@ enum Command {
     /// Keys this wallet holds, and the addresses they control.
     ///
     /// Named `account` rather than `wallet` because the program is already
-    /// called that: `ekubo-wallet wallet create` says it twice and the second
-    /// one carries nothing. `wallet` still works as an alias.
-    #[command(alias = "wallet", alias = "acct")]
+    /// called that: `ekubo-wallet wallet create` said it twice and the second
+    /// one carried nothing.
+    #[command(alias = "acct")]
     Account(AccountArgs),
     /// Configured EVM networks and the endpoints they are reached through.
     #[command(alias = "net")]
@@ -126,9 +126,6 @@ enum Command {
     /// Print dynamic completion candidates.
     #[command(name = "__complete", hide = true)]
     Complete { value_kind: String },
-    /// Configure a supported agent integration.
-    #[command(name = "__configure-agent", hide = true)]
-    ConfigureAgent(ConfigureAgentArgs),
 }
 
 #[derive(Debug, Args)]
@@ -331,22 +328,6 @@ impl AgentName {
             Self::Cursor => None,
         }
     }
-}
-
-#[derive(Debug, Args)]
-struct ConfigureAgentArgs {
-    #[command(subcommand)]
-    command: ConfigureAgentCommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum ConfigureAgentCommand {
-    /// Add this server to ~/.cursor/mcp.json without replacing other entries.
-    Cursor {
-        server_command: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        server_args: Vec<String>,
-    },
 }
 
 #[derive(Debug, Args)]
@@ -557,7 +538,7 @@ enum TransactionCommand {
     /// `--limit`, then read one row with `transaction show`.
     List {
         /// Only rows for this account.
-        #[arg(long, alias = "wallet")]
+        #[arg(long)]
         account: Option<String>,
         #[arg(long, default_value_t = 100)]
         limit: u16,
@@ -605,7 +586,6 @@ impl Cli {
             } => run_review(&config, request_id, decision, mode).await,
             Command::Completion { shell } => print_completion_script(shell),
             Command::Complete { value_kind } => print_completion_values(&config, &value_kind),
-            Command::ConfigureAgent(args) => run_configure_agent(args.command),
         }
     }
 }
@@ -4711,21 +4691,6 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
                     Ok(lines.join("\n"))
                 },
             )
-        }
-    }
-}
-
-fn run_configure_agent(command: ConfigureAgentCommand) -> Result<()> {
-    match command {
-        ConfigureAgentCommand::Cursor {
-            server_command,
-            server_args,
-        } => {
-            let file = configure_cursor_mcp(&server_command, &server_args)?;
-            print_json(&serde_json::json!({
-                "configured": "cursor",
-                "file": file,
-            }))
         }
     }
 }

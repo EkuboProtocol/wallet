@@ -13,11 +13,11 @@ _ekubo_wallet() {
 
   case "$COMP_CWORD" in
     1)
-      choices="server version status portfolio balance bal account acct wallet network net policy transaction tx token address-book agent legal review completion --data-dir --json --help --version"
+      choices="server version status portfolio balance bal account acct network net policy transaction tx token address-book agent legal review completion --data-dir --json --help --version"
       ;;
     2)
       case "$first" in
-        account|acct|wallet) choices="list create import export remove" ;;
+        account|acct) choices="list create import export remove" ;;
         portfolio|balance|bal) choices="$(ekubo-wallet __complete wallets 2>/dev/null)" ;;
         network|net) choices="list presets reset add edit remove delete review" ;;
         policy) choices="show set allow-all require-approval validate schema review" ;;
@@ -36,7 +36,7 @@ _ekubo_wallet() {
           COMPREPLY=( $(compgen -f -- "$current") )
           return
           ;;
-        account:export|account:remove|acct:export|acct:remove|wallet:export|wallet:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:show|tx:show)
+        account:export|account:remove|acct:export|acct:remove|policy:show|policy:set|policy:allow-all|policy:require-approval|policy:review|transaction:show|tx:show)
           choices="$(ekubo-wallet __complete wallets 2>/dev/null)"
           ;;
         network:add)

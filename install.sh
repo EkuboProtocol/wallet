@@ -15,7 +15,6 @@ set -eu
 REPOSITORY=${EKUBO_WALLET_REPOSITORY:-EkuboProtocol/wallet-mcp-server}
 VERSION=${EKUBO_WALLET_VERSION:-latest}
 LOCAL_SOURCE=${EKUBO_WALLET_LOCAL_SOURCE:-}
-SERVER_NAME=ekubo-wallet
 : "${HOME:?HOME is required}"
 
 log() {
@@ -269,55 +268,16 @@ esac
 # Agent registration
 # ---------------------------------------------------------------------------
 
-# Detection and use must name the same file. `command -v` resolves through
-# PATH, and resolving a second time to run what was found leaves a window in
-# which the answer can change — and makes the check evidence about one file
-# while the work happens on another. Each agent's path is resolved once here
-# and every later reference goes through the captured value.
-CODEX_BIN=$(command -v codex 2>/dev/null || :)
-CLAUDE_BIN=$(command -v claude 2>/dev/null || :)
-GEMINI_BIN=$(command -v gemini 2>/dev/null || :)
-CURSOR_BIN=$(command -v cursor 2>/dev/null || command -v cursor-agent 2>/dev/null || :)
-
-register_codex() {
-  "$CODEX_BIN" mcp remove "$SERVER_NAME" >/dev/null 2>&1 || :
-  "$CODEX_BIN" mcp add "$SERVER_NAME" -- "$CLI_BIN" server
-}
-
-register_claude() {
-  "$CLAUDE_BIN" mcp remove "$SERVER_NAME" --scope user >/dev/null 2>&1 || :
-  "$CLAUDE_BIN" mcp add "$SERVER_NAME" --scope user -- "$CLI_BIN" server
-}
-
-register_gemini() {
-  "$GEMINI_BIN" mcp remove "$SERVER_NAME" --scope user >/dev/null 2>&1 || :
-  "$GEMINI_BIN" mcp add "$SERVER_NAME" "$CLI_BIN" server --scope user
-}
-
-register_cursor() {
-  "$CLI_BIN" __configure-agent cursor "$CLI_BIN" server
-}
-
+# Agent registration lives in the binary, not here. It has to exist there
+# anyway — someone who moves the executable needs a way to re-point their
+# agents at it, and this script is not around for that — and a second copy of
+# the argument order each agent's `mcp add` expects is a second copy to get
+# wrong. `agent add` with no agent named configures whatever it detects,
+# reports what it did, and is safe to re-run.
 if [ "${EKUBO_WALLET_SKIP_AGENTS:-0}" != "1" ]; then
-  AGENT_COUNT=0
-  if [ -n "$CODEX_BIN" ]; then
-    AGENT_COUNT=$((AGENT_COUNT + 1))
-    if register_codex >/dev/null; then log "configured Codex"; else warn "could not configure Codex"; fi
-  fi
-  if [ -n "$CLAUDE_BIN" ]; then
-    AGENT_COUNT=$((AGENT_COUNT + 1))
-    if register_claude >/dev/null; then log "configured Claude Code at user scope"; else warn "could not configure Claude Code"; fi
-  fi
-  if [ -n "$GEMINI_BIN" ]; then
-    AGENT_COUNT=$((AGENT_COUNT + 1))
-    if register_gemini >/dev/null; then log "configured Gemini CLI at user scope"; else warn "could not configure Gemini CLI"; fi
-  fi
-  if [ -n "$CURSOR_BIN" ] || [ -d "$HOME/.cursor" ]; then
-    AGENT_COUNT=$((AGENT_COUNT + 1))
-    if register_cursor >/dev/null; then log "configured Cursor globally"; else warn "could not configure Cursor"; fi
-  fi
-  if [ "$AGENT_COUNT" -eq 0 ]; then
-    warn "no supported agent CLI or Cursor installation was detected; the binary and completion are still installed"
+  if ! "$CLI_BIN" agent add; then
+    warn "no agent was configured; the binary and completion are still installed"
+    warn "run '$CLI_BIN agent list' to see what was detected"
   fi
 fi
 

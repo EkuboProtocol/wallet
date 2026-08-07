@@ -17,7 +17,6 @@ complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a balance -d 'Alias fo
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a bal -d 'Alias for portfolio'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a account -d 'Create, import, inspect, export, or remove accounts'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a acct -d 'Create, import, inspect, export, or remove accounts'
-complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a wallet -d 'Alias for account'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a network -d 'Inspect, add, edit, reset, or remove networks'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a net -d 'Alias for network'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -a policy -d 'Set or inspect wallet policies'
@@ -34,7 +33,7 @@ complete -c ekubo-wallet -l json -d 'Print machine-readable JSON instead of the 
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l help -d 'Show command help'
 complete -c ekubo-wallet -n __ekubo_wallet_needs_command -l version -d 'Print version information'
 
-complete -c ekubo-wallet -n '__fish_seen_subcommand_from account acct wallet; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
+complete -c ekubo-wallet -n '__fish_seen_subcommand_from account acct; and not __fish_seen_subcommand_from list create import export remove' -a 'list create import export remove'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from network net; and not __fish_seen_subcommand_from list presets reset add edit remove delete review' -a 'list presets reset add edit remove delete review'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from show set allow-all require-approval validate schema review' -a 'show set allow-all require-approval validate schema review'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from transaction tx; and not __fish_seen_subcommand_from list show cancel rebroadcast discard' -a 'list show cancel rebroadcast discard'
@@ -46,7 +45,7 @@ complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subco
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from address-book; and __fish_seen_subcommand_from add' -l note -r -d 'Attach a short note to the alias'
 complete -c ekubo-wallet -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish elvish powershell' -a 'bash zsh fish elvish powershell'
 
-complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from export remove; and __fish_seen_subcommand_from account acct wallet' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
+complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from export remove; and __fish_seen_subcommand_from account acct' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from add; and __fish_seen_subcommand_from network net' -a '(ekubo-wallet __complete defaults-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from edit remove delete; and __fish_seen_subcommand_from network net' -a '(ekubo-wallet __complete networks-fish 2>/dev/null)'
 complete -c ekubo-wallet -n '__ekubo_wallet_at_position 3; and __fish_seen_subcommand_from show set allow-all require-approval review; and __fish_seen_subcommand_from policy' -a '(ekubo-wallet __complete wallets-fish 2>/dev/null)'
