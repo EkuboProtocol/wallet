@@ -1831,7 +1831,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_address_book",
-        description = "Look up user-configured aliases for addresses on particular chains. A policy may refer to these entries through the is_address_book predicate, so an alias can decide whether a call signs automatically; adding, changing, or removing entries is a separate human CLI operation the user confirms in their own terminal, and nothing reachable from here can write one. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
+        description = "Look up user-configured aliases for addresses on particular chains. These name an address for a human reading a transaction and decide nothing: no policy can refer to them, so an alias never widens what signs automatically. A policy that means to permit an address names it in the policy. Adding, changing, or removing entries is a separate human CLI operation the user confirms in their own terminal, and nothing reachable from here can write one. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_address_book(

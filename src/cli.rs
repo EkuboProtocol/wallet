@@ -2648,12 +2648,19 @@ async fn run_approve(
     }
 }
 
-/// The terminal implementation of the review seam: print the JSON record to
-/// the transcript, then draw the orchestrator-authored document in the same
-/// full-screen scrollable review the signing requests use — Approve stays
-/// unreachable until the end of the document has been on screen. `no_confirm`
-/// skips only the review — owner authentication still follows in the
-/// orchestrator.
+/// The terminal implementation of the review seam: draw the
+/// orchestrator-authored document in the same full-screen scrollable review
+/// the signing requests use — Approve stays unreachable until the end of the
+/// document has been on screen. `no_confirm` skips only the review — owner
+/// authentication still follows in the orchestrator.
+///
+/// Nothing is printed before that screen opens. This used to dump the approval
+/// and its simulation as JSON first, which restated what the document already
+/// renders and scrolled the terminal immediately before a full-screen surface
+/// covered it, so the dump was never read where it was written and survived
+/// only as scrollback the reviewer paged past once the screen was released.
+/// The typed-data and message paths still print their transcripts: those
+/// review the payload itself, which has no document of its own.
 struct CliTransactionPresenter {
     no_confirm: bool,
 }
@@ -2663,9 +2670,8 @@ impl crate::approval::ReviewPresenter for CliTransactionPresenter {
     async fn review_transaction(
         &self,
         request: &ApprovalRequest,
-        simulation: &SimulationResult,
+        _simulation: &SimulationResult,
     ) -> Result<ApprovalDecision> {
-        print_approval_review(request, simulation)?;
         if self.no_confirm {
             return Ok(ApprovalDecision::Approved);
         }
@@ -3055,13 +3061,6 @@ fn print_review_transcript(value: &serde_json::Value) -> Result<()> {
     stderr.write_all(b"\n")?;
     stderr.flush()?;
     Ok(())
-}
-
-fn print_approval_review(approval: &ApprovalRequest, simulation: &SimulationResult) -> Result<()> {
-    print_review_transcript(&serde_json::json!({
-        "approval": approval,
-        "simulation": simulation,
-    }))
 }
 
 async fn replace_policy(
