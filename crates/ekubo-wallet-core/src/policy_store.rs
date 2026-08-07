@@ -587,13 +587,29 @@ impl PolicyStore {
             .collect()
     }
 
-    /// Remove the wallet's pending proposal, if any. Returns whether one
-    /// existed.
-    pub fn delete_proposal(&mut self, wallet_id: &str) -> Result<bool> {
-        validate_wallet_id(wallet_id)?;
+    /// Discard exactly `proposal`, if it is still the pending one. Returns
+    /// whether it was.
+    ///
+    /// Identified the same way `consume_proposal` identifies its row, and for
+    /// the same reason. The caller that discards a proposal has read it and
+    /// the active policy separately and found them inconsistent; a newer
+    /// proposal written in between may reference the current revision and be
+    /// perfectly applicable. Deleting by wallet ID threw that one away while
+    /// telling the owner a stale proposal had been cleaned up.
+    pub fn delete_proposal(&mut self, proposal: &PolicyProposal) -> Result<bool> {
+        validate_wallet_id(&proposal.wallet_id)?;
+        let policy_json = serde_json::to_string(&proposal.policy)?;
         let changed = self.connection.execute(
-            "DELETE FROM policy_proposals WHERE wallet_id = ?1",
-            [wallet_id],
+            "DELETE FROM policy_proposals
+             WHERE wallet_id = ?1 AND created_at = ?2 AND source_revision = ?3
+               AND policy_json = ?4 AND rationale = ?5",
+            params![
+                proposal.wallet_id,
+                proposal.created_at.to_rfc3339(),
+                i64::try_from(proposal.source_revision).context("source revision out of range")?,
+                policy_json,
+                proposal.rationale
+            ],
         )?;
         Ok(changed == 1)
     }

@@ -418,8 +418,13 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
         .put("primary", &stored.policy, Some(stored.source_revision))
         .unwrap();
     assert_eq!(applied.revision, active.revision + 1);
-    assert!(store.delete_proposal("primary").unwrap());
-    assert!(!store.delete_proposal("primary").unwrap());
+    // Named by content, so a discard cannot land on a proposal it never read.
+    let mut impostor = stored.clone();
+    impostor.rationale = "a different proposal entirely".into();
+    assert!(!store.delete_proposal(&impostor).unwrap());
+    assert!(store.proposal("primary").unwrap().is_some());
+    assert!(store.delete_proposal(&stored).unwrap());
+    assert!(!store.delete_proposal(&stored).unwrap());
     assert!(store.proposal("primary").unwrap().is_none());
 }
 

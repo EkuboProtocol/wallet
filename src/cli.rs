@@ -1818,13 +1818,21 @@ async fn review_policy_proposal(
         .get(wallet_id)?
         .with_context(|| format!("wallet {wallet_id} has no local policy"))?;
     if current.revision != proposal.source_revision {
-        policies.delete_proposal(wallet_id)?;
+        // Discards the proposal that was actually read, not whatever occupies
+        // the wallet's slot by now: the two reads above are separate, so a
+        // replacement written in between could reference the current revision
+        // and be perfectly applicable.
+        let discarded = policies.delete_proposal(&proposal)?;
         anyhow::bail!(
             "the pending proposal referenced policy revision {} but the active policy is now \
-             revision {}; the stale proposal was discarded. Ask the agent to read the current \
-             policy and propose again.",
+             revision {}; {}. Ask the agent to read the current policy and propose again.",
             proposal.source_revision,
-            current.revision
+            current.revision,
+            if discarded {
+                "the stale proposal was discarded"
+            } else {
+                "it has already been replaced by a newer one, which was left in place"
+            }
         );
     }
 
