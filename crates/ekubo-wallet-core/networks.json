@@ -7908,7 +7908,7 @@
     "decimals": 18
    },
    "max_gas_limit": "32000000",
-   "block_explorer_url": "https://robinhoodchain.blockscout.com",
+   "block_explorer_url": "https://robinscan.io",
    "documentation_url": "https://docs.robinhood.com/chain/connecting/",
    "simulate_endpoints": 5,
    "fork_endpoints": 5,

@@ -229,7 +229,11 @@ for (const chain of candidates) {
         }
       : null,
     max_gas_limit: overlay.max_gas_limit ?? null,
-    block_explorer_url: meta.explorers?.[0]?.url ?? null,
+    // The registry lists explorers in no particular order, and its first entry
+    // for a chain is not always the one that chain's own users read. An
+    // overlay entry names the explorer a person should be sent to; without one
+    // the registry's first is as good a guess as this script can make.
+    block_explorer_url: overlay.block_explorer_url ?? meta.explorers?.[0]?.url ?? null,
     documentation_url:
       overlay.documentation_url ??
       (meta.infoURL?.startsWith("https://") ? meta.infoURL : null),

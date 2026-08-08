@@ -1,5 +1,5 @@
 {
-  "note": "Hand-written identity for the chains the wallet ships as defaults. Names and aliases are not cosmetic: they are what an owner types and what an MCP caller passes as `network`, so a regeneration that renamed `ethereum` to `eth` would break every stored habit and every script. Anything not listed here keeps the name derived from the registry's short name. `max_gas_limit` is the ceiling this wallet will simulate or sign at on that chain, independent of what a block would allow. `rpc_first` names the endpoint that should lead the list — the chain's own published endpoint, or on Ethereum an MEV-protecting one — so an owner's traffic goes to the operator the chain itself points at before it goes to anyone found in a directory. It is honoured only when that endpoint probed healthy, and never when pinning it would put a node without eth_simulateV1 ahead of one that has it.",
+  "note": "Hand-written identity for the chains the wallet ships as defaults. Names and aliases are not cosmetic: they are what an owner types and what an MCP caller passes as `network`, so a regeneration that renamed `ethereum` to `eth` would break every stored habit and every script. Anything not listed here keeps the name derived from the registry's short name. `max_gas_limit` is the ceiling this wallet will simulate or sign at on that chain, independent of what a block would allow. `rpc_first` names the endpoint that should lead the list — the chain's own published endpoint, or on Ethereum an MEV-protecting one — so an owner's traffic goes to the operator the chain itself points at before it goes to anyone found in a directory. It is honoured only when that endpoint probed healthy, and never when pinning it would put a node without eth_simulateV1 ahead of one that has it. `block_explorer_url` names the explorer a person should be sent to when the registry's first listing for the chain is not the one its users read.",
   "chains": {
     "1": {
       "name": "ethereum",
@@ -132,7 +132,8 @@
       ],
       "max_gas_limit": "32000000",
       "documentation_url": "https://docs.robinhood.com/chain/connecting/",
-      "rpc_first": "https://rpc.mainnet.chain.robinhood.com"
+      "rpc_first": "https://rpc.mainnet.chain.robinhood.com",
+      "block_explorer_url": "https://robinscan.io"
     },
     "57073": {
       "name": "ink",
