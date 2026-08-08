@@ -264,8 +264,9 @@ struct TransfersInput {
     /// Ordered transfers, which may mix the native token with any number of
     /// ERC-20 contracts.
     transfers: Vec<Transfer>,
-    /// What to do when the plan's simulation fails. Has no effect on a plan
-    /// the policy denies: that always queues for human approval.
+    /// What to do when the plan's simulation fails. It says nothing about
+    /// policy: a plan no rule covers always queues for human approval, and a
+    /// plan a `deny` rule matched always fails outright.
     #[serde(default)]
     on_simulation_failure: OnSimulationFailure,
 }
@@ -297,8 +298,9 @@ struct SendExecutionPlanInput {
     /// can never become a different transaction.
     #[serde(default)]
     request_id: Option<uuid::Uuid>,
-    /// What to do when the plan's simulation fails. Has no effect on a plan
-    /// the policy denies: that always queues for human approval.
+    /// What to do when the plan's simulation fails. It says nothing about
+    /// policy: a plan no rule covers always queues for human approval, and a
+    /// plan a `deny` rule matched always fails outright.
     #[serde(default)]
     on_simulation_failure: OnSimulationFailure,
 }
@@ -308,12 +310,15 @@ struct SendExecutionPlanInput {
 /// Distinct from `SimulationFailureAction`, which is the action a failure
 /// recommends; this is the one the caller chose in advance.
 ///
-/// A failed simulation and a policy denial are different problems with the
-/// same old answer: queue for a human. But only the policy denial is a
-/// question a human can answer — a plan that reverts needs new calldata from
+/// A failed simulation and a plan no policy rule covers are different problems
+/// with the same old answer: queue for a human. But only the uncovered plan is
+/// a question a human can answer — a plan that reverts needs new calldata from
 /// whoever produced it, and sending the user to a review prompt for it costs
 /// them an interruption to approve something that will fail anyway. Callers
 /// that can act on the failure themselves say so here.
+///
+/// A plan a `deny` rule matched is neither: it never queues whatever this
+/// says, because no approval prompt can override the owner's own rule.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum OnSimulationFailure {
@@ -988,7 +993,7 @@ impl WalletMcpServer {
     // in-process, short-lived, and invisible at approval time.
     #[tool(
         name = "wallet_simulate_execution_plan",
-        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result still goes to wallet_send_execution_plan, which queues it for human approval.",
+        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1545,7 +1550,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; policy denials queue for approval either way. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan no policy rule covers queues for approval either way, and a plan a deny rule matched fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2437,9 +2442,11 @@ impl WalletMcpServer {
 
         // A caller that asked to hear about a failed simulation hears about
         // it, and nothing is written: no pending row, no expiry to wait out,
-        // no review prompt for a plan that does not execute. A policy denial
-        // is deliberately not covered — overriding policy is exactly the
-        // decision only the user can make, so it still queues below.
+        // no review prompt for a plan that does not execute. A plan no policy
+        // rule covers is deliberately not covered here — whether to allow it
+        // once is exactly the decision only the user can make, so it still
+        // queues below. A plan a `deny` rule matched never gets that far: it
+        // fails outright in `execute_automatic`, whatever was passed here.
         if !simulation.simulation.success && on_simulation_failure == OnSimulationFailure::Fail {
             // Attributed, because this sentence was written by whoever produced
             // the plan and travels outside the plan digest. It is advice about
@@ -2904,10 +2911,9 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
     })
 }
 
-/// The next step for an agent holding a sendable simulation the policy
-/// denied. A denial routes the plan to a human review; it is not a failure,
-/// and widening the policy is never a precondition for the action in hand.
-/// What to do next when the policy did not allow a plan outright.
+/// What to do next when the policy did not allow a plan outright: the
+/// instruction an agent gets alongside a sendable simulation with
+/// `allowed=false`.
 ///
 /// The two negative outcomes need opposite advice, which is why this takes the
 /// outcome rather than assuming. Telling an agent to queue a plan the policy

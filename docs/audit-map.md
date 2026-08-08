@@ -51,8 +51,9 @@ broadcast.
   cloneable; `from_terminal()` requires stdin, stdout, and stderr to all be
   terminals; one production call site (the CLI review command).
 - `execution::SigningOverrides` — private fields; `none()` or
-  `human(&InteractiveProof)`. Signing past a policy denial or failed
-  simulation is impossible without the proof.
+  `human(&InteractiveProof)`. Signing a plan no policy rule covers, or one
+  whose simulation failed, is impossible without the proof; a plan a `deny`
+  rule matched cannot be signed with it either.
 - `approval::ReviewPresenter` — the UI seam. The orchestrator authors the
   complete review document; a presenter only renders it and returns a
   decision, and never receives key material or store handles. The terminal

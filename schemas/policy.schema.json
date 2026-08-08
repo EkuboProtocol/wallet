@@ -4,19 +4,22 @@
   "type": "object",
   "properties": {
     "$schema": {
+      "description": "Optional URL of this schema, for editor completion only. Nothing is\nfetched from it.",
       "type": [
         "string",
         "null"
       ]
     },
     "version": {
+      "description": "The document format version. Must be 1.",
       "type": "integer",
       "format": "uint8",
-      "minimum": 0,
-      "maximum": 255,
+      "minimum": 1,
+      "maximum": 1,
       "default": 1
     },
     "chains": {
+      "description": "Canonical decimal chain ID (no leading zeros), or `\"*\"` for every\nchain. An exact entry replaces `\"*\"` for that chain outright rather\nthan extending it, so a permission on one chain never reaches another.\nA chain with neither entry is ungoverned: its plans queue for human\napproval.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/ChainPolicy"
@@ -32,25 +35,29 @@
       "type": "object",
       "properties": {
         "label": {
+          "description": "1-160 characters, shown to the owner reviewing this chain's authority.",
           "type": [
             "string",
             "null"
           ]
         },
         "max_calls_per_batch": {
+          "description": "How many calls one atomic batch may carry, 1 to 4096. A plan with more\nqueues for human approval; it is not rejected.",
           "type": "integer",
           "format": "uint32",
-          "minimum": 0,
+          "minimum": 1,
+          "maximum": 4096,
           "default": 16
         },
         "native_value": {
-          "description": "Applied to every call independently, on top of whichever rule matched.\nA guard rather than a grant: no rule can widen it. Omitted, it is\n`{\"eq\": \"0\"}`, so a document that never mentions native value never\nsends any.",
+          "description": "Applied to every call independently, on top of whichever rule matched.\nA guard rather than a grant: no rule can widen it, and a call it\nrefuses queues for human approval rather than being rejected. Omitted,\nit is `{\"eq\": \"0\"}`, so a document that never mentions native value\nnever sends any. It is a `uint256` in wei.",
           "$ref": "#/$defs/Predicate",
           "default": {
             "eq": "0"
           }
         },
         "rules": {
+          "description": "An unordered set. Order carries no meaning and deny always beats allow,\nso a rule can be read without reading the rules around it.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Rule"
@@ -69,7 +76,7 @@
           "const": "any_value"
         },
         {
-          "description": "Equal to one literal, which may be the `$self` variable standing for\nthis wallet's own address.",
+          "description": "Equal to one literal, written as 0x-prefixed hex or unprefixed decimal\n— never bare hex — and read as the type of the value it is compared\nagainst. May be the `$self` variable standing for this wallet's own\naddress.",
           "type": "object",
           "properties": {
             "eq": {
@@ -99,6 +106,7 @@
           "additionalProperties": false
         },
         {
+          "description": "The `bytes` value is a canonically encoded call to this exact function\nwhose named arguments satisfy their own predicates. Applies only to a\n`bytes` value: a rule's `calldata` slot, or a `bytes` argument reached\nthrough `each`.",
           "type": "object",
           "properties": {
             "selector": {
@@ -111,7 +119,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Every element of an array satisfies the inner predicate. An empty array\nsatisfies it vacuously.",
+          "description": "Every element of an array satisfies the inner predicate. Applies only\nto an array value; an empty array satisfies it vacuously.",
           "type": "object",
           "properties": {
             "each": {
@@ -156,6 +164,7 @@
           "additionalProperties": false
         },
         {
+          "description": "The inner predicate does not match. A value the inner predicate cannot\ndecode stays undecided rather than inverting into a match.",
           "type": "object",
           "properties": {
             "not": {
@@ -186,9 +195,11 @@
       "type": "object",
       "properties": {
         "abi": {
+          "description": "The function's full signature with every parameter named, such as\n`approve(address spender, uint256 amount)`. The four-byte selector is\nderived from it, so a policy can never allowlist bytes whose meaning it\ndoes not know.",
           "type": "string"
         },
         "args": {
+          "description": "Constraints on parameters, by the names `abi` gives them. A parameter\nleft out is unconstrained.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/Predicate"
@@ -201,13 +212,14 @@
       ]
     },
     "Rule": {
-      "description": "One rule: a conjunction of predicate slots and the effect of matching them.",
+      "description": "One rule: a conjunction of predicate slots and the effect of matching them.\nEvery slot is optional and an absent slot constrains nothing, so a rule\nnaming only `to` covers every function that contract has, including any\nbatching entry point that forwards elsewhere.",
       "type": "object",
       "properties": {
         "effect": {
           "$ref": "#/$defs/Effect"
         },
         "label": {
+          "description": "1-160 characters, shown verbatim in the permission diff the owner\nreviews. Say what the rule is for, not what it says.",
           "type": [
             "string",
             "null"
@@ -264,12 +276,19 @@
       ]
     },
     "Effect": {
-      "type": "string",
-      "enum": [
-        "allow",
-        "deny"
+      "oneOf": [
+        {
+          "description": "A matching call signs automatically, with no prompt.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "A matching call is refused outright: nothing signs, nothing queues, and\nno approval can override it. Use it to foreclose something, not to gate\nit — a call no rule covers already queues for human approval.",
+          "type": "string",
+          "const": "deny"
+        }
       ]
     }
   },
-  "description": "Stateless per-call signing policy. Each chain holds an unordered set of rules: any matching deny rule denies, otherwise any matching allow rule allows, otherwise the call is denied. There are no amount limits, budgets, or spend counters — a rule bounds which calls may be made, not how much they move."
+  "description": "Stateless per-call signing policy. Every call in a plan is graded on its own against one chain's unordered rule set: any matching deny rule rejects the plan outright — nothing signs, nothing queues, and no approval overrides it — otherwise any matching allow rule signs it automatically, otherwise the plan queues for explicit human approval in the CLI. Every other refusal (no rule, the native_value guard, max_calls_per_batch, an ungoverned chain) queues the same way; only a deny rule forecloses. There are no amount limits, budgets, or spend counters — a rule bounds which calls may be made, not how much they move."
 }

@@ -825,9 +825,15 @@ fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
     // and asks the user to widen their policy, which is the one thing the
     // user is not being asked to do: the send is what queues the review.
     assert!(
-        SERVER_INSTRUCTIONS.contains("policy denial is the ordinary route to a human approval")
+        SERVER_INSTRUCTIONS
+            .contains("matching no policy rule is the ordinary route to a human approval")
     );
     assert!(SERVER_INSTRUCTIONS.contains("never a prerequisite for the one in hand"));
+
+    // The opposite half of the same fact: a deny rule is not a route to
+    // approval at all, so the instructions must not read as though every
+    // allowed=false eventually queues.
+    assert!(SERVER_INSTRUCTIONS.contains("nothing signs it and nothing queues it"));
 
     // wallet_wait_for_execution returns immediately while a request is
     // still AwaitingApproval, so the instructions must not let an agent
@@ -868,6 +874,42 @@ fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
     assert!(refused.contains("refuses this plan outright"));
     assert!(refused.contains("do not queue it"));
     assert!(!refused.contains("not a dead end"));
+}
+
+#[test]
+fn the_authoring_surfaces_separate_the_two_negative_outcomes() {
+    // The policy fold reads "deny, else allow, else …", and every earlier
+    // wording of that third branch called it a denial. That made the guide
+    // contradict itself: an agent told a policy queues whatever it does not
+    // permit will propose a `deny` rule to gate something routine, and then
+    // the user cannot approve it. The two surfaces an agent actually reads
+    // must say which of the two negatives it is holding.
+    let schema = serde_json::to_string(&crate::core::policy::json_schema()).unwrap();
+    for surface in [POLICY_AUTHORING_GUIDE, &schema] {
+        assert!(
+            surface.contains("nothing signs, nothing queues"),
+            "a deny rule forecloses rather than gating"
+        );
+        assert!(
+            surface.contains("queues for explicit human approval"),
+            "matching no rule is a question, not a refusal"
+        );
+    }
+    // The guide has to be usable without the schema beside it, so the corners
+    // that decide whether a proposed rule can ever fire belong in it too.
+    for fact in [
+        "no rule can widen it",
+        "An absent slot constrains nothing",
+        "1 to 4096",
+        "type-checked against the signature",
+        "Never bare hex",
+        "only variable there is",
+    ] {
+        assert!(
+            POLICY_AUTHORING_GUIDE.contains(fact),
+            "the authoring guide no longer states: {fact}"
+        );
+    }
 }
 
 fn sendable_plan() -> ExecutionPlan {

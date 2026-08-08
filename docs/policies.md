@@ -5,16 +5,18 @@ entry applies only when no exact chain ID entry exists, so an exact entry
 replaces rather than extends the fallback. Without a wildcard, a permission on
 one chain never applies to another.
 
-Each chain configures the maximum calls in one atomic batch, a `native_value`
-guard, and an unordered set of `rules`.
+Each chain configures the maximum calls in one atomic batch
+(`max_calls_per_batch`, 1 to 4096, default 16), a `native_value` guard, and an
+unordered set of `rules`. A chain with no entry and no wildcard is ungoverned:
+its plans queue for approval.
 
 ## How a call is decided
 
 Every call in a plan is graded on its own, against the whole rule set:
 
-- any matching `deny` rule denies,
-- otherwise any matching `allow` rule allows,
-- otherwise the call is denied.
+- any matching `deny` rule rejects it outright,
+- otherwise any matching `allow` rule signs it automatically,
+- otherwise nothing signs automatically and it queues for a human.
 
 Those three lines are three *outcomes*, and they are not interchangeable:
 
@@ -31,6 +33,12 @@ the owner having said nothing, which is a question rather than a refusal, and
 that is exactly the case a human may still answer at the terminal. A rejected
 plan never reaches the pending queue at all: the only way forward is to change
 the policy, which is its own explicit CLI action with its own permission diff.
+
+Only a `deny` rule rejects. Every other refusal — no matching rule, the
+`native_value` guard, `max_calls_per_batch`, a chain with no entry — queues for
+approval instead. The same verdict is checked again at the signing boundary, so
+the human override that signs a queued request cannot reach a call a `deny` rule
+covers either.
 
 Rules are a **set**, not a list. Order carries no meaning, and deny always beats
 allow, so a rule can be read without reading the rules around it. That is also
@@ -133,8 +141,14 @@ by an alternate encoding that the target contract's decoder would read
 differently.
 
 Anything unanswerable is a non-match — calldata too short, a decode that fails,
-a predicate applied to the wrong shape — and since an unmatched call is denied,
-uncertainty denies.
+a predicate applied to the wrong shape — and since only a definite match
+satisfies an `allow`, uncertainty never signs automatically.
+
+Calldata that meets a `selector` predicate's own function in an encoding this
+policy cannot decide is a third answer, not a plain non-match: it satisfies no
+`allow`, and it trips every `deny` that named that selector. So an alternate
+encoding can neither slip a call past a rule written to stop it nor satisfy one
+written to permit it.
 
 ## Nested calls
 
@@ -209,7 +223,7 @@ for editor completion. Starting points live in [`examples/`](../examples):
 | [`policy.json`](../examples/policy.json) | The allow-all profile, one of the two choices `account create` offers. |
 | [`policies/deny-all.json`](../examples/policies/deny-all.json) | Exactly what `policy require-approval` installs, and the default for imported wallets. |
 | [`policies/token-budget.template.json`](../examples/policies/token-budget.template.json) | One chain, one router, one token: a bounded approval, a swap paying back to this wallet, and a blanket deny on operator grants. |
-| [`policies/approval-wildcards.template.json`](../examples/policies/approval-wildcards.template.json) | How an exact chain entry replaces the wildcard, and how the metadata predicates read. |
+| [`policies/approval-wildcards.template.json`](../examples/policies/approval-wildcards.template.json) | How an exact chain entry replaces the wildcard rather than extending it. |
 | [`policies/allow-all-with-approval.template.json`](../examples/policies/allow-all-with-approval.template.json) | Exactly what `policy allow-all` installs. |
 
 Worked examples, each demonstrating one thing the engine can express. Every
