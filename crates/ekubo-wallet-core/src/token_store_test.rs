@@ -495,3 +495,50 @@ fn a_batch_cannot_carry_the_review_queue_past_its_cap() {
     store.propose(&listed[5..], "list-c").unwrap();
     assert_eq!(store.count_proposals().unwrap(), 8);
 }
+
+#[test]
+fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
+    // Run 6251, finding 187006. `proposed_at` is what a decision names when it
+    // comes back to consume the row, so an agent that could rotate it for free
+    // could make accept and reject match nothing — repeating the identical
+    // suggestion while the picker was open, or during the owner
+    // authentication that follows it.
+    let (_directory, mut store) = store();
+    let address = Address::repeat_byte(0x11);
+    store.propose(&[usdc(1, address)], "list-a").unwrap();
+    let queued = store.proposals().unwrap();
+    assert_eq!(queued.len(), 1);
+    let reviewed = queued[0].proposed_at.clone();
+
+    // The same suggestion again, from the same list: nothing the owner reads
+    // has changed, so nothing about what they are deciding has changed.
+    store.propose(&[usdc(1, address)], "list-a").unwrap();
+    assert_eq!(
+        store.proposals().unwrap()[0].proposed_at,
+        reviewed,
+        "a repeat of the identical suggestion must not invalidate a decision"
+    );
+
+    // And the decision taken against what was shown still consumes the row.
+    assert_eq!(
+        store
+            .discard_proposals(&[(1, address, reviewed.clone())])
+            .unwrap(),
+        1
+    );
+    assert!(store.proposals().unwrap().is_empty());
+
+    // A suggestion whose content really did change does rotate it: the owner
+    // is being asked about something else, and an answer to the old text is
+    // not an answer to this one.
+    store.propose(&[usdc(1, address)], "list-a").unwrap();
+    let first = store.proposals().unwrap()[0].proposed_at.clone();
+    let renamed = ListedToken {
+        symbol: "USDC.e".into(),
+        ..usdc(1, address)
+    };
+    store.propose(&[renamed], "list-a").unwrap();
+    let second = store.proposals().unwrap()[0].proposed_at.clone();
+    assert_ne!(first, second);
+    assert_eq!(store.discard_proposals(&[(1, address, first)]).unwrap(), 0);
+}

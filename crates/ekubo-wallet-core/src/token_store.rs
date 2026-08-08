@@ -373,6 +373,22 @@ impl TokenStore {
                 );
                 pending += 1;
             }
+            // `proposed_at` is what the owner's decision names when it comes
+            // back to consume this row, so rotating it throws that decision
+            // away. Rotating it for a re-proposal that changed nothing threw
+            // it away for free: an agent could repeat the identical suggestion
+            // while the picker was open, or during the owner-authentication
+            // pause after it, and both accept and reject would then match no
+            // row. Repeated, that keeps rejected names reappearing and holds
+            // the queue at its cap with decisions that can never land.
+            //
+            // So the timestamp moves only when the content behind it moves,
+            // which makes it stand for what was reviewed rather than for when
+            // it was last mentioned. A genuinely changed suggestion does
+            // rotate it, and should: the owner is being asked about something
+            // else now, and a decision taken against the old text is not an
+            // answer to it. `IS NOT` rather than `<>` because a name is
+            // nullable and `NULL <> NULL` is not true.
             transaction.execute(
                 "INSERT INTO token_proposals(
                      chain_id, address, symbol, name, decimals, source, proposed_at
@@ -382,7 +398,11 @@ impl TokenStore {
                      name = excluded.name,
                      decimals = excluded.decimals,
                      source = excluded.source,
-                     proposed_at = excluded.proposed_at",
+                     proposed_at = excluded.proposed_at
+                 WHERE symbol IS NOT excluded.symbol
+                    OR name IS NOT excluded.name
+                    OR decimals IS NOT excluded.decimals
+                    OR source IS NOT excluded.source",
                 params![
                     i64::try_from(token.chain_id).context("chain ID out of range")?,
                     format!("{:#x}", token.address),
@@ -837,6 +857,16 @@ async fn fetch_nonzero_balances(
     fork: Option<&ForkPreface>,
 ) -> Result<NonzeroBalances> {
     crate::rpc::try_endpoints(network, |provider| async move {
+        // Every attempt re-verifies the chain, which is the rule the rest of
+        // the failover paths keep and this one did not. Nothing further down
+        // would have caught it: Multicall3 and the lens are deployed at the
+        // same addresses everywhere, `balanceOf` is a standard selector, and
+        // the structural checks below ask whether the answer is about the
+        // tokens that were requested — never which chain it came from. So a
+        // fallback pointed at another EVM chain answered, and the result was
+        // labelled with the configured network's name, chain ID, and a block
+        // number from a chain nobody asked about.
+        crate::rpc::ensure_serving_chain(&provider, network.chain_id).await?;
         nonzero_balances_through(network, &provider, owner, tokens, fork).await
     })
     .await
