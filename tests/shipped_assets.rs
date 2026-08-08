@@ -115,8 +115,34 @@ fn every_documented_decode_plan_parses() {
             let plan = call.get("decode").unwrap_or_else(|| {
                 panic!("example {name} has a call without a decode plan");
             });
-            serde_json::from_value::<AbiDecodePlan>(plan.clone())
+            let parsed = serde_json::from_value::<AbiDecodePlan>(plan.clone())
                 .unwrap_or_else(|error| panic!("example {name} decode plan is invalid: {error}"));
+            // Parsing is not enough: a codec path that addresses nothing fails
+            // at decode time, which is how this example shipped asking for
+            // `sqrt_ratio` on a lone parameter that the decoder unwraps to a
+            // bare value.
+            if let AbiDecodePlan::AbiParameters {
+                parameters,
+                semantic_codecs,
+                ..
+            } = &parsed
+            {
+                for codec in semantic_codecs {
+                    let root = codec.path.split('.').next().unwrap_or_default();
+                    let addressable = if parameters.len() == 1 {
+                        codec.path == "$"
+                    } else {
+                        parameters
+                            .iter()
+                            .any(|parameter| parameter.name.as_deref() == Some(root))
+                    };
+                    assert!(
+                        addressable,
+                        "example {name} addresses {}, which its parameters do not declare",
+                        codec.path
+                    );
+                }
+            }
             checked += 1;
         }
     }

@@ -177,7 +177,10 @@
         "data": "0x12345678",
         "decode": {
           "kind": "abi_parameters",
-          "parameters": [{ "name": "sqrt_ratio", "type": "uint256" }],
+          "parameters": [
+            { "name": "sqrt_ratio", "type": "uint256" },
+            { "name": "tick", "type": "int32" }
+          ],
           "semantic_codecs": [
             {
               "path": "sqrt_ratio",
