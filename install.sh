@@ -1,6 +1,7 @@
 #!/bin/sh
-# Install the ekubo-wallet release binary, register it with detected agents, and
-# install shell completion. Review this script before piping it to a shell.
+# Install the ekubo-wallet release binary, register it and the Ekubo protocol
+# server with detected agents, and install shell completion. Review this script
+# before piping it to a shell.
 #
 # The archive is never trusted on its own: this script downloads SHA256SUMS,
 # verifies the archive digest against it, and — when Cosign is installed —
@@ -177,9 +178,8 @@ if [ -n "$LOCAL_SOURCE" ]; then
   (cd "$LOCAL_SOURCE" && cargo build --locked --release) \
     || fail "local build failed"
   SOURCE_DIRECTORY="$WORK_DIRECTORY/local"
-  mkdir -p "$SOURCE_DIRECTORY/completions" "$SOURCE_DIRECTORY/contrib/polkit"
+  mkdir -p "$SOURCE_DIRECTORY/contrib/polkit"
   install -m 0755 "$LOCAL_SOURCE/target/release/ekubo-wallet" "$SOURCE_DIRECTORY/ekubo-wallet"
-  install -m 0644 "$LOCAL_SOURCE"/completions/* "$SOURCE_DIRECTORY/completions/"
   if [ -f "$LOCAL_SOURCE/contrib/polkit/com.ekubo.wallet.policy" ]; then
     install -m 0644 "$LOCAL_SOURCE/contrib/polkit/com.ekubo.wallet.policy" \
       "$SOURCE_DIRECTORY/contrib/polkit/"
@@ -282,9 +282,6 @@ install -m 0755 "$SOURCE_DIRECTORY/ekubo-wallet" "$BIN_DIR/ekubo-wallet"
 if [ "$OS" = Darwin ] && command -v xattr >/dev/null 2>&1; then
   xattr -d com.apple.quarantine "$BIN_DIR/ekubo-wallet" >/dev/null 2>&1 || :
 fi
-# `ew` is a symlink, not a second binary: the OS keychain identifies clients
-# by the resolved executable, so one keychain grant covers both names.
-ln -sf ekubo-wallet "$BIN_DIR/ew"
 CLI_BIN="$BIN_DIR/ekubo-wallet"
 log "installed $("$CLI_BIN" version) to $BIN_DIR"
 
@@ -301,10 +298,20 @@ esac
 # anyway — someone who moves the executable needs a way to re-point their
 # agents at it, and this script is not around for that — and a second copy of
 # the argument order each agent's `mcp add` expects is a second copy to get
-# wrong. `agent add` with no agent named configures whatever it detects,
-# reports what it did, and is safe to re-run.
+# wrong. That argument goes double now that there are two servers to register:
+# this wallet over stdio, and the Ekubo protocol server over HTTPS. `agent add`
+# with no agent named configures whatever it detects, reports what it did, and
+# is safe to re-run.
 if [ "${EKUBO_WALLET_SKIP_AGENTS:-0}" != "1" ]; then
-  if ! "$CLI_BIN" agent add; then
+  AGENT_ADD_ARGUMENTS=""
+  # The companion server is a remote endpoint this wallet does not control the
+  # network path to, so registering it is a decision the operator can decline
+  # while still getting the wallet.
+  if [ "${EKUBO_WALLET_SKIP_COMPANION:-0}" = "1" ]; then
+    AGENT_ADD_ARGUMENTS="--no-companion"
+  fi
+  # shellcheck disable=SC2086  # deliberate: empty must expand to no argument
+  if ! "$CLI_BIN" agent add $AGENT_ADD_ARGUMENTS; then
     warn "no agent was configured; the binary and completion are still installed"
     warn "run '$CLI_BIN agent list' to see what was detected"
   fi
@@ -332,17 +339,6 @@ install_completion_file() {
   mv "$completion_temporary" "$completion_file"
 }
 
-install_completion_alias() {
-  completion_source=$1
-  completion_alias=$2
-  completion_alias_directory=$(dirname "$completion_alias")
-  mkdir -p "$completion_alias_directory"
-  completion_alias_temporary=$(mktemp "$completion_alias_directory/.ekubo-wallet.XXXXXXXX") || return 1
-  cp "$completion_source" "$completion_alias_temporary"
-  chmod 0644 "$completion_alias_temporary"
-  mv "$completion_alias_temporary" "$completion_alias"
-}
-
 append_once() {
   rc_file=$1
   marker=$2
@@ -363,7 +359,6 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
     bash)
       COMPLETION_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/ekubo-wallet"
       install_completion_file bash "$COMPLETION_FILE"
-      install_completion_alias "$COMPLETION_FILE" "$(dirname "$COMPLETION_FILE")/ew"
       append_once "$HOME/.bashrc" "# ekubo-wallet completion" "[ -r $(shell_quote "$COMPLETION_FILE") ] && . $(shell_quote "$COMPLETION_FILE")"
       log "installed Bash completion"
       ;;
@@ -371,7 +366,6 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
       COMPLETION_DIRECTORY="${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions"
       COMPLETION_FILE="$COMPLETION_DIRECTORY/_ekubo-wallet"
       install_completion_file zsh "$COMPLETION_FILE"
-      install_completion_alias "$COMPLETION_FILE" "$COMPLETION_DIRECTORY/_ew"
       ZSH_RC="${ZDOTDIR:-$HOME}/.zshrc"
       append_once "$ZSH_RC" "# ekubo-wallet completion" "fpath=($(shell_quote "$COMPLETION_DIRECTORY") \$fpath)" "autoload -Uz compinit && compinit"
       log "installed Zsh completion"
@@ -379,7 +373,6 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
     fish)
       COMPLETION_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/ekubo-wallet.fish"
       install_completion_file fish "$COMPLETION_FILE"
-      install_completion_alias "$COMPLETION_FILE" "$(dirname "$COMPLETION_FILE")/ew.fish"
       log "installed Fish completion"
       ;;
     *)

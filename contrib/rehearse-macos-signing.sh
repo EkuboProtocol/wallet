@@ -143,11 +143,8 @@ echo "==> packaging exactly as the release job does"
 package="$work/ekubo-wallet-rehearsal"
 mkdir -p "$package"
 install -m 0755 "$staged" "$package/ekubo-wallet"
-ln -s ekubo-wallet "$package/ew"
 install -m 0644 "$repo_root/LICENSE" "$package/LICENSE"
 install -m 0644 "$repo_root/README.md" "$package/README.md"
-cp -R "$repo_root/completions" "$package/completions"
-cp -R "$repo_root/examples" "$repo_root/schemas" "$package/"
 ditto -c -k --sequesterRsrc --keepParent "$package" "$package.zip"
 
 # Interrupting the wait is safe and costs nothing: the archive is already

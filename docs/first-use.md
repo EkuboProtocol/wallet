@@ -114,6 +114,13 @@ and whether this server is registered with each; `agent add` registers it
 with everything detected, and `agent add <name>` with one. The installer does
 this once, so reach for it after moving the binary or installing a new agent.
 
+`agent add` also registers the Ekubo protocol server at
+`https://mcp.ekubo.org/mcp`, which is what gives a new install something to do
+— quotes, swaps, bridging, liquidity — beyond holding keys. It prepares
+unsigned plans and holds no key; what it returns is checked, simulated, and
+policy-checked here like any other plan. `agent add --no-companion` leaves it
+out. See [installation](installation.md#the-companion-server).
+
 Start the MCP server over stdio with `ekubo-wallet server`. It publishes the
 `wallet://docs/security-model` resource. Run `ekubo-wallet --help` for the
 complete CLI, or install a packaged completion:

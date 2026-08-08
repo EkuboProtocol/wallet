@@ -489,8 +489,8 @@ fn cursor_configuration_is_private_atomic_and_preserves_other_servers() {
     .unwrap();
     let file = configure_cursor_mcp_at(
         home.path(),
-        "/usr/local/bin/ekubo-wallet",
-        &["server".into()],
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
     )
     .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
@@ -602,7 +602,7 @@ fn unregistering_cursor_leaves_every_other_entry_alone() {
     )
     .unwrap();
 
-    remove_cursor_mcp_at(home.path()).unwrap();
+    remove_cursor_mcp_at(home.path(), LOCAL_SERVER_NAME).unwrap();
 
     let document: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -619,7 +619,104 @@ fn unregistering_cursor_without_a_configuration_is_not_an_error() {
     // `agent remove` with no agent named walks everything detected, so a
     // machine where Cursor was never configured must not fail the sweep.
     let home = tempfile::tempdir().unwrap();
-    remove_cursor_mcp_at(home.path()).unwrap();
+    remove_cursor_mcp_at(home.path(), LOCAL_SERVER_NAME).unwrap();
+    remove_cursor_mcp_at(home.path(), COMPANION_SERVER_NAME).unwrap();
+}
+
+#[test]
+fn cursor_gets_the_companion_as_a_url_entry_beside_the_wallet() {
+    // Cursor has no transport field: `command` means a subprocess and `url`
+    // means a remote endpoint, so writing the wrong key is how the companion
+    // would silently become an unlaunchable stdio server.
+    let home = tempfile::tempdir().unwrap();
+    configure_cursor_mcp_at(
+        home.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let file = configure_cursor_mcp_at(
+        home.path(),
+        COMPANION_SERVER_NAME,
+        &ServerTransport::Http(COMPANION_SERVER_URL),
+    )
+    .unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let companion = &document["mcpServers"]["ekubo"];
+    assert_eq!(companion["url"], COMPANION_SERVER_URL);
+    assert!(companion.get("command").is_none());
+    // Registering the second one must not have displaced the first.
+    assert_eq!(
+        document["mcpServers"]["ekubo-wallet"]["command"],
+        "/usr/local/bin/ekubo-wallet"
+    );
+}
+
+#[test]
+fn removing_the_wallet_from_cursor_leaves_the_companion_in_place() {
+    // The two are removed by separate calls, and `ekubo` is a prefix of
+    // `ekubo-wallet`: a removal keyed on anything looser than an exact name
+    // would take both.
+    let home = tempfile::tempdir().unwrap();
+    configure_cursor_mcp_at(
+        home.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let file = configure_cursor_mcp_at(
+        home.path(),
+        COMPANION_SERVER_NAME,
+        &ServerTransport::Http(COMPANION_SERVER_URL),
+    )
+    .unwrap();
+
+    remove_cursor_mcp_at(home.path(), LOCAL_SERVER_NAME).unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert!(document["mcpServers"].get("ekubo-wallet").is_none());
+    assert_eq!(document["mcpServers"]["ekubo"]["url"], COMPANION_SERVER_URL);
+}
+
+#[test]
+fn a_registered_wallet_alone_does_not_read_as_a_registered_companion() {
+    // The bug this exists for: `ekubo` is a prefix of `ekubo-wallet`, so the
+    // obvious substring test reports both servers present when only the
+    // wallet is, and `agent list` then never tells anyone the companion is
+    // missing.
+    let wallet_only =
+        read_registration("ekubo-wallet: /Users/x/.local/bin/ekubo-wallet server - ✓ Connected\n");
+    assert!(wallet_only.wallet);
+    assert!(!wallet_only.companion);
+
+    let both = read_registration(
+        "ekubo-wallet: /Users/x/.local/bin/ekubo-wallet server - ✓ Connected\n\
+         ekubo: https://mcp.ekubo.org/mcp (HTTP) - ✓ Connected\n",
+    );
+    assert!(both.wallet);
+    assert!(both.companion);
+
+    let companion_only = read_registration("ekubo: https://mcp.ekubo.org/mcp (HTTP)\n");
+    assert!(!companion_only.wallet);
+    assert!(companion_only.companion);
+
+    let neither = read_registration("No MCP servers configured.\n");
+    assert!(!neither.wallet);
+    assert!(!neither.companion);
+}
+
+#[test]
+fn the_companion_is_a_first_party_https_endpoint() {
+    // A plaintext or redirected companion URL would be a downgrade the wallet
+    // ships to every install at once, so the constant is pinned rather than
+    // merely reviewed.
+    assert_eq!(COMPANION_SERVER_URL, "https://mcp.ekubo.org/mcp");
+    assert!(COMPANION_SERVER_URL.starts_with("https://"));
+    // The names are distinct but one is a prefix of the other, which is the
+    // whole reason detection blanks the longer one out first.
+    assert_ne!(COMPANION_SERVER_NAME, LOCAL_SERVER_NAME);
+    assert!(LOCAL_SERVER_NAME.starts_with(COMPANION_SERVER_NAME));
 }
 
 #[test]

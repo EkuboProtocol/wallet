@@ -41,7 +41,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `build.rs`.
 pub const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
 
-/// Shared entry point for the `ekubo-wallet` binary and its `ew` alias.
+/// Entry point for the `ekubo-wallet` binary.
 pub async fn run_cli() -> anyhow::Result<()> {
     use clap::Parser as _;
     use tracing_subscriber::EnvFilter;

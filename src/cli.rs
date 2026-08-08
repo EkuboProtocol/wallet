@@ -362,11 +362,39 @@ enum AgentCommand {
     /// Show which supported agents are installed here and whether this server
     /// is registered with each.
     List,
-    /// Register this server. Without an agent, every one detected here.
-    Add { agent: Option<AgentName> },
-    /// Unregister this server. Without an agent, every one detected here.
+    /// Register this server and the Ekubo protocol server. Without an agent,
+    /// every one detected here.
+    Add {
+        agent: Option<AgentName>,
+        /// Register only this wallet, leaving the Ekubo protocol server out.
+        #[arg(long)]
+        no_companion: bool,
+    },
+    /// Unregister this server and the Ekubo protocol server. Without an agent,
+    /// every one detected here.
     #[command(alias = "delete")]
     Remove { agent: Option<AgentName> },
+}
+
+/// This wallet's own MCP server, as agents know it.
+const LOCAL_SERVER_NAME: &str = "ekubo-wallet";
+
+/// The Ekubo protocol server, registered alongside the wallet so a fresh
+/// install can quote, swap, bridge, and provide liquidity rather than only
+/// hold keys. It prepares unsigned plans and never sees a key: everything it
+/// produces still arrives here as a reference the wallet fetches, verifies,
+/// simulates, and policy-checks on its own. That is why registering it is a
+/// convenience rather than a widening of what an agent can spend — the
+/// security boundary is unchanged, and `--no-companion` opts out regardless.
+const COMPANION_SERVER_NAME: &str = "ekubo";
+const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
+
+/// How an agent reaches one of the two servers.
+enum ServerTransport {
+    /// A subprocess: this executable, run as `<path> server`.
+    Stdio(String),
+    /// A remote streamable-HTTP endpoint.
+    Http(&'static str),
 }
 
 /// The agents this wallet knows how to configure.
@@ -4586,8 +4614,8 @@ fn completion_safe(value: &str) -> String {
 /// Where this executable actually is, so a registration records the path an
 /// agent can still launch tomorrow.
 ///
-/// `current_exe` rather than argv[0]: an agent config that recorded `ew` or a
-/// relative path would work only from the shell that wrote it.
+/// `current_exe` rather than argv[0]: an agent config that recorded a shell
+/// alias or a relative path would work only from the shell that wrote it.
 fn server_command() -> Result<String> {
     let path = std::env::current_exe().context("could not determine this executable's path")?;
     path.to_str()
@@ -4622,54 +4650,134 @@ fn agent_installed(agent: AgentName) -> bool {
 /// `None` means the question could not be answered rather than answered no —
 /// an agent's `mcp list` may fail or change its wording, and reporting that as
 /// "not registered" would send someone to re-register something that is fine.
-fn agent_registered(agent: AgentName) -> Option<bool> {
+fn agent_registered(agent: AgentName) -> Option<Registration> {
     if agent == AgentName::Cursor {
         let file = BaseDirs::new()?.home_dir().join(".cursor").join("mcp.json");
         let document: serde_json::Value = serde_json::from_slice(&fs::read(file).ok()?).ok()?;
-        return Some(document.get("mcpServers")?.get("ekubo-wallet").is_some());
+        let servers = document.get("mcpServers")?;
+        return Some(Registration {
+            wallet: servers.get(LOCAL_SERVER_NAME).is_some(),
+            companion: servers.get(COMPANION_SERVER_NAME).is_some(),
+        });
     }
-    {
-        {
-            let output = std::process::Command::new(agent_binary(agent)?)
-                .args(["mcp", "list"])
-                .output()
-                .ok()?;
-            if !output.status.success() {
-                return None;
-            }
-            Some(String::from_utf8_lossy(&output.stdout).contains("ekubo-wallet"))
-        }
+    let output = std::process::Command::new(agent_binary(agent)?)
+        .args(["mcp", "list"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(read_registration(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// What an agent's `mcp list` output says about the two servers.
+///
+/// Every CLI here prints its own layout and is free to change it, so this
+/// stays a substring search rather than a parse. The one trap is that `ekubo`
+/// is a prefix of `ekubo-wallet`: a plain search would report the companion
+/// registered whenever the wallet is, and then `agent list` would tell people
+/// they have swaps and bridging when they have neither. Blanking the longer
+/// name out first leaves only genuine mentions of the shorter one.
+fn read_registration(listing: &str) -> Registration {
+    Registration {
+        wallet: listing.contains(LOCAL_SERVER_NAME),
+        companion: listing
+            .replace(LOCAL_SERVER_NAME, "")
+            .contains(COMPANION_SERVER_NAME),
     }
 }
 
-fn register_agent(agent: AgentName) -> Result<()> {
+/// Which of the two servers an agent currently has.
+#[derive(Debug, Clone, Copy)]
+struct Registration {
+    wallet: bool,
+    companion: bool,
+}
+
+/// Register both servers with one agent.
+///
+/// The wallet is the point of the command and its failure is the command's
+/// failure. The companion is an extra, and it can fail on its own for reasons
+/// that say nothing about the wallet — an agent CLI too old to add a remote
+/// server by URL, most of all. So its error is returned beside a successful
+/// wallet registration rather than replacing it, and the caller reports it as
+/// a warning.
+fn register_agent(agent: AgentName, companion: bool) -> Result<Option<String>> {
     let command = server_command()?;
+    register_server(agent, LOCAL_SERVER_NAME, &ServerTransport::Stdio(command))?;
+    if !companion {
+        return Ok(None);
+    }
+    let outcome = register_server(
+        agent,
+        COMPANION_SERVER_NAME,
+        &ServerTransport::Http(COMPANION_SERVER_URL),
+    );
+    Ok(outcome.err().map(|error| format!("{error:#}")))
+}
+
+fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) -> Result<()> {
     if agent == AgentName::Cursor {
-        configure_cursor_mcp(&command, &["server".to_string()])?;
+        configure_cursor_mcp(name, transport)?;
         return Ok(());
     }
     let binary =
         agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
     // Removed first so re-registering after moving the binary replaces the old
     // path instead of failing on a name that already exists.
-    let _ = unregister_agent(agent);
-    let mut arguments: Vec<String> = vec!["mcp".into(), "add".into(), "ekubo-wallet".into()];
-    match agent {
-        // Gemini takes the command inline and the scope after it; the other
-        // two separate the command with `--`.
-        AgentName::Gemini => {
-            arguments.extend([command, "server".into(), "--scope".into(), "user".into()]);
-        }
-        AgentName::ClaudeCode => {
-            arguments.extend([
+    let _ = unregister_server(agent, name);
+    let mut arguments: Vec<String> = vec!["mcp".into(), "add".into()];
+    match transport {
+        ServerTransport::Stdio(command) => match agent {
+            // Gemini takes the command inline and the scope after it; the
+            // other two separate the command with `--`.
+            AgentName::Gemini => arguments.extend([
+                name.to_string(),
+                command.clone(),
+                "server".into(),
+                "--scope".into(),
+                "user".into(),
+            ]),
+            AgentName::ClaudeCode => arguments.extend([
+                name.to_string(),
                 "--scope".into(),
                 "user".into(),
                 "--".into(),
-                command,
+                command.clone(),
                 "server".into(),
-            ]);
-        }
-        _ => arguments.extend(["--".into(), command, "server".into()]),
+            ]),
+            _ => arguments.extend([
+                name.to_string(),
+                "--".into(),
+                command.clone(),
+                "server".into(),
+            ]),
+        },
+        ServerTransport::Http(url) => match agent {
+            // Each CLI spells a remote server differently: Codex takes it as
+            // a `--url` option, the other two as the positional that would
+            // otherwise be a command, distinguished by `--transport http`.
+            AgentName::Codex => {
+                arguments.extend([name.to_string(), "--url".into(), (*url).to_string()]);
+            }
+            AgentName::ClaudeCode => arguments.extend([
+                "--transport".into(),
+                "http".into(),
+                "--scope".into(),
+                "user".into(),
+                name.to_string(),
+                (*url).to_string(),
+            ]),
+            AgentName::Gemini => arguments.extend([
+                name.to_string(),
+                (*url).to_string(),
+                "--transport".into(),
+                "http".into(),
+                "--scope".into(),
+                "user".into(),
+            ]),
+            AgentName::Cursor => unreachable!("Cursor is configured by file above"),
+        },
     }
     let status = std::process::Command::new(&binary)
         .args(&arguments)
@@ -4677,7 +4785,7 @@ fn register_agent(agent: AgentName) -> Result<()> {
         .with_context(|| format!("failed to run {}", binary.display()))?;
     ensure!(
         status.success(),
-        "{} rejected the registration; run it yourself to see why: {} {}",
+        "{} rejected the registration of {name}; run it yourself to see why: {} {}",
         agent.label(),
         binary.display(),
         arguments.join(" ")
@@ -4686,12 +4794,21 @@ fn register_agent(agent: AgentName) -> Result<()> {
 }
 
 fn unregister_agent(agent: AgentName) -> Result<()> {
+    // The companion may never have been registered — `--no-companion`, or an
+    // install that predates it — and every CLI here treats removing an absent
+    // name as an error. Removing the wallet is what `agent remove` promises,
+    // so only that failure is one.
+    let _ = unregister_server(agent, COMPANION_SERVER_NAME);
+    unregister_server(agent, LOCAL_SERVER_NAME)
+}
+
+fn unregister_server(agent: AgentName, name: &str) -> Result<()> {
     if agent == AgentName::Cursor {
-        return remove_cursor_mcp();
+        return remove_cursor_mcp(name);
     }
     let binary =
         agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
-    let mut arguments: Vec<String> = vec!["mcp".into(), "remove".into(), "ekubo-wallet".into()];
+    let mut arguments: Vec<String> = vec!["mcp".into(), "remove".into(), name.to_string()];
     if matches!(agent, AgentName::ClaudeCode | AgentName::Gemini) {
         arguments.extend(["--scope".into(), "user".into()]);
     }
@@ -4703,14 +4820,14 @@ fn unregister_agent(agent: AgentName) -> Result<()> {
     Ok(())
 }
 
-/// Drop this server from Cursor's `mcp.json`, leaving every other entry and
+/// Drop one server from Cursor's `mcp.json`, leaving every other entry and
 /// every unrelated key exactly as they were.
-fn remove_cursor_mcp() -> Result<()> {
+fn remove_cursor_mcp(name: &str) -> Result<()> {
     let base = BaseDirs::new().context("could not determine the user home directory")?;
-    remove_cursor_mcp_at(base.home_dir())
+    remove_cursor_mcp_at(base.home_dir(), name)
 }
 
-fn remove_cursor_mcp_at(home: &Path) -> Result<()> {
+fn remove_cursor_mcp_at(home: &Path, name: &str) -> Result<()> {
     let file = home.join(".cursor").join("mcp.json");
     if !file.exists() {
         return Ok(());
@@ -4729,7 +4846,7 @@ fn remove_cursor_mcp_at(home: &Path) -> Result<()> {
     else {
         return Ok(());
     };
-    servers.remove("ekubo-wallet");
+    servers.remove(name);
     document.insert("mcpServers".into(), servers.into());
     let directory = file.parent().context("mcp.json has no parent directory")?;
     let mut temporary = NamedTempFile::new_in(directory)?;
@@ -4747,21 +4864,37 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
                 .into_iter()
                 .map(|agent| {
                     let installed = agent_installed(agent);
+                    let state = installed.then(|| agent_registered(agent)).flatten();
                     serde_json::json!({
                         "agent": agent.key(),
                         "installed": installed,
-                        "registered": installed.then(|| agent_registered(agent)).flatten(),
+                        "registered": state.map(|state| state.wallet),
+                        "companion_registered": state.map(|state| state.companion),
                     })
                 })
                 .collect();
             emit(mode, &serde_json::json!({ "agents": rows }), || {
-                let mut lines = vec![format!("Server command: {}", server_command()?)];
-                lines.push(String::new());
+                let mut lines = vec![
+                    format!("Server command: {}", server_command()?),
+                    format!("Companion server: {COMPANION_SERVER_URL}"),
+                    String::new(),
+                ];
                 for agent in AgentName::ALL {
                     let state = if agent_installed(agent) {
                         match agent_registered(agent) {
-                            Some(true) => "registered".to_string(),
-                            Some(false) => format!(
+                            // The companion is reported only when it is the
+                            // thing missing. Naming both on every line would
+                            // bury the answer the command is asked for.
+                            Some(Registration {
+                                wallet: true,
+                                companion: true,
+                            }) => "registered".to_string(),
+                            Some(Registration { wallet: true, .. }) => format!(
+                                "registered, without {COMPANION_SERVER_NAME} — \
+                                 `ekubo-wallet agent add {}`",
+                                agent.key()
+                            ),
+                            Some(Registration { wallet: false, .. }) => format!(
                                 "installed, not registered — `ekubo-wallet agent add {}`",
                                 agent.key()
                             ),
@@ -4775,8 +4908,17 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
                 Ok(lines.join("\n"))
             })
         }
-        AgentCommand::Add { agent } | AgentCommand::Remove { agent } => {
+        AgentCommand::Add { agent, .. } | AgentCommand::Remove { agent } => {
             let adding = matches!(command, AgentCommand::Add { .. });
+            // `remove` takes both servers back regardless, so the flag is only
+            // ever read on the way in.
+            let companion = !matches!(
+                command,
+                AgentCommand::Add {
+                    no_companion: true,
+                    ..
+                }
+            );
             // A bare `add` configures what is actually here rather than
             // failing on the agents that are not, which is what the installer
             // does and the only behaviour that makes it re-runnable.
@@ -4795,21 +4937,31 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
             );
             let mut changed = Vec::new();
             let mut failed = Vec::new();
+            let mut partial = Vec::new();
             for agent in targets {
                 let outcome = if adding {
-                    register_agent(agent)
+                    register_agent(agent, companion)
                 } else {
-                    unregister_agent(agent)
+                    unregister_agent(agent).map(|()| None)
                 };
                 match outcome {
-                    Ok(()) => changed.push(agent.key()),
+                    Ok(warning) => {
+                        changed.push(agent.key());
+                        if let Some(warning) = warning {
+                            partial.push(format!("{}: {warning}", agent.label()));
+                        }
+                    }
                     Err(error) => failed.push(format!("{}: {error:#}", agent.label())),
                 }
             }
             let verb = if adding { "registered" } else { "unregistered" };
             emit(
                 mode,
-                &serde_json::json!({ verb: changed, "failed": failed }),
+                &serde_json::json!({
+                    verb: changed,
+                    "failed": failed,
+                    "companion_failed": partial,
+                }),
                 || {
                     let mut lines = Vec::new();
                     if changed.is_empty() {
@@ -4819,6 +4971,12 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
                     }
                     for failure in &failed {
                         lines.push(format!("Failed — {failure}"));
+                    }
+                    for failure in &partial {
+                        lines.push(format!(
+                            "This wallet registered, but {COMPANION_SERVER_NAME} did not — \
+                             {failure}"
+                        ));
                     }
                     if adding && !changed.is_empty() {
                         lines.push("Restart the agent to pick up the change.".into());
@@ -4830,19 +4988,18 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
     }
 }
 
-fn configure_cursor_mcp(server_command: &str, server_args: &[String]) -> Result<PathBuf> {
-    ensure!(
-        !server_command.trim().is_empty(),
-        "server command cannot be empty"
-    );
+fn configure_cursor_mcp(name: &str, transport: &ServerTransport) -> Result<PathBuf> {
+    if let ServerTransport::Stdio(command) = transport {
+        ensure!(!command.trim().is_empty(), "server command cannot be empty");
+    }
     let base = BaseDirs::new().context("could not determine the user home directory")?;
-    configure_cursor_mcp_at(base.home_dir(), server_command, server_args)
+    configure_cursor_mcp_at(base.home_dir(), name, transport)
 }
 
 fn configure_cursor_mcp_at(
     home: &Path,
-    server_command: &str,
-    server_args: &[String],
+    name: &str,
+    transport: &ServerTransport,
 ) -> Result<PathBuf> {
     let directory = home.join(".cursor");
     let file = directory.join("mcp.json");
@@ -4865,12 +5022,17 @@ fn configure_cursor_mcp_at(
             .context("Cursor mcpServers must be a JSON object")?,
         None => serde_json::Map::new(),
     };
+    // Cursor tells the two apart by which key is present: `command` for a
+    // subprocess, `url` for a remote endpoint. There is no transport field.
     servers.insert(
-        "ekubo-wallet".into(),
-        serde_json::json!({
-            "command": server_command,
-            "args": server_args,
-        }),
+        name.into(),
+        match transport {
+            ServerTransport::Stdio(command) => serde_json::json!({
+                "command": command,
+                "args": ["server"],
+            }),
+            ServerTransport::Http(url) => serde_json::json!({ "url": url }),
+        },
     );
     document.insert("mcpServers".into(), servers.into());
 

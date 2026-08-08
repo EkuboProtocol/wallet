@@ -19,4 +19,3 @@ function __ekubo_wallet_complete
 end
 
 complete -c ekubo-wallet -f -a '(__ekubo_wallet_complete)'
-complete -c ew -w ekubo-wallet

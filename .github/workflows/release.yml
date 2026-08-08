@@ -88,14 +88,15 @@ jobs:
           package="ekubo-wallet-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$package"
           install -m 0755 "target/${{ matrix.target }}/release/ekubo-wallet" "dist/$package/ekubo-wallet"
-          # One binary, one keychain identity: ew is a symlink to it.
-          ln -s ekubo-wallet "dist/$package/ew"
           install -m 0644 LICENSE "dist/$package/LICENSE"
           install -m 0644 README.md "dist/$package/README.md"
-          mkdir -p "dist/$package/completions" "dist/$package/contrib/polkit"
-          install -m 0644 completions/* "dist/$package/completions/"
+          # The polkit action is the one payload file the installer cannot
+          # produce from the binary: it has to exist on disk before owner
+          # authentication works. Completions come from `ekubo-wallet
+          # completion`, and the policy schema from `ekubo-wallet policy
+          # schema`, so neither is shipped here.
+          mkdir -p "dist/$package/contrib/polkit"
           install -m 0644 contrib/polkit/com.ekubo.wallet.policy "dist/$package/contrib/polkit/"
-          cp -R examples schemas "dist/$package/"
           tar -C dist -czf "dist/$package.tar.gz" "$package"
 
       - name: Upload packaged binary
@@ -136,12 +137,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p unsigned/completions
+          mkdir -p unsigned
           cp "target/${{ matrix.target }}/release/ekubo-wallet${{ runner.os == 'Windows' && '.exe' || '' }}" unsigned/
           cp LICENSE unsigned/LICENSE
           cp README.md unsigned/README.md
-          cp completions/* unsigned/completions/
-          cp -R examples schemas unsigned/
 
       - name: Upload unsigned binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -298,11 +297,8 @@ jobs:
             package="ekubo-wallet-$VERSION-$target"
             mkdir -p "dist/$package"
             install -m 0755 "unsigned/$target/ekubo-wallet" "dist/$package/ekubo-wallet"
-            ln -s ekubo-wallet "dist/$package/ew"
             install -m 0644 "unsigned/$target/LICENSE" "dist/$package/LICENSE"
             install -m 0644 "unsigned/$target/README.md" "dist/$package/README.md"
-            cp -R "unsigned/$target/completions" "dist/$package/completions"
-            cp -R "unsigned/$target/examples" "unsigned/$target/schemas" "dist/$package/"
             ditto -c -k --sequesterRsrc --keepParent "dist/$package" "dist/$package.zip"
           done
 
@@ -440,14 +436,8 @@ jobs:
           $package = "ekubo-wallet-${{ needs.validate.outputs.version }}-x86_64-pc-windows-msvc"
           New-Item -ItemType Directory -Force -Path "dist\$package" | Out-Null
           Copy-Item "unsigned\ekubo-wallet.exe" "dist\$package\ekubo-wallet.exe"
-          # Windows has no reliable archive symlinks; a cmd shim forwards to
-          # the one executable so both names share its signature.
-          Set-Content -Path "dist\$package\ew.cmd" -Value "@echo off`r`n`"%~dp0ekubo-wallet.exe`" %*"
           Copy-Item "unsigned\LICENSE" "dist\$package\LICENSE"
           Copy-Item "unsigned\README.md" "dist\$package\README.md"
-          Copy-Item -Recurse "unsigned\completions" "dist\$package\completions"
-          Copy-Item -Recurse "unsigned\examples" "dist\$package\examples"
-          Copy-Item -Recurse "unsigned\schemas" "dist\$package\schemas"
           Compress-Archive -Path "dist\$package" -DestinationPath "dist\$package.zip"
 
       - name: Upload Windows archive

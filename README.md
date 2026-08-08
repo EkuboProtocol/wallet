@@ -3,9 +3,7 @@
 `ekubo-wallet` is a local EVM wallet, command-line tool, and stdio MCP server.
 It enforces transaction policy in the same process that reads the signing key,
 and exposes no arbitrary-message, arbitrary-hash, or raw-transaction signing
-tool. `ew` is an equivalent short name for the same executable — a symlink on
-macOS and Linux and a forwarding shim on Windows — so the OS credential store
-sees one client identity and a single keychain grant covers both names.
+tool.
 
 It is a general-purpose wallet, not a companion to any particular protocol,
 dapp, or other MCP server. Any tool can produce a signer-neutral execution plan;
@@ -18,6 +16,12 @@ machine's disk and described with `ekubo-wallet reference <path>` — so the
 agent relaying a plan between servers, or assembling one of its own out of
 several, passes a line of text instead of the plan body.
 
+The installer registers the Ekubo protocol server alongside this wallet so a
+new install can actually transact, and that is a packaging convenience rather
+than a hole in the paragraph above: nothing in this wallet knows that server
+from any other producer, and its plans get the same treatment as everyone
+else's. It can be declined at install time.
+
 This is security-sensitive software. It has not been independently audited, and
 nothing here should be read as a claim that it has.
 
@@ -26,10 +30,9 @@ nothing here should be read as a claim that it has.
 
 The installer downloads the archive for your platform, **verifies the Sigstore
 signature over `SHA256SUMS` and the archive's SHA-256 checksum against it
-before extracting anything**, installs
-`ekubo-wallet` and `ew`, registers the server with every agent CLI it detects
-(Codex, Claude Code, Gemini CLI, and Cursor), and installs completion for your
-login shell:
+before extracting anything**, installs `ekubo-wallet`, registers it with every
+agent CLI it detects (Codex, Claude Code, Gemini CLI, and Cursor), and installs
+completion for your login shell:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
@@ -42,6 +45,15 @@ an exact release tag for a reproducible installation.
 archive, so it catches a truncated download rather than a chosen one, and the
 signature is what names a builder. See
 [installation](docs/installation.md) if you need to install without it.
+
+The installer registers a second server alongside the wallet: the Ekubo
+protocol server at `https://mcp.ekubo.org/mcp`, as `ekubo`. That is what makes
+a fresh install able to quote, swap, bridge, and provide liquidity rather than
+only hold keys. It is a convenience, not an exception — it prepares unsigned
+plans and never sees a key, and every plan it produces is validated,
+simulated, and policy-checked here exactly like a plan from anywhere else.
+`EKUBO_WALLET_SKIP_COMPANION=1` installs the wallet without it, and
+`ekubo-wallet agent remove` takes both back.
 
 Then accept the legal documents and create a wallet:
 

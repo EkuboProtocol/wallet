@@ -20,4 +20,4 @@ _ekubo_wallet() {
   COMPREPLY=( $(compgen -W "$candidates" -- "$current") )
 }
 
-complete -F _ekubo_wallet ekubo-wallet ew
+complete -F _ekubo_wallet ekubo-wallet
