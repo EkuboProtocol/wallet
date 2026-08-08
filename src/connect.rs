@@ -405,10 +405,17 @@ impl SessionHandler for DappSession<'_> {
     }
 
     async fn handle_request(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
-        // Two of these paths open a review and all of them may reach owner
-        // authentication, so the terminal is handed over for the whole
-        // request rather than guessed at per method.
-        self.suspend_idle().await;
+        // Deliberately no `suspend_idle` here. Handing the terminal over for
+        // every request meant leaving the alternate screen and re-entering it
+        // on the next turn of the session loop, so the session screen blinked
+        // out and back on every answer — including for `eth_chainId`, which
+        // draws nothing, and for a transaction the policy signs automatically.
+        //
+        // The surface is released by the paths that actually draw
+        // ([`Self::review_queued`] and the two signing reviews) and taken back
+        // by the session loop afterwards. Everything else answers underneath
+        // it, and its log line appears in place.
+        //
         // A failure carrying out one request answers that request and leaves
         // the session up. Ending the whole session because one call could not
         // be served would disconnect the dapp mid-flow over, say, one RPC
@@ -777,6 +784,8 @@ impl DappSession<'_> {
             encoding,
         )?;
         let store = MessageStore::production(&self.data_dir)?;
+        // Every message is reviewed by a person, so this one always draws.
+        self.suspend_idle().await;
         match decide_message(self.config, store, record, Some(&requester), false).await? {
             MessageDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this message.",
@@ -816,6 +825,9 @@ impl DappSession<'_> {
             digest,
         )?;
         let store = TypedDataStore::production(&self.data_dir)?;
+        // Every typed-data payload is reviewed by a person, so this one always
+        // draws.
+        self.suspend_idle().await;
         match decide_typed_data(self.config, store, record, Some(&requester), false).await? {
             TypedDataDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this payload.",
@@ -1153,6 +1165,10 @@ impl DappSession<'_> {
         &self,
         queued: PendingTransaction,
     ) -> Result<Option<PendingTransaction>> {
+        // The review draws, and owner authentication below it may put a polkit
+        // text agent on this same terminal, so the idle surface hands it over
+        // before either — and the session loop takes it back afterwards.
+        self.suspend_idle().await;
         let data_dir = self.data_dir.clone();
         let wallet_id = self.wallet().id.clone();
         let read_policy = move || -> Result<crate::policy_store::StoredPolicy> {

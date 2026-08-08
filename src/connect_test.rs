@@ -215,3 +215,35 @@ fn a_reported_receipt_carries_every_field_the_spec_names() {
     assert_eq!(json["logs"][0]["data"], "0x0102");
     assert_eq!(json["logs"][0]["topics"].as_array().unwrap().len(), 1);
 }
+
+/// The session screen must not blink out when a request is merely answered.
+///
+/// Suspending the idle surface leaves the alternate screen, and the session
+/// loop re-enters it on its next turn — so a `suspend_idle` covering every
+/// request made the whole screen flash on every answer, including for methods
+/// that draw nothing at all. Only a path that actually draws may release it.
+///
+/// Read from the source because there is nothing else to read: the defect is a
+/// terminal doing something visible, and no assertion about a return value
+/// catches it.
+#[test]
+fn answering_a_request_does_not_release_the_session_screen() {
+    let source = include_str!("connect.rs");
+    let start = source
+        .find("async fn handle_request")
+        .expect("handle_request is gone");
+    let body = &source[start..];
+    let end = body[1..]
+        .find("\n    fn ")
+        .or_else(|| body[1..].find("\n    async fn "))
+        .expect("handle_request has no successor")
+        + 1;
+    // The call, not the name: the comment in that body explains why the call
+    // is absent, and a test that cannot tell them apart fails on the
+    // explanation.
+    assert!(
+        !body[..end].contains("self.suspend_idle("),
+        "handle_request suspends the idle surface for every request, which flashes the session \
+         screen on each answer. Suspend inside the path that draws instead."
+    );
+}
