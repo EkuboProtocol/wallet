@@ -1582,27 +1582,6 @@
    ]
   },
   {
-   "chain_id": 165,
-   "name": "omni-testnet-deprecated",
-   "display_name": "Omni Testnet (Deprecated)",
-   "aliases": [],
-   "default": false,
-   "testnet": true,
-   "native_currency": {
-    "name": "Omni",
-    "symbol": "OMNI",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": null,
-   "documentation_url": "https://docs.omni.network/",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://rpc.fmcscan.com/"
-   ]
-  },
-  {
    "chain_id": 168,
    "name": "aioz",
    "display_name": "AIOZ Network",
@@ -3482,28 +3461,6 @@
    ]
   },
   {
-   "chain_id": 766,
-   "name": "qom",
-   "display_name": "QL1",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "Shiba Predator",
-    "symbol": "QOM",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://scan.qom.one",
-   "documentation_url": "https://qom.one",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://evm-rpc-ql1.mschihuahua.org/",
-    "https://evm-rpc-ql1.foxxone.one/"
-   ]
-  },
-  {
    "chain_id": 785,
    "name": "autheo-test-chain",
    "display_name": "AUTHEO Testnet",
@@ -4460,28 +4417,6 @@
    "fork_endpoints": 0,
    "rpc_urls": [
     "https://rpc.testnet.quarrychain.network/"
-   ]
-  },
-  {
-   "chain_id": 1130,
-   "name": "dfi",
-   "display_name": "DeFiChain EVM Network Mainnet",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "DeFiChain",
-    "symbol": "DFI",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": null,
-   "documentation_url": "https://meta.defichain.com/",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://dmc.mydefichain.com/mainnet",
-    "https://dmc01.mydefichain.com/mainnet"
    ]
   },
   {
@@ -6229,27 +6164,6 @@
     "https://centrifuge-parachain.api.onfinality.io/public",
     "https://rpc-centrifuge.luckyfriday.io/",
     "https://fullnode.centrifuge.io/"
-   ]
-  },
-  {
-   "chain_id": 2035,
-   "name": "phala",
-   "display_name": "Phala Network",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "Ether",
-    "symbol": "ETH",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": null,
-   "documentation_url": "https://phala.network",
-   "simulate_endpoints": 1,
-   "fork_endpoints": 1,
-   "rpc_urls": [
-    "https://rpc.phala.network/"
    ]
   },
   {
@@ -9192,27 +9106,6 @@
    ]
   },
   {
-   "chain_id": 7332,
-   "name": "eon",
-   "display_name": "Horizen EON Mainnet",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "Zencash",
-    "symbol": "ZEN",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": null,
-   "documentation_url": "https://horizen.io/",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://rpc.ankr.com/horizen_eon"
-   ]
-  },
-  {
    "chain_id": 7336,
    "name": "pruvtestnet",
    "display_name": "Pruv Testnet",
@@ -10001,27 +9894,6 @@
    "fork_endpoints": 1,
    "rpc_urls": [
     "https://rpc.test.algen.network/"
-   ]
-  },
-  {
-   "chain_id": 8921,
-   "name": "algl2",
-   "display_name": "Algen Layer2",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "ALG",
-    "symbol": "ALG",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://scan.alg2.algen.network",
-   "documentation_url": "https://www.algen.network",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://rpc.alg2.algen.network/"
    ]
   },
   {
@@ -11049,27 +10921,6 @@
    "fork_endpoints": 0,
    "rpc_urls": [
     "https://testnet-rpc.ivarex.com/"
-   ]
-  },
-  {
-   "chain_id": 17000,
-   "name": "holesky",
-   "display_name": "Holesky",
-   "aliases": [],
-   "default": false,
-   "testnet": true,
-   "native_currency": {
-    "name": "Testnet ETH",
-    "symbol": "ETH",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://holesky.beaconcha.in",
-   "documentation_url": "https://holesky.ethpandaops.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://holesky.drpc.org/"
    ]
   },
   {
@@ -13292,29 +13143,6 @@
    ]
   },
   {
-   "chain_id": 69420,
-   "name": "cheese",
-   "display_name": "CHEESE Blockchain",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "CHEESE",
-    "symbol": "CHEESE",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://cheesescan.com",
-   "documentation_url": "https://cheesescan.com",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://rpc2.cheesescan.com/",
-    "https://rpc1.cheesescan.com/",
-    "https://cheesescan.com/rpc"
-   ]
-  },
-  {
    "chain_id": 69923,
    "name": "ilyt",
    "display_name": "ILITY Testnet",
@@ -14465,174 +14293,6 @@
    ]
   },
   {
-   "chain_id": 100001,
-   "name": "qkc-s0",
-   "display_name": "QuarkChain Mainnet Shard 0",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/0",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s0-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 100002,
-   "name": "qkc-s1",
-   "display_name": "QuarkChain Mainnet Shard 1",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/1",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s1-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 100003,
-   "name": "qkc-s2",
-   "display_name": "QuarkChain Mainnet Shard 2",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/2",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s2-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 100004,
-   "name": "qkc-s3",
-   "display_name": "QuarkChain Mainnet Shard 3",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/3",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s3-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 100005,
-   "name": "qkc-s4",
-   "display_name": "QuarkChain Mainnet Shard 4",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/4",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s4-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 100006,
-   "name": "qkc-s5",
-   "display_name": "QuarkChain Mainnet Shard 5",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/5",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s5-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 100007,
-   "name": "qkc-s6",
-   "display_name": "QuarkChain Mainnet Shard 6",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/6",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s6-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 100008,
-   "name": "qkc-s7",
-   "display_name": "QuarkChain Mainnet Shard 7",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://mainnet.quarkchain.io/7",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://mainnet-s7-ethapi.quarkchain.io/"
-   ]
-  },
-  {
    "chain_id": 102030,
    "name": "ctc",
    "display_name": "Creditcoin",
@@ -14716,48 +14376,6 @@
    "fork_endpoints": 0,
    "rpc_urls": [
     "https://rpc.xertra.com/"
-   ]
-  },
-  {
-   "chain_id": 110001,
-   "name": "qkc-d-s0",
-   "display_name": "QuarkChain Devnet Shard 0",
-   "aliases": [],
-   "default": false,
-   "testnet": true,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://devnet.quarkchain.io/0",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://devnet-s0-ethapi.quarkchain.io/"
-   ]
-  },
-  {
-   "chain_id": 110002,
-   "name": "qkc-d-s1",
-   "display_name": "QuarkChain Devnet Shard 1",
-   "aliases": [],
-   "default": false,
-   "testnet": true,
-   "native_currency": {
-    "name": "QKC",
-    "symbol": "QKC",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://devnet.quarkchain.io/1",
-   "documentation_url": "https://www.quarkchain.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://devnet-s1-ethapi.quarkchain.io/"
    ]
   },
   {
@@ -15925,28 +15543,6 @@
    ]
   },
   {
-   "chain_id": 543210,
-   "name": "zero-network",
-   "display_name": "ZERO Network",
-   "aliases": [],
-   "default": false,
-   "testnet": false,
-   "native_currency": {
-    "name": "Ether",
-    "symbol": "ETH",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://explorer.zero.network",
-   "documentation_url": "https://docs.zero.network",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://zero.drpc.org/",
-    "https://rpc.zerion.io/v1/zero"
-   ]
-  },
-  {
    "chain_id": 552981,
    "name": "owctt",
    "display_name": "One World Chain Testnet",
@@ -16201,29 +15797,6 @@
    "fork_endpoints": 0,
    "rpc_urls": [
     "https://rpc.primeanetwork.com/rpc-https"
-   ]
-  },
-  {
-   "chain_id": 713715,
-   "name": "sei-devnet",
-   "display_name": "Sei Devnet",
-   "aliases": [],
-   "default": false,
-   "testnet": true,
-   "native_currency": {
-    "name": "Sei",
-    "symbol": "SEI",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://seistream.app",
-   "documentation_url": "https://www.sei.io",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://sei-devnet.drpc.org/",
-    "https://evm-rpc.arctic-1.seinetwork.io/",
-    "https://evm-rpc-arctic-1.sei-apis.com/"
    ]
   },
   {
@@ -17596,27 +17169,6 @@
     "https://rpc.ma-chain.xyz/",
     "https://madataseed.xyz/",
     "https://maclive.info/"
-   ]
-  },
-  {
-   "chain_id": 20260532,
-   "name": "gridmindt",
-   "display_name": "GridMind Testnet",
-   "aliases": [],
-   "default": false,
-   "testnet": true,
-   "native_currency": {
-    "name": "GridMind Test GRD",
-    "symbol": "tGRD",
-    "decimals": 18
-   },
-   "max_gas_limit": null,
-   "block_explorer_url": "https://gridmindblockchain.com",
-   "documentation_url": "https://www.grid-mind.com/blockchain",
-   "simulate_endpoints": 0,
-   "fork_endpoints": 0,
-   "rpc_urls": [
-    "https://testnet-rpc.grid-mind.com/"
    ]
   },
   {

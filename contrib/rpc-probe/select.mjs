@@ -168,6 +168,14 @@ const chains = [];
 for (const chain of candidates) {
   const meta = chain.meta;
   if (!meta) continue;
+  // The collector works this out and says why: a chain that never reached
+  // mainnet, or that another chain replaced, is not one a wallet should offer
+  // to sign on. Nothing here read it, so the classification was computed,
+  // written to the candidate file, and dropped — and the registry shipped
+  // "Omni Testnet (Deprecated)" and the Harmony shards with the same
+  // provenance as every live chain beside them. Abandoned infrastructure is
+  // exactly what goes stale or changes hands.
+  if (meta.deprecated) continue;
   const records = chain.endpoints
     .map((endpoint) => probes.get(`${chain.chainId}|${endpoint.url}`))
     .filter(Boolean)

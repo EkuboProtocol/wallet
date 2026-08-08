@@ -90,6 +90,17 @@ restore() {
 }
 trap restore EXIT
 
+# Read without echo, then passed to `security import` as an argument, which is
+# the only way that command takes one: omitting -P asks for it through a GUI
+# panel instead, which is not a prompt a terminal rehearsal should depend on.
+#
+# So it is in this process's argv for the length of the import, and run 6251
+# raised that (187014). On macOS a process's arguments are readable by its own
+# user and by root, not by other users, so what this exposes is exactly the
+# same-user attacker that `docs/threat-model.md` already accepts as residual —
+# one who can read this argv can also read the keystrokes that produced it.
+# Recorded rather than worked around, because every alternative here is worse
+# than the thing it avoids.
 printf 'p12 export password: '
 read -rs p12_password
 printf '\n'
