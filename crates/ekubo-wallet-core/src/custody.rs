@@ -109,7 +109,14 @@ pub(crate) fn load_matching_signer<K: KeyStore + ?Sized>(
     Ok(signer)
 }
 
-pub trait KeyStore: Send + Sync {
+/// Where a wallet's private key lives.
+///
+/// Sealed: implementing this requires [`crate::sealed::SealedKeyStore`], which
+/// is private to the kernel, so the only key stores are the two below. A store
+/// decides whether `insert_new` really persisted the key it was handed and
+/// whether `delete` really removed one, which is not a decision presentation
+/// code gets to make. See [`crate::sealed`] for the full reasoning.
+pub trait KeyStore: crate::sealed::SealedKeyStore + Send + Sync {
     fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()>;
     fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial>;
     fn delete(&self, wallet_id: &str) -> Result<()>;
@@ -117,6 +124,8 @@ pub trait KeyStore: Send + Sync {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OsKeyStore;
+
+impl crate::sealed::SealedKeyStore for OsKeyStore {}
 
 impl OsKeyStore {
     fn entry(wallet_id: &str) -> Result<Entry> {
@@ -358,6 +367,9 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 #[cfg(any(test, feature = "test-hooks"))]
 #[derive(Default)]
 pub struct MemoryKeyStore(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl crate::sealed::SealedKeyStore for MemoryKeyStore {}
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl KeyStore for MemoryKeyStore {

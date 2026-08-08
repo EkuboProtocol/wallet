@@ -13,6 +13,11 @@ use crate::human_presence::{HumanPresenceError, TestHumanPresence};
 /// it is the one point where the call awaits without holding any lock.
 struct PresenceThen<F>(F);
 
+// A test backend is still a backend, so it carries the seal like the real
+// ones. That this file *can* write this impl, and the presentation crate
+// cannot, is the seal working as intended rather than an obstacle to it.
+impl<F> crate::sealed::SealedHumanPresence for PresenceThen<F> {}
+
 #[async_trait::async_trait]
 impl<F: Fn() + Send + Sync> HumanPresence for PresenceThen<F> {
     async fn confirm(&self, _request: &PresenceRequest) -> Result<(), HumanPresenceError> {

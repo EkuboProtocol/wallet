@@ -101,24 +101,41 @@ fn interactive_proof_has_exactly_one_production_origin_per_listed_command() {
     );
 }
 
-/// No key material, and nothing that can use it, leaves the kernel crate.
+/// Every custody symbol banned in presentation code, and the reason it is.
 ///
 /// A `PrivateKeySigner` signs any 32 bytes with no policy, no simulation, and
-/// no owner authentication, so a caller holding one holds the wallet — which
-/// makes "who can obtain a signer" the question that decides whether the crate
-/// split protects keys at all. It is answered by visibility: `signer`,
-/// `expose_hex`, and `load_matching_signer` are `pub(crate)`, so presentation
-/// code passes a `KeyStore` into an orchestrator entry point and gets a stored
-/// decision back, never a key.
+/// no owner authentication, so a caller holding one holds the wallet. That
+/// makes "who can obtain a signer" the question deciding whether the crate
+/// split protects keys at all, and these are the answers.
 ///
-/// The compiler already enforces this; the value of pinning it is that
-/// widening a `pub(crate)` to `pub` is a one-word diff that reads as tidying up
-/// and silently restores the bypass. This makes that word fail the build and
-/// say why.
+/// `address` is deliberately absent: it is derived from the public key and
+/// appears in every transaction the wallet sends, so exposing one discloses
+/// nothing.
+const CUSTODY_BANS: &[&str] = &[
+    "ekubo_wallet_core::custody::load_matching_signer",
+    "ekubo_wallet_core::custody::PrivateKeyMaterial::signer",
+    "ekubo_wallet_core::custody::PrivateKeyMaterial::expose_hex",
+    "ekubo_wallet_core::custody::KeyStore::load",
+    "alloy::signers::local::PrivateKeySigner",
+];
+
+/// No key material, and nothing that can use it, leaves the kernel crate.
 ///
-/// `address` is deliberately absent from the list: an address is derived from
-/// the public key and appears in every transaction the wallet sends, so
-/// exposing one discloses nothing.
+/// Three mechanisms stack here, and this test guards the two the compiler
+/// cannot guard itself.
+///
+/// The compiler is the enforcement: `signer`, `expose_hex`, and
+/// `load_matching_signer` are `pub(crate)`, so presentation code cannot write
+/// the call at all. Clippy's `disallowed_methods` is the second line, denied
+/// rather than warned in `Cargo.toml`, so that widening one of those to `pub`
+/// — a one-word diff that reads as tidying up — fails at the first *use*
+/// rather than silently restoring the bypass.
+///
+/// What neither can see is a widening that nobody has used yet, or the quiet
+/// deletion of the `clippy.toml` that carries the bans. So this pins the
+/// declarations and pins the config, and the assertions are text matching
+/// because both targets *are* text: a declaration's spelling and a config
+/// file's contents, not a claim about what the code does.
 #[test]
 fn no_signer_or_key_material_escapes_the_kernel() {
     let custody =
@@ -136,41 +153,118 @@ fn no_signer_or_key_material_escapes_the_kernel() {
         );
     }
 
-    // And the presentation crate must not name them, which catches a widening
-    // at the point it starts being used rather than only at the declaration.
-    let mut offenders = Vec::new();
-    let mut directories = vec![repository_root().join("src")];
-    while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(&directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                directories.push(path);
-                continue;
-            }
-            if path.extension().is_none_or(|extension| extension != "rs") {
-                continue;
-            }
-            let source = fs::read_to_string(&path).unwrap();
-            for (number, line) in source.lines().enumerate() {
-                // Comments are skipped, as in the proof-origin check above:
-                // the rule is about what the code reaches for, and explaining
-                // in prose why a symbol is out of reach must stay allowed.
-                if line.trim_start().starts_with("//") {
-                    continue;
-                }
-                for forbidden in ["expose_hex", "load_matching_signer", "PrivateKeySigner"] {
-                    if line.contains(forbidden) {
-                        let display = path.display().to_string().replace('\\', "/");
-                        offenders.push(format!("{display}:{}: {forbidden}", number + 1));
-                    }
-                }
-            }
-        }
+    let clippy = fs::read_to_string(repository_root().join("clippy.toml")).unwrap();
+    for ban in CUSTODY_BANS {
+        assert!(
+            clippy.contains(ban),
+            "clippy.toml no longer bans `{ban}` in the presentation crate; the ban is what catches \
+             a widened `pub(crate)` at its first use"
+        );
     }
+
+    // A ban that only warns is a ban you scroll past: the gate prints warnings
+    // and still exits zero.
+    let manifest = fs::read_to_string(repository_root().join("Cargo.toml")).unwrap();
+    for level in [
+        "disallowed_methods = \"deny\"",
+        "disallowed_types = \"deny\"",
+    ] {
+        assert!(
+            manifest.contains(level),
+            "Cargo.toml no longer sets `{level}`; reaching for a private key must fail the build, \
+             not warn in it"
+        );
+    }
+}
+
+/// The two capability traits stay closed to outside implementation.
+///
+/// `HumanPresence` is the one that matters. Every owner authentication in the
+/// process is a single `confirm` call, so an implementation returning `Ok(())`
+/// is not a weak check but the absence of all of them — and presentation code
+/// hands a `HumanPresence` to the kernel by design, so it would be supplying
+/// the very thing that is supposed to constrain it. `KeyStore` is sealed
+/// alongside it: a store decides whether `insert_new` really persisted a key
+/// and whether `delete` really removed one.
+///
+/// Dropping a supertrait bound is a one-line diff that compiles and breaks
+/// nothing, which is exactly the kind of erosion no other check here sees.
+#[test]
+fn the_capability_traits_stay_sealed() {
+    for (file, bound) in [
+        (
+            "crates/ekubo-wallet-core/src/custody.rs",
+            "pub trait KeyStore: crate::sealed::SealedKeyStore",
+        ),
+        (
+            "crates/ekubo-wallet-core/src/human_presence.rs",
+            "pub trait HumanPresence: crate::sealed::SealedHumanPresence",
+        ),
+    ] {
+        let source = fs::read_to_string(repository_root().join(file)).unwrap();
+        assert!(
+            source.contains(bound),
+            "{file} no longer declares `{bound}`; an unsealed capability trait can be implemented \
+             by the presentation crate, which is where it would be used to answer its own \
+             security question"
+        );
+    }
+
+    // And the seal is only a seal while its module is unreachable from outside
+    // the kernel: `pub mod sealed` would let presentation code implement the
+    // marker directly and satisfy the bound after all.
+    let lib =
+        fs::read_to_string(repository_root().join("crates/ekubo-wallet-core/src/lib.rs")).unwrap();
     assert!(
-        offenders.is_empty(),
-        "the presentation crate reaches for key material: {offenders:?}; signing belongs to \
-         orchestrator entry points that confirm presence first"
+        lib.contains("\nmod sealed;"),
+        "the kernel no longer declares `mod sealed;`"
+    );
+    assert!(
+        !lib.contains("pub mod sealed;"),
+        "`sealed` is published; the marker traits must be unnameable outside the kernel or the \
+         seal means nothing"
+    );
+}
+
+/// The kernel's clippy exemption covers the custody bans and nothing else.
+///
+/// Clippy reads the `clippy.toml` beside a crate's own `Cargo.toml` in
+/// preference to the workspace root's, and the chosen file *replaces* the
+/// other rather than merging. That is what scopes the custody bans to
+/// presentation code — and it means any future ban added to the root file and
+/// meant to apply everywhere silently skips the security kernel, the code that
+/// most wants linting.
+///
+/// Nothing about that failure is visible: the kernel just stops being linted
+/// for the new rule. So the two files are compared here instead. Add a ban to
+/// the root that is not a custody ban, and this fails until it is mirrored
+/// into the kernel's file.
+#[test]
+fn the_kernel_mirrors_every_lint_ban_that_is_not_about_custody() {
+    fn banned_paths(file: &str) -> Vec<String> {
+        fs::read_to_string(repository_root().join(file))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .filter_map(|line| {
+                let (_, rest) = line.split_once("path = \"")?;
+                let (path, _) = rest.split_once('"')?;
+                Some(path.to_owned())
+            })
+            .collect()
+    }
+
+    let mut expected: Vec<String> = banned_paths("clippy.toml")
+        .into_iter()
+        .filter(|path| !CUSTODY_BANS.contains(&path.as_str()))
+        .collect();
+    let mut found = banned_paths("crates/ekubo-wallet-core/clippy.toml");
+    expected.sort();
+    found.sort();
+    assert_eq!(
+        found, expected,
+        "the kernel's clippy.toml does not mirror the root's non-custody bans; a rule meant for \
+         the whole workspace is not being applied to the security kernel"
     );
 }
 

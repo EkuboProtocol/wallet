@@ -84,3 +84,12 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 too_many_arguments = "allow"
 too_many_lines = "allow"
+# The custody bans in `clippy.toml` refuse the build rather than warning in it.
+# Everything else here is advice about how the code reads; these two say that
+# presentation code has reached for a private key or a signer, and a warning is
+# the wrong response to that — the gate prints warnings by the screenful and
+# nothing fails, so a warning is a thing you scroll past. See `clippy.toml` for
+# what is banned and why, and `crates/ekubo-wallet-core/clippy.toml` for the
+# kernel's exemption.
+disallowed_methods = "deny"
+disallowed_types = "deny"

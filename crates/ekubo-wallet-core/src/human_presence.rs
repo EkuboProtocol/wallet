@@ -105,13 +105,25 @@ pub enum HumanPresenceError {
     Backend(String),
 }
 
+/// Proof that the machine's owner is present and consented to one operation.
+///
+/// Sealed, and of the kernel's two sealed traits this is the one that matters
+/// most. Every owner authentication in the process — signing a reviewed
+/// message or typed-data payload, exporting a private key, removing a wallet —
+/// is exactly one `confirm` call, so an implementation that returns `Ok(())`
+/// is not a weak presence check but the absence of every presence check at
+/// once. Requiring the kernel-private [`crate::sealed::SealedHumanPresence`]
+/// is what stops presentation code writing that four-line impl and handing it
+/// to an orchestrator entry point.
 #[async_trait]
-pub trait HumanPresence: Send + Sync {
+pub trait HumanPresence: crate::sealed::SealedHumanPresence + Send + Sync {
     async fn confirm(&self, request: &PresenceRequest) -> Result<(), HumanPresenceError>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlatformHumanPresence;
+
+impl crate::sealed::SealedHumanPresence for PlatformHumanPresence {}
 
 #[cfg(target_os = "macos")]
 #[async_trait]
@@ -284,6 +296,9 @@ impl HumanPresence for PlatformHumanPresence {
 pub struct TestHumanPresence {
     pub allow: bool,
 }
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl crate::sealed::SealedHumanPresence for TestHumanPresence {}
 
 #[cfg(any(test, feature = "test-hooks"))]
 #[async_trait]

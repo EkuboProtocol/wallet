@@ -33,6 +33,7 @@ pub mod policy_store;
 pub mod reconcile;
 pub mod rpc;
 pub mod sanitize;
+mod sealed;
 pub(crate) mod signature_requests;
 pub mod simulation;
 pub mod simulation_store;

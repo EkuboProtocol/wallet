@@ -1,0 +1,36 @@
+# Key material, and everything that can use it, is out of reach here.
+#
+# This file configures the `ekubo-wallet` package — the presentation layer:
+# CLI, TUI, MCP server, WalletConnect. The security kernel exempts itself with
+# its own `crates/ekubo-wallet-core/clippy.toml`, because the kernel is where
+# the legitimate uses live. Read the two files together: this one is the rule,
+# that one is the list of who it does not apply to.
+#
+# The rule these encode is that presentation code obtains signatures, never
+# signers. It passes a `KeyStore` and a `HumanPresence` into an orchestrator
+# entry point and gets a stored decision back. A caller holding a
+# `PrivateKeySigner` instead holds the wallet: it signs any 32 bytes with no
+# policy, no simulation, and no owner authentication.
+#
+# The compiler is what actually enforces this — `signer`, `expose_hex`, and
+# `load_matching_signer` are `pub(crate)`, so the calls below cannot even be
+# written from here today. These bans are the second line: widening one of
+# those to `pub` is a one-word diff that reads as tidying up, and on its own it
+# would silently restore the bypass. This makes the first *use* of a widened
+# symbol fail the gate, with a reason attached.
+#
+# Why paths rather than a source grep: these resolve through the type system,
+# so `use … as …` cannot evade them, and `KeyStore::load` below is
+# distinguished from the unrelated `AtomicBool::load` and `ConfigStore::load`
+# that presentation code calls constantly. A text search can do neither.
+
+disallowed-methods = [
+    { path = "ekubo_wallet_core::custody::load_matching_signer", reason = "presentation code must not mint a signer; call an orchestrator entry point, which confirms owner presence first" },
+    { path = "ekubo_wallet_core::custody::PrivateKeyMaterial::signer", reason = "a signer signs anything put in front of it, with no policy and no owner authentication" },
+    { path = "ekubo_wallet_core::custody::PrivateKeyMaterial::expose_hex", reason = "this renders the secret itself; only CustodyService::export may, and it confirms presence and records the disclosure" },
+    { path = "ekubo_wallet_core::custody::KeyStore::load", reason = "presentation code has no reason to pull key material into memory; hand the KeyStore to the kernel and let it load" },
+]
+
+disallowed-types = [
+    { path = "alloy::signers::local::PrivateKeySigner", reason = "holding one is holding the wallet; presentation code receives signatures, never signers" },
+]

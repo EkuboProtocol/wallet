@@ -115,6 +115,48 @@ Owner authentication is in any case an application-level check in the CLI, not
 an operating-system gate on the key. Choose a wallet's policy on that basis,
 and keep autonomous wallets funded accordingly.
 
+## What the crate split enforces in-process
+
+Because that check is application-level, it is worth being precise about what
+holds it up. The workspace is two crates: `ekubo-wallet-core` is the security
+kernel, and the `ekubo-wallet` binary above it is presentation — CLI, TUI, MCP
+server, WalletConnect. The split is not a naming convention. Four things about
+it are enforced by the compiler:
+
+- **No signer leaves the kernel.** `PrivateKeyMaterial::signer`, `expose_hex`,
+  and `load_matching_signer` are `pub(crate)`. Presentation code can hold a
+  `PrivateKeyMaterial` and learn its `address`, and that is all: a signer signs
+  any 32 bytes with no policy and no authentication, so obtaining one is
+  obtaining the wallet. Every signature in the process is therefore minted by
+  a function in `orchestrator`.
+- **No presence backend is supplied from outside.** `HumanPresence` is sealed
+  by a kernel-private marker trait. Presentation code passes one *in*, so
+  without the seal it could pass an implementation whose `confirm` returns
+  `Ok(())` — not a weak owner check but the absence of every owner check in the
+  process, since each one is a single `confirm` call. `KeyStore` is sealed the
+  same way.
+- **No arbitrary SQL.** `PolicyStore`'s connection is `pub(crate)`, the
+  database key loader is private, and the binary crate does not depend on
+  `rusqlite` at all — so storage is reachable only through the kernel's typed
+  methods, and not by accident even in principle.
+- **No raw transaction construction.** `sign_prepared` is private, so a
+  transaction cannot be signed around the policy and simulation ladder.
+
+Two further layers catch erosion rather than attack. Clippy's
+`disallowed_methods` and `disallowed_types` — denied, not warned, in
+`Cargo.toml` and configured in `clippy.toml` — fail the build if presentation
+code names a custody symbol, so widening one of those `pub(crate)`s to `pub`
+stops being a silent one-word change. `tests/boundary.rs` pins the
+declarations, the bans, and the seals themselves.
+
+What none of this does is defend against someone who can change the code:
+they can edit the kernel as easily as the presentation layer. The guarantee is
+narrower and still worth having — that no reviewer, refactor, or new MCP tool
+reaches key material *by accident*, and that an auditor establishes what can
+sign by reading one crate. Every MCP tool body, for instance, holds an
+`Arc<dyn KeyStore>`; what stops it exfiltrating a key is that there is no
+method it can call to read one.
+
 SQLCipher protects confidentiality and page integrity, but there is no external
 anti-rollback anchor. Restoring an older valid encrypted database can restore
 an older policy or an already-signed pending record. See

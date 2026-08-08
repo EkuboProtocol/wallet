@@ -1,0 +1,22 @@
+# The kernel is exempt from the custody bans in the workspace-root
+# `clippy.toml`, because the kernel is the one place those symbols are meant to
+# be used: `execution` and `orchestrator` mint the signers, and
+# `CustodyService::export` renders a key after confirming owner presence.
+#
+# Clippy reads the `clippy.toml` beside the crate's own `Cargo.toml` in
+# preference to the workspace root's, and the chosen file *replaces* the
+# other rather than merging with it. That is what scopes the bans to
+# presentation code, and it carries one trap worth stating plainly:
+#
+#   A `disallowed-methods` or `disallowed-types` entry added to the root file
+#   and genuinely meant to apply everywhere will NOT apply to this crate — the
+#   security kernel, the code that most wants linting — and nothing will say
+#   so. Such an entry has to be copied here as well.
+#
+# The lists are empty rather than absent so that the trap has somewhere
+# obvious to be documented, and so a reader who greps for `disallowed` in this
+# crate finds this explanation rather than nothing at all.
+
+disallowed-methods = []
+
+disallowed-types = []
