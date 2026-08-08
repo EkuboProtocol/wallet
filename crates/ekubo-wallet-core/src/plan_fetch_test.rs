@@ -557,6 +557,38 @@ mod file_references {
         assert!(error.contains("not a regular file"), "{error}");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_is_answered_rather_than_waited_on() {
+        // What this asserts is mostly the timeout. A FIFO opened for reading
+        // with no writer holds the open, not the read, so without
+        // `O_NONBLOCK` the call never comes back and the regression is a
+        // hung test rather than a wrong message. The message is checked too:
+        // the refusal has to come from the handle's own type.
+        let body = plan_json();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("plan.json");
+        // The shipped `mkfifo`, because `libc::mkfifo` is an `unsafe` call and
+        // this workspace denies those outright.
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success(), "mkfifo {}", path.display());
+
+        let url = Url::from_file_path(&path).unwrap().to_string();
+        let reference = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            resolve(&reference, FetchPolicy::production()),
+        )
+        .await
+        .expect("opening a FIFO must not block")
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
     #[tokio::test]
     async fn a_missing_file_names_the_path_the_caller_gave() {
         let body = plan_json();

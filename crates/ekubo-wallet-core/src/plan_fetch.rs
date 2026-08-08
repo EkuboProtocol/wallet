@@ -401,10 +401,9 @@ fn require_verifiable(
 /// Synchronous inside an async caller on purpose: this is a bounded read of
 /// at most `MAX_SERIALIZED_PLAN_BYTES` from local storage, and the wallet
 /// already does its encrypted-database work the same way. What it must not
-/// do is block
-/// indefinitely, which is why the path has to be a regular file — a FIFO
-/// would hold the open itself until someone wrote to it, and a character
-/// device would answer the read forever.
+/// do is block indefinitely, which is why what it opens has to be a regular
+/// file — a FIFO would hold the open itself until someone wrote to it, and a
+/// character device would answer the read forever.
 fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
     use std::io::Read as _;
 
@@ -434,7 +433,41 @@ fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
     let path = parsed.to_file_path().map_err(|()| {
         anyhow!("{noun} file URL must name an absolute local path, as in file:///tmp/plan.json")
     })?;
-    let metadata = std::fs::metadata(&path)
+    // Nothing is asked of the name before the open. Statting the path and
+    // then opening it are two resolutions of one string, and whoever owns the
+    // directory chooses what sits there in between: a regular file for the
+    // check, a FIFO for the open, and the open is the call that never
+    // returns — on a thread the async runtime needs back, for a caller that
+    // can repeat the trick. `O_NONBLOCK` makes the open answer immediately
+    // for exactly the file types that would otherwise hold it, and means
+    // nothing to a regular file, whose reads are unaffected by it.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = match options.open(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            // The name is consulted only to explain a refusal that has
+            // already happened, so a lie told to it changes no decision.
+            // Windows declines to open a directory at all, where Unix opens
+            // it and lets the check below name it; asking here leaves both
+            // saying the same sentence.
+            if std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
+                bail!("{noun} file {} is not a regular file", path.display());
+            }
+            return Err(anyhow::Error::new(error)
+                .context(format!("{noun} file {} could not be read", path.display())));
+        }
+    };
+    // The type and the size are read from the handle this function goes on to
+    // read, rather than from the name, so no swap can sit between the answer
+    // and its use.
+    let metadata = file
+        .metadata()
         .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
     ensure!(
         metadata.is_file(),
@@ -446,9 +479,7 @@ fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
         measured <= MAX_SERIALIZED_PLAN_BYTES,
         "{noun} file exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
     );
-    let file = std::fs::File::open(&path)
-        .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
-    let mut body = Vec::with_capacity(measured);
+    let mut body = Vec::with_capacity(measured.min(MAX_SERIALIZED_PLAN_BYTES));
     // Read one byte past the cap rather than trusting the size just measured:
     // the file may have grown between the two calls, and the limit is on what
     // this process holds, not on what it expected to.
