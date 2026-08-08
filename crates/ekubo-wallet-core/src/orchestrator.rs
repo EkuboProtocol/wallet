@@ -317,6 +317,16 @@ pub async fn approve_transaction(
     let decision = presenter
         .review_transaction(&approval, &simulation, &review)
         .await?;
+    // Recorded before anything else can fail. Rejection needs only the request
+    // ID — no simulation, no prepared envelope — and reading that state first
+    // meant an unrelated error in it returned early and left the request
+    // `AwaitingApproval` after the terminal had told the reviewer it was
+    // refused. A decision this function calls a decision has to be written
+    // like one.
+    if decision != ApprovalDecision::Approved {
+        let rejected = lock(&pending)?.reject(request.request_id)?;
+        return Ok(ApprovalOutcome::Rejected(rejected));
+    }
     // Whatever the reviewer last had in front of them, not what was authored
     // first. A refresh replaces the simulation and the prepared envelope
     // together, and signing the earlier pair would sign numbers nobody
@@ -327,10 +337,6 @@ pub async fn approve_transaction(
         prepared,
         ..
     } = review.take_authored()?;
-    if decision != ApprovalDecision::Approved {
-        let rejected = lock(&pending)?.reject(request.request_id)?;
-        return Ok(ApprovalOutcome::Rejected(rejected));
-    }
 
     let review_digest = prepared.review_digest();
     presence

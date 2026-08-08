@@ -203,6 +203,14 @@ fn review_fullscreen_blocking(
     review.refreshable = refreshable;
     let decision = {
         let mut screen = Screen::enter()?;
+        // Authoring this document took RPC round trips, and the terminal was
+        // collecting keystrokes throughout. `run_refresh` already drains for
+        // exactly this reason after a re-simulation; entering the screen the
+        // first time is the same situation and the more dangerous one, because
+        // a document that fits the viewport has `reached_end` set by its own
+        // first draw — so a buffered Tab and Enter, typed into the silence
+        // before anything was drawn, would move to Approve and take it.
+        drain_type_ahead()?;
         loop {
             screen
                 .terminal
@@ -276,6 +284,13 @@ fn run_refresh(
         }
     };
     review.finish_refresh(outcome);
+    drain_type_ahead()?;
+    Ok(())
+}
+
+/// Discard whatever the terminal buffered while nothing was on screen to read
+/// it, so a keystroke can only ever answer a document its typist has seen.
+fn drain_type_ahead() -> Result<()> {
     while crossterm::event::poll(std::time::Duration::ZERO)? {
         let _ = crossterm::event::read()?;
     }
