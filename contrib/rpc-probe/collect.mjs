@@ -48,6 +48,12 @@ mkdirSync(outDir, { recursive: true });
 const KEY_SEGMENT = /^(?:[0-9a-f]{20,}|[0-9a-zA-Z_-]{24,}|demo|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 function carriesCredential(parsed) {
+  // Userinfo first, because it is the one form that does not have to look
+  // like a credential to be one — `https://apikey:secret@rpc.example.com/`
+  // has an ordinary host and an empty path, and every stage after this keeps
+  // it: `canonical` preserves it, the prober sends it, and the compiled
+  // registry would ship it to everyone.
+  if (parsed.username !== "" || parsed.password !== "") return true;
   for (const [name] of parsed.searchParams) {
     if (/key|token|secret|auth|pass/i.test(name)) return true;
   }

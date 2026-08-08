@@ -730,6 +730,22 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
             matches!(rpc_url.scheme(), "http" | "https"),
             "RPC URL must use http:// or https://"
         );
+        // Userinfo is a credential written in the one part of a URL that does
+        // not have to look like one, and this wallet quotes its endpoints back
+        // verbatim: `wallet_list` hands them to the agent, `network show`
+        // prints them, and the disclosure text names them. A field repeated on
+        // every read cannot hold a secret, so it is refused here rather than
+        // redacted at each of the places it would otherwise surface — and
+        // refused without echoing the URL, since the message that named it
+        // would publish the thing it is complaining about. Checked before the
+        // duplicate test below, which does echo.
+        ensure!(
+            rpc_url.username().is_empty() && rpc_url.password().is_none(),
+            "an RPC URL for network {} carries a username or password; this wallet repeats its \
+             endpoints verbatim to the agent and on screen, so a credential there would be \
+             disclosed. Remove it from the URL.",
+            network.name
+        );
         // A list that names one endpoint twice is shorter than it looks: the
         // second attempt reaches the service that just failed, so the network
         // has fewer real fallbacks than its owner believes.

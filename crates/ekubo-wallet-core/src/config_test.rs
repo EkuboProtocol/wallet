@@ -262,6 +262,33 @@ fn owner_configuration_admits_a_loopback_node() {
 }
 
 #[test]
+fn an_rpc_url_may_not_carry_a_credential_the_wallet_would_repeat() {
+    // A host and an empty path, so nothing but the userinfo distinguishes it
+    // from an ordinary endpoint — and the wallet quotes endpoints back to the
+    // agent and onto the screen verbatim.
+    for endpoint in [
+        "https://apikey:secret@rpc.example.com/",
+        "https://apikey@rpc.example.com/",
+    ] {
+        let mut candidate = default_networks().remove(0);
+        candidate.rpc_urls = vec![endpoint.parse().unwrap()];
+        let error = validate_network(&candidate)
+            .expect_err(endpoint)
+            .to_string();
+        // The refusal must not publish what it is refusing.
+        assert!(!error.contains("secret"), "{error}");
+        assert!(!error.contains("apikey"), "{error}");
+        assert!(error.contains("username or password"), "{error}");
+    }
+
+    // A key in the path is not this check's business: it is indistinguishable
+    // from a path, and the owner naming one has decided to use it.
+    let mut candidate = default_networks().remove(0);
+    candidate.rpc_urls = vec!["https://rpc.example.com/v2/somekey".parse().unwrap()];
+    assert!(validate_network(&candidate).is_ok());
+}
+
+#[test]
 fn network_identifiers_cannot_inject_terminal_or_completion_controls() {
     let mut candidate = default_networks().remove(0);
     candidate.aliases.push("bad\nvalue".into());
