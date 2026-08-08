@@ -8,6 +8,7 @@ use crate::{
     core::execution_plan::{DecimalU256, ExecutionPlan},
     policy_store::PolicyStore,
     rpc::MinedFee,
+    signature_requests::split_decision,
     sql::{self, Blob, Millis, RowExt},
 };
 use alloy::primitives::{B256, Bytes, keccak256};
@@ -347,7 +348,7 @@ impl PendingStore {
         );
         transaction.execute(
             "UPDATE pending_transactions
-             SET status = 'rejected', rejected_at = ?2, updated_at = ?2
+             SET status = 'rejected', decided_at = ?2, updated_at = ?2
              WHERE request_id = ?1 AND status = 'awaiting_approval'",
             params![request_id, Millis(sql::now())],
         )?;
@@ -421,7 +422,7 @@ impl PendingStore {
         transaction
             .execute(
                 "UPDATE pending_transactions SET
-                status = 'signed', approved_at = ?2, updated_at = ?2,
+                status = 'signed', decided_at = ?2, updated_at = ?2,
                 serialized_transaction = ?3, signed_transaction_hash = ?4,
                 review_digest = ?5
              WHERE request_id = ?1 AND status = 'awaiting_approval'",
@@ -813,7 +814,7 @@ impl PendingStore {
             .query_row(
                 "SELECT wallet_id, network_name, chain_id, plan_json, plan_digest,
                         policy_revision, status, created_at, updated_at,
-                        approved_at, rejected_at, serialized_transaction,
+                        decided_at, serialized_transaction,
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
                         approval_required, review_digest, cancel_serialized_transaction,
                         cancel_transaction_hashes, gas_used, effective_gas_price, plan_source
@@ -830,19 +831,18 @@ impl PendingStore {
                         status: row.get(6)?,
                         created_at: row.time(7)?,
                         updated_at: row.time(8)?,
-                        approved_at: row.time_opt(9)?,
-                        rejected_at: row.time_opt(10)?,
-                        serialized_transaction: row.blob_opt(11)?,
-                        signed_transaction_hash: row.blob_opt(12)?,
-                        broadcast_transaction_hash: row.blob_opt(13)?,
-                        block_number: row.get(14)?,
-                        approval_required: row.get(15)?,
-                        review_digest: row.blob_opt(16)?,
-                        cancel_serialized_transaction: row.blob_opt(17)?,
-                        cancel_transaction_hashes: row.get(18)?,
-                        gas_used: row.get(19)?,
-                        effective_gas_price: row.blob_opt(20)?,
-                        plan_source: row.get(21)?,
+                        decided_at: row.time_opt(9)?,
+                        serialized_transaction: row.blob_opt(10)?,
+                        signed_transaction_hash: row.blob_opt(11)?,
+                        broadcast_transaction_hash: row.blob_opt(12)?,
+                        block_number: row.get(13)?,
+                        approval_required: row.get(14)?,
+                        review_digest: row.blob_opt(15)?,
+                        cancel_serialized_transaction: row.blob_opt(16)?,
+                        cancel_transaction_hashes: row.get(17)?,
+                        gas_used: row.get(18)?,
+                        effective_gas_price: row.blob_opt(19)?,
+                        plan_source: row.get(20)?,
                     })
                 },
             )
@@ -864,8 +864,7 @@ struct PendingRow {
     status: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
-    approved_at: Option<DateTime<Utc>>,
-    rejected_at: Option<DateTime<Utc>>,
+    decided_at: Option<DateTime<Utc>>,
     serialized_transaction: Option<Bytes>,
     signed_transaction_hash: Option<B256>,
     broadcast_transaction_hash: Option<B256>,
@@ -925,8 +924,11 @@ impl PendingRow {
             approval_required || self.review_digest.is_none(),
             "automatic transaction unexpectedly has a review digest"
         );
+        let status = PendingStatus::parse(&self.status)?;
+        let (approved_at, rejected_at) =
+            split_decision(self.decided_at, status == PendingStatus::Rejected);
         ensure!(
-            self.review_digest.is_none() || self.approved_at.is_some(),
+            self.review_digest.is_none() || approved_at.is_some(),
             "stored review digest has no exceptional approval timestamp"
         );
         let cancel_transaction_hashes = self
@@ -983,11 +985,11 @@ impl PendingRow {
             review_digest: self.review_digest.map(|digest| format!("{digest:#x}")),
             policy_revision,
             approval_required,
-            status: PendingStatus::parse(&self.status)?,
+            status,
             created_at: self.created_at,
             updated_at: self.updated_at,
-            approved_at: self.approved_at,
-            rejected_at: self.rejected_at,
+            approved_at,
+            rejected_at,
             serialized_transaction: self.serialized_transaction.map(|bytes| bytes.to_string()),
             signed_transaction_hash: self
                 .signed_transaction_hash

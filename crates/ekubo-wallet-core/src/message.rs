@@ -18,7 +18,7 @@
 use crate::{
     policy_store::PolicyStore,
     sanitize::is_bidirectional_control,
-    signature_requests::{SignatureQueue, encode_signature},
+    signature_requests::{SignatureQueue, encode_signature, split_decision},
     sql::{Blob, Millis, RowExt},
 };
 use alloy::primitives::{Address, B256, eip191_hash_message};
@@ -593,7 +593,7 @@ impl MessageStore {
             .connection
             .query_row(
                 "SELECT wallet_id, chain_id, message, message_encoding, digest, status,
-                        created_at, updated_at, approved_at, rejected_at, signature
+                        created_at, updated_at, decided_at, signature
                  FROM pending_messages WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -607,8 +607,7 @@ impl MessageStore {
                         row.time(6)?,
                         row.time(7)?,
                         row.time_opt(8)?,
-                        row.time_opt(9)?,
-                        row.blob_opt::<[u8; 65]>(10)?,
+                        row.blob_opt::<[u8; 65]>(9)?,
                     ))
                 },
             )
@@ -622,8 +621,7 @@ impl MessageStore {
             status,
             created_at,
             updated_at,
-            approved_at,
-            rejected_at,
+            decided_at,
             signature,
         ) = row;
         crate::config::validate_wallet_id(&wallet_id)?;
@@ -634,6 +632,9 @@ impl MessageStore {
             message_digest(&message) == digest,
             "stored message digest mismatch"
         );
+        let status = MessageStatus::parse(&status)?;
+        let (approved_at, rejected_at) =
+            split_decision(decided_at, status == MessageStatus::Rejected);
         Ok(PendingMessage {
             request_id,
             wallet_id,
@@ -641,7 +642,7 @@ impl MessageStore {
             message_hex: encode_message_hex(&message),
             encoding: MessageEncoding::parse(&encoding)?,
             digest: format!("{digest:#x}"),
-            status: MessageStatus::parse(&status)?,
+            status,
             created_at,
             updated_at,
             approved_at,

@@ -85,7 +85,7 @@ impl SignatureQueue {
     pub fn reject(&self, connection: &Connection, request_id: Uuid) -> Result<()> {
         let changed = connection.execute(
             &format!(
-                "UPDATE {} SET status = 'rejected', rejected_at = ?2, updated_at = ?2 \
+                "UPDATE {} SET status = 'rejected', decided_at = ?2, updated_at = ?2 \
                  WHERE request_id = ?1 AND status = 'awaiting_approval'",
                 self.table
             ),
@@ -125,7 +125,7 @@ impl SignatureQueue {
         );
         transaction.execute(
             &format!(
-                "UPDATE {} SET status = 'signed', approved_at = ?2, updated_at = ?2, \
+                "UPDATE {} SET status = 'signed', decided_at = ?2, updated_at = ?2, \
                  signature = ?3 WHERE request_id = ?1 AND status = 'awaiting_approval'",
                 self.table
             ),
@@ -152,6 +152,25 @@ impl SignatureQueue {
         Ok(statement
             .query_map([wallet_id], |row| row.get::<_, Uuid>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+/// Split one stored decision into the two moments the API reports.
+///
+/// The database keeps a single `decided_at`, because a request gets one
+/// decision and two nullable timestamps could claim it got both. Callers still
+/// ask "when was this approved" and "when was this rejected" as separate
+/// questions, so the status that names the decision splits it back apart —
+/// here, once, rather than at each of the three stores, so the two answers
+/// cannot come apart.
+pub(crate) fn split_decision(
+    decided_at: Option<DateTime<Utc>>,
+    rejected: bool,
+) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+    if rejected {
+        (None, decided_at)
+    } else {
+        (decided_at, None)
     }
 }
 

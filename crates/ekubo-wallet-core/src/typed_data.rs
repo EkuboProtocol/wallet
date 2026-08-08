@@ -11,7 +11,7 @@
 
 use crate::{
     policy_store::PolicyStore,
-    signature_requests::{SignatureQueue, encode_signature},
+    signature_requests::{SignatureQueue, encode_signature, split_decision},
     sql::{Blob, Millis, RowExt},
 };
 use alloy::primitives::{Address, B256, U256, address};
@@ -645,8 +645,7 @@ impl TypedDataStore {
             .connection
             .query_row(
                 "SELECT wallet_id, chain_id, typed_data_json, digest, status,
-                        created_at, updated_at, approved_at, rejected_at,
-                        signature
+                        created_at, updated_at, decided_at, signature
                  FROM pending_typed_data WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -659,8 +658,7 @@ impl TypedDataStore {
                         row.time(5)?,
                         row.time(6)?,
                         row.time_opt(7)?,
-                        row.time_opt(8)?,
-                        row.blob_opt::<[u8; 65]>(9)?,
+                        row.blob_opt::<[u8; 65]>(8)?,
                     ))
                 },
             )
@@ -673,8 +671,7 @@ impl TypedDataStore {
             status,
             created_at,
             updated_at,
-            approved_at,
-            rejected_at,
+            decided_at,
             signature,
         ) = row;
         crate::config::validate_wallet_id(&wallet_id)?;
@@ -688,13 +685,16 @@ impl TypedDataStore {
             i64::try_from(stored_chain_id).is_ok_and(|declared| declared == chain_id),
             "stored typed-data chain mismatch"
         );
+        let status = TypedDataStatus::parse(&status)?;
+        let (approved_at, rejected_at) =
+            split_decision(decided_at, status == TypedDataStatus::Rejected);
         Ok(PendingTypedData {
             request_id,
             wallet_id,
             chain_id: chain_id.to_string(),
             typed_data,
             digest: format!("{digest:#x}"),
-            status: TypedDataStatus::parse(&status)?,
+            status,
             created_at,
             updated_at,
             approved_at,

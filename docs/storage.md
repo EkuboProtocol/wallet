@@ -37,6 +37,17 @@ entry and `Esc` also leaves the browser. Every reporting command prints exact JS
 `--json` is passed or when stdout is not a terminal, so scripts and agents
 always receive machine-readable output.
 
+Each queue records a decision in one `decided_at` column rather than a pair of
+`approved_at` and `rejected_at` ones, because a request gets one decision and a
+pair can claim it got both — a contradiction the schema previously had no
+opinion about, alongside a rejected row carrying no rejection time. `status`
+names which decision it was, since rejection is terminal and a decided row that
+is not rejected was approved. A check states exactly which rows carry one: an
+automatic transaction carries none because nobody decided anything, a queued
+request has not been decided yet, and everything further along has been. The
+`approved_at` and `rejected_at` fields the CLI and MCP surfaces report are
+derived from the stored pair, so the two can never disagree.
+
 Values are stored as what they are rather than as text that describes them.
 Every hash, address, signature, signed envelope, and request ID is a `BLOB` of
 its exact width, and every moment is an `INTEGER` count of milliseconds since

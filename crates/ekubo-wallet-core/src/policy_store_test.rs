@@ -528,6 +528,61 @@ fn authenticated_page_corruption_fails_closed() {
     assert!(PolicyStore::open(&path, &key(4)).is_err());
 }
 
+/// Every shape the lifecycle really produces, written straight at the table.
+///
+/// `decided_at` replaced a pair of nullable timestamps that could say a row
+/// was both approved and rejected, or rejected without ever being rejected —
+/// the schema accepted both. One column cannot express the first, and the
+/// check refuses the rest, so the table now states when a human decided rather
+/// than merely leaving room for it.
+#[test]
+fn only_real_decision_states_are_storable() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let store = PolicyStore::open(&path, &key(5)).unwrap();
+    // Each row gets its own chain, so the one-in-flight-per-wallet-and-chain
+    // index cannot be what refuses an insert; only the decision check can.
+    let insert = |chain: i64, status: &str, approval_required: i64, decided_at: Option<i64>| {
+        store.connection.execute(
+            "INSERT INTO pending_transactions(
+                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
+                 policy_revision, status, approval_required, created_at, updated_at, decided_at
+             ) VALUES (randomblob(16), 'primary', 'mainnet', ?1, '{}', zeroblob(32), 1,
+                       ?2, ?3, 0, 0, ?4)",
+            rusqlite::params![chain, status, approval_required, decided_at],
+        )
+    };
+
+    for (chain, (status, approval_required, decided_at)) in (1..).zip([
+        ("awaiting_approval", 1, None), // queued; nobody has decided
+        ("rejected", 1, Some(200)),     // the owner said no
+        ("signed", 1, Some(300)),       // the owner said yes
+        ("signed", 0, None),            // automatic; nobody decided
+        ("confirmed", 0, None),         // automatic, mined
+        ("confirmed", 1, Some(400)),    // approved, mined
+        ("cancelled", 1, Some(500)),    // approved, later discarded
+        ("cancelled", 1, None),         // queued, dropped with its policy
+        ("cancelled", 0, None),         // automatic, discarded before sending
+        ("cancelling", 1, Some(600)),   // approved, being cancelled on chain
+    ]) {
+        insert(chain, status, approval_required, decided_at)
+            .unwrap_or_else(|error| panic!("{status}/{approval_required} was refused: {error}"));
+    }
+
+    for (chain, (status, approval_required, decided_at)) in (100..).zip([
+        ("awaiting_approval", 1, Some(100)), // decided while still queued
+        ("rejected", 1, None),               // rejected without a moment
+        ("signed", 0, Some(300)),            // automatic, yet somebody decided
+        ("confirmed", 1, None),              // needed approval, never recorded one
+        ("broadcast", 1, None),              // the same, further along
+    ]) {
+        assert!(
+            insert(chain, status, approval_required, decided_at).is_err(),
+            "{status}/{approval_required}/{decided_at:?} should be unrepresentable"
+        );
+    }
+}
+
 #[test]
 fn committed_state_does_not_depend_on_a_persistent_wal() {
     let directory = tempfile::tempdir().unwrap();

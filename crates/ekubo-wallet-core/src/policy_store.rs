@@ -894,8 +894,13 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  )),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
-                 approved_at INTEGER,
-                 rejected_at INTEGER,
+                 -- When a human decided, whichever way they decided. One
+                 -- column because a request gets one decision: two nullable
+                 -- timestamps could say a row was both approved and rejected,
+                 -- and the schema had nothing to say about that. `status`
+                 -- names which decision it was — rejection is terminal, so a
+                 -- decided row that is not 'rejected' was approved.
+                 decided_at INTEGER,
                  serialized_transaction BLOB
                      CHECK (serialized_transaction IS NULL
                          OR length(serialized_transaction) > 0),
@@ -927,10 +932,29 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  effective_gas_price BLOB
                      CHECK (effective_gas_price IS NULL
                          OR length(effective_gas_price) = 16),
+                 -- Exactly which rows carry a decision. An automatic
+                 -- transaction has none, because nobody decided anything —
+                 -- which `approval_required` and the decision timestamps,
+                 -- being unrelated columns, could not say before. A queued
+                 -- request has none yet. Anything further along was decided.
+                 --
+                 -- 'cancelled' is the one status that genuinely does not say:
+                 -- it is reached both by discarding a request the owner had
+                 -- already approved and by the system dropping a queued one
+                 -- when a policy is replaced or a wallet purged, and only the
+                 -- first of those involved a person. Leaving it open is the
+                 -- honest reading; every other status is pinned.
                  CHECK (
-                     (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
-                         AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
-                     OR status <> 'awaiting_approval'
+                     CASE
+                         WHEN approval_required = 0 THEN decided_at IS NULL
+                         WHEN status = 'awaiting_approval' THEN decided_at IS NULL
+                         WHEN status = 'cancelled' THEN 1
+                         ELSE decided_at IS NOT NULL
+                     END
+                 ),
+                 CHECK (
+                     status <> 'awaiting_approval'
+                     OR (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
                  ),
                  CHECK (
                      (serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
@@ -969,9 +993,16 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                      CHECK (policy_revision IS NULL OR policy_revision > 0),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
-                 approved_at INTEGER,
-                 rejected_at INTEGER,
+                 -- One decision per request; `status` names which one it was.
+                 -- Stated against `approval_required` exactly as
+                 -- pending_transactions is, so the one column that could
+                 -- describe a row nobody decided keeps saying so.
+                 decided_at INTEGER,
                  signature BLOB CHECK (signature IS NULL OR length(signature) = 65),
+                 CHECK (
+                     (decided_at IS NOT NULL)
+                     = (status <> 'awaiting_approval' AND approval_required = 1)
+                 ),
                  CHECK ((status = 'signed') = (signature IS NOT NULL)),
                  CHECK (approval_required = 1 OR policy_revision IS NOT NULL)
              ) STRICT",
@@ -1002,9 +1033,13 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  )),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
-                 approved_at INTEGER,
-                 rejected_at INTEGER,
+                 -- One decision per request; `status` names which one it was.
+                 -- No `approval_required` here, because every message is
+                 -- decided by a human, so leaving the queue and being decided
+                 -- are the same event.
+                 decided_at INTEGER,
                  signature BLOB CHECK (signature IS NULL OR length(signature) = 65),
+                 CHECK ((status = 'awaiting_approval') = (decided_at IS NULL)),
                  CHECK ((status = 'signed') = (signature IS NOT NULL))
              ) STRICT",
             "CREATE UNIQUE INDEX pending_messages_unique_awaiting
