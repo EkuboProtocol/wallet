@@ -31,6 +31,53 @@ fn approve_calldata(spender: Address, amount: U256) -> Vec<u8> {
     data
 }
 
+fn set_approval_for_all_calldata(operator: Address, approved: bool) -> Vec<u8> {
+    let mut data = SET_APPROVAL_FOR_ALL_SELECTOR.to_vec();
+    data.extend_from_slice(&operator.into_word().0);
+    data.extend_from_slice(&U256::from(u8::from(approved)).to_be_bytes::<32>());
+    data
+}
+
+#[tokio::test]
+async fn a_descriptor_does_not_silence_the_operator_grant_warning() {
+    // The Ekubo Positions contract ships a descriptor for
+    // `setApprovalForAll`, whose intent line — "Manage operator rights for" —
+    // reads the same whether the grant is being made or revoked. Only the
+    // wallet's own warning distinguishes them, so the descriptor path has to
+    // carry it.
+    let positions: Address = "0x02D9876A21AF7545f8632C3af76eC90b5ad4b66D"
+        .parse()
+        .unwrap();
+    let operator = Address::repeat_byte(0x33);
+    let granted = interpret_step(
+        &step(1, positions, set_approval_for_all_calldata(operator, true)),
+        &TokenMetadataMap::new(),
+    )
+    .await;
+    let description = granted.description.clone().unwrap_or_default();
+    assert!(
+        !description.starts_with("setApprovalForAll:"),
+        "the descriptor did not match, so this proves nothing: {description}"
+    );
+    assert!(
+        granted
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("blanket operator control")),
+        "descriptor reading dropped the warning: {:?}",
+        granted.warnings
+    );
+
+    // A revocation reads through the same descriptor and must stay quiet:
+    // a warning on every operator call would say nothing about this one.
+    let revoked = interpret_step(
+        &step(1, positions, set_approval_for_all_calldata(operator, false)),
+        &TokenMetadataMap::new(),
+    )
+    .await;
+    assert!(revoked.warnings.is_empty(), "{:?}", revoked.warnings);
+}
+
 #[tokio::test]
 async fn a_descriptor_does_not_silence_the_unlimited_allowance_warning() {
     // stETH ships a vendored ERC-7730 descriptor for `approve`, so this
