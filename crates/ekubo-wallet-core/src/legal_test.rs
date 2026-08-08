@@ -46,6 +46,21 @@ fn privacy_policy_discloses_reference_fetches() {
     assert!(policy.contains("data:application/json"));
 }
 
+/// A `connect` session opens a websocket to a relay operated by someone else,
+/// which is an outbound connection no other command makes. The policy has to
+/// name it, say what the operator can see, and say what it cannot.
+#[test]
+fn privacy_policy_discloses_the_walletconnect_relay() {
+    let policy = privacy_policy();
+    assert!(policy.contains("## 5. The WalletConnect relay"));
+    assert!(policy.contains("wss://relay.walletconnect.org"));
+    assert!(policy.contains("end-to-end encrypted"));
+    assert!(policy.contains("the size and timing of every message"));
+    // Section 2's "nothing else leaves this machine" claim has to account for
+    // it, or the disclosure contradicts the section that promises exhaustion.
+    assert!(policy.contains("and the WalletConnect relay described in section 5, this software\nmakes no network requests."));
+}
+
 #[test]
 fn terms_disclaim_agent_signing_losses() {
     assert!(TERMS_OF_SERVICE.contains("NOT RESPONSIBLE OR LIABLE FOR ANY LOSSES"));

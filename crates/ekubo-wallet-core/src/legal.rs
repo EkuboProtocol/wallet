@@ -97,7 +97,7 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 2 — Effective 2026-08-05
+Version 3 — Effective 2026-08-08
 
 This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
 separately from the terms of service.
@@ -119,10 +119,11 @@ may log or retain them under their own policies, and are outside the
 developer's control. The developer is not responsible for data those
 endpoints collect.
 
-Apart from these RPC endpoints and the referenced-artifact fetches described
-in section 4, this software makes no network requests. If you add or replace
-a network, requests for that network go to the endpoints you configure. Each
-release keeps the following list current with its built-in defaults.
+Apart from these RPC endpoints, the referenced-artifact fetches described in
+section 4, and the WalletConnect relay described in section 5, this software
+makes no network requests. If you add or replace a network, requests for that
+network go to the endpoints you configure. Each release keeps the following
+list current with its built-in defaults.
 
 Each network below lists several endpoints, run by unrelated operators. The
 wallet tries them in the order shown and moves to the next when one fails, so
@@ -167,7 +168,39 @@ A plan or call bundle you hold inline travels instead as a
 `data:application/json` URI, which the wallet decodes locally and never
 fetches over the network.
 
-## 5. Data exposed through agents and tooling
+## 5. The WalletConnect relay
+
+`ekubo-wallet connect` pairs this wallet with a dapp over the WalletConnect
+protocol. While that command is running — and only then — this software holds
+an open websocket to a WalletConnect relay, by default
+`wss://relay.walletconnect.org`, operated by an independent third party
+outside the developer's control. `--relay-url` sends that traffic to a relay
+you name instead.
+
+The connection carries a project id that identifies this application, not
+you. It is a fixed value compiled into this release, shared by every copy of
+it, and cannot be changed by configuration; it is not derived from anything of
+yours and is not a secret. Under it, the relay operator can observe your IP
+address, when you are connected and for how long, the pairing and session
+topics your wallet subscribes to, and the size and timing of every message.
+Topics are derived from the pairing link the dapp gave you and are not your
+wallet address, but they do link the messages of one session to each other and
+to your IP address. The operator may log or retain this under its own policy.
+
+Message contents are end-to-end encrypted between this wallet and the dapp
+with a key established from the pairing link, so the relay routes ciphertext
+it cannot read and cannot forge a message that opens: what you sign, what a
+dapp proposes, and which account you exposed are not visible to it. What the
+relay sees is the metadata above.
+
+The dapp on the other end is a separate third party. When you approve a
+connection it learns the single account address you chose to expose and the
+chains you allowed, and thereafter whatever it asks for and you approve. The
+developer is not responsible for data the relay operator or the dapp collects.
+Running no `connect` session means this software opens no relay connection at
+all.
+
+## 6. Data exposed through agents and tooling
 
 Any MCP client, agent, or other tooling you connect to this wallet can read
 what its tools return: wallet addresses, balances, token holdings,
@@ -177,7 +210,7 @@ determined by your agent stack, not by this software. THE DEVELOPER IS NOT
 RESPONSIBLE FOR ANY DATA DISCLOSED OR LEAKED THROUGH THE AGENT OR ASSOCIATED
 TOOLING.
 
-## 6. Local data
+## 7. Local data
 
 Keys stay in the operating system credential store. Policies, transaction
 lifecycle records, token metadata, the address book, legal acceptance
@@ -185,10 +218,13 @@ records, and pending policy proposals are stored in an encrypted local
 database. A resolved execution plan is stored in that database as part of the
 record of the request it becomes; the URL it was fetched from is not retained.
 Wallet metadata and network configuration, including the RPC URLs you
-configure, are stored unencrypted in the wallet data directory. Nothing in
-this section leaves your machine except as described in sections 2, 4, and 5.
+configure, are stored unencrypted in the wallet data directory. A dapp session
+is not recorded: the pairing keys live only in memory and are gone when the
+command exits, though the transactions and signatures it produced are kept
+like any others. Nothing in this section leaves your machine except as
+described in sections 2, 4, 5, and 6.
 
-## 7. Acknowledgment
+## 8. Acknowledgment
 
 Acknowledgment is recorded locally against the exact text of this document,
 including the endpoint list above. A release that changes the default
