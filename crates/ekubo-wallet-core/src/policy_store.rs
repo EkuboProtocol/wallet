@@ -260,8 +260,35 @@ impl PolicyStore {
                 // startup is what makes the default list a starting point
                 // instead of a policy: after this, a token the owner removed
                 // stays removed.
-                if seed_defaults == SeedDefaults::Yes {
-                    crate::default_tokens::seed(&connection)?;
+                //
+                // Which is also why a half-created database must not survive.
+                // The schema and its version marker are committed by the line
+                // above, and the seed is a second transaction; a failure
+                // between them — a disk that holds the small schema and not
+                // the large insert — leaves a database that opens cleanly
+                // forever after, takes the existing-version branch, and never
+                // seeds again. Every ERC-20 the defaults would have named goes
+                // unnamed and unlisted, and a portfolio reads as holding none
+                // of them, permanently and without saying so.
+                //
+                // So the file goes with the error. Removing it is safe here
+                // and nowhere else: the branch is reached only when the
+                // database had no tables at all, which means this call created
+                // it moments ago and there is nothing in it that was not just
+                // written. The journal mode is DELETE rather than WAL, so the
+                // one file is the whole database.
+                if seed_defaults == SeedDefaults::Yes
+                    && let Err(error) = crate::default_tokens::seed(&connection)
+                {
+                    drop(connection);
+                    let _ = std::fs::remove_file(path);
+                    return Err(error).with_context(|| {
+                        format!(
+                            "removed the partly created policy database {} so the next start \
+                             creates a complete one",
+                            path.display()
+                        )
+                    });
                 }
                 SCHEMA_VERSION
             }

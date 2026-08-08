@@ -189,16 +189,26 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
     let proposals = store.proposals().unwrap();
     assert_eq!(proposals.len(), 1);
     assert_eq!(proposals[0].source, "ekubo-default");
+    let reviewed = proposals[0].proposed_at.clone();
     store.add(&proposals[0].token, "ekubo-default").unwrap();
     assert_eq!(
         store.display_metadata(1, &[token]).unwrap()[&token].symbol,
         Some("USDC".into())
     );
 
-    // And once confirmed it is no longer a pending decision. The row is named
-    // by the timestamp it was read at, so a suggestion replaced since the
-    // owner looked is left for its own review rather than silently consumed.
-    let reviewed = store.proposals().unwrap()[0].proposed_at.clone();
+    // And once confirmed it is no longer a pending decision — which the
+    // review screen now reads too, rather than offering a choice whose
+    // answers were both wrong: rejecting deleted the suggestion and reported
+    // that nothing was named while the confirmed row carried on naming the
+    // token, and accepting preserved that row and reported zero.
+    assert!(
+        store.proposals().unwrap().is_empty(),
+        "a token that already has a name is not a decision left to make"
+    );
+
+    // The stored row is still named by the timestamp it was read at, so a
+    // suggestion replaced since the owner looked is left for its own review
+    // rather than silently consumed.
     assert_eq!(
         store
             .discard_proposals(&[(1, token, "1999-01-01T00:00:00+00:00".to_string())])

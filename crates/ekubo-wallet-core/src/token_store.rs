@@ -422,9 +422,26 @@ impl TokenStore {
     /// Every suggestion awaiting the owner, oldest source first so the review
     /// screen's grouping is stable between runs.
     pub fn proposals(&self) -> Result<Vec<TokenProposal>> {
+        // A suggestion for a token that already has a name is not a decision
+        // the owner has left to make, and showing it as one made both answers
+        // wrong: rejecting deleted the suggestion and reported that nothing
+        // was named, while the confirmed row it was about carried on naming
+        // the token on every approval; accepting preserved that row and
+        // reported zero confirmations. `propose` already treats a confirmed
+        // address as nothing to decide and counts it separately — this is the
+        // same rule, applied to what the review screen reads, so the two
+        // cannot disagree about a row that arrived before an import confirmed
+        // it. Changing a name that is already there is what `token remove`
+        // is for.
         let mut statement = self.database.connection.prepare(
             "SELECT chain_id, address, symbol, name, decimals, source, proposed_at
-             FROM token_proposals ORDER BY source, chain_id, symbol, address",
+             FROM token_proposals AS proposal
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM tokens
+                 WHERE tokens.chain_id = proposal.chain_id
+                   AND tokens.address = proposal.address
+             )
+             ORDER BY source, chain_id, symbol, address",
         )?;
         let mapped = statement.query_map([], |row| {
             let chain_id: i64 = row.get(0)?;
