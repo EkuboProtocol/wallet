@@ -126,32 +126,138 @@ pub fn parse_typed_data(value: &serde_json::Value) -> Result<(TypedData, u64, B2
 /// A payload with an extra member is not a payload whose display needs fixing;
 /// it is one whose author is describing something other than what they are
 /// asking for, and the wallet has no way to know which half was the mistake.
+/// The members EIP-712 defines for a domain. The domain hash is built from
+/// these and only these, so a payload's own `EIP712Domain` declaration decides
+/// nothing about what is signed.
+const DOMAIN_MEMBERS: [&str; 5] = ["name", "version", "chainId", "verifyingContract", "salt"];
+
 fn reject_unsigned_members(value: &serde_json::Value, typed: &TypedData) -> Result<()> {
+    // The payload has to be an object before any of the checks below can look
+    // inside it — and a payload that is not one is not merely unusual. Alloy
+    // accepts a JSON *string* holding the whole payload and unwraps it to
+    // parse, while every `get` here misses on the string and reports nothing
+    // wrong. That combination skipped this function entirely: the reviewer was
+    // shown a blob of text with no member covered by anything.
+    let object = value
+        .as_object()
+        .context("typed data must be a JSON object with types, primaryType, domain, and message")?;
+
+    // Nothing outside those four is hashed, so nothing outside them may be
+    // present to be read. A `"note": "only $1 will move"` beside them sits in
+    // the reviewed payload looking exactly as authoritative as `message` does,
+    // and is signed by nothing.
+    for key in object.keys() {
+        ensure!(
+            matches!(key.as_str(), "types" | "primaryType" | "domain" | "message"),
+            "typed data carries \"{key}\", which EIP-712 does not define; \
+             it would be displayed but not signed"
+        );
+    }
+
     let declarations = value.get("types");
 
-    // The domain is checked against its own declaration when the payload makes
-    // one, and against the standard member set when it does not. Omitting
-    // `EIP712Domain` from `types` is common and legal — the standard fixes
-    // what a domain may hold — but skipping the check on that basis meant a
-    // payload could carry an unsigned domain member simply by not declaring
-    // the type it was breaking.
+    // The domain is checked against the standard member set, and only against
+    // it. EIP-712 fixes what a domain may hold and the hash is built from the
+    // fields the standard defines, so a payload's own `EIP712Domain`
+    // declaration decides nothing about what gets signed — preferring it here
+    // meant an attacker could declare `note`, satisfy this check with it, and
+    // have the member displayed and ignored by the hash all the same.
     if let Some(domain) = value.get("domain").and_then(serde_json::Value::as_object) {
-        let declared = declared_members(declarations, "EIP712Domain").unwrap_or_else(|| {
-            ["name", "version", "chainId", "verifyingContract", "salt"]
-                .into_iter()
-                .collect()
-        });
         for key in domain.keys() {
             ensure!(
-                declared.contains(key.as_str()),
-                "typed data domain carries \"{key}\", which type EIP712Domain does not declare; \
+                DOMAIN_MEMBERS.contains(&key.as_str()),
+                "typed data domain carries \"{key}\", which EIP712Domain does not define; \
                  it would be displayed but not signed"
             );
         }
     }
+    if let Some(declared) = declared_members(declarations, "EIP712Domain") {
+        for member in declared {
+            ensure!(
+                DOMAIN_MEMBERS.contains(&member),
+                "typed data declares EIP712Domain member \"{member}\", which EIP-712 does not \
+                 define; it would be displayed but not signed"
+            );
+        }
+    }
+
+    reject_unsigned_declarations(declarations)?;
+    reject_unreachable_types(declarations, &typed.primary_type)?;
 
     if let Some(message) = value.get("message") {
         reject_unsigned_within(message, &typed.primary_type, declarations, "message")?;
+    }
+    Ok(())
+}
+
+/// Refuse a member declaration carrying anything but the name and type that
+/// EIP-712 defines.
+///
+/// The type string a struct hashes under is built from exactly those two per
+/// member. A third key is free text sitting inside the `types` map, which the
+/// reviewer reads as the payload's own account of what each field means —
+/// `{"name": "value", "type": "uint256", "label": "at most $1"}` beside a
+/// `value` of 2^256-1 — and which the hash never sees.
+fn reject_unsigned_declarations(types: Option<&serde_json::Value>) -> Result<()> {
+    let Some(types) = types.and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    for (name, members) in types {
+        let Some(members) = members.as_array() else {
+            continue;
+        };
+        for member in members {
+            let Some(member) = member.as_object() else {
+                continue;
+            };
+            for key in member.keys() {
+                ensure!(
+                    matches!(key.as_str(), "name" | "type"),
+                    "typed data type {name} declares a member with \"{key}\", which EIP-712 does \
+                     not define; it would be displayed but not signed"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a type declaration nothing reaches from the primary type.
+///
+/// EIP-712 hashes a struct under a type string naming only the types actually
+/// referenced, so a declaration the primary type cannot reach contributes
+/// nothing to the signature. It is still in the `types` map the reviewer
+/// reads, which is the whole of the problem: a `"Reassurance": [{"name":
+/// "capped", "type": "string"}]` describes the payload without being part of
+/// it.
+fn reject_unreachable_types(types: Option<&serde_json::Value>, primary_type: &str) -> Result<()> {
+    let Some(types) = types.and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    let mut reached = std::collections::BTreeSet::from(["EIP712Domain"]);
+    let mut pending = vec![primary_type];
+    while let Some(name) = pending.pop() {
+        if !reached.insert(name) {
+            continue;
+        }
+        let Some(members) = types.get(name).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for member in members {
+            if let Some(member_type) = member.get("type").and_then(serde_json::Value::as_str) {
+                let element = member_type.split('[').next().unwrap_or(member_type);
+                if types.contains_key(element) {
+                    pending.push(element);
+                }
+            }
+        }
+    }
+    for name in types.keys() {
+        ensure!(
+            reached.contains(name.as_str()),
+            "typed data declares type {name}, which {primary_type} does not reach; \
+             it would be displayed but not signed"
+        );
     }
     Ok(())
 }

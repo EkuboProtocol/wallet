@@ -346,3 +346,98 @@ fn an_undeclared_domain_type_still_bounds_the_domain() {
     assert!(error.contains("\"note\""), "{error}");
     assert!(error.contains("not signed"), "{error}");
 }
+
+#[test]
+fn every_part_of_a_reviewed_payload_is_covered_by_the_signature() {
+    // Run 6251, finding 186987. The reviewer reads the payload as submitted,
+    // so anything in it that the hash does not cover is text an author wrote
+    // about a signature it is not part of. Each of these was accepted before,
+    // and each was confirmed to change nothing about the digest.
+    let signed = serde_json::json!({
+        "types": {"Permit": [{"name": "value", "type": "uint256"}]},
+        "primaryType": "Permit",
+        "domain": {"chainId": 1},
+        "message": {"value": "1"}
+    });
+    parse_typed_data(&signed).expect("the payload it describes is still signable");
+
+    let refused = |payload: serde_json::Value, expected: &str| {
+        let error = parse_typed_data(&payload)
+            .err()
+            .unwrap_or_else(|| panic!("accepted: {payload}"));
+        let text = format!("{error:#}");
+        assert!(text.contains(expected), "{text}");
+    };
+
+    // The whole payload as one JSON string. Alloy unwraps it to parse and
+    // hash, while every key lookup in the guard missed on the string — so no
+    // member was checked at all, and the reviewer saw an uninspected blob.
+    refused(
+        serde_json::Value::String(signed.to_string()),
+        "must be a JSON object",
+    );
+
+    // Metadata beside the four keys EIP-712 defines.
+    let mut top_level = signed.clone();
+    top_level["note"] = serde_json::json!("only $1 will move");
+    refused(top_level, "\"note\"");
+
+    // A third key inside a member declaration, which the type string that gets
+    // hashed is not built from.
+    refused(
+        serde_json::json!({
+            "types": {"Permit": [{"name": "value", "type": "uint256", "label": "at most $1"}]},
+            "primaryType": "Permit",
+            "domain": {"chainId": 1},
+            "message": {"value": "1"}
+        }),
+        "\"label\"",
+    );
+
+    // A type nothing reaches from the primary type.
+    refused(
+        serde_json::json!({
+            "types": {
+                "Permit": [{"name": "value", "type": "uint256"}],
+                "Reassurance": [{"name": "capped", "type": "string"}]
+            },
+            "primaryType": "Permit",
+            "domain": {"chainId": 1},
+            "message": {"value": "1"}
+        }),
+        "Reassurance",
+    );
+
+    // A domain member the payload declares for itself. The domain hash is
+    // built from the members EIP-712 defines, so declaring another one bought
+    // display without signature — which is exactly what the old check, having
+    // preferred the payload's own declaration, was asking the attacker for.
+    refused(
+        serde_json::json!({
+            "types": {
+                "EIP712Domain": [
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "note", "type": "string"}
+                ],
+                "Permit": [{"name": "value", "type": "uint256"}]
+            },
+            "primaryType": "Permit",
+            "domain": {"chainId": 1, "note": "capped at $1"},
+            "message": {"value": "1"}
+        }),
+        "note",
+    );
+
+    // Reachability follows array members and nests, so a struct used only as
+    // an element type is reached rather than refused.
+    parse_typed_data(&serde_json::json!({
+        "types": {
+            "Order": [{"name": "items", "type": "Item[]"}],
+            "Item": [{"name": "value", "type": "uint256"}]
+        },
+        "primaryType": "Order",
+        "domain": {"chainId": 1},
+        "message": {"items": [{"value": "1"}]}
+    }))
+    .expect("a type reached only through an array member is still reached");
+}
