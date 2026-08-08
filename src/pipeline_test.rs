@@ -348,7 +348,7 @@ fn pipeline_server(
         "0x0000000000000000000000000000000000000000000000000000000000000007",
     )
     .unwrap();
-    let wallet_address = material.signer().address();
+    let wallet_address = material.address();
     keys.insert_new("primary", &material).unwrap();
     let wallet = WalletMetadata {
         id: "primary".into(),

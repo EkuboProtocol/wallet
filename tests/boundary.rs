@@ -101,6 +101,79 @@ fn interactive_proof_has_exactly_one_production_origin_per_listed_command() {
     );
 }
 
+/// No key material, and nothing that can use it, leaves the kernel crate.
+///
+/// A `PrivateKeySigner` signs any 32 bytes with no policy, no simulation, and
+/// no owner authentication, so a caller holding one holds the wallet — which
+/// makes "who can obtain a signer" the question that decides whether the crate
+/// split protects keys at all. It is answered by visibility: `signer`,
+/// `expose_hex`, and `load_matching_signer` are `pub(crate)`, so presentation
+/// code passes a `KeyStore` into an orchestrator entry point and gets a stored
+/// decision back, never a key.
+///
+/// The compiler already enforces this; the value of pinning it is that
+/// widening a `pub(crate)` to `pub` is a one-word diff that reads as tidying up
+/// and silently restores the bypass. This makes that word fail the build and
+/// say why.
+///
+/// `address` is deliberately absent from the list: an address is derived from
+/// the public key and appears in every transaction the wallet sends, so
+/// exposing one discloses nothing.
+#[test]
+fn no_signer_or_key_material_escapes_the_kernel() {
+    let custody =
+        fs::read_to_string(repository_root().join("crates/ekubo-wallet-core/src/custody.rs"))
+            .unwrap();
+    for declaration in [
+        "pub(crate) fn signer(",
+        "pub(crate) fn expose_hex(",
+        "pub(crate) fn load_matching_signer",
+    ] {
+        assert!(
+            custody.contains(declaration),
+            "custody.rs no longer declares `{declaration}`; a signer or raw key that presentation \
+             code can obtain is a signature nobody had to authenticate for"
+        );
+    }
+
+    // And the presentation crate must not name them, which catches a widening
+    // at the point it starts being used rather than only at the declaration.
+    let mut offenders = Vec::new();
+    let mut directories = vec![repository_root().join("src")];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                continue;
+            }
+            let source = fs::read_to_string(&path).unwrap();
+            for (number, line) in source.lines().enumerate() {
+                // Comments are skipped, as in the proof-origin check above:
+                // the rule is about what the code reaches for, and explaining
+                // in prose why a symbol is out of reach must stay allowed.
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for forbidden in ["expose_hex", "load_matching_signer", "PrivateKeySigner"] {
+                    if line.contains(forbidden) {
+                        let display = path.display().to_string().replace('\\', "/");
+                        offenders.push(format!("{display}:{}: {forbidden}", number + 1));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the presentation crate reaches for key material: {offenders:?}; signing belongs to \
+         orchestrator entry points that confirm presence first"
+    );
+}
+
 /// The security kernel carries no presentation or MCP dependencies: nothing
 /// in the audited crate can draw a terminal or serve a tool.
 #[test]

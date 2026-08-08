@@ -1,11 +1,22 @@
 //! The one signing orchestration.
 //!
-//! Exactly two paths produce a transaction signature in this process, and
-//! both live here: the automatic path, gated by the active policy and a
-//! successful simulation, and the human-gated path, gated by a terminal
-//! review plus OS owner authentication. Each owns its guard ladder once, so
-//! the MCP server and the CLI cannot drift apart on what is checked before
-//! key material is touched.
+//! Every signature this process produces is minted by a function in this
+//! module. Transactions take one of two paths: the automatic path, gated by
+//! the active policy and a successful simulation, and the human-gated path,
+//! gated by a terminal review plus OS owner authentication. The two payloads
+//! no policy can score — an EIP-191 message and an EIP-712 typed-data
+//! payload — take [`sign_reviewed_message`] and [`sign_reviewed_typed_data`],
+//! which confirm owner presence themselves.
+//!
+//! Each owns its guard ladder once, so the MCP server and the CLI cannot
+//! drift apart on what is checked before key material is touched.
+//!
+//! That "every signature" is enforced rather than merely intended:
+//! [`crate::custody::load_matching_signer`] is crate-private, so no caller
+//! outside this crate can obtain a signer to sign anything with. Presentation
+//! code passes a [`KeyStore`] and a [`HumanPresence`] in and gets a stored
+//! decision back; it never holds the key, and it cannot reach a signature
+//! without the presence check that precedes one.
 
 use crate::{
     approval::{
@@ -16,16 +27,19 @@ use crate::{
     },
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     core::{execution_plan::ExecutionPlan, policy::FindingSeverity},
-    custody::KeyStore,
+    custody::{KeyStore, load_matching_signer},
     execution::{
         PreparedExecution, SigningOverrides, prepare_execution, sign_execution,
         sign_prepared_execution,
     },
     human_presence::{HumanPresence, PresenceRequest},
+    message::{MessageStatus, MessageStore, PendingMessage},
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::StoredPolicy,
     simulation::{SimulationResult, simulate_execution},
+    typed_data::{PendingTypedData, TypedDataStatus, TypedDataStore},
 };
+use alloy::{primitives::B256, signers::SignerSync as _};
 use anyhow::{Context, Result, ensure};
 use num_bigint::BigUint;
 use std::{str::FromStr, sync::Mutex};
@@ -680,6 +694,97 @@ async fn transaction_approval_request(
         ));
     }
     Ok(request)
+}
+
+/// Confirm owner presence and sign one reviewed EIP-191 message.
+///
+/// The caller has already drawn the review and taken the reviewer's decision;
+/// what remains is everything that must not be skippable, so it lives here
+/// rather than at the call site: owner authentication, a re-read of every
+/// mutable input the review may have raced, and the signature itself.
+///
+/// The re-read matters because a review takes as long as a person takes, and
+/// nothing is locked while it waits. `request` is what the reviewer actually
+/// saw; the stored row and the wallet configuration are compared back against
+/// it, so a request edited or a wallet re-pointed mid-review is refused rather
+/// than signed under an approval given for something else. The final write
+/// repeats the digest and status checks inside its own transaction.
+pub async fn sign_reviewed_message(
+    config: &ConfigStore,
+    store: &mut MessageStore,
+    request: &PendingMessage,
+    wallet: &WalletMetadata,
+    digest: B256,
+    presence: &dyn HumanPresence,
+    keys: &dyn KeyStore,
+) -> Result<PendingMessage> {
+    presence
+        .confirm(&PresenceRequest::SignMessage {
+            wallet: wallet.id.clone(),
+        })
+        .await?;
+
+    let current = store.get(request.request_id)?;
+    ensure!(
+        current.status == MessageStatus::AwaitingApproval
+            && current.digest == request.digest
+            && current.message_hex == request.message_hex,
+        "message request changed during approval"
+    );
+    ensure!(
+        config.wallet(&request.wallet_id)? == *wallet,
+        "wallet configuration changed during approval"
+    );
+
+    let signer = load_matching_signer(keys, wallet)?;
+    let signature = signer
+        .sign_hash_sync(&digest)
+        .context("failed to sign the message")?;
+    store.store_signature(
+        request.request_id,
+        digest,
+        &format!("0x{}", hex::encode(signature.as_bytes())),
+    )
+}
+
+/// Confirm owner presence and sign one reviewed EIP-712 payload.
+///
+/// The twin of [`sign_reviewed_message`], and it climbs the same ladder for
+/// the same reasons; only the queue and the presence reason differ.
+pub async fn sign_reviewed_typed_data(
+    config: &ConfigStore,
+    store: &mut TypedDataStore,
+    request: &PendingTypedData,
+    wallet: &WalletMetadata,
+    digest: B256,
+    presence: &dyn HumanPresence,
+    keys: &dyn KeyStore,
+) -> Result<PendingTypedData> {
+    presence
+        .confirm(&PresenceRequest::SignTypedData {
+            wallet: wallet.id.clone(),
+        })
+        .await?;
+
+    let current = store.get(request.request_id)?;
+    ensure!(
+        current.status == TypedDataStatus::AwaitingApproval && current.digest == request.digest,
+        "typed-data request changed during approval"
+    );
+    ensure!(
+        config.wallet(&request.wallet_id)? == *wallet,
+        "wallet configuration changed during approval"
+    );
+
+    let signer = load_matching_signer(keys, wallet)?;
+    let signature = signer
+        .sign_hash_sync(&digest)
+        .context("failed to sign typed data")?;
+    store.store_signature(
+        request.request_id,
+        digest,
+        &format!("0x{}", hex::encode(signature.as_bytes())),
+    )
 }
 
 #[cfg(test)]

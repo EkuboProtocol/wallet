@@ -17,12 +17,21 @@
 //! platform owner authentication follows the review, and every mutable input is
 //! re-read afterwards — because the review can take as long as a person takes,
 //! and the store write at the end repeats the row checks atomically.
+//!
+//! This module owns only the review. Everything from owner authentication
+//! onward — the re-read, the signature, the store write — belongs to
+//! `orchestrator::sign_reviewed_message` and its typed-data twin, because those
+//! are the steps that must not be skippable. Nothing here can reach key
+//! material: `load_matching_signer` is private to the kernel crate, so a
+//! signature is obtainable only by calling an entry point that confirms
+//! presence first. Drawing a review and then forgetting to authenticate is not
+//! a mistake this file is able to make.
 
 use crate::{
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest},
     config::ConfigStore,
-    custody::{OsKeyStore, load_matching_signer},
-    human_presence::{HumanPresence, PlatformHumanPresence, PresenceRequest},
+    custody::OsKeyStore,
+    human_presence::PlatformHumanPresence,
     message::{
         MessageStatus, MessageStore, PendingMessage, describe_message, message_digest, parse_siwe,
         siwe_warnings,
@@ -32,8 +41,7 @@ use crate::{
         parse_typed_data,
     },
 };
-use alloy::signers::SignerSync as _;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use std::io::{self, Write as _};
 
 /// What a message review decided.
@@ -205,34 +213,21 @@ pub async fn decide_message(
         return Ok(MessageDecision::Rejected(store.reject(request.request_id)?));
     }
 
-    PlatformHumanPresence
-        .confirm(&PresenceRequest::SignMessage {
-            wallet: wallet.id.clone(),
-        })
-        .await?;
-
-    // Re-read mutable local authority after the potentially long human
-    // review; the final SQL write repeats the pending checks atomically.
-    let current = store.get(request.request_id)?;
-    ensure!(
-        current.status == MessageStatus::AwaitingApproval
-            && current.digest == request.digest
-            && current.message_hex == request.message_hex,
-        "message request changed during approval"
-    );
-    ensure!(
-        config.wallet(&request.wallet_id)? == wallet,
-        "wallet configuration changed during approval"
-    );
-    let signer = load_matching_signer(&OsKeyStore, &wallet)?;
-    let signature = signer
-        .sign_hash_sync(&digest)
-        .context("failed to sign the message")?;
-    Ok(MessageDecision::Signed(store.store_signature(
-        request.request_id,
-        digest,
-        &format!("0x{}", hex::encode(signature.as_bytes())),
-    )?))
+    // Owner authentication, the re-read of every mutable input this review may
+    // have raced, and the signature are one step in the kernel: this module
+    // draws the review and has no way to reach key material itself.
+    Ok(MessageDecision::Signed(
+        crate::orchestrator::sign_reviewed_message(
+            config,
+            &mut store,
+            &request,
+            &wallet,
+            digest,
+            &PlatformHumanPresence,
+            &OsKeyStore,
+        )
+        .await?,
+    ))
 }
 
 /// Review one queued EIP-712 payload and resolve it, either way.
@@ -338,32 +333,20 @@ pub async fn decide_typed_data(
         ));
     }
 
-    PlatformHumanPresence
-        .confirm(&PresenceRequest::SignTypedData {
-            wallet: wallet.id.clone(),
-        })
-        .await?;
-
-    // Re-read mutable local authority after the potentially long human
-    // review; the final SQL write repeats the pending checks atomically.
-    let current = store.get(request.request_id)?;
-    ensure!(
-        current.status == TypedDataStatus::AwaitingApproval && current.digest == request.digest,
-        "typed-data request changed during approval"
-    );
-    ensure!(
-        config.wallet(&request.wallet_id)? == wallet,
-        "wallet configuration changed during approval"
-    );
-    let signer = load_matching_signer(&OsKeyStore, &wallet)?;
-    let signature = signer
-        .sign_hash_sync(&digest)
-        .context("failed to sign typed data")?;
-    Ok(TypedDataDecision::Signed(store.store_signature(
-        request.request_id,
-        digest,
-        &format!("0x{}", hex::encode(signature.as_bytes())),
-    )?))
+    // As in `decide_message`: presence, re-read, and signature are the
+    // kernel's, and this module never holds a signer.
+    Ok(TypedDataDecision::Signed(
+        crate::orchestrator::sign_reviewed_typed_data(
+            config,
+            &mut store,
+            &request,
+            &wallet,
+            digest,
+            &PlatformHumanPresence,
+            &OsKeyStore,
+        )
+        .await?,
+    ))
 }
 
 /// Keep one approval fact to a readable length; the complete message always
