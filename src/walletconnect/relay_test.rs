@@ -2,11 +2,8 @@
 
 use super::*;
 
-fn config(url: &str) -> RelayConfig {
-    RelayConfig {
-        url: Url::parse(url).unwrap(),
-        project_id: "abc123".to_owned(),
-    }
+fn config(url: &str) -> Url {
+    Url::parse(url).unwrap()
 }
 
 #[test]
@@ -15,10 +12,21 @@ fn the_connection_url_carries_the_token_the_project_and_the_agent() {
     let url = authenticated_url(&config(DEFAULT_RELAY_URL), &identity).unwrap();
     let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert!(query.contains_key("auth"));
-    assert_eq!(query.get("projectId").map(String::as_str), Some("abc123"));
+    assert_eq!(query.get("projectId").map(String::as_str), Some(PROJECT_ID));
     assert!(
         query.get("ua").is_some_and(|ua| ua.starts_with("wc-2/")),
         "{query:?}"
+    );
+}
+
+#[test]
+fn the_compiled_in_project_id_is_shaped_like_one() {
+    // It goes into a URL query string unvalidated, and a typo in it would only
+    // show up as a relay close code at pairing time.
+    assert_eq!(PROJECT_ID.len(), 32);
+    assert!(
+        PROJECT_ID.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{PROJECT_ID}"
     );
 }
 
@@ -41,6 +49,23 @@ fn the_token_audience_is_the_relay_without_its_query_string() {
     assert_eq!(payload["aud"], "wss://relay.example.org");
     // The relay's own parameters survive alongside the ones added here.
     assert_eq!(query.get("region").map(String::as_str), Some("eu"));
+}
+
+#[test]
+fn relay_call_ids_are_timestamps_rather_than_a_counter() {
+    // A counter starting at 1 is answered `Invalid request ID` by the relay on
+    // the first `irn_subscribe`, so the session pairs and then never hears
+    // anything. The id has to look like microseconds since the epoch.
+    let salt = AtomicU16::new(0);
+    let first = next_call_id(&salt);
+    let second = next_call_id(&salt);
+    let now_micros =
+        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap() * 1000 + 1_000_000;
+    assert!(first > 1_700_000_000_000_000, "{first}");
+    assert!(first < now_micros, "{first}");
+    // Two calls in the same millisecond still get different ids, or the second
+    // one's answer would wake the first one's caller.
+    assert_ne!(first, second);
 }
 
 #[tokio::test]

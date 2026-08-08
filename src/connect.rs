@@ -46,7 +46,7 @@ use crate::{
         crypto::ClientIdentity,
         identity::DappIdentity,
         protocol::{AppMetadata, error_code},
-        relay::{DEFAULT_RELAY_URL, RelayConfig, RelayConnection},
+        relay::{DEFAULT_RELAY_URL, RelayConnection},
         request as dapp_request,
         session::{
             ApprovedScope, DappRequest, ProposalDecision, ProposalSummary, RequestOutcome,
@@ -64,10 +64,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 use url::Url;
-
-/// Environment variable holding the relay project id, so it need not be typed
-/// on every invocation.
-pub const PROJECT_ID_ENV: &str = "EKUBO_WALLET_WALLETCONNECT_PROJECT_ID";
 
 /// The dapp-facing methods this wallet implements.
 ///
@@ -97,8 +93,6 @@ pub struct ConnectOptions {
     pub uri: Option<String>,
     /// Which account to expose. Inferred when the wallet holds exactly one.
     pub account: Option<String>,
-    /// The relay project id, or `None` to read [`PROJECT_ID_ENV`].
-    pub project_id: Option<String>,
     /// An alternative relay, for a self-hosted deployment.
     pub relay_url: Option<Url>,
 }
@@ -116,7 +110,6 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
     legal::require_current_acceptance(config.data_dir())?;
 
     let (accounts, selected) = resolve_accounts(config, options.account.as_deref())?;
-    let project_id = resolve_project_id(options.project_id)?;
     let relay_url = match options.relay_url {
         Some(url) => url,
         None => Url::parse(DEFAULT_RELAY_URL).expect("the default relay URL is valid"),
@@ -143,14 +136,7 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
 
     let relay_display = relay_url.to_string();
     let identity = ClientIdentity::generate()?;
-    let relay = RelayConnection::connect(
-        &RelayConfig {
-            url: relay_url,
-            project_id,
-        },
-        &identity,
-    )
-    .await?;
+    let relay = RelayConnection::connect(&relay_url, &identity).await?;
 
     let state = Arc::new(Mutex::new(SessionState {
         title: "Connecting…".to_owned(),
@@ -217,33 +203,6 @@ fn resolve_accounts(
         .position(|account| account.id == wanted.id)
         .context("the named account is not in this wallet's account list")?;
     Ok((accounts, selected))
-}
-
-/// The relay project id, from the flag or the environment.
-///
-/// There is no default and no anonymous fallback: the public relay refuses a
-/// connection without one, and a wallet that silently borrowed somebody else's
-/// id would be rate-limited on their quota.
-fn resolve_project_id(requested: Option<String>) -> Result<String> {
-    let project_id = match requested {
-        Some(project_id) => project_id,
-        None => std::env::var(PROJECT_ID_ENV).unwrap_or_default(),
-    };
-    let project_id = project_id.trim().to_owned();
-    ensure!(
-        !project_id.is_empty(),
-        "a WalletConnect relay project id is required. Create one — it is free — at \
-         https://dashboard.reown.com, then pass `--project-id` or set {PROJECT_ID_ENV}. It \
-         identifies the application to the relay operator, not you, and it is not a secret."
-    );
-    ensure!(
-        project_id.len() <= 128
-            && project_id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
-        "that does not look like a relay project id: they are short alphanumeric strings"
-    );
-    Ok(project_id)
 }
 
 /// One dapp session, bound to one account.

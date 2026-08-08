@@ -220,15 +220,6 @@ struct ConnectArgs {
     /// what each one would expose. This only chooses where that starts.
     #[arg(long, short)]
     account: Option<String>,
-    #[allow(clippy::doc_markdown)]
-    /// The WalletConnect relay project id.
-    ///
-    /// Free to create at https://dashboard.reown.com. It identifies the
-    /// application to the relay operator rather than you, and it is not a
-    /// secret — but the relay refuses connections without one, so there is no
-    /// default.
-    #[arg(long, env = crate::connect::PROJECT_ID_ENV)]
-    project_id: Option<String>,
     /// A relay other than the public one, for a self-hosted deployment.
     #[arg(long)]
     relay_url: Option<Url>,
@@ -680,7 +671,6 @@ impl Cli {
                     crate::connect::ConnectOptions {
                         uri: args.uri,
                         account: args.account,
-                        project_id: args.project_id,
                         relay_url: args.relay_url,
                     },
                 )

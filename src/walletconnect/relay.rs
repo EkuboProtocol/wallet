@@ -12,7 +12,7 @@
 
 use super::{
     crypto::ClientIdentity,
-    protocol::{IncomingMessage, JSONRPC_VERSION},
+    protocol::{IncomingMessage, JSONRPC_VERSION, request_id},
 };
 use anyhow::{Context, Result, bail, ensure};
 use futures::{SinkExt as _, StreamExt as _};
@@ -21,7 +21,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU16, Ordering},
     },
     time::Duration,
 };
@@ -31,6 +31,15 @@ use url::Url;
 
 /// The public relay, used when nothing else is configured.
 pub const DEFAULT_RELAY_URL: &str = "wss://relay.walletconnect.org";
+
+/// This wallet's relay project id.
+///
+/// It identifies the *application* to the relay operator, not the user, and it
+/// is not a secret — it travels in the connection URL's query string on every
+/// pairing. It is compiled in rather than configured because it names this
+/// wallet: a copy running under someone else's id would spend their quota and
+/// misreport who is connecting.
+pub const PROJECT_ID: &str = "1b68f6037b9d5d9558dc5aa3f67c2dc3";
 
 /// How long a relay authentication token stays valid. One day, as the
 /// reference client uses; the connection is re-authenticated on reconnect.
@@ -46,14 +55,6 @@ pub struct RelayMessage {
     pub message: String,
 }
 
-/// What the relay connection needs to know to open a socket.
-pub struct RelayConfig {
-    pub url: Url,
-    /// The relay refuses an anonymous connection, so this is required rather
-    /// than optional. It identifies the *application*, not the user.
-    pub project_id: String,
-}
-
 /// One live relay connection.
 ///
 /// Reads happen on a background task so that a caller can be awaiting the next
@@ -64,7 +65,9 @@ pub struct RelayConnection {
     outgoing: mpsc::UnboundedSender<Message>,
     incoming: mpsc::UnboundedReceiver<RelayMessage>,
     pending: PendingCalls,
-    next_id: AtomicU64,
+    /// Distinguishes calls made within the same millisecond; see
+    /// [`next_call_id`].
+    salt: AtomicU16,
     reader: tokio::task::JoinHandle<()>,
     writer: tokio::task::JoinHandle<()>,
 }
@@ -73,8 +76,8 @@ type PendingCalls = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>
 
 impl RelayConnection {
     /// Open and authenticate a connection.
-    pub async fn connect(config: &RelayConfig, identity: &ClientIdentity) -> Result<Self> {
-        let url = authenticated_url(config, identity)?;
+    pub async fn connect(relay: &Url, identity: &ClientIdentity) -> Result<Self> {
+        let url = authenticated_url(relay, identity)?;
         // The websocket URL carries a bearer token in its query string. Over
         // `ws:` that token — and every topic this wallet subscribes to — is
         // readable by anything on the path, so plaintext is refused rather than
@@ -90,7 +93,7 @@ impl RelayConnection {
             .with_context(|| {
                 format!(
                     "could not reach the WalletConnect relay at {}",
-                    config.url.as_str()
+                    relay.as_str()
                 )
             })?;
         let (mut sink, mut source) = stream.split();
@@ -144,9 +147,7 @@ impl RelayConnection {
             outgoing: outgoing_sender,
             incoming: incoming_receiver,
             pending,
-            // Relay call ids are per-connection and need only be unique; unlike
-            // protocol-level ids no peer inspects their shape.
-            next_id: AtomicU64::new(1),
+            salt: AtomicU16::new(0),
             reader,
             writer,
         })
@@ -204,7 +205,7 @@ impl RelayConnection {
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = next_call_id(&self.salt);
         let (sender, receiver) = oneshot::channel();
         self.pending
             .lock()
@@ -240,6 +241,24 @@ impl RelayConnection {
             pending.remove(&id);
         }
     }
+}
+
+/// The id for the next call this client makes.
+///
+/// The relay checks the *shape* of a JSON-RPC id and answers `Invalid request
+/// ID` to anything that is not a microsecond-scale timestamp. A per-connection
+/// counter starting at 1 is therefore refused on the very first
+/// `irn_subscribe`, leaving a paired session that can never be delivered
+/// anything — so relay calls are numbered exactly as protocol calls are.
+///
+/// The salt separates calls made within the same millisecond; it wraps, and
+/// two ids collide only if this client makes 1000 relay calls in one
+/// millisecond.
+fn next_call_id(salt: &AtomicU16) -> u64 {
+    request_id(
+        chrono::Utc::now().timestamp_millis(),
+        salt.fetch_add(1, Ordering::Relaxed),
+    )
 }
 
 /// Route one frame from the relay: either the answer to a call this client
@@ -284,18 +303,18 @@ fn dispatch(
 }
 
 /// The websocket URL with a freshly signed authentication token.
-fn authenticated_url(config: &RelayConfig, identity: &ClientIdentity) -> Result<Url> {
+fn authenticated_url(relay: &Url, identity: &ClientIdentity) -> Result<Url> {
     // The token's audience is the relay's own URL without the query string:
     // signing the full URL would mean signing the token into itself.
-    let mut audience = config.url.clone();
+    let mut audience = relay.clone();
     audience.set_query(None);
     let audience = audience.as_str().trim_end_matches('/').to_owned();
     let jwt = identity.relay_jwt(&audience, chrono::Utc::now().timestamp(), JWT_TTL_SECONDS)?;
 
-    let mut url = config.url.clone();
+    let mut url = relay.clone();
     url.query_pairs_mut()
         .append_pair("auth", &jwt)
-        .append_pair("projectId", &config.project_id)
+        .append_pair("projectId", PROJECT_ID)
         .append_pair("ua", &user_agent());
     Ok(url)
 }

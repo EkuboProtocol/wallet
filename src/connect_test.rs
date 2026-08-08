@@ -11,37 +11,6 @@ fn example_dapp() -> AppMetadata {
 }
 
 #[test]
-fn a_relay_project_id_is_required_and_says_where_to_get_one() {
-    // The public relay refuses a connection without one, so failing here with
-    // a link beats failing later with a websocket close code.
-    let error = resolve_project_id(Some(String::new())).expect_err("an empty id was accepted");
-    let message = format!("{error}");
-    assert!(message.contains("dashboard.reown.com"), "{message}");
-    assert!(message.contains(PROJECT_ID_ENV), "{message}");
-}
-
-#[test]
-fn a_project_id_is_trimmed_and_shape_checked() {
-    assert_eq!(
-        resolve_project_id(Some("  abc123  ".to_owned())).unwrap(),
-        "abc123"
-    );
-    assert!(resolve_project_id(Some("abc_123-XYZ".to_owned())).is_ok());
-    // A pasted URL or a whole JSON blob is not a project id, and accepting one
-    // would put it straight into a URL query string.
-    for wrong in [
-        "https://dashboard.reown.com/project/abc",
-        "{\"projectId\":\"abc\"}",
-        "abc 123",
-    ] {
-        assert!(
-            resolve_project_id(Some(wrong.to_owned())).is_err(),
-            "{wrong} was accepted as a project id"
-        );
-    }
-}
-
-#[test]
 fn the_methods_offered_exclude_the_two_that_cannot_be_reviewed_or_tracked() {
     // `eth_sign` signs a bare digest, so no review can show what it
     // authorizes. `eth_signTransaction` hands signed bytes to the dapp, which

@@ -142,13 +142,15 @@ will expose is listed on the review screen before you decide.
 
 ## The relay project id
 
-The public WalletConnect relay refuses anonymous connections, so a project id
-is required. Create one — it is free — at <https://dashboard.reown.com>, then
-pass `--project-id` or set `EKUBO_WALLET_WALLETCONNECT_PROJECT_ID`.
+The public WalletConnect relay refuses anonymous connections, so every
+connection sends a project id. This wallet's is compiled in; there is nothing
+to create, configure, or pass.
 
 It identifies the *application* to the relay operator, not you, and it is not a
-secret. There is no built-in default on purpose: a wallet that silently
-borrowed somebody else's id would be rate-limited on their quota.
+secret — it travels in the relay URL's query string on every connection. It is
+fixed rather than configurable because it names this wallet to the relay: a
+copy connecting under some other id would spend that account's quota and
+misreport who is pairing.
 
 
 ## What the relay can see
