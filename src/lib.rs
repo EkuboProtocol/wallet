@@ -13,13 +13,16 @@ pub mod approve_tui;
 pub mod batch_read;
 pub mod cli;
 pub mod completion;
+pub mod connect;
 pub mod fullscreen;
 pub mod mcp;
 pub mod pager;
 pub mod render;
+pub mod signing_review;
 pub mod token_picker;
 pub mod tui;
 pub mod tx_browser;
+pub mod walletconnect;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

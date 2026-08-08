@@ -8,25 +8,19 @@ use crate::{
         default_networks, remove_configured_network, replace_configured_network,
     },
     core::policy::WalletPolicy,
-    custody::{CustodyService, OsKeyStore, PrivateKeyMaterial, load_matching_signer},
+    custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceRequest},
     legal::{self, LegalDocument, LegalStore},
-    message::{
-        MessageStatus, MessageStore, PendingMessage, describe_message, message_digest, parse_siwe,
-        siwe_warnings,
-    },
+    message::{MessageStore, PendingMessage},
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     render::{OutputMode, described_time, emit, print_json, relative_time},
     rpc::verify_chain_id,
     simulation::SimulationResult,
     tx_browser::status_label,
-    typed_data::{
-        PendingTypedData, TypedDataStatus, TypedDataStore, interpret_permit_approvals,
-        parse_typed_data,
-    },
+    typed_data::{PendingTypedData, TypedDataStore},
 };
-use alloy::{primitives::Address, signers::SignerSync};
+use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
@@ -104,6 +98,19 @@ enum Command {
     /// Bare, on a terminal, this opens the full-screen editor.
     #[command(name = "address-book")]
     AddressBook(AddressBookArgs),
+    #[allow(clippy::doc_markdown)]
+    /// Connect this wallet to a dapp with a pasted WalletConnect link.
+    ///
+    /// The dapp gets exactly what an MCP agent gets: it can propose, and
+    /// nothing else. Every transaction it sends is simulated and put to this
+    /// wallet's policy, and anything the policy does not already allow is shown
+    /// to you here before it is signed. Every signature request is shown to you
+    /// regardless, because no policy can evaluate what a signature authorizes.
+    ///
+    /// Runs until the dapp disconnects or you press Ctrl-C.
+    ///
+    ///   ekubo-wallet connect 'wc:a1b2…@2?relay-protocol=irn&symKey=…'
+    Connect(ConnectArgs),
     /// Register this wallet as an MCP server with the agents on this machine.
     ///
     /// The installer does this once. This is how to redo it after moving the
@@ -197,6 +204,31 @@ struct PortfolioArgs {
     /// from one says nothing about the balance.
     #[arg(long, default_value_t = crate::token_store::MAX_PORTFOLIO_TOKENS)]
     tokens: usize,
+}
+
+#[derive(Debug, Args)]
+struct ConnectArgs {
+    /// The `wc:` link copied from the dapp. Prompted for when omitted.
+    ///
+    /// Quote it: it contains `&`, which every shell reads as "run this in the
+    /// background" long before the wallet ever sees it.
+    uri: Option<String>,
+    /// Which account to expose. Required only when this wallet holds more than
+    /// one, because a dapp session exposes exactly one account.
+    #[arg(long, short)]
+    account: Option<String>,
+    #[allow(clippy::doc_markdown)]
+    /// The WalletConnect relay project id.
+    ///
+    /// Free to create at https://dashboard.reown.com. It identifies the
+    /// application to the relay operator rather than you, and it is not a
+    /// secret — but the relay refuses connections without one, so there is no
+    /// default.
+    #[arg(long, env = crate::connect::PROJECT_ID_ENV)]
+    project_id: Option<String>,
+    /// A relay other than the public one, for a self-hosted deployment.
+    #[arg(long)]
+    relay_url: Option<Url>,
 }
 
 #[derive(Debug, Args)]
@@ -639,6 +671,18 @@ impl Cli {
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
             Command::Token(args) => run_token(&config, &args.command, mode).await,
             Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
+            Command::Connect(args) => {
+                crate::connect::run(
+                    &config,
+                    crate::connect::ConnectOptions {
+                        uri: args.uri,
+                        account: args.account,
+                        project_id: args.project_id,
+                        relay_url: args.relay_url,
+                    },
+                )
+                .await
+            }
             Command::Agent(args) => run_agent(&args.command, mode),
             Command::Legal(args) => run_legal(&config, &args.command, mode),
             Command::Review {
@@ -2741,376 +2785,82 @@ impl crate::approval::ReviewPresenter for CliTransactionPresenter {
 
 async fn approve_typed_data(
     config: &ConfigStore,
-    mut store: TypedDataStore,
+    store: TypedDataStore,
     request: PendingTypedData,
     no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    ensure!(
-        request.status == TypedDataStatus::AwaitingApproval,
-        "typed-data request is not awaiting approval"
-    );
-    let wallet = config.wallet(&request.wallet_id)?;
-    config.network_by_chain_id(&request.chain_id)?;
-    let (typed, chain_id, digest) = parse_typed_data(&request.typed_data)?;
-    ensure!(
-        chain_id.to_string() == request.chain_id && format!("{digest:#x}") == request.digest,
-        "typed-data request no longer matches its stored payload"
-    );
-    let permit_approvals = interpret_permit_approvals(&typed, wallet.address)?;
-
-    let mut approval = ApprovalRequest::new(
-        ApprovalKind::TypedDataSignature,
-        "Approve typed-data signature",
-        "Review and sign this exact EIP-712 payload with the wallet key. The complete payload is \
-         shown at the end of this review.",
-    )
-    .fact("Wallet", &request.wallet_id)
-    .fact("Chain ID", &request.chain_id)
-    .fact("Primary type", &typed.primary_type)
-    .fact(
-        "Domain",
-        format!(
-            "name={:?}; version={:?}; verifyingContract={}",
-            typed.domain.name.as_deref().unwrap_or("<none>"),
-            typed.domain.version.as_deref().unwrap_or("<none>"),
-            typed
-                .domain
-                .verifying_contract
-                .map_or_else(|| "<none>".into(), |contract| contract.to_checksum(None)),
-        ),
-    )
-    .fact("Signing hash", &request.digest)
-    .digest(&request.digest);
-    approval.id = request.request_id;
-
-    // A vendored ERC-7730 descriptor reading, when the domain matches one
-    // exactly. Supplemental display only: the printed payload and the permit
-    // decode below stay authoritative.
-    if let Some(reading) = crate::clear_signing::interpret_typed_data(&request.typed_data).await {
-        approval = approval.fact("Reads as", reading.intent);
-        for line in reading.fields {
-            approval = approval.fact("·", line);
-        }
-    }
-
-    if let Some(approvals) = &permit_approvals {
-        for (index, permit) in approvals.iter().enumerate() {
-            approval = approval.fact(
-                format!("Grants approval {}", index + 1),
-                format!(
-                    "{}: allow {} to spend up to {} of token {}{}",
-                    permit.kind,
-                    permit.spender,
-                    permit.amount,
-                    permit.token,
-                    permit
-                        .deadline
-                        .as_deref()
-                        .map_or_else(String::new, |deadline| format!("; deadline {deadline}")),
-                ),
-            );
-        }
-        approval = approval.warning(
-            "Signing grants the token approvals listed above. No policy limits what a signature \
-             authorizes, and nothing stops the holder collecting more of them, so approve this \
-             only if you expected exactly these approvals now.",
-        );
-    } else {
-        approval = approval.warning(
-            "This payload is not a recognized permit. A typed-data signature can authorize \
-             transfers, orders, or delegations; verify every field of the printed payload.",
-        );
-    }
-
-    print_review_transcript(&serde_json::json!({
-        "approval": approval,
-        "typed_data": request.typed_data,
-    }))?;
-    if !no_confirm
-        && !reviewer_approved(approval, typed_data_payload_lines(&request.typed_data)).await?
-    {
-        let rejected = store.reject(request.request_id)?;
-        return emit_rejected(
+    match crate::signing_review::decide_typed_data(config, store, request, no_confirm).await? {
+        crate::signing_review::TypedDataDecision::Rejected(rejected) => emit_rejected(
             mode,
             "typed-data request",
             rejected.request_id,
             &rejected.digest,
             rejected.rejected_at,
-        );
+        ),
+        crate::signing_review::TypedDataDecision::Signed(stored) => {
+            eprintln!(
+                "Approved and signed. An MCP agent waiting on this request reads the signature \
+                 automatically; nothing further is needed here."
+            );
+            emit(
+                mode,
+                &serde_json::json!({
+                    "approved": stored.request_id,
+                    "digest": stored.digest,
+                    "signature": stored.signature,
+                    "approved_at": stored.approved_at,
+                }),
+                || {
+                    Ok(format!(
+                        "Approved typed-data request {}.\nSignature: {}",
+                        stored.request_id,
+                        stored.signature.as_deref().unwrap_or("<missing>"),
+                    ))
+                },
+            )
+        }
     }
-
-    PlatformHumanPresence
-        .confirm(&PresenceRequest::SignTypedData {
-            wallet: wallet.id.clone(),
-        })
-        .await?;
-
-    // Re-read mutable local authority after the potentially long human
-    // review; the final SQL write repeats the pending checks atomically.
-    let current = store.get(request.request_id)?;
-    ensure!(
-        current.status == TypedDataStatus::AwaitingApproval && current.digest == request.digest,
-        "typed-data request changed during approval"
-    );
-    ensure!(
-        config.wallet(&request.wallet_id)? == wallet,
-        "wallet configuration changed during approval"
-    );
-    let signer = load_matching_signer(&OsKeyStore, &wallet)?;
-    let signature = signer
-        .sign_hash_sync(&digest)
-        .context("failed to sign typed data")?;
-    let stored = store.store_signature(
-        request.request_id,
-        &request.digest,
-        &format!("0x{}", hex::encode(signature.as_bytes())),
-    )?;
-    eprintln!(
-        "Approved and signed. An MCP agent waiting on this request reads the signature \
-         automatically; nothing further is needed here."
-    );
-    emit(
-        mode,
-        &serde_json::json!({
-            "approved": stored.request_id,
-            "digest": stored.digest,
-            "signature": stored.signature,
-            "approved_at": stored.approved_at,
-        }),
-        || {
-            Ok(format!(
-                "Approved typed-data request {}.\nSignature: {}",
-                stored.request_id,
-                stored.signature.as_deref().unwrap_or("<missing>"),
-            ))
-        },
-    )
 }
 
 async fn approve_message(
     config: &ConfigStore,
-    mut store: MessageStore,
+    store: MessageStore,
     request: PendingMessage,
     no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    ensure!(
-        request.status == MessageStatus::AwaitingApproval,
-        "message request is not awaiting approval"
-    );
-    let wallet = config.wallet(&request.wallet_id)?;
-    if let Some(chain_id) = &request.chain_id {
-        config.network_by_chain_id(chain_id)?;
-    }
-    let message = request.message_bytes()?;
-    let digest = message_digest(&message);
-    ensure!(
-        format!("{digest:#x}") == request.digest,
-        "message request no longer matches its stored bytes"
-    );
-    let display = describe_message(&message);
-    let siwe = display.text.as_deref().and_then(parse_siwe);
-    // Re-check the account the login names here too: the request was refused
-    // at creation, and nothing may have changed the wallet under it since.
-    if let Some(siwe) = &siwe {
-        ensure!(
-            siwe.address == wallet.address.to_checksum(None),
-            "this sign-in message names account {}, but wallet {} is {}",
-            siwe.address,
-            wallet.id,
-            wallet.address.to_checksum(None)
-        );
-    }
-
-    let mut approval = ApprovalRequest::new(
-        ApprovalKind::MessageSignature,
-        "Approve message signature",
-        "Sign these exact bytes with the wallet key, prefixed as an EIP-191 personal message. \
-         The complete message is shown at the end of this review.",
-    )
-    .fact("Wallet", &request.wallet_id)
-    .fact("Signer", wallet.address.to_checksum(None))
-    .fact(
-        "Chain",
-        request.chain_id.as_ref().map_or_else(
-            || "not stated; a message signature binds no chain".to_owned(),
-            |chain_id| format!("{chain_id}, claimed by the requester"),
-        ),
-    )
-    .fact(
-        "Size",
-        format!(
-            "{} bytes, {} line(s), sent as {}",
-            display.byte_length,
-            display.line_count,
-            match request.encoding {
-                crate::message::MessageEncoding::Text => "text",
-                crate::message::MessageEncoding::Hex => "raw bytes",
-            }
-        ),
-    );
-
-    if let Some(siwe) = &siwe {
-        approval = approval
-            .fact("Sign in to", &siwe.domain)
-            .fact("Account", &siwe.address)
-            .fact("URI", &siwe.uri)
-            .fact("Chain ID in message", &siwe.chain_id)
-            .fact("Nonce", &siwe.nonce)
-            .fact("Issued at", &siwe.issued_at);
-        if let Some(statement) = &siwe.statement {
-            approval = approval.fact("Statement", terminal_safe_excerpt(statement));
-        }
-        for (label, value) in [
-            ("Expires at", siwe.expiration_time.as_deref()),
-            ("Not before", siwe.not_before.as_deref()),
-            ("Request ID", siwe.request_id.as_deref()),
-        ] {
-            if let Some(value) = value {
-                approval = approval.fact(label, value);
-            }
-        }
-        for (index, resource) in siwe.resources.iter().enumerate() {
-            approval = approval.fact(
-                format!("Resource {}", index + 1),
-                terminal_safe_excerpt(resource),
-            );
-        }
-        for warning in siwe_warnings(
-            siwe,
-            request.chain_id.as_deref(),
-            config.network_by_chain_id(&siwe.chain_id).is_ok(),
-            chrono::Utc::now(),
-        ) {
-            approval = approval.warning(warning);
-        }
-    } else {
-        approval = approval
-            .fact(
-                "Message",
-                display
-                    .escaped_text
-                    .as_deref()
-                    .map_or_else(|| request.message_hex.clone(), terminal_safe_excerpt),
-            )
-            .warning(
-                "This is not a recognized sign-in message. A message signature can authorize an \
-                 off-chain order, a delegation, or an account link; verify every byte of the \
-                 complete message against whatever asked for it.",
-            );
-    }
-    for warning in &display.warnings {
-        approval = approval.warning(warning.clone());
-    }
-    approval = approval
-        .fact("Signing hash", &request.digest)
-        .digest(&request.digest);
-    approval.id = request.request_id;
-
-    print_review_transcript(&serde_json::json!({
-        "approval": approval,
-        "message": {
-            "hex": request.message_hex,
-            "text": display.text,
-            "escaped_text": display.escaped_text,
-            "byte_length": display.byte_length,
-            "encoding": request.encoding,
-            "siwe": siwe,
-        },
-    }))?;
-    if !no_confirm
-        && !reviewer_approved(
-            approval,
-            message_payload_lines(&request.message_hex, &display),
-        )
-        .await?
-    {
-        let rejected = store.reject(request.request_id)?;
-        return emit_rejected(
+    match crate::signing_review::decide_message(config, store, request, no_confirm).await? {
+        crate::signing_review::MessageDecision::Rejected(rejected) => emit_rejected(
             mode,
             "message request",
             rejected.request_id,
             &rejected.digest,
             rejected.rejected_at,
-        );
+        ),
+        crate::signing_review::MessageDecision::Signed(stored) => {
+            eprintln!(
+                "Approved and signed. An MCP agent waiting on this request reads the signature \
+                 automatically; nothing further is needed here."
+            );
+            emit(
+                mode,
+                &serde_json::json!({
+                    "approved": stored.request_id,
+                    "digest": stored.digest,
+                    "signature": stored.signature,
+                    "approved_at": stored.approved_at,
+                }),
+                || {
+                    Ok(format!(
+                        "Approved message request {}.\nSignature: {}",
+                        stored.request_id,
+                        stored.signature.as_deref().unwrap_or("<missing>"),
+                    ))
+                },
+            )
+        }
     }
-
-    PlatformHumanPresence
-        .confirm(&PresenceRequest::SignMessage {
-            wallet: wallet.id.clone(),
-        })
-        .await?;
-
-    // Re-read mutable local authority after the potentially long human
-    // review; the final SQL write repeats the pending checks atomically.
-    let current = store.get(request.request_id)?;
-    ensure!(
-        current.status == MessageStatus::AwaitingApproval
-            && current.digest == request.digest
-            && current.message_hex == request.message_hex,
-        "message request changed during approval"
-    );
-    ensure!(
-        config.wallet(&request.wallet_id)? == wallet,
-        "wallet configuration changed during approval"
-    );
-    let signer = load_matching_signer(&OsKeyStore, &wallet)?;
-    let signature = signer
-        .sign_hash_sync(&digest)
-        .context("failed to sign the message")?;
-    let stored = store.store_signature(
-        request.request_id,
-        &request.digest,
-        &format!("0x{}", hex::encode(signature.as_bytes())),
-    )?;
-    eprintln!(
-        "Approved and signed. An MCP agent waiting on this request reads the signature \
-         automatically; nothing further is needed here."
-    );
-    emit(
-        mode,
-        &serde_json::json!({
-            "approved": stored.request_id,
-            "digest": stored.digest,
-            "signature": stored.signature,
-            "approved_at": stored.approved_at,
-        }),
-        || {
-            Ok(format!(
-                "Approved message request {}.\nSignature: {}",
-                stored.request_id,
-                stored.signature.as_deref().unwrap_or("<missing>"),
-            ))
-        },
-    )
-}
-
-/// Keep one approval fact to a readable length; the complete message always
-/// follows at the end of the review document.
-fn terminal_safe_excerpt(value: &str) -> String {
-    const MAX_FACT_CHARACTERS: usize = 200;
-    if value.chars().count() <= MAX_FACT_CHARACTERS {
-        return value.to_owned();
-    }
-    let head: String = value.chars().take(MAX_FACT_CHARACTERS).collect();
-    format!("{head}… (complete message below)")
-}
-
-/// Write a review transcript to stderr with nothing in it that can redraw the
-/// terminal it lands in.
-///
-/// `serde_json` escapes quotes, backslashes, and C0 control characters, and
-/// nothing else. A right-to-left override, an isolate, or a zero-width space —
-/// in a token symbol, a message body, a policy label, an RPC error — is
-/// perfectly valid JSON and reaches the approver's terminal verbatim. Every
-/// other surface that shows a human untrusted text routes through
-/// `sanitize`; these transcripts stream straight to a file descriptor and so
-/// did not, which is the one place it matters most.
-fn review_transcript_text(value: &serde_json::Value) -> Result<String> {
-    Ok(crate::sanitize::terminal_safe_multiline(
-        &serde_json::to_string_pretty(value)?,
-    ))
 }
 
 /// Write the orchestrator-authored review document to the terminal, for the
@@ -3119,14 +2869,6 @@ fn review_transcript_text(value: &serde_json::Value) -> Result<String> {
 fn print_review_document(request: &ApprovalRequest) -> Result<()> {
     let mut stderr = io::stderr().lock();
     stderr.write_all(crate::approve_tui::review_document_text(request, Vec::new()).as_bytes())?;
-    stderr.write_all(b"\n")?;
-    stderr.flush()?;
-    Ok(())
-}
-
-fn print_review_transcript(value: &serde_json::Value) -> Result<()> {
-    let mut stderr = io::stderr().lock();
-    stderr.write_all(review_transcript_text(value)?.as_bytes())?;
     stderr.write_all(b"\n")?;
     stderr.flush()?;
     Ok(())
@@ -3225,117 +2967,6 @@ fn resolve_starting_policy(flag: Option<StartingPolicy>) -> Result<Option<Starti
         choices.len(),
     )?
     .map(|index| choices[index]))
-}
-
-/// Ask for a decision and return it, for the queued signing requests where
-/// declining has somewhere to be written. Everything else uses
-/// [`require_approval`], which treats a decline as an abort because there is
-/// no queue entry to resolve.
-///
-/// These reviews run full screen: the complete payload scrolls inside the
-/// review itself rather than somewhere above the prompt, and the JSON record
-/// printed to the transcript beforehand stays in the scrollback for after
-/// the alternate screen closes.
-async fn reviewer_approved(
-    request: ApprovalRequest,
-    payload: Vec<crate::fullscreen::Line>,
-) -> Result<bool> {
-    Ok(
-        crate::approve_tui::review_fullscreen(&request, payload).await?
-            == ApprovalDecision::Approved,
-    )
-}
-
-/// Payload text for the full-screen review: every control or bidirectional
-/// character becomes a visible `\u{..}` escape rather than a silent space,
-/// because in a payload being signed the tricky characters are exactly the
-/// ones the reviewer needs to see.
-fn escape_payload_line(line: &str) -> String {
-    use std::fmt::Write as _;
-    let mut escaped = String::with_capacity(line.len());
-    for character in line.chars() {
-        if crate::sanitize::is_disallowed(character) {
-            let _ = write!(escaped, "\\u{{{:04x}}}", character as u32);
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
-}
-
-/// The complete message, line by line, for the scrollable review document.
-fn message_payload_lines(
-    message_hex: &str,
-    display: &crate::message::MessageDisplay,
-) -> Vec<crate::fullscreen::Line> {
-    use crate::fullscreen::Span;
-    use crate::tui::Tone;
-    let mut lines = vec![
-        Vec::new(),
-        vec![Span::toned("Complete message", Tone::Emphasis)],
-    ];
-    if let Some(text) = &display.text {
-        lines.extend(
-            text.split('\n')
-                .map(|line| vec![Span::plain(escape_payload_line(line))]),
-        );
-    } else {
-        lines.push(vec![Span::toned("Not valid UTF-8.", Tone::Muted)]);
-    }
-    // Always, not only when the decode failed. The rendering above is not
-    // injective: `escape_payload_line` turns a real U+202E into the characters
-    // `\u{202e}`, and a message that literally contains those characters
-    // renders identically — so the reviewer cannot tell which one they are
-    // being asked to sign. Confusables have the same problem in the other
-    // direction, a Cyrillic а being indistinguishable from a Latin a. The hex
-    // is the only thing on this screen that separates them, and it is what is
-    // actually hashed.
-    lines.push(Vec::new());
-    lines.push(vec![Span::toned("Exact bytes signed", Tone::Emphasis)]);
-    lines.extend(
-        hex_payload_rows(message_hex)
-            .into_iter()
-            .map(|row| vec![Span::plain(row)]),
-    );
-    lines
-}
-
-/// Split a 0x-prefixed hex body into fixed-width rows.
-///
-/// One unbroken line of hex is re-wrapped by the viewport at whatever width
-/// the terminal happens to be, so the same message looks different in two
-/// windows and neither grouping means anything. Fixed rows of 32 bytes make
-/// the layout a property of the message.
-fn hex_payload_rows(message_hex: &str) -> Vec<String> {
-    const BYTES_PER_ROW: usize = 32;
-    let digits = message_hex.strip_prefix("0x").unwrap_or(message_hex);
-    if digits.is_empty() {
-        return vec!["0x (empty)".to_owned()];
-    }
-    digits
-        .as_bytes()
-        .chunks(BYTES_PER_ROW * 2)
-        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-        .collect()
-}
-
-/// The complete EIP-712 payload, pretty-printed, for the scrollable review
-/// document.
-fn typed_data_payload_lines(typed_data: &serde_json::Value) -> Vec<crate::fullscreen::Line> {
-    use crate::fullscreen::Span;
-    use crate::tui::Tone;
-    let pretty =
-        serde_json::to_string_pretty(typed_data).unwrap_or_else(|_| typed_data.to_string());
-    let mut lines = vec![
-        Vec::new(),
-        vec![Span::toned("Complete EIP-712 payload", Tone::Emphasis)],
-    ];
-    lines.extend(
-        pretty
-            .split('\n')
-            .map(|line| vec![Span::plain(escape_payload_line(line))]),
-    );
-    lines
 }
 
 async fn require_approval(request: ApprovalRequest) -> Result<()> {

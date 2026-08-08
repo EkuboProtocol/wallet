@@ -31,11 +31,25 @@ fn mcp_server_cannot_reach_an_approval_surface() {
     }
 }
 
-/// Exactly one production call site can mint an interactive-terminal proof —
-/// the CLI review command. Every human override in the process descends from
-/// it, so an auditor enumerates override origins by reading one line.
+/// Every file that may mint an interactive-terminal proof, and nothing else.
+///
+/// Each entry is a command a person is sitting in front of, reviewing a
+/// specific request: `cli.rs` is `ekubo-wallet review`, and `connect.rs` is the
+/// `WalletConnect` session, which reviews a dapp's transaction on the same
+/// terminal through the same orchestrator. A proof is a non-cloneable
+/// capability minted where it is used, so a second interactive command cannot
+/// borrow the first one's — it has to appear here.
+///
+/// Adding to this list is a deliberate act. It widens the set of places a
+/// human override can originate, which is exactly what an auditor reads this
+/// test to enumerate.
+const PROOF_ORIGINS: &[&str] = &["src/cli.rs", "src/connect.rs"];
+
+/// Only the listed production call sites can mint an interactive-terminal
+/// proof, one each. Every human override in the process descends from one of
+/// them, so an auditor enumerates override origins by reading this list.
 #[test]
-fn interactive_proof_has_exactly_one_production_origin() {
+fn interactive_proof_has_exactly_one_production_origin_per_listed_command() {
     let mut call_sites = Vec::new();
     let mut directories = vec![
         repository_root().join("src"),
@@ -65,14 +79,25 @@ fn interactive_proof_has_exactly_one_production_origin() {
             }
         }
     }
+    call_sites.sort();
+    for origin in PROOF_ORIGINS {
+        let found = call_sites
+            .iter()
+            .filter(|site| site.contains(origin))
+            .count();
+        assert_eq!(
+            found, 1,
+            "expected exactly one InteractiveProof::from_terminal call site in {origin}, found \
+             {found}: {call_sites:?}"
+        );
+    }
+    // Nothing outside the list, so the count is the whole check: a new call
+    // site anywhere else fails here rather than quietly becoming a third way
+    // for a human override to originate.
     assert_eq!(
         call_sites.len(),
-        1,
-        "expected exactly one InteractiveProof::from_terminal call site, found: {call_sites:?}"
-    );
-    assert!(
-        call_sites[0].contains("src/cli.rs"),
-        "the one proof origin must be the CLI review command: {call_sites:?}"
+        PROOF_ORIGINS.len(),
+        "InteractiveProof::from_terminal is called outside {PROOF_ORIGINS:?}: {call_sites:?}"
     );
 }
 
