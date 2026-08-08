@@ -332,3 +332,41 @@ fn the_refresh_key_is_advertised_only_where_it_works() {
         review.hints()
     );
 }
+
+#[test]
+fn a_decision_taken_without_the_screen_still_shows_the_document() {
+    // Run 6251, finding 186993. `--decision approve` answers the question in
+    // advance, which is a legitimate thing for a script or a remote session to
+    // do; it is not a reason to withhold what the answer is about. This path
+    // once printed a JSON transcript before opening the screen, that dump was
+    // removed as unread scrollback, and nothing replaced it here — so the one
+    // review that exists because a policy asked a question or a simulation
+    // failed became the one that showed no target, value, or digest.
+    let request = ApprovalRequest::new(
+        ApprovalKind::Transaction,
+        "Approve a transfer",
+        "Sending 1000 USDC to a new address",
+    )
+    .fact("Wallet", "main")
+    .fact("Network", "ethereum")
+    .section("Call 1")
+    .fact("Target", "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+    .fact("Value", "0")
+    .warning("no policy rule covers this transaction")
+    .digest("0xabc123");
+
+    let text = crate::approve_tui::review_document_text(&request, Vec::new());
+    for shown in [
+        "Sending 1000 USDC",
+        "main",
+        "ethereum",
+        "Call 1",
+        "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "0xabc123",
+        "no policy rule covers this transaction",
+    ] {
+        assert!(text.contains(shown), "the document omits {shown:?}: {text}");
+    }
+    // The request id is what a reviewer quotes when something goes wrong.
+    assert!(text.contains(&request.id.to_string()), "{text}");
+}

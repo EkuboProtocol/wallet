@@ -301,6 +301,23 @@ const REFRESH_TICK: std::time::Duration = std::time::Duration::from_millis(REFRE
 /// The warnings come last, after the sections and the payload: the decision
 /// pane refuses Approve until the end of the document has been on screen, so
 /// last is the one position a long document can never scroll them away from.
+/// The same document as plain text, for the one path that takes the decision
+/// without opening a screen to ask it.
+///
+/// `--decision approve` answers the question in advance; it does not make the
+/// subject of the question unnecessary. Without this the transaction path
+/// showed the reviewer no target, no value, no calldata, no fees, no policy
+/// finding, and no digest — while the typed-data and message paths printed
+/// their transcripts under the same flag, which made transactions the one
+/// exception at the point where there is most to see. Everything queued here
+/// is queued because its policy asked a question or its simulation failed.
+#[must_use]
+pub fn review_document_text(request: &ApprovalRequest, payload: Vec<Line>) -> String {
+    crate::fullscreen::lines_to_text(&review_document(request, payload), |text, _| {
+        text.to_owned()
+    })
+}
+
 fn review_document(request: &ApprovalRequest, payload: Vec<Line>) -> Vec<Line> {
     let mut lines: Vec<Line> = vec![vec![Span::plain(&request.summary)], Vec::new()];
     let mut header = request.facts.clone();

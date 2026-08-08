@@ -2716,6 +2716,16 @@ impl crate::approval::ReviewPresenter for CliTransactionPresenter {
         refresh: &dyn crate::approval::ReviewRefresh,
     ) -> Result<ApprovalDecision> {
         if self.no_confirm {
+            // The flag answers the question without being asked it. What it
+            // must not also skip is the subject: a transaction is queued here
+            // precisely because its policy asked something or its simulation
+            // failed, so this is the path with the most to see and it was
+            // showing nothing at all — no target, no value, no calldata, no
+            // fees, no finding, no digest. The typed-data and message paths
+            // print their transcripts under the same flag; this restores the
+            // parity, and the document still reaches the terminal before the
+            // owner authentication that follows in the orchestrator.
+            print_review_document(request)?;
             return Ok(ApprovalDecision::Approved);
         }
         // The plan's calldata already lives in the document's call sections,
@@ -3101,6 +3111,17 @@ fn review_transcript_text(value: &serde_json::Value) -> Result<String> {
     Ok(crate::sanitize::terminal_safe_multiline(
         &serde_json::to_string_pretty(value)?,
     ))
+}
+
+/// Write the orchestrator-authored review document to the terminal, for the
+/// path that takes the decision without opening the screen that would have
+/// drawn it.
+fn print_review_document(request: &ApprovalRequest) -> Result<()> {
+    let mut stderr = io::stderr().lock();
+    stderr.write_all(crate::approve_tui::review_document_text(request, Vec::new()).as_bytes())?;
+    stderr.write_all(b"\n")?;
+    stderr.flush()?;
+    Ok(())
 }
 
 fn print_review_transcript(value: &serde_json::Value) -> Result<()> {
