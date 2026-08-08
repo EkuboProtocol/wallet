@@ -67,6 +67,20 @@ fn terms_disclaim_agent_signing_losses() {
     assert!(TERMS_OF_SERVICE.contains("USING AN AGENT"));
 }
 
+/// A dapp is a second way a signature request reaches this wallet, and the
+/// relay carrying it is a third party the developer does not run. The
+/// disclaimer covers agents by name, so it has to cover these by name too.
+#[test]
+fn terms_disclaim_dapp_directed_signing_and_the_relay() {
+    assert!(TERMS_OF_SERVICE.contains("CONNECTED OVER WALLETCONNECT"));
+    assert!(TERMS_OF_SERVICE.contains("ANY RELAY\nOPERATOR"));
+    assert!(TERMS_OF_SERVICE.contains("IMPERSONATED DAPP"));
+    // Section 1 says the developer runs no servers; the relay it now names is
+    // somebody else's, and saying so is what keeps that claim true.
+    assert!(TERMS_OF_SERVICE.contains("wss://relay.walletconnect.org"));
+    assert!(TERMS_OF_SERVICE.contains("under the control of the developer"));
+}
+
 fn store() -> (tempfile::TempDir, LegalStore) {
     let directory = tempfile::tempdir().unwrap();
     let database = PolicyStore::open(

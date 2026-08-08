@@ -39,7 +39,7 @@ pub const THIRD_PARTY_LICENSES: &str = include_str!("../../../THIRD_PARTY_LICENS
 pub const TERMS_OF_SERVICE: &str = "\
 # Ekubo Wallet Terms of Service
 
-Version 1 — Effective 2026-08-04
+Version 2 — Effective 2026-08-08
 
 These terms are an agreement between you and Ekubo, Inc. (the
 \"developer\"). By accepting them you agree to all of the following before
@@ -53,13 +53,21 @@ machine and stay in your operating system's credential store. The developer
 operates no servers for this software and never has access to your keys or
 funds.
 
-## 2. You direct all signing, including through agents
+`ekubo-wallet connect` additionally speaks the WalletConnect protocol to a
+dapp you choose, through a relay operated by a third party — by default
+`wss://relay.walletconnect.org`. Neither the relay nor the dapp is operated
+by, endorsed by, or under the control of the developer, and this software's
+use of the WalletConnect protocol implies no relationship with, or approval
+by, its operators or any dapp you connect to.
+
+## 2. You direct all signing, including through agents and connected dapps
 
 This software is designed to be driven by AI agents and other automated
-tooling through the Model Context Protocol. Policies, simulations, and
-approval prompts are safety aids, not guarantees. You are solely responsible
-for every transaction and signature this software produces, including those
-requested by an agent on your behalf.
+tooling through the Model Context Protocol, and to serve requests from a dapp
+you connect to over WalletConnect. Policies, simulations, and approval
+prompts are safety aids, not guarantees. You are solely responsible for every
+transaction and signature this software produces, including those requested
+by an agent on your behalf and those requested by a dapp you paired with.
 
 ## 3. Assumption of risk
 
@@ -69,7 +77,14 @@ injection), or submit plans whose effects differ from what you intended.
 Policy configuration, simulation results, and third-party RPC responses can
 be incomplete or wrong. You accept all of these risks by using this software.
 
-## 4. No liability for agent-directed signing
+A dapp you connect to is an untrusted counterparty for the whole life of the
+session: it chooses what to propose, its site may be compromised or
+impersonated, and a pairing link you did not just generate yourself may
+belong to someone else. The relay carrying that session can delay, drop, or
+refuse messages, and may be unavailable. Nothing this software shows about a
+dapp is a verification of who it is. You accept these risks too.
+
+## 4. No liability for agent-directed or dapp-directed signing
 
 TO THE MAXIMUM EXTENT PERMITTED BY LAW, EKUBO, INC. AND ALL COPYRIGHT
 HOLDERS ARE NOT RESPONSIBLE OR LIABLE FOR ANY LOSSES INCURRED DUE TO USING AN AGENT
@@ -78,6 +93,13 @@ SOFTWARE. THIS INCLUDES, WITHOUT LIMITATION, LOSS OF FUNDS, TOKENS, OR
 ACCESS RESULTING FROM AGENT ERROR, PROMPT INJECTION, MALICIOUS OR DEFECTIVE
 EXECUTION PLANS, POLICY MISCONFIGURATION, SIMULATION INACCURACY, OR RPC
 MISBEHAVIOR.
+
+THE SAME APPLIES TO EVERY TRANSACTION OR SIGNATURE PRODUCED FOR A DAPP
+CONNECTED OVER WALLETCONNECT. THE DEVELOPER IS NOT RESPONSIBLE OR LIABLE FOR
+ANY LOSSES ARISING FROM A CONNECTED DAPP, A PAIRING LINK OBTAINED FROM ANY
+SOURCE, OR THE CONDUCT, FAILURE, DOWNTIME, OR UNAVAILABILITY OF ANY RELAY
+OPERATOR, INCLUDING WITHOUT LIMITATION LOSSES FROM A MALICIOUS, COMPROMISED,
+OR IMPERSONATED DAPP AND FROM MESSAGES DELAYED, DROPPED, OR NEVER DELIVERED.
 
 ## 5. No warranty
 
