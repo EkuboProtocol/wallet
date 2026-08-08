@@ -299,9 +299,29 @@ esac
 # agents at it, and this script is not around for that — and a second copy of
 # the argument order each agent's `mcp add` expects is a second copy to get
 # wrong. That argument goes double now that there are two servers to register:
-# this wallet over stdio, and the Ekubo protocol server over HTTPS. `agent add`
+# this wallet over stdio, and the Ekubo protocol server over HTTPS. `meta-agent add`
 # with no agent named configures whatever it detects, reports what it did, and
 # is safe to re-run.
+# This script is fetched from `main` while the binary it configures is the
+# latest *release*, so the two can disagree about a command's name for as long
+# as it takes to cut one. `meta-agent` and `shell-completion` were `agent` and
+# `completion` until the top-level names were spread out for tab completion, so
+# each is resolved against the binary actually installed rather than assumed.
+subcommand_name() {
+  for candidate in "$@"; do
+    if "$CLI_BIN" help "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  # Nothing matched: name the current spelling so the failure that follows
+  # says what was tried rather than expanding to nothing.
+  printf '%s\n' "$1"
+}
+
+AGENT_COMMAND=$(subcommand_name meta-agent agent)
+COMPLETION_COMMAND=$(subcommand_name shell-completion completion)
+
 if [ "${EKUBO_WALLET_SKIP_AGENTS:-0}" != "1" ]; then
   AGENT_ADD_ARGUMENTS=""
   # The companion server is a remote endpoint this wallet does not control the
@@ -311,9 +331,9 @@ if [ "${EKUBO_WALLET_SKIP_AGENTS:-0}" != "1" ]; then
     AGENT_ADD_ARGUMENTS="--no-companion"
   fi
   # shellcheck disable=SC2086  # deliberate: empty must expand to no argument
-  if ! "$CLI_BIN" agent add $AGENT_ADD_ARGUMENTS; then
+  if ! "$CLI_BIN" "$AGENT_COMMAND" add $AGENT_ADD_ARGUMENTS; then
     warn "no agent was configured; the binary and completion are still installed"
-    warn "run '$CLI_BIN agent list' to see what was detected"
+    warn "run '$CLI_BIN $AGENT_COMMAND list' to see what was detected"
   fi
 fi
 
@@ -331,7 +351,7 @@ install_completion_file() {
   # predictable path would follow whatever is already there, handing the write,
   # the chmod, and the rename to a file this script never chose.
   completion_temporary=$(mktemp "$completion_directory/.ekubo-wallet.XXXXXXXX") || return 1
-  if ! "$CLI_BIN" completion "$completion_shell" > "$completion_temporary"; then
+  if ! "$CLI_BIN" "$COMPLETION_COMMAND" "$completion_shell" > "$completion_temporary"; then
     rm -f "$completion_temporary"
     return 1
   fi
@@ -359,7 +379,7 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
     bash)
       COMPLETION_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/ekubo-wallet"
       install_completion_file bash "$COMPLETION_FILE"
-      append_once "$HOME/.bashrc" "# ekubo-wallet completion" "[ -r $(shell_quote "$COMPLETION_FILE") ] && . $(shell_quote "$COMPLETION_FILE")"
+      append_once "$HOME/.bashrc" "# ekubo-wallet shell-completion" "[ -r $(shell_quote "$COMPLETION_FILE") ] && . $(shell_quote "$COMPLETION_FILE")"
       log "installed Bash completion"
       ;;
     zsh)
@@ -367,7 +387,7 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
       COMPLETION_FILE="$COMPLETION_DIRECTORY/_ekubo-wallet"
       install_completion_file zsh "$COMPLETION_FILE"
       ZSH_RC="${ZDOTDIR:-$HOME}/.zshrc"
-      append_once "$ZSH_RC" "# ekubo-wallet completion" "fpath=($(shell_quote "$COMPLETION_DIRECTORY") \$fpath)" "autoload -Uz compinit && compinit"
+      append_once "$ZSH_RC" "# ekubo-wallet shell-completion" "fpath=($(shell_quote "$COMPLETION_DIRECTORY") \$fpath)" "autoload -Uz compinit && compinit"
       log "installed Zsh completion"
       ;;
     fish)
@@ -376,7 +396,7 @@ if [ "${EKUBO_WALLET_SKIP_COMPLETIONS:-0}" != "1" ]; then
       log "installed Fish completion"
       ;;
     *)
-      warn "unsupported login shell '$COMPLETION_SHELL'; run 'ekubo-wallet completion bash|zsh|fish' manually"
+      warn "unsupported login shell '$COMPLETION_SHELL'; run 'ekubo-wallet $COMPLETION_COMMAND bash|zsh|fish' manually"
       ;;
   esac
 fi

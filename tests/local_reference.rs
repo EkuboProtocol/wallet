@@ -1,4 +1,4 @@
-//! `ekubo-wallet reference` and the wallet's `file:` reader are two halves of
+//! `ekubo-wallet meta-reference` and the wallet's `file:` reader are two halves of
 //! one agreement: the command says what a file hashes to, and the wallet
 //! refuses the file unless it still hashes to that. Nothing else checks that
 //! they agree on the digest, the byte count, or the URL spelling, and a
@@ -35,13 +35,13 @@ fn plan_json(recipient: &str) -> String {
 fn envelope_for(path: &std::path::Path) -> ArtifactReference {
     let output = Command::cargo_bin("ekubo-wallet")
         .expect("ekubo-wallet binary builds")
-        .arg("reference")
+        .arg("meta-reference")
         .arg(path)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "reference exited non-zero: {}",
+        "meta-reference exited non-zero: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("the printed envelope is an artifact_reference")

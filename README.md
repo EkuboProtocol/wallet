@@ -12,7 +12,7 @@ regardless of where it came from, and treats all of them as untrusted input.
 Plans arrive by URL — a producer reference's public https URL, verified
 against the keccak256 digest published beside it, a `data:application/json`
 URI carrying the plan inline, or a `file:` URL naming a body written to this
-machine's disk and described with `ekubo-wallet reference <path>` — so the
+machine's disk and described with `ekubo-wallet meta-reference <path>` — so the
 agent relaying a plan between servers, or assembling one of its own out of
 several, passes a line of text instead of the plan body.
 
@@ -53,7 +53,7 @@ only hold keys. It is a convenience, not an exception — it prepares unsigned
 plans and never sees a key, and every plan it produces is validated,
 simulated, and policy-checked here exactly like a plan from anywhere else.
 `EKUBO_WALLET_SKIP_COMPANION=1` installs the wallet without it, and
-`ekubo-wallet agent remove` takes both back.
+`ekubo-wallet meta-agent remove` takes both back.
 
 Then accept the legal documents and create a wallet:
 

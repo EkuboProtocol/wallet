@@ -90,12 +90,12 @@ recipient, and the simulated result are what the review is actually for.
 Seeding happens only at creation. Nothing re-seeds on later launches, so a
 token you remove stays removed, and the database is yours after the first
 run. Filters are named and take a network name, alias, or chain ID —
-`token list --chain base`, `address-book list --network arbitrum`,
+`meta-tokens list --chain base`, `meta-address-book list --network arbitrum`,
 `transaction list --account primary`. Drop one name with
-`ekubo-wallet token remove <network> <address>`.
+`ekubo-wallet meta-tokens remove <network> <address>`.
 
-Add more at any time with `ekubo-wallet token import`, and confirm what
-an agent suggests with `ekubo-wallet token review` — an agent's suggestion is
+Add more at any time with `ekubo-wallet meta-tokens import`, and confirm what
+an agent suggests with `ekubo-wallet meta-tokens review` — an agent's suggestion is
 never a name until you accept it.
 
 On Linux, install the polkit action shipped in the archive before signing:
@@ -109,16 +109,16 @@ Linux also needs a working Secret Service provider for credential storage. If
 polkit, Windows Hello, or macOS Local Authentication is unavailable, sensitive
 operations fail closed.
 
-`ekubo-wallet agent list` shows which supported agents are installed here
-and whether this server is registered with each; `agent add` registers it
-with everything detected, and `agent add <name>` with one. The installer does
+`ekubo-wallet meta-agent list` shows which supported agents are installed here
+and whether this server is registered with each; `meta-agent add` registers it
+with everything detected, and `meta-agent add <name>` with one. The installer does
 this once, so reach for it after moving the binary or installing a new agent.
 
-`agent add` also registers the Ekubo protocol server at
+`meta-agent add` also registers the Ekubo protocol server at
 `https://mcp.ekubo.org/mcp`, which is what gives a new install something to do
 — quotes, swaps, bridging, liquidity — beyond holding keys. It prepares
 unsigned plans and holds no key; what it returns is checked, simulated, and
-policy-checked here like any other plan. `agent add --no-companion` leaves it
+policy-checked here like any other plan. `meta-agent add --no-companion` leaves it
 out. See [installation](installation.md#the-companion-server).
 
 Start the MCP server over stdio with `ekubo-wallet server`. It publishes the
@@ -126,5 +126,5 @@ Start the MCP server over stdio with `ekubo-wallet server`. It publishes the
 complete CLI, or install a packaged completion:
 
 ```sh
-ekubo-wallet completion zsh > ~/.zfunc/_ekubo-wallet
+ekubo-wallet shell-completion zsh > ~/.zfunc/_ekubo-wallet
 ```

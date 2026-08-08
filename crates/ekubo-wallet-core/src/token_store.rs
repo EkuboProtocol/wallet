@@ -76,7 +76,7 @@ const BALANCE_CHUNK: usize = 200;
 /// the owner is handed at once, not about what a batch of RPC calls costs.
 ///
 /// It is deliberately generous, because the decision it bounds is not
-/// per-row. `token review` groups suggestions by the list that vouched for
+/// per-row. `meta-tokens review` groups suggestions by the list that vouched for
 /// them and the owner accepts or rejects a whole list at a time: what they
 /// are judging is whether the curator is trustworthy, and that question reads
 /// the same at ten entries as at ten thousand. A tighter cap bought no extra
@@ -94,7 +94,7 @@ pub const MAX_IMPORT_TOKENS: usize = 10_000;
 ///
 /// Sized to hold several full imports, so the ordinary case of proposing a
 /// couple of curated lists back to back is never refused, while an agent
-/// cannot make `token review` an unbounded scroll of decisions. It has to
+/// cannot make `meta-tokens review` an unbounded scroll of decisions. It has to
 /// stay a multiple of [`MAX_IMPORT_TOKENS`]: capacity is charged per row
 /// below, so a queue smaller than one import would make every full-size
 /// import fail partway and roll back, which is a cap that refuses the thing
@@ -344,7 +344,7 @@ impl TokenStore {
         // the same address are idempotent, but an agent calling with a
         // thousand fresh addresses each time grows it without bound — and does
         // not thereby gain a name, it makes the screen where names are granted
-        // unreadable, which is the same thing. `token review` loads the whole
+        // unreadable, which is the same thing. `meta-tokens review` loads the whole
         // queue and renders one row per token.
         //
         // Capacity is charged per row rather than per call. Checking the count
@@ -359,7 +359,7 @@ impl TokenStore {
         ensure!(
             pending < MAX_PENDING_TOKEN_PROPOSALS,
             "{pending} tokens already await review; the owner must run \
-             `ekubo-wallet token review` before more can be suggested"
+             `ekubo-wallet meta-tokens review` before more can be suggested"
         );
         let mut summary = ProposalSummary::default();
         let transaction = self.database.connection.transaction()?;
@@ -398,7 +398,7 @@ impl TokenStore {
                 ensure!(
                     pending < MAX_PENDING_TOKEN_PROPOSALS,
                     "this batch would leave more than {MAX_PENDING_TOKEN_PROPOSALS} tokens \
-                     awaiting review; the owner must run `ekubo-wallet token review` first"
+                     awaiting review; the owner must run `ekubo-wallet meta-tokens review` first"
                 );
                 pending += 1;
             }
@@ -460,7 +460,7 @@ impl TokenStore {
         // address as nothing to decide and counts it separately — this is the
         // same rule, applied to what the review screen reads, so the two
         // cannot disagree about a row that arrived before an import confirmed
-        // it. Changing a name that is already there is what `token remove`
+        // it. Changing a name that is already there is what `meta-tokens remove`
         // is for.
         let mut statement = self.database.connection.prepare(
             "SELECT chain_id, address, symbol, name, decimals, source, proposed_at

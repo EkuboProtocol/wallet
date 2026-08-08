@@ -193,10 +193,10 @@ fn every_packaged_completion_asks_the_binary_and_reads_its_answer() {
     // handoff: asking in a format the binary does not print, or ignoring the
     // one answer that is a directive rather than a candidate.
     for (shell, format) in [("bash", "plain"), ("zsh", "zsh"), ("fish", "fish")] {
-        let output = cli().arg("completion").arg(shell).output().unwrap();
+        let output = cli().arg("shell-completion").arg(shell).output().unwrap();
         assert!(
             output.status.success(),
-            "completion {shell} exited non-zero"
+            "shell-completion {shell} exited non-zero"
         );
         let script = String::from_utf8(output.stdout).expect("completion script is UTF-8");
         assert!(
@@ -209,7 +209,7 @@ fn every_packaged_completion_asks_the_binary_and_reads_its_answer() {
         );
         // A script that still names a subcommand is a script that has started
         // keeping its own list again.
-        for stale in ["address-book", "rebroadcast", "require-approval"] {
+        for stale in ["meta-address-book", "rebroadcast", "require-approval"] {
             assert!(
                 !script.contains(stale),
                 "{shell} completion hardcodes `{stale}` rather than asking"
@@ -238,7 +238,7 @@ fn the_completion_endpoint_answers_what_the_scripts_ask_it() {
         expected.len() > 20,
         "clap reported implausibly few subcommands: {expected:?}"
     );
-    for name in ["portfolio", "address-book", "review", "--json"] {
+    for name in ["portfolio", "meta-address-book", "review", "--json"] {
         assert!(
             offered.lines().any(|line| line == name),
             "the root completion never offers `{name}`: {offered}"

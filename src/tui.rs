@@ -99,7 +99,7 @@ static STDIN_CONSUMED: AtomicBool = AtomicBool::new(false);
 /// Record that standard input carried a document, not keystrokes, so
 /// [`interactive`] stops treating it as evidence either way.
 ///
-/// `ekubo-wallet token import -` exists so a list can be piped in without an
+/// `ekubo-wallet meta-tokens import -` exists so a list can be piped in without an
 /// agent re-emitting it, and a pipe is by definition not a terminal — so the
 /// ordinary stdin check would conclude "not interactive" and silently confirm
 /// nothing, which is the one outcome that would make the feature useless. It

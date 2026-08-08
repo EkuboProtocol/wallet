@@ -193,7 +193,7 @@ fn parses_transaction_network_and_completion_parity_commands() {
             },
         }) if account == "primary"
     ));
-    let cli = Cli::try_parse_from(["ekubo-wallet", "completion", "zsh"]).unwrap();
+    let cli = Cli::try_parse_from(["ekubo-wallet", "shell-completion", "zsh"]).unwrap();
     assert!(matches!(
         cli.command,
         Command::Completion { shell: Shell::Zsh }
@@ -579,7 +579,7 @@ fn status_summarizes_every_queue_that_is_waiting() {
     // Token suggestions are not part of the review inbox, so they are reported
     // on their own line pointing at their own screen.
     assert!(rendered.contains("40 suggested"));
-    assert!(rendered.contains("ekubo-wallet token review"));
+    assert!(rendered.contains("ekubo-wallet meta-tokens review"));
 }
 
 #[test]
@@ -616,7 +616,7 @@ fn unregistering_cursor_leaves_every_other_entry_alone() {
 
 #[test]
 fn unregistering_cursor_without_a_configuration_is_not_an_error() {
-    // `agent remove` with no agent named walks everything detected, so a
+    // `meta-agent remove` with no agent named walks everything detected, so a
     // machine where Cursor was never configured must not fail the sweep.
     let home = tempfile::tempdir().unwrap();
     remove_cursor_mcp_at(home.path(), LOCAL_SERVER_NAME).unwrap();
@@ -683,7 +683,7 @@ fn removing_the_wallet_from_cursor_leaves_the_companion_in_place() {
 fn a_registered_wallet_alone_does_not_read_as_a_registered_companion() {
     // The bug this exists for: `ekubo` is a prefix of `ekubo-wallet`, so the
     // obvious substring test reports both servers present when only the
-    // wallet is, and `agent list` then never tells anyone the companion is
+    // wallet is, and `meta-agent list` then never tells anyone the companion is
     // missing.
     let wallet_only =
         read_registration("ekubo-wallet: /Users/x/.local/bin/ekubo-wallet server - ✓ Connected\n");
@@ -814,6 +814,49 @@ fn no_spelling_is_a_prefix_of_a_sibling() {
             }
         }
     }
+}
+
+#[test]
+fn one_character_reaches_each_of_the_commands_people_actually_type() {
+    // `review`, `account`, and `transaction` are the three a person reaches
+    // for daily, so each is worth a whole letter of the top-level namespace.
+    // Everything that used to share one has moved rather than been abbreviated:
+    // `agent` and `address-book` to `meta-agent` and `meta-address-book`,
+    // `reference` to `meta-reference`, `token` to `meta-tokens`. The `meta-`
+    // prefix is not decoration — it is what keeps those letters clear.
+    //
+    // A rival is another *command*, not another spelling: `tx` shares `t`
+    // with `transaction` and reaches the same place, so the letter is still
+    // unambiguous. Only a second destination makes the shell stop and ask.
+    let root = Cli::command();
+    let level = spellings(&root);
+    for wanted in ["review", "account", "transaction"] {
+        let letter = &wanted[..1];
+        let rivals: Vec<&str> = level
+            .iter()
+            .filter(|(spelling, owner)| owner != wanted && spelling.starts_with(letter))
+            .map(|(spelling, _)| spelling.as_str())
+            .collect();
+        assert!(
+            rivals.is_empty(),
+            "`{letter}` does not reach `{wanted}` on its own: {rivals:?} share it"
+        );
+    }
+}
+
+#[test]
+fn the_command_tree_has_no_shell_completion_ambiguity_for_connect() {
+    // `completion` sat on `c` beside `connect`, so the one command a person
+    // types while holding a pasted WalletConnect link could not be completed
+    // in a keystroke. Spelling it `shell-completion` is the fix, and the cost
+    // is that `s` now carries three commands — none of them typed often.
+    let level = spellings(&Cli::command());
+    let names: Vec<&str> = level
+        .iter()
+        .map(|(spelling, _)| spelling.as_str())
+        .filter(|spelling| spelling.starts_with('c'))
+        .collect();
+    assert_eq!(names, ["connect"]);
 }
 
 #[test]

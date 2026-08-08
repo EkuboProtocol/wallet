@@ -36,11 +36,11 @@ fn a_network_argument_reaches_the_configured_networks() {
     for line in [
         "portfolio main --network",
         "portfolio main -n",
-        "token list --chain",
-        "token search usdc --chain",
-        "address-book list --network",
-        "address-book add",
-        "token remove",
+        "meta-tokens list --chain",
+        "meta-tokens search usdc --chain",
+        "meta-address-book list --network",
+        "meta-address-book add",
+        "meta-tokens remove",
         "network edit",
         "network remove",
     ] {
@@ -89,8 +89,8 @@ fn a_path_argument_hands_the_shell_its_own_file_completion() {
     for line in [
         "policy validate",
         "policy set primary",
-        "reference",
-        "token import",
+        "meta-reference",
+        "meta-tokens import",
     ] {
         let words: Vec<String> = line.split_whitespace().map(ToOwned::to_owned).collect();
         assert_eq!(
@@ -107,11 +107,12 @@ fn clap_answers_for_every_argument_that_names_its_own_values() {
     // so a new one is completable the day it is added.
     let (_directory, config) = config();
     assert!(values(&config, "legal show").contains(&"privacy".to_owned()));
-    assert!(values(&config, "agent add").contains(&"claude-code".to_owned()));
-    assert!(values(&config, "completion").contains(&"fish".to_owned()));
+    assert!(values(&config, "meta-agent add").contains(&"claude-code".to_owned()));
+    assert!(values(&config, "shell-completion").contains(&"fish".to_owned()));
     assert!(values(&config, "review --decision").contains(&"reject".to_owned()));
     assert!(
-        values(&config, "reference /tmp/plan.json --type").contains(&"execution_plan".to_owned())
+        values(&config, "meta-reference /tmp/plan.json --type")
+            .contains(&"execution_plan".to_owned())
     );
     assert!(values(&config, "account create main --policy").contains(&"allow-all".to_owned()));
 }
@@ -179,16 +180,16 @@ fn a_flag_still_waiting_for_its_value_asks_nothing_else() {
 
 #[test]
 fn an_alias_is_offered_for_the_network_already_named() {
-    // The alias argument of `address-book remove` means an alias *on that
+    // The alias argument of `meta-address-book remove` means an alias *on that
     // chain*, so the network typed a word earlier is what scopes it. Without a
     // database there is nothing to list; what is checked here is that the
     // scope is read from the line rather than ignored.
     let (_directory, config) = config();
-    let words = ["address-book", "remove", "ethereum"].map(ToOwned::to_owned);
+    let words = ["meta-address-book", "remove", "ethereum"].map(ToOwned::to_owned);
     let mut root = <crate::cli::Cli as clap::CommandFactory>::command();
     root.build();
     let position = locate(&root, &words);
-    assert_eq!(position.path, "address-book remove");
+    assert_eq!(position.path, "meta-address-book remove");
     assert_eq!(position.positionals, vec!["ethereum".to_owned()]);
     assert_eq!(scoped_chain(&config, &position), Some(1));
 }
@@ -209,4 +210,37 @@ fn a_store_that_does_not_answer_costs_a_keystroke_and_not_the_shell() {
         "waited {:?} on a store that never answered",
         started.elapsed()
     );
+}
+
+#[test]
+fn every_source_rule_names_a_real_command_and_argument() {
+    // `SOURCE_RULES` is keyed by strings the compiler never compares against
+    // the command tree. A key that matches nothing is not an error: `source_of`
+    // returns `None` and the argument silently loses its candidates, which is
+    // precisely what renaming `token` to `meta-tokens` did to six of them. So
+    // the keys are resolved here, and a stale one fails the build instead.
+    let root = <crate::cli::Cli as clap::CommandFactory>::command();
+    for rule in SOURCE_RULES {
+        for path in rule.paths {
+            let mut command = &root;
+            for word in path.split(' ') {
+                command = command
+                    .get_subcommands()
+                    .find(|sub| sub.get_name() == word)
+                    .unwrap_or_else(|| {
+                        panic!("`{path}` names `{word}`, which is not a command here")
+                    });
+            }
+            let known: Vec<&str> = command
+                .get_arguments()
+                .map(clap::Arg::get_id)
+                .map(clap::Id::as_str)
+                .collect();
+            assert!(
+                rule.arguments.iter().any(|wanted| known.contains(wanted)),
+                "`{path}` takes {known:?}, none of which is {:?}",
+                rule.arguments
+            );
+        }
+    }
 }

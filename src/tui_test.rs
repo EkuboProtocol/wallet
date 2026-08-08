@@ -80,7 +80,7 @@ fn text_editing_lands_on_character_boundaries() {
 
 /// Spending standard input on a document must not, by itself, conclude that a
 /// human is watching. The stderr check is the one that decides that, and
-/// `token import -` in a script — a pipe in, no terminal anywhere — has to
+/// `meta-tokens import -` in a script — a pipe in, no terminal anywhere — has to
 /// keep confirming nothing rather than confirming everything.
 #[test]
 fn a_spent_stdin_does_not_manufacture_a_terminal() {

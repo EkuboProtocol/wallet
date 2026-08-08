@@ -93,10 +93,14 @@ enum Command {
     #[command(alias = "tx")]
     Transaction(TransactionArgs),
     /// The local token database: what this wallet will display a name for.
+    ///
+    /// Under `meta-` because the first letter of a command is what tab
+    /// completion has to work with, and `t` belongs to `transaction`.
+    #[command(name = "meta-tokens")]
     Token(TokenArgs),
     /// Browse and edit per-chain address aliases used for agent lookups.
     /// Bare, on a terminal, this opens the full-screen editor.
-    #[command(name = "address-book")]
+    #[command(name = "meta-address-book")]
     AddressBook(AddressBookArgs),
     #[allow(clippy::doc_markdown)]
     /// Connect this wallet to a dapp with a pasted WalletConnect link.
@@ -115,6 +119,9 @@ enum Command {
     ///
     /// The installer does this once. This is how to redo it after moving the
     /// binary, and how to find out which agents currently point at it.
+    ///
+    /// Under `meta-` because `a` belongs to `account`.
+    #[command(name = "meta-agent")]
     Agent(AgentArgs),
     /// Read legal documents and record their acceptance.
     Legal(LegalArgs),
@@ -140,7 +147,10 @@ enum Command {
     /// the megabyte of calldata stays on disk and only the envelope is passed
     /// to the wallet's tools.
     ///
-    ///   ekubo-wallet reference /tmp/combined-plan.json
+    /// Under `meta-` because `r` belongs to `review`.
+    ///
+    ///   ekubo-wallet meta-reference /tmp/combined-plan.json
+    #[command(name = "meta-reference")]
     Reference {
         /// Path to the JSON body.
         path: PathBuf,
@@ -150,6 +160,9 @@ enum Command {
         artifact_type: Option<ReferenceType>,
     },
     /// Print a shell completion script, including local dynamic candidates.
+    ///
+    /// Spelled in full so `c` reaches `connect` alone.
+    #[command(name = "shell-completion")]
     Completion { shell: Shell },
     /// Print the candidates for the cursor, given the words typed so far.
     ///
@@ -625,7 +638,7 @@ enum TokenCommand {
     ///
     /// Pass `-` to read the list from standard input:
     ///
-    ///   curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet token import -
+    ///   curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet meta-tokens import -
     ///
     /// The review screen still opens, because piping in a list decides
     /// nothing: it only saves an agent from re-typing it.
@@ -948,7 +961,7 @@ fn status_lines(facts: &StatusFacts<'_>) -> String {
             String::new()
         } else {
             format!(
-                " · {} suggested, waiting on `ekubo-wallet token review`",
+                " · {} suggested, waiting on `ekubo-wallet meta-tokens review`",
                 facts.token_proposals
             )
         }
@@ -1436,7 +1449,7 @@ async fn run_token_review(config: &ConfigStore, mode: OutputMode) -> Result<()> 
             }),
             || {
                 Ok(format!(
-                    "{} token(s) await review. Run `ekubo-wallet token review` in a \
+                    "{} token(s) await review. Run `ekubo-wallet meta-tokens review` in a \
                      terminal to confirm them.",
                     proposals.len()
                 ))
@@ -1687,7 +1700,7 @@ fn list_address_book(
         || {
             if entries.is_empty() {
                 return Ok(
-                    "The address book is empty. Run `ekubo-wallet address-book` to add aliases interactively, or `ekubo-wallet address-book add <network> <alias> <address>`.".into(),
+                    "The address book is empty. Run `ekubo-wallet meta-address-book` to add aliases interactively, or `ekubo-wallet meta-address-book add <network> <alias> <address>`.".into(),
                 );
             }
             let mut lines = vec![format!("{total} entrie(s), showing {}:", entries.len())];
@@ -2344,7 +2357,7 @@ fn approval_columns() -> Vec<crate::fullscreen::TableColumn> {
 ///
 /// Token suggestions are deliberately absent. One accepted list can propose
 /// hundreds of rows at once, and a queue that arrives by the hundred would
-/// bury the handful of things that actually block signing; `token review`
+/// bury the handful of things that actually block signing; `meta-tokens review`
 /// stays its own screen, where the suggestions can be grouped by the list
 /// that carried them.
 fn pending_approval_rows(
@@ -4675,7 +4688,7 @@ fn agent_registered(agent: AgentName) -> Option<Registration> {
 /// Every CLI here prints its own layout and is free to change it, so this
 /// stays a substring search rather than a parse. The one trap is that `ekubo`
 /// is a prefix of `ekubo-wallet`: a plain search would report the companion
-/// registered whenever the wallet is, and then `agent list` would tell people
+/// registered whenever the wallet is, and then `meta-agent list` would tell people
 /// they have swaps and bridging when they have neither. Blanking the longer
 /// name out first leaves only genuine mentions of the shorter one.
 fn read_registration(listing: &str) -> Registration {
@@ -4796,7 +4809,7 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
 fn unregister_agent(agent: AgentName) -> Result<()> {
     // The companion may never have been registered — `--no-companion`, or an
     // install that predates it — and every CLI here treats removing an absent
-    // name as an error. Removing the wallet is what `agent remove` promises,
+    // name as an error. Removing the wallet is what `meta-agent remove` promises,
     // so only that failure is one.
     let _ = unregister_server(agent, COMPANION_SERVER_NAME);
     unregister_server(agent, LOCAL_SERVER_NAME)
@@ -4891,11 +4904,11 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
                             }) => "registered".to_string(),
                             Some(Registration { wallet: true, .. }) => format!(
                                 "registered, without {COMPANION_SERVER_NAME} — \
-                                 `ekubo-wallet agent add {}`",
+                                 `ekubo-wallet meta-agent add {}`",
                                 agent.key()
                             ),
                             Some(Registration { wallet: false, .. }) => format!(
-                                "installed, not registered — `ekubo-wallet agent add {}`",
+                                "installed, not registered — `ekubo-wallet meta-agent add {}`",
                                 agent.key()
                             ),
                             None => "installed; could not read its MCP configuration".to_string(),

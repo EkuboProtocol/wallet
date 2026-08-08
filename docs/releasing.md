@@ -10,7 +10,7 @@ GitHub Release.
 Each archive contains `ekubo-wallet`, the README, and the license. Linux
 archives also contain the polkit action required for owner-authenticated
 operations, which is the one payload the installer cannot produce for itself:
-completion scripts come from `ekubo-wallet completion`, the policy JSON Schema
+completion scripts come from `ekubo-wallet shell-completion`, the policy JSON Schema
 from `ekubo-wallet policy schema`, and the example policies live in the
 repository rather than in every download. The workflow source is release-ready; the
 repository/environment configuration and signing values below are the

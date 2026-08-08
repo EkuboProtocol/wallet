@@ -65,7 +65,7 @@ you extend to any tool your agent can call: it can propose, and it can consume
 whatever you send it.
 
 `EKUBO_WALLET_SKIP_COMPANION=1` skips it at install time, `ekubo-wallet agent
-add --no-companion` skips it on a later re-run, and `ekubo-wallet agent list`
+add --no-companion` skips it on a later re-run, and `ekubo-wallet meta-agent list`
 reports it separately so a wallet-only registration is visible rather than
 implied.
 
@@ -85,9 +85,9 @@ install -m 0755 ekubo-wallet-<version>-<target>/ekubo-wallet ~/.local/bin/
 
 The archive holds the executable, the license, the README, and — on Linux —
 the polkit action under `contrib/polkit/`. Everything else it used to carry is
-produced by the binary itself: `ekubo-wallet completion bash|zsh|fish` writes
+produced by the binary itself: `ekubo-wallet shell-completion bash|zsh|fish` writes
 the completion script, and `ekubo-wallet policy schema` writes the policy JSON
-Schema. Registration is `ekubo-wallet agent add`.
+Schema. Registration is `ekubo-wallet meta-agent add`.
 
 For a short name, alias it in your shell rather than copying the executable:
 
@@ -132,7 +132,7 @@ wallet-only setup. Cursor reads exactly this shape. The CLIs spell it
 differently — `claude mcp add --transport http ekubo https://mcp.ekubo.org/mcp`,
 `gemini mcp add ekubo https://mcp.ekubo.org/mcp --transport http`, and
 `codex mcp add ekubo --url https://mcp.ekubo.org/mcp` — which is why
-`ekubo-wallet agent add` exists rather than a documented command per agent.
+`ekubo-wallet meta-agent add` exists rather than a documented command per agent.
 
 Use an absolute path, such as `/home/you/.local/bin/ekubo-wallet`, if the agent
 does not inherit your login shell's `PATH`. Confirm the installed build with

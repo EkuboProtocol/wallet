@@ -24,8 +24,8 @@
 //! subcommand names (with their `about` as the description) and the values of
 //! a `ValueEnum` argument. The table is only for arguments whose values live
 //! in a store — and it is written per command rather than per argument name,
-//! because `address-book add`'s `address` is one the owner is about to invent
-//! while `token remove`'s is one they must already have.
+//! because `meta-address-book add`'s `address` is one the owner is about to invent
+//! while `meta-tokens remove`'s is one they must already have.
 
 use crate::{
     address_book::AddressBookStore,
@@ -85,49 +85,113 @@ enum Source {
     Files,
 }
 
+/// One store, and the command-and-argument pairs that draw from it.
+struct SourceRule {
+    /// Command paths, spelled exactly as the command tree spells them.
+    paths: &'static [&'static str],
+    arguments: &'static [&'static str],
+    source: Source,
+}
+
 /// Which store an argument's values come from, keyed by the command that takes
 /// it. Per command rather than per argument name: two commands can take an
 /// `address` and mean opposite things by it, and only one of them is asking
 /// for something that already exists.
+///
+/// A table rather than a `match` because the keys are strings the compiler
+/// cannot check against the command tree: renaming a command leaves a key
+/// nothing matches, `source_of` answers `None`, and the argument quietly stops
+/// completing — no error anywhere. Renaming `token` to `meta-tokens` did
+/// exactly that. As a table the keys can be walked, and
+/// `every_source_rule_names_a_real_command_and_argument` walks them.
+const SOURCE_RULES: &[SourceRule] = &[
+    SourceRule {
+        paths: &["portfolio", "transaction list", "connect"],
+        arguments: &["account"],
+        source: Source::Wallets,
+    },
+    SourceRule {
+        paths: &[
+            "account export",
+            "account remove",
+            "policy show",
+            "policy set",
+            "policy allow-all",
+            "policy require-approval",
+            "policy review",
+        ],
+        arguments: &["wallet_id"],
+        source: Source::Wallets,
+    },
+    SourceRule {
+        paths: &["network add"],
+        arguments: &["name"],
+        source: Source::Presets,
+    },
+    SourceRule {
+        paths: &["network add"],
+        arguments: &["rpc_strategy"],
+        source: Source::RpcStrategies,
+    },
+    SourceRule {
+        paths: &["network edit", "network remove"],
+        arguments: &["name"],
+        source: Source::Networks,
+    },
+    SourceRule {
+        paths: &[
+            "portfolio",
+            "meta-tokens list",
+            "meta-tokens search",
+            "meta-tokens remove",
+            "meta-address-book list",
+            "meta-address-book add",
+            "meta-address-book remove",
+        ],
+        arguments: &["network", "chain"],
+        source: Source::Networks,
+    },
+    SourceRule {
+        paths: &["meta-address-book add", "meta-address-book remove"],
+        arguments: &["alias"],
+        source: Source::Aliases,
+    },
+    SourceRule {
+        paths: &["meta-tokens remove"],
+        arguments: &["address"],
+        source: Source::Tokens,
+    },
+    SourceRule {
+        paths: &["review"],
+        arguments: &["request_id"],
+        source: Source::Approvals,
+    },
+    SourceRule {
+        paths: &[
+            "transaction show",
+            "transaction cancel",
+            "transaction rebroadcast",
+            "transaction discard",
+        ],
+        arguments: &["identifier"],
+        source: Source::Transactions,
+    },
+    SourceRule {
+        paths: &["policy set", "policy validate"],
+        arguments: &["policy_file"],
+        source: Source::Files,
+    },
+    SourceRule {
+        paths: &["meta-reference", "meta-tokens import"],
+        arguments: &["path"],
+        source: Source::Files,
+    },
+];
+
 fn source_of(command_path: &str, argument: &str) -> Option<Source> {
-    Some(match (command_path, argument) {
-        ("portfolio" | "transaction list" | "connect", "account")
-        | (
-            "account export"
-            | "account remove"
-            | "policy show"
-            | "policy set"
-            | "policy allow-all"
-            | "policy require-approval"
-            | "policy review",
-            "wallet_id",
-        ) => Source::Wallets,
-        ("network add", "name") => Source::Presets,
-        ("network add", "rpc_strategy") => Source::RpcStrategies,
-        ("network edit" | "network remove", "name")
-        | (
-            "portfolio"
-            | "token list"
-            | "token search"
-            | "token remove"
-            | "address-book list"
-            | "address-book add"
-            | "address-book remove",
-            "network" | "chain",
-        ) => Source::Networks,
-        ("address-book add" | "address-book remove", "alias") => Source::Aliases,
-        ("token remove", "address") => Source::Tokens,
-        ("review", "request_id") => Source::Approvals,
-        (
-            "transaction show"
-            | "transaction cancel"
-            | "transaction rebroadcast"
-            | "transaction discard",
-            "identifier",
-        ) => Source::Transactions,
-        ("policy set" | "policy validate", "policy_file")
-        | ("reference" | "token import", "path") => Source::Files,
-        _ => return None,
+    SOURCE_RULES.iter().find_map(|rule| {
+        (rule.paths.contains(&command_path) && rule.arguments.contains(&argument))
+            .then_some(rule.source)
     })
 }
 
@@ -191,7 +255,7 @@ struct Position<'a> {
     /// Space-joined subcommand names, as `source_of` keys them.
     path: String,
     /// Positional values already given to `command`, in order. They are what
-    /// scopes a later positional: the network in `address-book remove` decides
+    /// scopes a later positional: the network in `meta-address-book remove` decides
     /// which aliases the alias argument can mean.
     positionals: Vec<String>,
     /// Set when the line ends in a flag that is still waiting for its value.

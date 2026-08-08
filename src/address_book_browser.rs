@@ -1,6 +1,6 @@
 //! Full-screen address book editor.
 //!
-//! The address book used to be edit-by-command-line only: `address-book add`
+//! The address book used to be edit-by-command-line only: `meta-address-book add`
 //! and `remove` with every value typed as an argument. This browser is the
 //! interactive surface over the same store, built on [`crate::fullscreen`]:
 //! a [`SearchableTable`] of every entry whose `/` search matches the record
@@ -18,7 +18,7 @@
 //! The list, the form, the network pick, and the confirmation are now views of
 //! one app. What still reaches the scrollback is one line per completed
 //! change, printed after the browser exits: the facts of what was changed
-//! belong in the terminal transcript exactly as the `address-book`
+//! belong in the terminal transcript exactly as the `meta-address-book`
 //! subcommands would leave them, and a form that was abandoned is not a fact.
 //!
 //! The alternate screen is released around platform owner authentication and
@@ -65,7 +65,7 @@ pub struct EntryDraft {
 /// Everything a reviewer is told before one address-book change.
 ///
 /// Built once and rendered two ways — as a [`tui::Confirmation`] for the
-/// one-shot `address-book` subcommands, and as a view inside the browser's
+/// one-shot `meta-address-book` subcommands, and as a view inside the browser's
 /// own screen. One producer per change, so the two surfaces cannot drift into
 /// describing the same write differently.
 struct Review {
