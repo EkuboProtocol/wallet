@@ -1019,14 +1019,52 @@ impl PendingRow {
 /// rebroadcasting the newest stored envelope, which adds no hash.
 pub const MAX_CANCELLATION_ATTEMPTS: usize = 8;
 
-/// A stored plan source must be exactly what the fetch layer produces — the
-/// literal "inline data URI", the literal "a file on this machine", or a
-/// lowercase vetted hostname — so a tampered database cannot inject terminal
-/// escapes or misleading text into the approval screen. Neither literal can
-/// be mistaken for a host name, because a host name has no space in it.
-fn validate_plan_source(value: Option<&str>) -> Result<()> {
+/// What a plan built from a connected dapp's request carries in front of the
+/// dapp's own account of itself.
+///
+/// Everywhere else this field is evidence: a host TLS proved, or a literal
+/// naming where local bytes came from. A dapp's name and URL are neither —
+/// they are strings it typed about itself, and one serving from
+/// `claim-rewards.xyz` is free to call itself `ekubo.org`. The prefix is what
+/// keeps the field honest with both kinds of value in it: `ekubo.org` alone
+/// means TLS proved that host, and `WalletConnect: Ekubo (ekubo.org)` means a
+/// dapp said so. A reviewer can tell the two apart at a glance, which is the
+/// whole point of the field.
+pub const DAPP_PLAN_SOURCE_PREFIX: &str = "WalletConnect: ";
+
+/// The longest a stored plan source may be. Public so a producer can cut its
+/// value to fit rather than discover the limit when the owner tries to sign.
+pub const MAX_PLAN_SOURCE_BYTES: usize = 255;
+
+/// A stored plan source must be exactly what its producer is allowed to
+/// produce — the literal "inline data URI", the literal "a file on this
+/// machine", a lowercase vetted hostname, or [`DAPP_PLAN_SOURCE_PREFIX`]
+/// followed by the dapp's claim — so a tampered database cannot inject
+/// terminal escapes or misleading text into the approval screen. No form with
+/// a space in it can be mistaken for a host name.
+///
+/// The claim after the prefix is the one part authored by someone else, so it
+/// is held to being already sanitized: it must equal its own
+/// [`crate::sanitize::terminal_safe_line`], which is what rules out the
+/// control, bidirectional, and zero-width characters that let stored text draw
+/// the wallet's own chrome.
+pub fn validate_plan_source(value: Option<&str>) -> Result<()> {
     let Some(value) = value else { return Ok(()) };
-    ensure!(value.len() <= 255, "stored plan source exceeds 255 bytes");
+    ensure!(
+        value.len() <= MAX_PLAN_SOURCE_BYTES,
+        "stored plan source exceeds {MAX_PLAN_SOURCE_BYTES} bytes"
+    );
+    if let Some(claim) = value.strip_prefix(DAPP_PLAN_SOURCE_PREFIX) {
+        ensure!(
+            !claim.trim().is_empty(),
+            "stored plan source names no dapp after its prefix"
+        );
+        ensure!(
+            crate::sanitize::terminal_safe_line(claim) == claim,
+            "stored plan source carries characters no rendered surface accepts"
+        );
+        return Ok(());
+    }
     ensure!(
         value == "inline data URI"
             || value == "a file on this machine"

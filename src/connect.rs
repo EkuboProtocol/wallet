@@ -830,7 +830,10 @@ impl DappSession<'_> {
         )
         .await?;
 
-        let plan_source = describe_plan_source(request.dapp, &proposed);
+        self.log(
+            crate::tui::Tone::Info,
+            describe_dapp_request(request.dapp, &proposed),
+        );
         let pending = Mutex::new(PendingStore::production(&self.data_dir)?);
         let disposition = crate::orchestrator::execute_automatic(
             self.config,
@@ -840,7 +843,7 @@ impl DappSession<'_> {
             &network,
             &stored_policy,
             &plan,
-            Some(&plan_source),
+            Some(&describe_plan_source(request.dapp)),
             &simulation,
         )
         .await?;
@@ -995,32 +998,57 @@ impl crate::approval::ReviewPresenter for FullScreenPresenter {
 
 /// What the approval document says this plan came from.
 ///
-/// Names the dapp, because "a dapp" is not enough to decide on: the reviewer is
-/// being asked about a specific transaction and the first question is which
-/// site sent it. The name is sanitized — it is dapp-authored text landing in a
-/// review document — and the connection review this session already passed said
-/// plainly that nobody verifies it.
+/// The dapp's own account of itself behind
+/// [`crate::pending::DAPP_PLAN_SOURCE_PREFIX`], which is what marks it as
+/// claimed rather than proved: the same field holds a TLS-verified host for a
+/// fetched plan, and the two must not read alike. The host rides along with
+/// the name because it is the part a person can compare against the address
+/// bar they opened the site from.
 ///
-/// Also explicit about what was discarded: a dapp that set a nonce or a gas
-/// price asked for something specific and did not get it.
-fn describe_plan_source(dapp: &AppMetadata, proposed: &dapp_request::TransactionRequest) -> String {
+/// Capped to what the store accepts. A dapp's claimed name is up to 120
+/// characters and characters are up to four bytes, so a long enough name in a
+/// wide enough script would otherwise be refused at exactly the moment the
+/// owner is trying to sign.
+fn describe_plan_source(dapp: &AppMetadata) -> String {
+    let mut source = format!(
+        "{}{}",
+        crate::pending::DAPP_PLAN_SOURCE_PREFIX,
+        DappIdentity::of(dapp).headline()
+    );
+    while source.len() > crate::pending::MAX_PLAN_SOURCE_BYTES {
+        source.pop();
+    }
+    terminal_safe_line(&source)
+}
+
+/// What this session says about a request, for the log on the session screen.
+///
+/// The log is a running account of who asked for what, so it names the dapp
+/// and states what was discarded: a dapp that set a nonce or a gas price asked
+/// for something specific and did not get it. That detail belongs here rather
+/// than in the plan source, which answers who produced the bytes and nothing
+/// else.
+fn describe_dapp_request(
+    dapp: &AppMetadata,
+    proposed: &dapp_request::TransactionRequest,
+) -> String {
     use std::fmt::Write as _;
 
-    let mut source = format!(
-        "{}, connected over WalletConnect",
+    let mut line = format!(
+        "{} proposed a transaction",
         DappIdentity::of(dapp).headline()
     );
     if let Some(gas) = proposed.suggested_gas {
-        let _ = write!(source, "; it suggested a gas limit of {gas}");
+        let _ = write!(line, "; it suggested a gas limit of {gas}");
     }
     if !proposed.overridden.is_empty() {
         let _ = write!(
-            source,
+            line,
             "; it also set {}, which this wallet determines itself and ignored",
             proposed.overridden.join(", ")
         );
     }
-    terminal_safe_line(&source)
+    terminal_safe_line(&line)
 }
 
 fn join_or_none(values: &[String]) -> String {

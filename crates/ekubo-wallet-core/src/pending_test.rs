@@ -791,3 +791,42 @@ fn wallet_state_removal_cancels_pending_requests() {
         PendingStatus::Cancelled
     );
 }
+
+/// The approval screen labels this field "Plan source", and a reviewer reads
+/// it to know whose word they are taking. So a bare host means TLS proved that
+/// host, and anything a dapp wrote about itself only ever appears behind the
+/// prefix that says as much.
+#[test]
+fn a_plan_source_separates_what_was_proved_from_what_was_claimed() {
+    for proved in ["mcp.ekubo.org", "localhost:8545", "inline data URI"] {
+        validate_plan_source(Some(proved)).unwrap_or_else(|error| panic!("{proved}: {error}"));
+    }
+    for claimed in [
+        "WalletConnect: Ekubo (ekubo.org)",
+        "WalletConnect: an unnamed dapp",
+        // A dapp naming itself after somewhere else is still legible as a
+        // claim, which is the whole job of the prefix.
+        "WalletConnect: ekubo.org (claim-rewards.xyz)",
+    ] {
+        validate_plan_source(Some(claimed)).unwrap_or_else(|error| panic!("{claimed}: {error}"));
+    }
+
+    // What the prefix does not buy: a claim that could redraw the screen it is
+    // displayed on, or one that says nothing at all.
+    for refused in [
+        "WalletConnect: ",
+        "WalletConnect: \u{202e}gro.obuke",
+        "WalletConnect: two\nlines",
+        "Ekubo (ekubo.org)",
+        "mcp.ekubo.org, connected over WalletConnect",
+    ] {
+        assert!(
+            validate_plan_source(Some(refused)).is_err(),
+            "{refused} was accepted"
+        );
+    }
+
+    // The cap is on bytes, because that is what the column holds.
+    let long = format!("WalletConnect: {}", "e".repeat(MAX_PLAN_SOURCE_BYTES));
+    assert!(validate_plan_source(Some(&long)).is_err());
+}
