@@ -35,7 +35,7 @@ use crate::{
     human_presence::PlatformHumanPresence,
     legal,
     message::{MessageEncoding, MessageStore, parse_siwe},
-    pending::{PendingStore, PendingTransaction},
+    pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     sanitize::terminal_safe_line,
     signing_review::{MessageDecision, TypedDataDecision, decide_message, decide_typed_data},
@@ -84,8 +84,19 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "eth_signTypedData_v3",
     "eth_signTypedData_v4",
     "personal_sign",
+    "wallet_getCallsStatus",
+    "wallet_getCapabilities",
+    "wallet_sendCalls",
     "wallet_switchEthereumChain",
 ];
+
+/// The most calls this wallet will take in one EIP-5792 batch.
+///
+/// A plan can hold far more, and the chain would carry them, but a batch is
+/// approved as one document by a person reading it: past a couple of dozen
+/// calls nobody is reading, and "approve all of this" stops meaning anything.
+/// A dapp told the batch is too large can send smaller ones.
+pub const MAX_BATCH_CALLS: usize = 24;
 
 /// What `ekubo-wallet connect` was asked to do.
 pub struct ConnectOptions {
@@ -654,19 +665,32 @@ impl DappSession<'_> {
         for caution in dapp.cautions {
             approval = approval.warning(caution);
         }
-        if !proposal
-            .required_methods
-            .iter()
-            .chain(&proposal.optional_methods)
-            .any(|method| method == "eth_sendTransaction")
-        {
+        // `wallet_sendCalls` is the same privilege as `eth_sendTransaction`
+        // and then some — one approval covering several calls — so a session
+        // carrying either gets the warning.
+        let sends: Vec<&str> = ["eth_sendTransaction", "wallet_sendCalls"]
+            .into_iter()
+            .filter(|method| {
+                proposal
+                    .required_methods
+                    .iter()
+                    .chain(&proposal.optional_methods)
+                    .any(|requested| requested == method)
+            })
+            .collect();
+        if sends.is_empty() {
             return approval;
         }
-        approval.warning(
-            "This session includes eth_sendTransaction. Transactions your policy already permits \
-             will be signed and broadcast without asking again; everything else stops here for \
-             your review.",
-        )
+        approval.warning(format!(
+            "This session includes {}. Transactions your policy already permits will be signed \
+             and broadcast without asking again; everything else stops here for your review{}",
+            sends.join(" and "),
+            if sends.contains(&"wallet_sendCalls") {
+                ", and a batch is reviewed and approved as one — every call in it or none."
+            } else {
+                "."
+            }
+        ))
     }
 
     async fn dispatch(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
@@ -709,6 +733,9 @@ impl DappSession<'_> {
                 self.sign_typed_data(request).await
             }
             "eth_sendTransaction" => self.send_transaction(request).await,
+            "wallet_getCapabilities" => self.capabilities(request),
+            "wallet_sendCalls" => self.send_calls(request).await,
+            "wallet_getCallsStatus" => self.calls_status(request).await,
             other => Ok(RequestOutcome::Error {
                 code: error_code::UNSUPPORTED_METHODS,
                 message: format!(
@@ -806,10 +833,263 @@ impl DappSession<'_> {
         if let Some(refusal) = self.refuse_foreign_signer(proposed.from) {
             return Ok(refusal);
         }
-        let network = self
-            .config
-            .network_by_chain_id(&request.chain_id.to_string())?;
-        let plan = self.build_plan(request.chain_id, &proposed)?;
+        let plan = self.build_plan(
+            request.chain_id,
+            &[dapp_request::ProposedCall {
+                to: proposed.to,
+                data: proposed.data.clone(),
+                value: proposed.value,
+            }],
+        )?;
+        self.log(
+            crate::tui::Tone::Info,
+            describe_dapp_request(request.dapp, &proposed),
+        );
+        match self
+            .execute_plan(request.chain_id, &plan, &describe_plan_source(request.dapp))
+            .await?
+        {
+            Ok(record) => Ok(RequestOutcome::Result(json!(
+                record
+                    .broadcast_transaction_hash
+                    .context("the broadcast record carries no transaction hash")?
+            ))),
+            Err(refusal) => Ok(refusal),
+        }
+    }
+
+    /// EIP-5792 `wallet_getCapabilities`.
+    ///
+    /// Atomicity is reported as `supported` because it is: two or more calls
+    /// become one `revertOnFailure` Calibur batch, so either all of them
+    /// happen or none does. It is reported per chain the session approved,
+    /// because that is where this wallet can act at all.
+    fn capabilities(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
+        let (address, requested) = dapp_request::parse_get_capabilities(&request.params)?;
+        if let Some(refusal) = self.refuse_foreign_signer(address) {
+            return Ok(refusal);
+        }
+        let mut capabilities = serde_json::Map::new();
+        for chain in &request.scope.chains {
+            let Some(chain_id) = chain
+                .strip_prefix("eip155:")
+                .and_then(|id| id.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            // An empty list is the dapp asking about everything, which is what
+            // the spec says to answer when it does not narrow the question.
+            if !requested.is_empty() && !requested.contains(&chain_id) {
+                continue;
+            }
+            capabilities.insert(
+                format!("0x{chain_id:x}"),
+                json!({ "atomic": { "status": "supported" } }),
+            );
+        }
+        Ok(RequestOutcome::Result(Value::Object(capabilities)))
+    }
+
+    /// EIP-5792 `wallet_sendCalls`.
+    ///
+    /// One batch is one execution plan, so it takes exactly the path a single
+    /// transaction takes: simulated once as a whole, put to the same policy,
+    /// and either signed automatically or reviewed as one document showing
+    /// every call. The id handed back is the pending record's, which is what
+    /// `wallet_getCallsStatus` reads and what `ekubo-wallet transaction show`
+    /// takes.
+    async fn send_calls(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
+        let batch = dapp_request::parse_send_calls(&request.params)?;
+        if let Some(from) = batch.from
+            && let Some(refusal) = self.refuse_foreign_signer(from)
+        {
+            return Ok(refusal);
+        }
+        if let Some(unsupported) = batch.required_capabilities.first() {
+            return Ok(RequestOutcome::Error {
+                code: error_code::UNSUPPORTED_CAPABILITY,
+                message: format!(
+                    "This wallet does not implement the `{}` capability, and this batch did not \
+                     mark it optional.",
+                    terminal_safe_line(unsupported)
+                ),
+            });
+        }
+        // The chain the batch names, not the one the request arrived on: a
+        // dapp may hold one session across several chains, and the batch says
+        // which of them it means.
+        if !request
+            .scope
+            .chains
+            .iter()
+            .any(|chain| chain == &format!("eip155:{}", batch.chain_id))
+        {
+            return Ok(RequestOutcome::Error {
+                code: error_code::UNSUPPORTED_CHAIN_ID,
+                message: format!(
+                    "This session covers only {}, not chain {}.",
+                    request.scope.chains.join(", "),
+                    batch.chain_id
+                ),
+            });
+        }
+        if batch.calls.len() > MAX_BATCH_CALLS {
+            return Ok(RequestOutcome::Error {
+                code: error_code::BUNDLE_TOO_LARGE,
+                message: format!(
+                    "This batch holds {} calls, and this wallet reviews at most {MAX_BATCH_CALLS} \
+                     in one request.",
+                    batch.calls.len()
+                ),
+            });
+        }
+
+        let plan = self.build_plan(batch.chain_id, &batch.calls)?;
+        self.log(
+            crate::tui::Tone::Info,
+            terminal_safe_line(&format!(
+                "{} proposed a batch of {} calls, to execute atomically",
+                DappIdentity::of(request.dapp).headline(),
+                batch.calls.len()
+            )),
+        );
+        match self
+            .execute_plan(batch.chain_id, &plan, &describe_plan_source(request.dapp))
+            .await?
+        {
+            Ok(record) => Ok(RequestOutcome::Result(
+                json!({ "id": batch_id(record.request_id) }),
+            )),
+            Err(refusal) => Ok(refusal),
+        }
+    }
+
+    /// EIP-5792 `wallet_getCallsStatus`.
+    ///
+    /// Answers only for records this session's own account owns. A batch id is
+    /// a record id, and a dapp that guessed one belonging to another wallet on
+    /// this machine would otherwise read its history.
+    async fn calls_status(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
+        let id = dapp_request::parse_get_calls_status(&request.params)?;
+        let unknown = || RequestOutcome::Error {
+            code: error_code::UNKNOWN_BUNDLE_ID,
+            message: "This wallet has no batch under that id.".to_owned(),
+        };
+        let Some(request_id) = parse_batch_id(&id) else {
+            return Ok(unknown());
+        };
+        let store = PendingStore::production(&self.data_dir)?;
+        let Ok(record) = store.get(request_id) else {
+            return Ok(unknown());
+        };
+        drop(store);
+        if record.wallet_id != self.wallet().id {
+            return Ok(unknown());
+        }
+
+        let receipts = match record.broadcast_transaction_hash.as_deref() {
+            Some(hash)
+                if matches!(
+                    record.status,
+                    PendingStatus::Confirmed | PendingStatus::Reverted
+                ) =>
+            {
+                let network = self.config.network(&record.network_name)?;
+                crate::rpc::transaction_receipt_details(&network, hash)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|receipt| json!([receipt_json(hash, &receipt)]))
+            }
+            _ => None,
+        };
+        let mut status = serde_json::Map::from_iter([
+            (
+                "version".to_owned(),
+                json!(dapp_request::SEND_CALLS_VERSION),
+            ),
+            ("id".to_owned(), json!(batch_id(record.request_id))),
+            (
+                "chainId".to_owned(),
+                json!(format!(
+                    "0x{:x}",
+                    record.chain_id.parse::<u64>().unwrap_or_default()
+                )),
+            ),
+            // Every batch this wallet executes is all-or-nothing, so there is
+            // no partial-failure case to report.
+            ("atomic".to_owned(), json!(true)),
+            ("status".to_owned(), json!(calls_status_code(record.status))),
+        ]);
+        if let Some(receipts) = receipts {
+            status.insert("receipts".to_owned(), receipts);
+        }
+        Ok(RequestOutcome::Result(Value::Object(status)))
+    }
+
+    /// A dapp's calls as one execution plan, in the order it gave them.
+    ///
+    /// The dapp's own opinions about nonce, fees, and chain are not carried
+    /// over — the wallet decides those, and `overridden` on a single
+    /// transaction records what was set so the review can say so rather than
+    /// silently disagreeing.
+    ///
+    /// A plan of two or more steps is what makes an EIP-5792 batch atomic:
+    /// [`crate::execution`] turns it into one `revertOnFailure` Calibur batch,
+    /// so either every call happens or none does.
+    fn build_plan(
+        &self,
+        chain_id: u64,
+        calls: &[dapp_request::ProposedCall],
+    ) -> Result<ExecutionPlan> {
+        let chain = DecimalU256::new(chain_id.to_string())?;
+        let mut ordered_steps = Vec::with_capacity(calls.len());
+        for (index, call) in calls.iter().enumerate() {
+            ordered_steps.push(ExecutionStep {
+                step: u32::try_from(index + 1)
+                    .context("that is more calls than a plan can hold")?,
+                kind: ExecutionStepKind::Execution,
+                transaction: PlannedTransaction {
+                    chain_id: chain.clone(),
+                    from: self.wallet().address,
+                    to: call.to,
+                    data: call.data.clone(),
+                    value: DecimalU256::new(call.value.to_string())?,
+                    // Deliberately absent. A gas limit the dapp suggested is
+                    // not a fact about the transaction, and the simulation
+                    // produces one that is.
+                    gas: None,
+                },
+                revert_decode: None,
+            });
+        }
+        let plan = ExecutionPlan {
+            schema_version: "1".to_owned(),
+            chain_id: chain,
+            caip2_chain_id: format!("eip155:{chain_id}"),
+            sender: self.wallet().address,
+            ordered_steps,
+            required_capabilities: Vec::new(),
+            extensions: serde_json::Map::new(),
+            simulation_failure_policy: None,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    /// Simulate, policy-check, review if the policy says so, sign, and
+    /// broadcast one plan.
+    ///
+    /// Shared by `eth_sendTransaction` and `wallet_sendCalls` so that a batch
+    /// is not a second, quieter path to a signature: same simulation, same
+    /// policy, same guard ladder, same review document.
+    async fn execute_plan(
+        &self,
+        chain_id: u64,
+        plan: &ExecutionPlan,
+        plan_source: &str,
+    ) -> Result<std::result::Result<PendingTransaction, RequestOutcome>> {
+        let network = self.config.network_by_chain_id(&chain_id.to_string())?;
 
         let policies = PolicyStore::production(&self.data_dir)?;
         let stored_policy = policies
@@ -823,17 +1103,13 @@ impl DappSession<'_> {
         let simulation = simulate_execution(
             self.wallet(),
             &network,
-            &plan,
+            plan,
             &stored_policy,
             &policy_context,
             None,
         )
         .await?;
 
-        self.log(
-            crate::tui::Tone::Info,
-            describe_dapp_request(request.dapp, &proposed),
-        );
         let pending = Mutex::new(PendingStore::production(&self.data_dir)?);
         let disposition = crate::orchestrator::execute_automatic(
             self.config,
@@ -842,8 +1118,8 @@ impl DappSession<'_> {
             self.wallet(),
             &network,
             &stored_policy,
-            &plan,
-            Some(&describe_plan_source(request.dapp)),
+            plan,
+            Some(plan_source),
             &simulation,
         )
         .await?;
@@ -855,55 +1131,20 @@ impl DappSession<'_> {
                 match self.review_queued(queued).await? {
                     Some(record) => record,
                     None => {
-                        return Ok(RequestOutcome::rejected(
+                        return Ok(Err(RequestOutcome::rejected(
                             "The wallet owner declined this transaction.",
-                        ));
+                        )));
                     }
                 }
             }
         };
-        let hash = self.broadcast(&network, signed).await?;
-        Ok(RequestOutcome::Result(json!(hash)))
-    }
-
-    /// One dapp transaction as a one-step execution plan.
-    ///
-    /// The dapp's own opinions about nonce, fees, and chain are not carried
-    /// over — the wallet decides those, and `proposed.overridden` records what
-    /// was set so the review can say so rather than silently disagreeing.
-    fn build_plan(
-        &self,
-        chain_id: u64,
-        proposed: &dapp_request::TransactionRequest,
-    ) -> Result<ExecutionPlan> {
-        let chain = DecimalU256::new(chain_id.to_string())?;
-        let plan = ExecutionPlan {
-            schema_version: "1".to_owned(),
-            chain_id: chain.clone(),
-            caip2_chain_id: format!("eip155:{chain_id}"),
-            sender: self.wallet().address,
-            ordered_steps: vec![ExecutionStep {
-                step: 1,
-                kind: ExecutionStepKind::Execution,
-                transaction: PlannedTransaction {
-                    chain_id: chain,
-                    from: self.wallet().address,
-                    to: proposed.to,
-                    data: proposed.data.clone(),
-                    value: DecimalU256::new(proposed.value.to_string())?,
-                    // Deliberately absent. A gas limit the dapp suggested is
-                    // not a fact about the transaction, and the simulation
-                    // produces one that is.
-                    gas: None,
-                },
-                revert_decode: None,
-            }],
-            required_capabilities: Vec::new(),
-            extensions: serde_json::Map::new(),
-            simulation_failure_policy: None,
-        };
-        plan.validate()?;
-        Ok(plan)
+        let request_id = signed.request_id;
+        self.broadcast(&network, signed).await?;
+        // Re-read rather than returning the pre-broadcast record: the hash and
+        // status a caller reports onward are written by the submission.
+        Ok(Ok(
+            PendingStore::production(&self.data_dir)?.get(request_id)?
+        ))
     }
 
     /// Put a queued transaction through the same review `ekubo-wallet review`
@@ -1049,6 +1290,64 @@ fn describe_dapp_request(
         );
     }
     terminal_safe_line(&line)
+}
+
+/// A pending record's id as an EIP-5792 batch id.
+///
+/// The record's own UUID, hex-encoded. Using the id the rest of the wallet
+/// already uses means a batch a dapp is asking about is the same thing
+/// `ekubo-wallet transaction show` prints and `transaction cancel` acts on,
+/// rather than a second identifier that has to be kept in step with the first.
+fn batch_id(request_id: uuid::Uuid) -> String {
+    format!("0x{}", hex::encode(request_id.as_bytes()))
+}
+
+/// The record id inside a batch id, or `None` for anything this wallet did not
+/// mint.
+fn parse_batch_id(id: &str) -> Option<uuid::Uuid> {
+    let bytes = hex::decode(id.strip_prefix("0x").unwrap_or(id)).ok()?;
+    uuid::Uuid::from_slice(&bytes).ok()
+}
+
+/// EIP-5792's status code for what the chain has done with a batch so far.
+///
+/// The spec's 600 — partially reverted — is unreachable here and deliberately
+/// so: a multi-call plan executes as one `revertOnFailure` batch, so the only
+/// outcomes are all of it, none of it, or not yet.
+const fn calls_status_code(status: PendingStatus) -> u16 {
+    match status {
+        PendingStatus::AwaitingApproval
+        | PendingStatus::Signed
+        | PendingStatus::Submitting
+        | PendingStatus::Broadcast
+        | PendingStatus::Cancelling => 100,
+        PendingStatus::Confirmed => 200,
+        // Onchain, and every call reverted together.
+        PendingStatus::Reverted => 500,
+        // Never made it onchain and never will: declined, cancelled, or its
+        // nonce taken by something else.
+        PendingStatus::Rejected | PendingStatus::Cancelled | PendingStatus::Replaced => 400,
+    }
+}
+
+/// One mined receipt in the shape EIP-5792 asks for.
+fn receipt_json(transaction_hash: &str, receipt: &crate::rpc::ReceiptDetails) -> Value {
+    json!({
+        "logs": receipt
+            .logs
+            .iter()
+            .map(|log| json!({
+                "address": format!("{:#x}", log.address),
+                "topics": log.topics.iter().map(|topic| format!("{topic:#x}")).collect::<Vec<_>>(),
+                "data": format!("0x{}", hex::encode(&log.data)),
+            }))
+            .collect::<Vec<_>>(),
+        "status": if receipt.succeeded { "0x1" } else { "0x0" },
+        "blockHash": format!("{:#x}", receipt.block_hash),
+        "blockNumber": format!("0x{:x}", receipt.block_number),
+        "gasUsed": format!("0x{:x}", receipt.gas_used),
+        "transactionHash": transaction_hash,
+    })
 }
 
 fn join_or_none(values: &[String]) -> String {

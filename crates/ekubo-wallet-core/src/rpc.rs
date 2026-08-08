@@ -425,6 +425,10 @@ pub struct ReceiptLog {
 pub struct ReceiptDetails {
     pub succeeded: bool,
     pub block_number: u64,
+    /// The block the receipt names. Carried because a caller reporting a
+    /// receipt onward — EIP-5792's `wallet_getCallsStatus` does — has to say
+    /// which block it read, and a height alone does not survive a reorg.
+    pub block_hash: B256,
     pub gas_used: u64,
     pub effective_gas_price: u128,
     pub logs: Vec<ReceiptLog>,
@@ -456,6 +460,9 @@ pub async fn transaction_receipt_details(
                 block_number: receipt
                     .block_number
                     .context("RPC returned a receipt without a block number")?,
+                block_hash: receipt
+                    .block_hash
+                    .context("RPC returned a receipt without a block hash")?,
                 gas_used: receipt.gas_used,
                 effective_gas_price: receipt.effective_gas_price,
                 logs: receipt

@@ -27,11 +27,18 @@ A dapp reached this way is exactly as untrusted as an agent is. It can
   either signed automatically because your policy already allows it or queued
   and shown to you in the same full-screen review the `review` command uses —
   same document, same owner authentication.
+- **`wallet_sendCalls`** ([EIP-5792](https://eips.ethereum.org/EIPS/eip-5792))
+  is a batch, and becomes one execution plan whose steps are the calls in the
+  order given. It takes the same path a single transaction takes — one
+  simulation of the whole batch, the same policy, one review document listing
+  every call — and executes atomically through EIP-7702, so either all of it
+  happens or none does. See [batching](batching.md).
 - **`personal_sign`** and **`eth_signTypedData_v4`** always stop for your
   review. No policy authorizes a signature, because a per-transaction limit
   cannot bound something its holder redeems whenever it likes.
-- **`eth_accounts`**, **`eth_chainId`**, and **`wallet_switchEthereumChain`**
-  are answered from the session's own state and touch nothing.
+- **`eth_accounts`**, **`eth_chainId`**, **`wallet_switchEthereumChain`**,
+  **`wallet_getCapabilities`**, and **`wallet_getCallsStatus`** are answered
+  from local state and touch nothing.
 
 Two methods are refused on purpose:
 
@@ -48,9 +55,40 @@ into a call to the zero address.
 
 The dapp's opinions about `nonce`, `gasPrice`, `maxFeePerGas`, and `chainId`
 are not honored — the wallet determines those itself. It does not drop them
-silently: whatever the dapp set is named in the "Plan source" line of the
-approval document, so a review never shows you something the request disagreed
-with.
+silently: whatever the dapp set is named on the session screen as the request
+arrives, so nothing it asked for and did not get goes unsaid.
+
+The approval document's "Plan source" says where a plan came from, and a dapp's
+account of itself always appears there behind `WalletConnect: ` — as in
+`WalletConnect: Ekubo (ekubo.org)`. A bare host in that line means TLS proved
+it; the prefix means a dapp typed it, and a site is free to type anything.
+
+
+## Batched calls
+
+`wallet_getCapabilities` reports `atomic: supported` for every chain the
+session covers, which is true: two or more calls become a single
+`revertOnFailure` batch through the Calibur EIP-7702 delegation, so a batch
+cannot half-execute. A dapp that reads this will send `wallet_sendCalls`
+rather than a sequence of separate transactions.
+
+What that changes for you is that one review covers several calls. The
+approval document lists every one of them and the simulated effect of the
+whole batch, and approving it approves all of it. At most 24 calls are
+accepted in one batch — past that nobody is really reading the document they
+are approving, and a dapp told the batch is too large can send smaller ones.
+
+`wallet_sendCalls` returns the id of the record the batch became, which is the
+same id `ekubo-wallet transaction show` takes, and `wallet_getCallsStatus`
+reports on it: `100` while it is unsettled, `200` once mined without reverts,
+`500` if it reverted as a whole, and `400` if it never reached the chain and
+never will — because you declined it, because you cancelled it, or because its
+nonce was taken by something else. The spec's `600`, partial revert, is never
+returned: this wallet has no half-executed outcome to describe.
+
+A batch is refused rather than partly honored if it asks for a capability this
+wallet does not implement — a paymaster, say — unless the dapp marked it
+optional.
 
 
 ## Choosing which account the dapp gets

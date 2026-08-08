@@ -214,3 +214,142 @@ fn switching_chains_reads_the_hex_id() {
     assert!(parse_switch_chain(&json!([{}])).is_err());
     assert!(parse_switch_chain(&json!([])).is_err());
 }
+
+fn batch(calls: &Value) -> Value {
+    json!([{
+        "version": "2.0.0",
+        "from": WALLET,
+        "chainId": "0x1",
+        "atomicRequired": true,
+        "calls": calls,
+    }])
+}
+
+#[test]
+fn a_batch_of_calls_parses_in_the_order_it_was_given() {
+    let request = parse_send_calls(&batch(&json!([
+        { "to": TARGET, "data": "0xa9059cbb", "value": "0x1" },
+        { "to": WALLET },
+    ])))
+    .unwrap();
+    assert_eq!(request.from, Some(WALLET.parse::<Address>().unwrap()));
+    assert_eq!(request.chain_id, 1);
+    assert!(request.atomic_required);
+    assert_eq!(request.calls.len(), 2);
+    // Order is the whole point of a batch: an approval and a swap in the other
+    // order is a different transaction.
+    assert_eq!(request.calls[0].to, TARGET.parse::<Address>().unwrap());
+    assert_eq!(request.calls[0].value, U256::from(1));
+    // A call may carry neither data nor value; it is a bare native send.
+    assert_eq!(request.calls[1].to, WALLET.parse::<Address>().unwrap());
+    assert!(request.calls[1].data.is_empty());
+    assert_eq!(request.calls[1].value, U256::ZERO);
+}
+
+/// `from` is optional in EIP-5792 — the wallet may pick the account — so an
+/// absent one means "the connected account", not a malformed request.
+#[test]
+fn a_batch_without_a_from_is_for_the_connected_account() {
+    let request = parse_send_calls(&json!([{
+        "version": "2.0.0",
+        "chainId": "0xa",
+        "atomicRequired": false,
+        "calls": [{ "to": TARGET }],
+    }]))
+    .unwrap();
+    assert_eq!(request.from, None);
+    assert_eq!(request.chain_id, 10);
+    assert!(!request.atomic_required);
+}
+
+#[test]
+fn a_batch_this_wallet_cannot_answer_is_refused_rather_than_trimmed() {
+    // The 1.0.0 response was a bare string where 2.0.0 is an object, so
+    // answering an older caller would hand it a shape it cannot read.
+    assert!(
+        parse_send_calls(&json!([{
+            "version": "1.0.0",
+            "chainId": "0x1",
+            "atomicRequired": true,
+            "calls": [{ "to": TARGET }],
+        }]))
+        .is_err()
+    );
+
+    for missing in [
+        json!([{ "chainId": "0x1", "atomicRequired": true, "calls": [{ "to": TARGET }] }]),
+        json!([{ "version": "2.0.0", "atomicRequired": true, "calls": [{ "to": TARGET }] }]),
+        json!([{ "version": "2.0.0", "chainId": "0x1", "calls": [{ "to": TARGET }] }]),
+        json!([{ "version": "2.0.0", "chainId": "0x1", "atomicRequired": true }]),
+    ] {
+        assert!(
+            parse_send_calls(&missing).is_err(),
+            "{missing} was accepted"
+        );
+    }
+
+    // A decimal chain id and an empty batch are both refusals, not guesses.
+    assert!(
+        parse_send_calls(&json!([{
+            "version": "2.0.0",
+            "chainId": "1",
+            "atomicRequired": true,
+            "calls": [{ "to": TARGET }],
+        }]))
+        .is_err()
+    );
+    assert!(parse_send_calls(&batch(&json!([]))).is_err());
+
+    // A call with no target deploys a contract, which no plan step expresses.
+    let error = parse_send_calls(&batch(&json!([{ "to": TARGET }, { "data": "0x60" }])))
+        .expect_err("a deployment was accepted");
+    assert!(format!("{error}").contains("call 2"), "{error}");
+}
+
+/// A capability the dapp did not mark optional is one the wallet has to refuse
+/// by name; silently not honoring it is the failure mode the field exists to
+/// prevent.
+#[test]
+fn required_capabilities_are_collected_and_optional_ones_ignored() {
+    let request = parse_send_calls(&json!([{
+        "version": "2.0.0",
+        "chainId": "0x1",
+        "atomicRequired": true,
+        "capabilities": {
+            "paymasterService": { "url": "https://example.com" },
+            "auxiliaryFunds": { "optional": true },
+        },
+        "calls": [{ "to": TARGET, "capabilities": { "flowControl": {} } }],
+    }]))
+    .unwrap();
+    assert_eq!(
+        request.required_capabilities,
+        vec!["flowControl".to_owned(), "paymasterService".to_owned()]
+    );
+
+    let plain = parse_send_calls(&batch(&json!([{ "to": TARGET }]))).unwrap();
+    assert!(plain.required_capabilities.is_empty());
+}
+
+#[test]
+fn a_capabilities_query_reads_the_address_and_any_chain_filter() {
+    let (address, chains) = parse_get_capabilities(&json!([WALLET, ["0x1", "0xa4b1"]])).unwrap();
+    assert_eq!(address, WALLET.parse::<Address>().unwrap());
+    assert_eq!(chains, vec![1, 42_161]);
+
+    // No filter means every chain, which is what an absent second parameter
+    // asks for.
+    let (_, chains) = parse_get_capabilities(&json!([WALLET])).unwrap();
+    assert!(chains.is_empty());
+
+    assert!(parse_get_capabilities(&json!([])).is_err());
+    assert!(parse_get_capabilities(&json!(["not an address"])).is_err());
+}
+
+#[test]
+fn a_status_query_reads_one_batch_id() {
+    assert_eq!(parse_get_calls_status(&json!(["0xabc"])).unwrap(), "0xabc");
+    assert!(parse_get_calls_status(&json!([])).is_err());
+    assert!(parse_get_calls_status(&json!([""])).is_err());
+    assert!(parse_get_calls_status(&json!([5])).is_err());
+}

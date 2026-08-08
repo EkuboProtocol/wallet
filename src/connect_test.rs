@@ -140,3 +140,78 @@ fn an_empty_list_reads_as_none_rather_than_as_nothing() {
         "eip155:1, eip155:10"
     );
 }
+
+#[test]
+fn the_batch_methods_are_offered_together_or_not_at_all() {
+    // A dapp told atomicity is supported will send `wallet_sendCalls` and then
+    // poll `wallet_getCallsStatus`. Advertising the capability without both is
+    // an answer that strands it.
+    for method in [
+        "wallet_getCapabilities",
+        "wallet_sendCalls",
+        "wallet_getCallsStatus",
+    ] {
+        assert!(SUPPORTED_METHODS.contains(&method), "{method} is missing");
+    }
+}
+
+#[test]
+fn a_batch_id_survives_the_round_trip_and_nothing_else_parses_as_one() {
+    let request_id = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+    let id = batch_id(request_id);
+    assert_eq!(id, "0x0123456789abcdef0123456789abcdef");
+    assert_eq!(parse_batch_id(&id), Some(request_id));
+    // A dapp asking about an id this wallet never minted gets "unknown batch",
+    // which needs these to fail rather than panic.
+    for wrong in ["0x", "0xnothex", "0x0123", &"0xab".repeat(40)] {
+        assert_eq!(parse_batch_id(wrong), None, "{wrong} parsed as a batch id");
+    }
+}
+
+/// The one status EIP-5792 defines that this wallet can never report is 600,
+/// partial revert — a multi-call plan is one `revertOnFailure` batch, so there
+/// is no half-executed outcome to describe.
+#[test]
+fn every_record_status_maps_to_a_batch_status_and_none_is_partial() {
+    use crate::pending::PendingStatus::{
+        AwaitingApproval, Broadcast, Cancelled, Cancelling, Confirmed, Rejected, Replaced,
+        Reverted, Signed, Submitting,
+    };
+
+    for pending in [AwaitingApproval, Signed, Submitting, Broadcast, Cancelling] {
+        assert_eq!(calls_status_code(pending), 100, "{pending:?}");
+    }
+    assert_eq!(calls_status_code(Confirmed), 200);
+    // Onchain and reverted as a whole, which is 500 rather than 400: gas was
+    // charged and the dapp needs to know the difference.
+    assert_eq!(calls_status_code(Reverted), 500);
+    for offchain in [Rejected, Cancelled, Replaced] {
+        assert_eq!(calls_status_code(offchain), 400, "{offchain:?}");
+    }
+}
+
+#[test]
+fn a_reported_receipt_carries_every_field_the_spec_names() {
+    use alloy::primitives::B256;
+
+    let receipt = crate::rpc::ReceiptDetails {
+        succeeded: true,
+        block_number: 0x123,
+        block_hash: B256::repeat_byte(0xbb),
+        gas_used: 21_000,
+        effective_gas_price: 1_000_000_000,
+        logs: vec![crate::rpc::ReceiptLog {
+            address: Address::repeat_byte(0xcc),
+            topics: vec![B256::repeat_byte(0xdd)],
+            data: vec![0x01, 0x02],
+        }],
+    };
+    let json = receipt_json("0xfeed", &receipt);
+    assert_eq!(json["status"], "0x1");
+    assert_eq!(json["blockNumber"], "0x123");
+    assert_eq!(json["gasUsed"], "0x5208");
+    assert_eq!(json["transactionHash"], "0xfeed");
+    assert_eq!(json["blockHash"].as_str().unwrap().len(), 66);
+    assert_eq!(json["logs"][0]["data"], "0x0102");
+    assert_eq!(json["logs"][0]["topics"].as_array().unwrap().len(), 1);
+}

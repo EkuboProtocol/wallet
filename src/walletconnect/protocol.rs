@@ -73,6 +73,15 @@ pub mod error_code {
     pub const UNAUTHORIZED_CHAIN: i64 = 3005;
     /// The request was well formed but could not be carried out.
     pub const INVALID_METHOD: i64 = 1001;
+    /// EIP-5792: the batch asked for a capability this wallet does not
+    /// implement and did not mark it optional.
+    pub const UNSUPPORTED_CAPABILITY: i64 = 5700;
+    /// EIP-5792: the batch named a chain outside this session.
+    pub const UNSUPPORTED_CHAIN_ID: i64 = 5710;
+    /// EIP-5792: no batch was submitted under that id.
+    pub const UNKNOWN_BUNDLE_ID: i64 = 5730;
+    /// EIP-5792: more calls than this wallet will put in one batch.
+    pub const BUNDLE_TOO_LARGE: i64 = 5740;
     /// The session ended from this side.
     pub const USER_DISCONNECTED: i64 = 6000;
 }

@@ -160,6 +160,7 @@ fn balance_changes_render_as_an_aligned_signed_table() {
     let receipt = ReceiptDetails {
         succeeded: true,
         block_number: 123,
+        block_hash: B256::repeat_byte(0xbb),
         gas_used: 21_000,
         effective_gas_price: 1_000_000_000,
         logs: vec![
@@ -220,6 +221,7 @@ fn an_unavailable_native_delta_is_said_not_shown_as_zero() {
     let receipt = ReceiptDetails {
         succeeded: true,
         block_number: 123,
+        block_hash: B256::repeat_byte(0xbb),
         gas_used: 21_000,
         effective_gas_price: 1_000_000_000,
         logs: Vec::new(),
