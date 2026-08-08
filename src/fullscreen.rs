@@ -858,6 +858,11 @@ pub(crate) fn confirm_review(
     }
     let mut accepting = false;
     let mut offset = 0_usize;
+    // Both are read by the key handler below and written by the draw closure,
+    // so paging moves by what the screen currently holds. Deciding a page size
+    // before a frame has been laid out would guess at a terminal that resizes.
+    let mut page = 1_usize;
+    let mut max_offset = 0_usize;
     let mut screen = Screen::enter()?;
     loop {
         screen.terminal.draw(|frame| {
@@ -872,7 +877,11 @@ pub(crate) fn confirm_review(
             let columns = (body.width as usize).saturating_sub(2).max(10);
             let wrapped = wrap_lines(document, columns);
             let viewport = (body.height as usize).max(1);
-            offset = offset.min(wrapped.len().saturating_sub(viewport));
+            // One line of overlap between pages, so a fact split across a page
+            // boundary is still readable on one of them.
+            page = viewport.saturating_sub(1).max(1);
+            max_offset = wrapped.len().saturating_sub(viewport);
+            offset = offset.min(max_offset);
             let visible: Vec<UiLine> = wrapped
                 .iter()
                 .skip(offset)
@@ -888,13 +897,20 @@ pub(crate) fn confirm_review(
                 decision_pane(question, cancel_label, accept_label, accepting),
                 decision,
             );
-            frame.render_widget(
-                footer_line(
-                    None,
-                    "↑↓/Tab choose · PgUp/PgDn scroll · Enter confirm · Esc cancel",
-                ),
-                footer,
-            );
+            // Scrolling is offered only when there is something to scroll, and
+            // the counter is what tells a reviewer that facts they have not
+            // read yet sit above the decision they are being asked to make.
+            let hints = if max_offset == 0 {
+                "↑↓/Tab choose · Enter confirm · Esc cancel".to_owned()
+            } else {
+                format!(
+                    "↑↓/Tab choose · PgUp/PgDn/Home/End scroll ({}/{}) · Enter confirm · Esc \
+                     cancel",
+                    offset + 1,
+                    max_offset + 1
+                )
+            };
+            frame.render_widget(footer_line(None, &hints), footer);
         })?;
         let key = match crossterm::event::read()? {
             crossterm::event::Event::Key(key)
@@ -912,11 +928,118 @@ pub(crate) fn confirm_review(
             KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
                 accepting = !accepting;
             }
-            KeyCode::PageDown => offset = offset.saturating_add(1),
-            KeyCode::PageUp => offset = offset.saturating_sub(1),
+            KeyCode::PageDown => offset = offset.saturating_add(page).min(max_offset),
+            KeyCode::PageUp => offset = offset.saturating_sub(page),
+            KeyCode::Home => offset = 0,
+            KeyCode::End => offset = max_offset,
             KeyCode::Enter => return Ok(accepting),
             _ => {}
         }
+    }
+}
+
+/// Everything a reviewer is told before one change, built once and drawn by
+/// [`confirm_review`] as a scrollable document.
+///
+/// For a change whose description has no fixed length: a permission diff, a
+/// list of RPC endpoints. [`crate::tui::Confirmation`] prints its facts
+/// straight into the scrollback, so a description taller than the terminal
+/// pushes the title, the warnings, and eventually the question itself off the
+/// top before the reviewer is asked — and a fact is clamped to one line there,
+/// so a multi-line value silently collapses into a run of spaces. A command
+/// whose facts are a fixed handful still uses the inline prompt; this is for
+/// the ones that cannot promise that.
+pub(crate) struct Review {
+    title: String,
+    summary: String,
+    /// Each label with its value as one or more lines. A single-line value
+    /// reads as `label: value`; several become a labelled, indented block, so
+    /// a list stays a list.
+    facts: Vec<(String, Vec<String>)>,
+    warnings: Vec<String>,
+}
+
+impl Review {
+    pub(crate) fn new(title: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            summary: summary.into(),
+            facts: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn fact(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
+        self.facts.push((label.into(), vec![value.into()]));
+        self
+    }
+
+    /// A labelled value that is a list. An empty one is dropped rather than
+    /// drawn as a heading with nothing under it.
+    #[must_use]
+    pub(crate) fn fact_lines(
+        mut self,
+        label: impl Into<String>,
+        values: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let values: Vec<String> = values.into_iter().collect();
+        if !values.is_empty() {
+            self.facts.push((label.into(), values));
+        }
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn warning(mut self, warning: impl Into<String>) -> Self {
+        self.warnings.push(warning.into());
+        self
+    }
+
+    /// The document [`confirm_review`] draws. Separate from [`Self::ask`] so a
+    /// caller that already owns a screen can embed the same lines rather than
+    /// describing the change a second time, and so the layout is testable
+    /// without a terminal.
+    pub(crate) fn document(&self) -> Vec<Line> {
+        let mut lines = vec![vec![Span::toned(&self.summary, Tone::Muted)], Vec::new()];
+        for (label, values) in &self.facts {
+            match values.as_slice() {
+                [] => {}
+                [only] => lines.push(vec![
+                    Span::toned(format!("{label}: "), Tone::Muted),
+                    Span::plain(only),
+                ]),
+                many => {
+                    lines.push(vec![Span::toned(format!("{label}:"), Tone::Muted)]);
+                    for value in many {
+                        lines.push(vec![Span::plain(format!("  {value}"))]);
+                    }
+                }
+            }
+        }
+        for warning in &self.warnings {
+            lines.push(Vec::new());
+            lines.push(vec![Span::toned(format!("⚠ {warning}"), Tone::Warning)]);
+        }
+        lines
+    }
+
+    /// Draw the change and ask. `Ok(false)` means it must not happen — which
+    /// is also what a non-interactive run answers, since there is nobody to
+    /// show it to.
+    pub(crate) fn ask(
+        &self,
+        question: &str,
+        accept_label: &str,
+        cancel_label: &str,
+    ) -> Result<bool> {
+        confirm_review(
+            &self.title,
+            &self.document(),
+            question,
+            accept_label,
+            cancel_label,
+        )
     }
 }
 
