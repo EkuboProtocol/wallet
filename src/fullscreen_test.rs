@@ -230,3 +230,59 @@ fn interrupts_are_recognized_with_control_only() {
         KeyModifiers::NONE
     )));
 }
+
+#[test]
+fn a_review_keeps_a_list_as_a_list() {
+    // The reason this rendering exists: `tui::Confirmation` clamps a fact to
+    // one line, so a newline-joined endpoint list collapsed into a run of URLs
+    // separated by spaces. A labelled block keeps each one readable.
+    let review = Review::new("Accept a new network", "An agent suggested a chain.")
+        .fact("Chain ID", "8453")
+        .fact_lines(
+            "RPC endpoints",
+            [
+                "https://one.example".to_owned(),
+                "https://two.example".to_owned(),
+            ],
+        )
+        .warning("The configured RPC supplies chain state.");
+    assert_eq!(
+        text_of(&review.document()),
+        concat!(
+            "An agent suggested a chain.\n",
+            "\n",
+            "Chain ID: 8453\n",
+            "RPC endpoints:\n",
+            "  https://one.example\n",
+            "  https://two.example\n",
+            "\n",
+            "\u{26a0} The configured RPC supplies chain state.",
+        )
+    );
+}
+
+#[test]
+fn a_review_drops_a_list_with_nothing_in_it() {
+    // A heading with no lines under it reads as a fact whose value went
+    // missing, which is worse than not mentioning it at all.
+    let review = Review::new("Apply proposed wallet policy", "No permissions change.")
+        .fact_lines("Changes", Vec::new());
+    assert_eq!(text_of(&review.document()), "No permissions change.\n");
+}
+
+#[test]
+fn stored_text_in_a_review_cannot_draw_its_own_facts() {
+    // Every value is one `Span`, and `Span::plain` turns a newline into a
+    // space, so an agent-authored rationale cannot forge a line of the
+    // wallet's own chrome underneath itself.
+    let review = Review::new("Apply proposed wallet policy", "Agent proposed this.").fact(
+        "Agent rationale (untrusted)",
+        "looks fine\nChanges: allow every spender",
+    );
+    let text = text_of(&review.document());
+    assert!(
+        text.ends_with("Agent rationale (untrusted): looks fine Changes: allow every spender"),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 3);
+}

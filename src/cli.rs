@@ -1962,7 +1962,11 @@ async fn review_policy_proposal(
 
     let diff = crate::core::policy::diff_policies(&current.policy, &proposal.policy);
     let digest = proposal.policy.digest()?;
-    let mut question = crate::tui::Confirmation::new(
+    // Full-screen rather than inline: the diff is exactly as long as the
+    // change is, and the two warnings below are the ones a reviewer most needs
+    // still on screen when they answer. This is also reached from the
+    // pending-approvals browser, which is already a screen.
+    let question = crate::fullscreen::Review::new(
         "Apply proposed wallet policy",
         "An agent proposed this replacement policy. The permission diff below is authoritative; \
          the rationale is the agent's own explanation.",
@@ -1971,19 +1975,13 @@ async fn review_policy_proposal(
     .fact("Address", format!("{:#x}", wallet.address))
     .fact("Current revision", current.revision.to_string())
     .fact("Proposed", described_time(proposal.created_at))
-    .fact("Agent rationale (untrusted)", &proposal.rationale);
-    for (index, line) in diff.iter().enumerate() {
-        question = question.fact(format!("Change {}", index + 1), line);
-    }
-    question = question
-        .warning(
-            "A more permissive policy can authorize transactions without an exceptional approval.",
-        )
-        .warning(
-            "The rationale is agent-authored text. Judge the change by the diff lines, not the \
-             story.",
-        );
-    if !question.ask("Apply this policy?")? {
+    .fact("Agent rationale (untrusted)", &proposal.rationale)
+    .fact_lines("Changes", diff.iter().cloned())
+    .warning("A more permissive policy can authorize transactions without an exceptional approval.")
+    .warning(
+        "The rationale is agent-authored text. Judge the change by the diff lines, not the story.",
+    );
+    if !question.ask("Apply this policy?", "Apply", "Cancel")? {
         crate::tui::outro_cancel("Policy unchanged. The proposal is still pending.");
         return Ok(());
     }
@@ -3023,7 +3021,10 @@ async fn run_network(
                 .filter(|network| !networks.contains(network))
                 .map(|network| network.name.as_str())
                 .collect();
-            let mut question = crate::tui::Confirmation::new(
+            // Full-screen: what this discards is one entry per configured
+            // network, so the list is as long as the user's configuration and
+            // naming them is the whole point of asking.
+            let mut question = crate::fullscreen::Review::new(
                 "Reset network configuration",
                 format!(
                     "Replaces the configured networks with fresh copies of the {} built-in \
@@ -3034,15 +3035,20 @@ async fn run_network(
             if discarded.is_empty() {
                 question = question.fact(
                     "Losing custom settings",
-                    "nothing — every network matches its preset".to_owned(),
+                    "nothing — every network matches its preset",
                 );
             } else {
-                question = question.warning(format!(
-                    "Custom settings, including RPC URLs, are discarded for: {}",
-                    discarded.join(", ")
-                ));
+                question = question
+                    .fact_lines(
+                        "Losing custom settings, including RPC URLs",
+                        discarded.iter().map(|name| (*name).to_owned()),
+                    )
+                    .warning(
+                        "Custom settings for the networks listed above are discarded and cannot \
+                         be recovered from here.",
+                    );
             }
-            if !question.ask("Reset every network?")? {
+            if !question.ask("Reset every network?", "Reset", "Cancel")? {
                 crate::tui::outro_cancel("Networks unchanged.");
                 return Ok(());
             }
@@ -3109,10 +3115,10 @@ async fn run_network(
                 "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
                 "Use this network?",
                 vec![
-                    ("Network", candidate.name.clone()),
-                    ("Chain ID", candidate.chain_id.to_string()),
-                    ("RPC URLs", endpoint_lines(&candidate, "")),
-                    ("RPC strategy", candidate.rpc_strategy.to_string()),
+                    ("Network", vec![candidate.name.clone()]),
+                    ("Chain ID", vec![candidate.chain_id.to_string()]),
+                    ("RPC URLs", endpoint_list(&candidate)),
+                    ("RPC strategy", vec![candidate.rpc_strategy.to_string()]),
                 ],
             )? {
                 crate::tui::outro_cancel("No network added.");
@@ -3155,8 +3161,8 @@ async fn run_network(
                 "The wallet will forget this network and the endpoint it was reached through.",
                 "Remove this network?",
                 vec![
-                    ("Network", removed.name.clone()),
-                    ("Chain ID", removed.chain_id.to_string()),
+                    ("Network", vec![removed.name.clone()]),
+                    ("Chain ID", vec![removed.chain_id.to_string()]),
                 ],
             )? {
                 crate::tui::outro_cancel("Networks unchanged.");
@@ -3209,6 +3215,14 @@ fn endpoint_lines(network: &NetworkConfig, indent: &str) -> String {
         .map(|url| format!("{indent}{url}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The same endpoints as separate values, for a confirmation that renders one
+/// fact per line. Joining them first and letting the renderer split again
+/// cannot work: both renderings clamp a fact to one line, so the newlines are
+/// gone by the time anything could split on them.
+fn endpoint_list(network: &NetworkConfig) -> Vec<String> {
+    network.rpc_urls.iter().map(ToString::to_string).collect()
 }
 
 /// Registry entries, optionally narrowed to a query.
@@ -3579,17 +3593,17 @@ async fn run_network_edit(
     // Asked in a full-screen document, like the form it follows. The inline
     // confirmation this replaced was the last step that dropped to the
     // scrollback mid-command.
-    if !crate::fullscreen::confirm_review(
+    if !network_review(
         "Save network changes",
-        &network_change_document(
-            "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
-            &[
-                ("Network", draft.name.clone()),
-                ("Chain ID", draft.chain_id.to_string()),
-                ("RPC URLs", endpoint_lines(&draft, "")),
-                ("RPC strategy", draft.rpc_strategy.to_string()),
-            ],
-        ),
+        "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
+        vec![
+            ("Network", vec![draft.name.clone()]),
+            ("Chain ID", vec![draft.chain_id.to_string()]),
+            ("RPC URLs", endpoint_list(&draft)),
+            ("RPC strategy", vec![draft.rpc_strategy.to_string()]),
+        ],
+    )
+    .ask(
         "Save these changes to this network?",
         "Save these changes",
         "Cancel — nothing is written",
@@ -4269,23 +4283,27 @@ async fn review_one_network_proposal(
     proposal: &crate::config::NetworkConfig,
 ) -> Result<NetworkReviewOutcome> {
     {
+        // Held here now that the question is asked full-screen: a screen
+        // answers `false` when there is nobody to show it to, and `false`
+        // discards the proposal.
+        require_interactive("network configuration changes")?;
         let existing = config
             .load()?
             .networks
             .into_iter()
             .find(|network| network.chain_id == proposal.chain_id);
         let mut facts = vec![
-            ("Network", proposal.name.clone()),
-            ("Chain ID", proposal.chain_id.to_string()),
-            ("RPC endpoints", endpoint_lines(proposal, "")),
-            ("RPC strategy", proposal.rpc_strategy.to_string()),
+            ("Network", vec![proposal.name.clone()]),
+            ("Chain ID", vec![proposal.chain_id.to_string()]),
+            ("RPC endpoints", endpoint_list(proposal)),
+            ("RPC strategy", vec![proposal.rpc_strategy.to_string()]),
         ];
         // An edit is the dangerous shape: the chain keeps working and its
         // narrator changes. Say which endpoint is being replaced, because the
         // difference between the two URLs is the entire decision.
         let (title, summary) = if let Some(existing) = &existing {
-            facts.push(("Replaces endpoints", endpoint_lines(existing, "")));
-            facts.push(("Configured name", existing.name.clone()));
+            facts.push(("Replaces endpoints", endpoint_list(existing)));
+            facts.push(("Configured name", vec![existing.name.clone()]));
             (
                 "Accept an edited network",
                 "An agent suggested changing how this wallet reaches a chain it already uses.",
@@ -4297,7 +4315,16 @@ async fn review_one_network_proposal(
             )
         };
 
-        if !confirm_network_change(title, summary, "Accept this network?", facts)? {
+        // Full-screen on both paths that reach here: the pending-approvals
+        // browser is already a screen, and `network review` walks every
+        // proposal in a row, so an inline prompt would stack answered
+        // exchanges behind the next one. Two endpoint lists side by side is
+        // also the network fact most likely to outgrow a terminal.
+        if !network_review(title, summary, facts).ask(
+            "Accept this network?",
+            "Accept this network",
+            "Discard the suggestion",
+        )? {
             let mut store = PolicyStore::production(config.data_dir())?;
             store.discard_network_proposal(proposal)?;
             return Ok(NetworkReviewOutcome::Discarded);
@@ -4333,30 +4360,24 @@ async fn review_one_network_proposal(
     }
 }
 
-/// The facts and the standing warning behind every network change, as a
-/// document. `confirm_network_change` prints the same content to the
-/// scrollback for the commands that are not already in a screen.
-fn network_change_document(
+/// The facts and the standing warning behind every network change, built once
+/// so the inline and full-screen renderings cannot drift into describing the
+/// same write differently.
+///
+/// Endpoints arrive as a list rather than one newline-joined string because a
+/// fact is clamped to a single line in both renderings: a joined list used to
+/// collapse into a run of URLs separated by spaces, which is the one fact
+/// nobody can afford to misread.
+fn network_review(
+    title: &str,
     summary: &str,
-    facts: &[(&str, String)],
-) -> Vec<crate::fullscreen::Line> {
-    use crate::fullscreen::Span;
-    let mut lines = vec![
-        vec![Span::toned(summary, crate::tui::Tone::Muted)],
-        Vec::new(),
-    ];
-    for (label, value) in facts {
-        lines.push(vec![
-            Span::toned(format!("{label}: "), crate::tui::Tone::Muted),
-            Span::plain(value),
-        ]);
+    facts: Vec<(&str, Vec<String>)>,
+) -> crate::fullscreen::Review {
+    let mut review = crate::fullscreen::Review::new(title, summary);
+    for (label, values) in facts {
+        review = review.fact_lines(label, values);
     }
-    lines.push(Vec::new());
-    lines.push(vec![Span::toned(
-        format!("⚠ {NETWORK_TRUST_WARNING}"),
-        crate::tui::Tone::Warning,
-    )]);
-    lines
+    review.warning(NETWORK_TRUST_WARNING)
 }
 
 /// What a configured RPC decides, said the same way everywhere it is asked
@@ -4364,16 +4385,25 @@ fn network_change_document(
 const NETWORK_TRUST_WARNING: &str = "The configured RPC supplies the chain state and eth_simulateV1 results that automatic \
      signing decisions are made from.";
 
+/// The scrollback rendering, for the network commands that never open a
+/// screen. A command that has already shown one asks with
+/// [`crate::fullscreen::Review::ask`] instead.
 fn confirm_network_change(
     title: &str,
     summary: &str,
     prompt: &str,
-    facts: Vec<(&str, String)>,
+    facts: Vec<(&str, Vec<String>)>,
 ) -> Result<bool> {
     require_interactive("network configuration changes")?;
     let mut question = crate::tui::Confirmation::new(title, summary).warning(NETWORK_TRUST_WARNING);
-    for (label, value) in facts {
-        question = question.fact(label, value);
+    for (label, values) in facts {
+        // Repeated rather than blanked for the second and later values: a
+        // `Confirmation` fact is one line, so a list has to arrive as separate
+        // facts, and an unlabelled continuation line reads as a different
+        // fact whose label went missing.
+        for value in values {
+            question = question.fact(label, value);
+        }
     }
     question.ask(prompt)
 }
