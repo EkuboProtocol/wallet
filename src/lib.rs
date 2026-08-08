@@ -25,7 +25,21 @@ pub mod tui;
 pub mod tx_browser;
 pub mod walletconnect;
 
+/// The crate version, exactly as the manifest declares it.
+///
+/// For anywhere the version is a protocol field rather than something a person
+/// reads. [`BUILD_VERSION`] is what to print.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The version of *this binary*: [`VERSION`] on a released build, and
+/// `1.0.0-rc.0+8133a00` on anything built from an untagged commit.
+///
+/// Everything a person or an agent reads uses this. A version alone cannot
+/// distinguish two builds of the same unreleased crate version, which is
+/// exactly the distinction that matters when someone reports that a fix did
+/// not take — the first question is whether they are running it. See
+/// `build.rs`.
+pub const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
 
 /// Shared entry point for the `ekubo-wallet` binary and its `ew` alias.
 pub async fn run_cli() -> anyhow::Result<()> {

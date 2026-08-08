@@ -83,6 +83,20 @@ Use an absolute path, such as `/home/you/.local/bin/ekubo-wallet`, if the agent
 does not inherit your login shell's `PATH`. Confirm the installed build with
 `ekubo-wallet version`.
 
+A release prints its version alone — `ekubo-wallet 1.0.0` — because the tag it
+was built from identifies it exactly. A build from source prints the commit
+too, as SemVer build metadata:
+
+```
+ekubo-wallet 1.0.0-rc.0+8133a00
+ekubo-wallet 1.0.0-rc.0+8133a00.dirty
+```
+
+The second form means the working tree had uncommitted changes to tracked
+files, so the commit names where the build started rather than what it
+contains. Both forms appear wherever else this binary reports its version:
+`--version`, `ekubo-wallet status`, and the MCP server's `serverInfo`.
+
 Do not ask an agent to clone this repository or run the human CLI on your
 behalf.
 

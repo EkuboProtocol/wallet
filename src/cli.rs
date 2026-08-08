@@ -1,6 +1,6 @@
 use crate::approve_tui::TerminalApprovalUi;
 use crate::{
-    VERSION,
+    BUILD_VERSION,
     address_book::AddressBookStore,
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalUi},
     config::{
@@ -42,7 +42,7 @@ use zeroize::Zeroize;
 #[derive(Debug, Parser)]
 #[command(
     name = "ekubo-wallet",
-    version = VERSION,
+    version = BUILD_VERSION,
     about = "Policy-enforced local EVM wallet and MCP server"
 )]
 pub struct Cli {
@@ -654,7 +654,7 @@ impl Cli {
         match self.command {
             Command::Server => crate::mcp::serve(config).await,
             Command::Version => {
-                println!("ekubo-wallet {VERSION}");
+                println!("ekubo-wallet {BUILD_VERSION}");
                 Ok(())
             }
             Command::Status => run_status(&config, mode),
@@ -817,7 +817,7 @@ fn run_status(config: &ConfigStore, mode: OutputMode) -> Result<()> {
 
     let waiting = awaiting + awaiting_typed_data + awaiting_messages;
     let report = serde_json::json!({
-        "version": VERSION,
+        "version": BUILD_VERSION,
         "data_dir": data_dir,
         "signing_allowed": legal.signing_allowed,
         "legal": legal,
@@ -881,7 +881,7 @@ struct StatusFacts<'a> {
 /// step just moves the search rather than ending it.
 fn status_lines(facts: &StatusFacts<'_>) -> String {
     let mut lines = vec![
-        format!("ekubo-wallet {VERSION}"),
+        format!("ekubo-wallet {BUILD_VERSION}"),
         format!("Data directory   {}", facts.data_dir),
         String::new(),
     ];
