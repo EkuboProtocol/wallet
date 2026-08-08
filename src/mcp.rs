@@ -514,7 +514,7 @@ struct ProposeTokensInput {
     /// it overrides whatever name the referenced list declares.
     #[serde(default)]
     list_name: Option<String>,
-    /// Entries written out one by one, at most 1000 of them. Provide exactly
+    /// Entries written out one by one, at most 10000 of them. Provide exactly
     /// one of `tokens` and `reference`; prefer `reference` for anything
     /// beyond a handful, since restating a list here costs an output token
     /// per field.
@@ -527,7 +527,7 @@ struct ProposeTokensInput {
     /// actually fetched. This changes only who carries the bytes — the
     /// entries still reach the owner as suggestions and are still named
     /// nothing until they accept them in `ekubo-wallet token review`. The
-    /// same 1000-entry cap applies: a longer list is refused rather than
+    /// same 10000-entry cap applies: a longer list is refused rather than
     /// truncated.
     #[serde(default)]
     reference: Option<ArtifactReference>,
@@ -641,10 +641,10 @@ struct GetBalancesInput {
     /// addresses. Only the addresses are used: this reads balances and never
     /// consults or records what the list calls anything. Entries on other
     /// chains are ignored, so one canonical multi-chain list can be pointed
-    /// at any chain — but the cap is on the list, not on the chain: a
-    /// referenced list is refused outright above 1000 entries across every
-    /// chain it names, so a larger list has to be split before it is
-    /// referenced here.
+    /// at any chain. Two different caps apply: the referenced list itself is
+    /// refused outright above 10000 entries across every chain it names, and
+    /// what survives the chain filter must still be at most 1000 addresses,
+    /// which is what one balance request will carry.
     #[serde(default)]
     reference: Option<ArtifactReference>,
     /// Read this temporary simulation fork's hypothetical balances instead of
@@ -1464,7 +1464,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_import_token_list",
-        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 1000 entries after that selection — Uniswap's default list carries about 1700 across nine chains — and an overflowing selection is refused rather than truncated, with the fix being fewer chains. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the separate CLI with `ekubo-wallet token review`, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
+        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 10000 entries after that selection, which fits the published lists people actually name, and an overflowing selection is refused rather than truncated — narrow the chains, or point at a more specific list. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the separate CLI with `ekubo-wallet token review`, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,

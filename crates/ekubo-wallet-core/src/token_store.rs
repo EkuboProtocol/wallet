@@ -71,24 +71,52 @@ const BALANCE_CHUNK: usize = 200;
 /// Tokens one import may carry.
 ///
 /// This bounds a single list's size so one call cannot fill the review queue
-/// by itself. Nothing here is read from a chain, so the limit is about what a
-/// person can be handed at once, not about what a batch of RPC calls costs.
-pub const MAX_IMPORT_TOKENS: usize = 1_000;
+/// by itself. Nothing here is read from a chain, so the limit is about what
+/// the owner is handed at once, not about what a batch of RPC calls costs.
+///
+/// It is deliberately generous, because the decision it bounds is not
+/// per-row. `token review` groups suggestions by the list that vouched for
+/// them and the owner accepts or rejects a whole list at a time: what they
+/// are judging is whether the curator is trustworthy, and that question reads
+/// the same at ten entries as at ten thousand. A tighter cap bought no extra
+/// scrutiny — nobody was checking a thousand rows individually either — while
+/// it did refuse ordinary published lists outright. Uniswap Labs Default
+/// carries about 1700 rows and `CoinGecko`'s about 5100, and a wallet that
+/// could not import either was enforcing a budget nobody was spending.
+///
+/// What still bounds the damage is that none of it is a name yet: an import
+/// is a queue of suggestions no display path reads until the owner confirms
+/// the list.
+pub const MAX_IMPORT_TOKENS: usize = 10_000;
 
 /// Token suggestions that may await review at once.
 ///
 /// Sized to hold several full imports, so the ordinary case of proposing a
 /// couple of curated lists back to back is never refused, while an agent
-/// cannot make `token review` an unbounded scroll of decisions.
-pub const MAX_PENDING_TOKEN_PROPOSALS: u64 = 5_000;
+/// cannot make `token review` an unbounded scroll of decisions. It has to
+/// stay a multiple of [`MAX_IMPORT_TOKENS`]: capacity is charged per row
+/// below, so a queue smaller than one import would make every full-size
+/// import fail partway and roll back, which is a cap that refuses the thing
+/// it was sized to hold.
+pub const MAX_PENDING_TOKEN_PROPOSALS: u64 = 50_000;
 /// A portfolio read checks at most this many known tokens.
 ///
-/// Comfortably above the largest chain in the shipped list — Ethereum's ~5,600
-/// — so the ordinary answer is complete rather than truncated. The lens
-/// returns only nonzero entries, so asking about every known token costs one
-/// request and a response sized by what the owner actually holds; the bound
-/// exists so an unusually large imported list cannot turn one read into a
-/// request no endpoint will serve.
+/// Above the largest chain in the shipped list — Ethereum's ~5,600 — so the
+/// ordinary answer is complete rather than truncated. The lens returns only
+/// nonzero entries, so asking about every known token costs one request and a
+/// response sized by what the owner actually holds; the bound exists so an
+/// unusually large imported list cannot turn one read into a request no
+/// endpoint will serve.
+///
+/// This one does *not* scale with [`MAX_IMPORT_TOKENS`], and must not be
+/// raised to match it. `FETCHER_CHUNK` is sized so a whole portfolio is one
+/// call, and that is a correctness property rather than tuning: a second
+/// chunk has to be read at the block the first reported, which archive-less
+/// public endpoints routinely cannot serve — the failure that broke this on
+/// Arbitrum and Base. So an owner who confirms more tokens than this on one
+/// chain gets a complete-as-far-as-it-went read with the remainder reported
+/// in `tokens_skipped`, which is the honest outcome; silently issuing a
+/// second chunk at a stale block would not be.
 pub const MAX_PORTFOLIO_TOKENS: usize = 8_000;
 /// One explicit balances read accepts at most this many token addresses.
 pub const MAX_BALANCE_TOKENS: usize = 1_000;

@@ -4,9 +4,9 @@
 //! fixtures. What needs the network is the other end of the contract: that
 //! the lists people actually name at tokenlists.org still parse, still fit
 //! the caps, and still carry the fields the owner is shown at review time.
-//! That end is maintained by strangers, so a fixture cannot speak for it —
-//! Uniswap's default list grew past the 1000-entry review budget on its own
-//! schedule, which is the whole reason the chain filter exists.
+//! That end is maintained by strangers and moves on its own schedule, so a
+//! fixture cannot speak for it: the default list outgrew the import cap once
+//! already, which is how the chain filter came to exist.
 //!
 //! Skipped unless `EKUBO_WALLET_LIVE_TOKEN_LIST_TESTS=1`. These read public
 //! URLs and need no key, wallet, or chain access.
@@ -41,7 +41,7 @@ async fn imports_ethereum_mainnet_from_the_uniswap_default_list() {
     assert!(!list.tokens.is_empty());
     assert!(
         list.tokens.len() <= MAX_IMPORT_TOKENS,
-        "one chain's selection must fit the review budget, got {}",
+        "one chain's selection must fit the import cap, got {}",
         list.tokens.len()
     );
     assert!(
@@ -63,19 +63,29 @@ async fn imports_ethereum_mainnet_from_the_uniswap_default_list() {
     );
 }
 
-/// The list is larger than one review can carry, which is the condition the
-/// chain filter exists for. If this ever stops holding the filter is still
-/// correct, but the sizing note in `token_list` has gone stale.
+/// With the import cap at ten thousand the whole default list fits, so an
+/// unfiltered import is expected to succeed rather than be refused. This
+/// pins that: the cap is the thing that has to stay ahead of a list that
+/// grows on someone else's schedule, and if this starts failing the cap has
+/// been outgrown again rather than the filter having broken.
 #[tokio::test]
-async fn the_whole_default_list_is_over_the_review_budget() {
+async fn the_whole_default_list_fits_one_import() {
     if !live_enabled() {
         return;
     }
-    let error = fetch_token_list_url(UNISWAP_DEFAULT, &[], FetchPolicy::production())
+    let (list, _) = fetch_token_list_url(UNISWAP_DEFAULT, &[], FetchPolicy::production())
         .await
-        .expect_err("the unfiltered list should not fit one review")
-        .to_string();
-    assert!(error.contains("one import may verify"), "{error}");
+        .expect("the whole default list should fit one import");
+    assert!(list.tokens.len() <= MAX_IMPORT_TOKENS);
+    // Unfiltered means every chain it names, so this must be strictly more
+    // than the single-chain selection above.
+    assert!(
+        list.tokens.iter().any(|token| token.chain_id != 1),
+        "an unfiltered import should carry more than mainnet"
+    );
+    assert_eq!(list.skipped_other_chain, 0);
+    // The non-EVM rows are still dropped and counted, filter or no filter.
+    assert!(list.skipped_non_evm > 0);
 }
 
 /// Several chains at once, since an owner usually runs more than one, and the

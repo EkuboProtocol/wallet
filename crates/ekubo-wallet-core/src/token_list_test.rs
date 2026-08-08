@@ -171,7 +171,7 @@ fn rejects_more_entries_than_one_import_may_verify() {
             .join(",")
     );
     let error = parse_token_list(body.as_bytes()).unwrap_err().to_string();
-    assert!(error.contains("one import may verify"), "{error}");
+    assert!(error.contains("one import may carry"), "{error}");
 }
 
 #[test]
@@ -181,13 +181,13 @@ fn rejects_a_body_over_the_byte_cap_before_parsing_it() {
     assert!(error.contains("larger than"), "{error}");
 }
 
-/// The case this exists for. Uniswap Labs Default carried 1685 rows across
-/// nine chains when this was written — well over the 1000 one import may
-/// verify — so charging the review budget against the whole list would refuse
-/// it without ever asking which chain the owner wanted. Selecting first turns
-/// the same list into a reviewable import.
+/// The case the filter exists for: charging the import cap against the whole
+/// list refuses it without ever asking which chain the owner wanted, while
+/// selecting first turns the same list into an import. Stated against the cap
+/// rather than a fixed count, so it keeps testing the behaviour if the cap
+/// moves again.
 #[test]
-fn a_list_over_the_review_budget_still_imports_one_chain() {
+fn a_list_over_the_import_cap_still_imports_one_chain() {
     let entry = |chain: u64| {
         format!(r#"{{"chainId": {chain}, "address": "{USDC}", "symbol": "X", "decimals": 6}}"#)
     };
@@ -197,11 +197,11 @@ fn a_list_over_the_review_budget_still_imports_one_chain() {
         .collect();
     let body = format!(r#"{{"name": "Big", "tokens": [{}]}}"#, rows.join(","));
 
-    // Unfiltered, the list is over the budget and says so.
+    // Unfiltered, the list is over the cap and says so.
     let error = parse_token_list(body.as_bytes()).unwrap_err().to_string();
-    assert!(error.contains("one import may verify"), "{error}");
+    assert!(error.contains("one import may carry"), "{error}");
 
-    // Selecting a chain charges the budget against what the owner would read.
+    // Selecting a chain charges the cap against what the owner is handed.
     let parsed = parse_token_list_for_chains(body.as_bytes(), &[1]).unwrap();
     assert_eq!(parsed.tokens.len(), wanted);
     assert!(parsed.tokens.iter().all(|token| token.chain_id == 1));
@@ -258,11 +258,10 @@ fn selecting_a_chain_the_list_does_not_name_says_so() {
 }
 
 /// The selection cap is charged after filtering, and the fix it names has to
-/// match the list. A single-chain list over the budget — `CoinGecko`'s is five
-/// thousand tokens on mainnet alone — cannot be fixed by narrowing chains, so
-/// it must not be told to.
+/// match the list: an overflow that is all on one chain cannot be fixed by
+/// narrowing chains, so it must not be told to.
 #[test]
-fn a_single_chain_selection_over_the_budget_is_not_told_to_narrow_chains() {
+fn a_single_chain_selection_over_the_cap_is_not_told_to_narrow_chains() {
     let entry = format!(r#"{{"chainId": 1, "address": "{USDC}", "symbol": "X", "decimals": 6}}"#);
     let body = format!(
         "[{}]",
@@ -273,14 +272,14 @@ fn a_single_chain_selection_over_the_budget_is_not_told_to_narrow_chains() {
     let error = parse_token_list_for_chains(body.as_bytes(), &[1])
         .unwrap_err()
         .to_string();
-    assert!(error.contains("one import may verify"), "{error}");
+    assert!(error.contains("one import may carry"), "{error}");
     assert!(!error.contains("select fewer chains"), "{error}");
     assert!(error.contains("more specific list"), "{error}");
 }
 
 /// With several chains selected, narrowing is a real fix and is offered.
 #[test]
-fn a_multi_chain_selection_over_the_budget_is_told_to_narrow_chains() {
+fn a_multi_chain_selection_over_the_cap_is_told_to_narrow_chains() {
     let entry = |chain: u64| {
         format!(r#"{{"chainId": {chain}, "address": "{USDC}", "symbol": "X", "decimals": 6}}"#)
     };
@@ -296,9 +295,8 @@ fn a_multi_chain_selection_over_the_budget_is_told_to_narrow_chains() {
 }
 
 /// A list too large to walk is refused before any of it is selected. This is
-/// the structural bound, not the review budget, and they are different
-/// numbers for a reason — so it must not claim a reviewer could verify
-/// twenty thousand rows.
+/// the structural bound rather than the import cap, and the two are different
+/// numbers, so the message must not claim one import could carry this many.
 #[test]
 fn a_list_over_the_structural_cap_is_refused_before_selection() {
     let entry = format!(r#"{{"chainId": 1, "address": "{USDC}", "symbol": "X", "decimals": 6}}"#);
@@ -312,7 +310,7 @@ fn a_list_over_the_structural_cap_is_refused_before_selection() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("this wallet will read"), "{error}");
-    assert!(!error.contains("one import may verify"), "{error}");
+    assert!(!error.contains("one import may carry"), "{error}");
 }
 
 #[test]

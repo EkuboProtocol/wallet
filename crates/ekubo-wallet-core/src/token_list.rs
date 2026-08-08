@@ -44,15 +44,15 @@ pub const MAX_TOKEN_LIST_BYTES: usize = 4 * 1024 * 1024;
 
 /// The most rows a published list may hold at all, before any are selected.
 ///
-/// This is not the review budget — [`MAX_IMPORT_TOKENS`] is, and it is charged
+/// This is not the import cap — [`MAX_IMPORT_TOKENS`] is, and it is charged
 /// against what an import actually proposes. This bounds the other thing: how
 /// much a list may make this process hold and walk while deciding which rows
-/// apply. The two differ because a real multi-chain list is routinely larger
-/// than any one import of it: Uniswap Labs Default carried 1685 rows across
-/// nine chains and a non-EVM ecosystem when this was written, of which 396
-/// were Ethereum mainnet. Holding the whole list to the reviewer's budget
-/// would refuse it outright and leave the owner no way to take the 396 —
-/// which is the case this exists to serve.
+/// apply. The two differ because a real multi-chain list can be larger than
+/// any one import of it, and a list is read in full before anything is
+/// selected from it. Kept a small multiple of the import cap, and in the same
+/// range as what [`MAX_TOKEN_LIST_BYTES`] already permits: at the ~220 bytes
+/// per entry that published lists run to, 4 MiB is about eighteen thousand
+/// rows, so neither bound is doing much work the other is not.
 pub const MAX_LIST_ENTRIES: usize = 20_000;
 
 /// A chain ID as lists actually write it.
@@ -162,7 +162,7 @@ pub struct ParsedTokenList {
 /// Parse one token-list body.
 ///
 /// Fails when the bytes are not a token list at all, when every entry was
-/// skipped, or when the list holds more entries than one import may verify.
+/// skipped, or when the list holds more entries than one import may carry.
 pub fn parse_token_list(body: &[u8]) -> Result<ParsedTokenList> {
     parse_token_list_within(body, MAX_TOKEN_LIST_BYTES, MAX_IMPORT_TOKENS)
 }
@@ -170,14 +170,13 @@ pub fn parse_token_list(body: &[u8]) -> Result<ParsedTokenList> {
 /// Parse one token-list body against explicit limits.
 ///
 /// The limits are a parameter because the two callers bound different things.
-/// An import's caps exist to keep the owner from being handed more rows than
-/// one review can honestly verify, so they are stated in units of human
-/// attention. The compiled-in list in [`crate::default_tokens`] is not
-/// reviewed at run time at all — it was reviewed when it was vendored, and
-/// nothing about a startup seed asks the owner to check anything — so holding
-/// it to a reviewer's budget would be enforcing a limit against the wrong
-/// party. Everything else about how the bytes are read stays identical, which
-/// is the point: one set of tolerances, one place they are written down.
+/// An import's cap exists to bound what one call can queue for the owner. The
+/// compiled-in list in [`crate::default_tokens`] queues nothing at all — it
+/// was reviewed when it was vendored, and nothing about a startup seed asks
+/// the owner to decide anything — so holding it to an import's cap would be
+/// enforcing a limit against the wrong party. Everything else about how the
+/// bytes are read stays identical, which is the point: one set of tolerances,
+/// one place they are written down.
 pub fn parse_token_list_within(
     body: &[u8],
     max_bytes: usize,
@@ -191,17 +190,17 @@ pub fn parse_token_list_within(
 
 /// Parse one token-list body, keeping only the entries for `chain_ids`.
 ///
-/// This is what a published multi-chain list needs. The review budget in
-/// [`MAX_IMPORT_TOKENS`] is a bound on what one person can honestly check, so
-/// it belongs on the rows that reach them — and a list is routinely far larger
-/// than the part of it an owner is taking. Charging the budget against the
-/// whole list instead would refuse Uniswap's default list at 1685 rows without
-/// ever asking which chain the owner wanted, so the filter runs first and the
-/// budget is charged to what survives it.
+/// This is what a published multi-chain list needs. [`MAX_IMPORT_TOKENS`]
+/// bounds what one call queues for the owner, so it belongs on the rows that
+/// actually reach them — and an owner taking one chain from a nine-chain list
+/// is not asking for the other eight. Selecting first also keeps names for
+/// chains the wallet has no network for out of the review screen entirely,
+/// which is the difference between a list someone wanted and a list they have
+/// to read past.
 ///
 /// An empty `chain_ids` selects every chain, which is the right default for a
-/// single-chain list and fails loudly on a large multi-chain one rather than
-/// silently importing a slice of it.
+/// single-chain list and fails loudly on a list too large to import whole
+/// rather than silently taking a slice of it.
 pub fn parse_token_list_for_chains(body: &[u8], chain_ids: &[u64]) -> Result<ParsedTokenList> {
     parse_selecting(
         body,
@@ -246,10 +245,8 @@ fn parse_selecting(
     };
     ensure!(!entries.is_empty(), "the token list lists no tokens");
     // The two callers bound different things with this, so it says which.
-    // Without a selection the structural cap *is* the review budget and the
-    // sentence is about what a person can check; with one it is only how much
-    // this process will walk before selecting, and claiming a reviewer could
-    // verify twenty thousand rows would be false.
+    // Without a selection the structural cap *is* the import cap; with one it
+    // is only how much this process will walk before selecting.
     ensure!(
         entries.len() <= structural_cap,
         "the token list holds {} entries, over the {structural_cap} {}",
@@ -257,7 +254,7 @@ fn parse_selecting(
         if chain_ids.is_some() {
             "this wallet will read"
         } else {
-            "one import may verify"
+            "one import may carry"
         }
     );
 
@@ -308,14 +305,13 @@ fn parse_selecting(
              all {skipped_non_evm} were for another ecosystem"
         );
     }
-    // Charged against what the owner would actually be shown. A list that
-    // overflows this is not refused for being large — it is refused for
-    // being more than one review can carry.
+    // Charged against what the owner would actually be handed, rather than
+    // against the whole list, so a multi-chain list stays importable for the
+    // chains someone wanted.
     //
-    // The advice has to match the list. Narrowing chains fixes an
-    // over-budget selection only when more than one chain is in it;
-    // CoinGecko's list is five thousand tokens on mainnet alone, and telling
-    // someone holding that to select fewer chains would send them looking
+    // The advice has to match the list. Narrowing chains fixes an over-cap
+    // selection only when more than one chain is in it; telling someone whose
+    // overflow is all on one chain to select fewer would send them looking
     // for a filter that cannot help. So the sentence offers narrowing only
     // when there is something to narrow.
     let chains_in_selection = tokens
@@ -325,7 +321,7 @@ fn parse_selecting(
         .len();
     ensure!(
         tokens.len() <= selection_cap,
-        "the selection holds {} entries, over the {selection_cap} one import may verify; {}",
+        "the selection holds {} entries, over the {selection_cap} one import may carry; {}",
         tokens.len(),
         if chains_in_selection > 1 {
             "select fewer chains, or point at a smaller list"
