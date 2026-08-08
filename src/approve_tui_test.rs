@@ -370,3 +370,103 @@ fn a_decision_taken_without_the_screen_still_shows_the_document() {
     // The request id is what a reviewer quotes when something goes wrong.
     assert!(text.contains(&request.id.to_string()), "{text}");
 }
+
+fn switchable_screen() -> ReviewScreen {
+    let mut review = ReviewScreen::new(document("primary review"));
+    review.choices = vec![
+        document("primary review"),
+        document("cold review"),
+        document("hot review"),
+    ];
+    review.choice_labels = vec!["primary".to_owned(), "cold".to_owned(), "hot".to_owned()];
+    review
+}
+
+#[test]
+fn switching_accounts_is_offered_only_where_there_is_a_choice() {
+    // One account is not a choice, and a key that silently does nothing is
+    // worse than one that was never advertised.
+    let mut only_one = ReviewScreen::new(document("summary"));
+    only_one.choices = vec![document("summary")];
+    only_one.choice_labels = vec!["primary".to_owned()];
+    assert!(!only_one.switchable());
+    assert_eq!(only_one.handle_key(press(KeyCode::Char('a'))), None);
+    assert_eq!(only_one.choice, 0);
+    assert!(
+        !only_one.hints().contains("a account"),
+        "{}",
+        only_one.hints()
+    );
+
+    let mut several = switchable_screen();
+    assert!(several.switchable());
+    assert_eq!(several.handle_key(press(KeyCode::Char('a'))), None);
+    assert_eq!(several.choice, 1);
+    assert!(several.hints().contains("a account"), "{}", several.hints());
+}
+
+#[test]
+fn switching_cycles_through_every_account_and_wraps() {
+    let mut review = switchable_screen();
+    for expected in [1, 2, 0, 1] {
+        review.handle_key(press(KeyCode::Char('a')));
+        assert_eq!(review.choice, expected);
+    }
+}
+
+#[test]
+fn the_document_on_screen_is_the_selected_accounts_own() {
+    let mut review = switchable_screen();
+    review.handle_key(press(KeyCode::Char('a')));
+    assert_eq!(review.document, document("cold review"));
+    review.handle_key(press(KeyCode::Char('a')));
+    assert_eq!(review.document, document("hot review"));
+}
+
+/// The same property a changed re-simulation has, for the same reason:
+/// scrolling one account's review to the end is not having read another's.
+/// Without this, reading `primary` to the end and then switching would leave
+/// Approve live over a document nobody had looked at.
+#[test]
+fn switching_accounts_withdraws_the_right_to_approve() {
+    let mut review = switchable_screen();
+    review.reached_end = true;
+    review.on_approve = true;
+    review.offset = 42;
+
+    review.handle_key(press(KeyCode::Char('a')));
+
+    assert!(!review.reached_end, "the new account's review is unseen");
+    assert!(!review.on_approve, "the cursor returns to Reject");
+    assert_eq!(review.offset, 0, "the new review starts at the top");
+    assert_eq!(
+        review.handle_key(press(KeyCode::Enter)),
+        Some(ReviewAction::Decide(ApprovalDecision::Rejected)),
+        "Enter on Reject still rejects"
+    );
+}
+
+#[test]
+fn the_footer_and_the_notice_name_the_account_now_selected() {
+    // A legend saying only that a switch is possible does not say which
+    // account is about to be connected, and that is the fact being decided.
+    let mut review = switchable_screen();
+    review.handle_key(press(KeyCode::Char('a')));
+    let hints = review.hints();
+    assert!(hints.contains("cold"), "{hints}");
+    assert!(hints.contains("2/3"), "{hints}");
+    let notice = review.notice.clone().expect("a switch says what it did");
+    assert!(notice.contains("cold"), "{notice}");
+}
+
+#[test]
+fn tab_still_moves_the_decision_cursor_on_a_switchable_review() {
+    // Tab is the decision cursor everywhere in this program, and that movement
+    // is what makes approving deliberate. Account switching must not have
+    // quietly taken it over.
+    let mut review = switchable_screen();
+    assert!(!review.on_approve);
+    review.handle_key(press(KeyCode::Tab));
+    assert!(review.on_approve, "Tab must still reach Approve");
+    assert_eq!(review.choice, 0, "Tab must not change the account");
+}

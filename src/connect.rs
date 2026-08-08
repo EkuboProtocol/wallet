@@ -109,7 +109,7 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
     );
     legal::require_current_acceptance(config.data_dir())?;
 
-    let wallet = resolve_account(config, options.account.as_deref())?;
+    let (accounts, selected) = resolve_accounts(config, options.account.as_deref())?;
     let project_id = resolve_project_id(options.project_id)?;
     let relay_url = match options.relay_url {
         Some(url) => url,
@@ -124,10 +124,17 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
 
     crate::tui::info(format!(
         "Connecting as {} ({}) through {}.",
-        wallet.id,
-        wallet.address.to_checksum(None),
+        accounts[selected].id,
+        accounts[selected].address.to_checksum(None),
         relay_url.as_str()
     ));
+    if accounts.len() > 1 {
+        crate::tui::info(format!(
+            "{} accounts available; press `a` on the connection review to change which one the \
+             dapp gets.",
+            accounts.len()
+        ));
+    }
 
     let identity = ClientIdentity::generate()?;
     let relay = RelayConnection::connect(
@@ -141,7 +148,8 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
 
     let handler = DappSession {
         config,
-        wallet,
+        accounts,
+        selected: std::cell::Cell::new(selected),
         data_dir: config.data_dir().to_path_buf(),
     };
     let session = Session::new(relay, pairing, &handler);
@@ -159,24 +167,34 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
     }
 }
 
-/// Which account to expose, without ever guessing between several.
-fn resolve_account(config: &ConfigStore, requested: Option<&str>) -> Result<WalletMetadata> {
-    if let Some(requested) = requested {
-        return config.wallet(requested);
-    }
-    let wallets = config.load()?.wallets;
-    match wallets.len() {
-        0 => bail!("this wallet holds no accounts. Run `ekubo-wallet account create` first."),
-        1 => Ok(wallets.into_iter().next().expect("length checked")),
-        _ => {
-            let names: Vec<&str> = wallets.iter().map(|wallet| wallet.id.as_str()).collect();
-            bail!(
-                "this wallet holds several accounts ({}), and a dapp session exposes exactly one. \
-                 Name it with `--account`.",
-                names.join(", ")
-            )
-        }
-    }
+/// Every account this session could expose, and which one starts selected.
+///
+/// A session exposes exactly one account, but *which* one is a question best
+/// asked on the review screen, where the consequences of the answer are
+/// already on display — so this returns all of them rather than making the
+/// caller choose blind. `--account` preselects; it does not narrow the list,
+/// because the review names the selected account in its own document and
+/// changing it takes a deliberate keystroke.
+fn resolve_accounts(
+    config: &ConfigStore,
+    requested: Option<&str>,
+) -> Result<(Vec<WalletMetadata>, usize)> {
+    let accounts = config.load()?.wallets;
+    ensure!(
+        !accounts.is_empty(),
+        "this wallet holds no accounts. Run `ekubo-wallet account create` first."
+    );
+    let Some(requested) = requested else {
+        return Ok((accounts, 0));
+    };
+    // Resolved through the config store rather than by scanning the list, so
+    // an unknown id fails with the store's own message.
+    let wanted = config.wallet(requested)?;
+    let selected = accounts
+        .iter()
+        .position(|account| account.id == wanted.id)
+        .context("the named account is not in this wallet's account list")?;
+    Ok((accounts, selected))
 }
 
 /// The relay project id, from the flag or the environment.
@@ -231,7 +249,18 @@ fn prompt_for_uri() -> Result<String> {
 /// One dapp session, bound to one account.
 struct DappSession<'a> {
     config: &'a ConfigStore,
-    wallet: WalletMetadata,
+    /// Every account the connection review may be pointed at.
+    accounts: Vec<WalletMetadata>,
+    /// Which one the reviewer settled on. Written once, when the connection
+    /// review returns, and read by every request afterwards.
+    ///
+    /// A `Cell` because [`SessionHandler`] takes `&self` — the session owns the
+    /// handler for the whole run — and because the alternative, threading the
+    /// choice back out through the trait, would put a session-lifetime decision
+    /// into a per-request signature. Nothing here is shared across threads: the
+    /// handler's futures are `?Send` and run on the thread that owns the
+    /// terminal.
+    selected: std::cell::Cell<usize>,
     data_dir: PathBuf,
 }
 
@@ -301,27 +330,43 @@ impl SessionHandler for DappSession<'_> {
             })
             .map(|method| (*method).to_owned())
             .collect();
-        let events: Vec<String> = SUPPORTED_EVENTS
+
+        // One complete review per account, authored before the screen opens,
+        // so switching between them is instant and the reviewer always sees
+        // the consequences of the account actually selected — the address
+        // exposed, and which chains it will be exposed on.
+        let scopes: Vec<ApprovedScope> = self
+            .accounts
             .iter()
-            .map(|event| (*event).to_owned())
+            .map(|account| Self::scope_for(account, chains.clone(), methods.clone()))
+            .collect();
+        let choices: Vec<crate::approve_tui::ReviewChoice> = self
+            .accounts
+            .iter()
+            .zip(&scopes)
+            .map(|(account, scope)| crate::approve_tui::ReviewChoice {
+                request: self.proposal_document(proposal, account, scope),
+                label: account.id.clone(),
+            })
             .collect();
 
-        let scope = ApprovedScope {
-            address: self.wallet.address.to_checksum(None),
-            chains,
-            methods,
-            events,
-        };
-        let approval = self.proposal_document(proposal, &scope);
-        if crate::approve_tui::review_fullscreen(&approval, Vec::new()).await?
-            != ApprovalDecision::Approved
-        {
+        let (decision, chosen) =
+            crate::approve_tui::review_fullscreen_choosing(choices, self.selected.get()).await?;
+        if decision != ApprovalDecision::Approved {
             return Ok(ProposalDecision::Reject {
                 code: error_code::USER_REJECTED,
                 message: "The wallet owner declined this connection.".to_owned(),
             });
         }
-        Ok(ProposalDecision::Approve(scope))
+        // Recorded before the scope is handed back, so every request served
+        // afterwards signs for the account whose review was approved.
+        self.selected.set(chosen);
+        Ok(ProposalDecision::Approve(
+            scopes
+                .into_iter()
+                .nth(chosen)
+                .context("the review returned an account that was never offered")?,
+        ))
     }
 
     async fn handle_request(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
@@ -399,6 +444,28 @@ impl SessionHandler for DappSession<'_> {
 }
 
 impl DappSession<'_> {
+    /// The account this session signs for.
+    fn wallet(&self) -> &WalletMetadata {
+        &self.accounts[self.selected.get().min(self.accounts.len() - 1)]
+    }
+
+    /// The scope a session would expose if it settled on `account`.
+    fn scope_for(
+        account: &WalletMetadata,
+        chains: Vec<String>,
+        methods: Vec<String>,
+    ) -> ApprovedScope {
+        ApprovedScope {
+            address: account.address.to_checksum(None),
+            chains,
+            methods,
+            events: SUPPORTED_EVENTS
+                .iter()
+                .map(|event| (*event).to_owned())
+                .collect(),
+        }
+    }
+
     /// The network configured for a CAIP-2 chain, if any.
     fn network_for(&self, caip2: &str) -> Option<NetworkConfig> {
         let chain_id = crate::walletconnect::session::numeric_chain_id(caip2)?;
@@ -414,6 +481,7 @@ impl DappSession<'_> {
     fn proposal_document(
         &self,
         proposal: &ProposalSummary,
+        account: &WalletMetadata,
         scope: &ApprovedScope,
     ) -> ApprovalRequest {
         let mut approval = ApprovalRequest::new(
@@ -428,7 +496,24 @@ impl DappSession<'_> {
         .fact("Dapp URL", sanitized(&proposal.metadata.url))
         .fact("Description", sanitized(&proposal.metadata.description))
         .fact("Pairing topic", &proposal.pairing_topic)
-        .fact("Account exposed", &scope.address);
+        .fact(
+            "Account exposed",
+            format!("{} — {}", account.id, scope.address),
+        );
+        if self.accounts.len() > 1 {
+            approval = approval.fact(
+                "Other accounts",
+                format!(
+                    "press `a` to connect a different one ({})",
+                    self.accounts
+                        .iter()
+                        .filter(|other| other.id != account.id)
+                        .map(|other| other.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
 
         approval = approval.section("What this session will allow");
         for chain in &scope.chains {
@@ -471,7 +556,7 @@ impl DappSession<'_> {
     async fn dispatch(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
         match request.method.as_str() {
             "eth_accounts" => Ok(RequestOutcome::Result(json!([self
-                .wallet
+                .wallet()
                 .address
                 .to_checksum(None)]))),
             "eth_chainId" => Ok(RequestOutcome::Result(json!(format!(
@@ -527,12 +612,12 @@ impl DappSession<'_> {
         // is useless to the address it names, so it is refused before a record
         // exists rather than shown to a person as a decision.
         if let Some(siwe) = std::str::from_utf8(&message).ok().and_then(parse_siwe)
-            && siwe.address != self.wallet.address.to_checksum(None)
+            && siwe.address != self.wallet().address.to_checksum(None)
         {
             return Ok(RequestOutcome::failed(format!(
                 "this sign-in message names account {}, but this session is {}",
                 siwe.address,
-                self.wallet.address.to_checksum(None)
+                self.wallet().address.to_checksum(None)
             )));
         }
 
@@ -542,7 +627,7 @@ impl DappSession<'_> {
             MessageEncoding::Text
         };
         let record = MessageStore::production(&self.data_dir)?.create(
-            &self.wallet.id,
+            &self.wallet().id,
             Some(&request.chain_id.to_string()),
             &message,
             encoding,
@@ -580,7 +665,7 @@ impl DappSession<'_> {
         self.config.network_by_chain_id(&chain_id.to_string())?;
 
         let record = TypedDataStore::production(&self.data_dir)?.create(
-            &self.wallet.id,
+            &self.wallet().id,
             chain_id,
             &payload,
             digest,
@@ -610,15 +695,15 @@ impl DappSession<'_> {
 
         let policies = PolicyStore::production(&self.data_dir)?;
         let stored_policy = policies
-            .get(&self.wallet.id)?
-            .with_context(|| format!("wallet {} has no local policy", self.wallet.id))?;
+            .get(&self.wallet().id)?
+            .with_context(|| format!("wallet {} has no local policy", self.wallet().id))?;
         drop(policies);
 
         let policy_context = crate::core::predicate::PolicyContext {
-            wallet: self.wallet.address,
+            wallet: self.wallet().address,
         };
         let simulation = simulate_execution(
-            &self.wallet,
+            self.wallet(),
             &network,
             &plan,
             &stored_policy,
@@ -633,7 +718,7 @@ impl DappSession<'_> {
             self.config,
             &pending,
             &OsKeyStore,
-            &self.wallet,
+            self.wallet(),
             &network,
             &stored_policy,
             &plan,
@@ -675,13 +760,13 @@ impl DappSession<'_> {
             schema_version: "1".to_owned(),
             chain_id: chain.clone(),
             caip2_chain_id: format!("eip155:{chain_id}"),
-            sender: self.wallet.address,
+            sender: self.wallet().address,
             ordered_steps: vec![ExecutionStep {
                 step: 1,
                 kind: ExecutionStepKind::Execution,
                 transaction: PlannedTransaction {
                     chain_id: chain,
-                    from: self.wallet.address,
+                    from: self.wallet().address,
                     to: proposed.to,
                     data: proposed.data.clone(),
                     value: DecimalU256::new(proposed.value.to_string())?,
@@ -707,7 +792,7 @@ impl DappSession<'_> {
         queued: PendingTransaction,
     ) -> Result<Option<PendingTransaction>> {
         let data_dir = self.data_dir.clone();
-        let wallet_id = self.wallet.id.clone();
+        let wallet_id = self.wallet().id.clone();
         let read_policy = move || -> Result<crate::policy_store::StoredPolicy> {
             PolicyStore::production(&data_dir)?
                 .get(&wallet_id)?
@@ -747,7 +832,7 @@ impl DappSession<'_> {
             store.claim_for_submission(request_id)?
         };
         let (record, broadcast) =
-            crate::reconcile::submit_claimed(&pending, &self.wallet, network, claimed).await?;
+            crate::reconcile::submit_claimed(&pending, self.wallet(), network, claimed).await?;
         if let Some(error) = broadcast.broadcast_error {
             bail!("the transaction was signed but the node refused it: {error}");
         }
@@ -758,14 +843,14 @@ impl DappSession<'_> {
 
     /// Refuse a request that names an address this session does not control.
     fn refuse_foreign_signer(&self, address: Address) -> Option<RequestOutcome> {
-        if address == self.wallet.address {
+        if address == self.wallet().address {
             return None;
         }
         Some(RequestOutcome::Error {
             code: error_code::UNSUPPORTED_ACCOUNTS,
             message: format!(
                 "This session signs for {} only; the request names {}.",
-                self.wallet.address.to_checksum(None),
+                self.wallet().address.to_checksum(None),
                 address.to_checksum(None)
             ),
         })

@@ -180,6 +180,104 @@ pub async fn review_fullscreen_refreshable(
     }
 }
 
+/// One subject a review can be pointed at.
+pub struct ReviewChoice {
+    /// The complete authored document for this subject.
+    pub request: ApprovalRequest,
+    /// What to call it while switching — an account id. Shown in the footer
+    /// and in the notice after a switch, so the reviewer can name what they
+    /// are now looking at without hunting for it in the document.
+    pub label: String,
+}
+
+/// A review the reviewer can re-point at a different subject before deciding,
+/// returning the decision and which subject it was about.
+///
+/// This exists for the `WalletConnect` connection screen, where the question is
+/// "connect this dapp to which account?" and the honest way to ask it is to
+/// let the answer change while the consequences of each answer are on screen.
+/// A separate account picker before the review would ask the same person to
+/// choose blind and then confirm.
+///
+/// Every subject's document is authored *before* the screen opens, so
+/// switching is instant and cannot fail halfway. That is why this needs none
+/// of the channel machinery [`review_fullscreen_refreshable`] uses: there is
+/// no RPC behind a switch, only a different document that already exists.
+///
+/// Switching resets the evidence that the document was read — scroll position,
+/// `reached_end`, and the cursor — for the same reason a changed
+/// re-simulation does. Reading account A's consequences to the end is not
+/// having read account B's.
+pub async fn review_fullscreen_choosing(
+    choices: Vec<ReviewChoice>,
+    selected: usize,
+) -> Result<(ApprovalDecision, usize)> {
+    ensure!(!choices.is_empty(), "a review needs at least one subject");
+    let selected = selected.min(choices.len() - 1);
+    let title = terminal_safe(&choices[selected].request.title);
+    let labels: Vec<String> = choices
+        .iter()
+        .map(|choice| terminal_safe(&choice.label))
+        .collect();
+    let documents: Vec<Vec<Line>> = choices
+        .into_iter()
+        .map(|choice| review_document(&choice.request, Vec::new()))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        review_fullscreen_choosing_blocking(&title, documents, labels, selected)
+    })
+    .await
+    .context("terminal approval task failed")?
+}
+
+fn review_fullscreen_choosing_blocking(
+    title: &str,
+    documents: Vec<Vec<Line>>,
+    labels: Vec<String>,
+    selected: usize,
+) -> Result<(ApprovalDecision, usize)> {
+    ensure!(
+        std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::io::stderr().is_terminal(),
+        "approval requires an interactive terminal"
+    );
+    let mut review = ReviewScreen::new(documents[selected].clone());
+    review.choices = documents;
+    review.choice_labels = labels;
+    review.choice = selected;
+    let decision = {
+        let mut screen = Screen::enter()?;
+        // Same reason as the refreshable review: whatever the terminal
+        // buffered before anything was drawn must not answer this document.
+        drain_type_ahead()?;
+        loop {
+            screen
+                .terminal
+                .draw(|frame| draw(frame, title, &mut review))?;
+            let key = match crossterm::event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => key,
+                _ => continue,
+            };
+            match review.handle_key(key) {
+                Some(ReviewAction::Decide(decision)) => break decision,
+                // A switch is synchronous and already applied by `handle_key`;
+                // there is nothing to wait for and nothing that can fail.
+                Some(ReviewAction::Refresh) | None => {}
+            }
+        }
+    };
+    match decision {
+        ApprovalDecision::Approved => {
+            crate::tui::outro("Approved; owner authentication is still required.");
+        }
+        ApprovalDecision::Rejected => {
+            crate::tui::outro_cancel("Rejected. Nothing was signed or submitted.");
+        }
+    }
+    Ok((decision, review.choice))
+}
+
 /// What one refresh produced: a re-authored document, or why there is none.
 enum RefreshOutcome {
     Document(Vec<Line>),
@@ -428,6 +526,14 @@ struct ReviewScreen {
     refreshable: bool,
     /// Ticks while a refresh is in flight; `None` when none is.
     refreshing: Option<u32>,
+    /// One complete document per subject this review can be pointed at, all
+    /// authored before the screen opened. Empty, or holding a single entry,
+    /// when there is nothing to switch between.
+    choices: Vec<Vec<Line>>,
+    /// Names for those subjects, parallel to `choices`.
+    choice_labels: Vec<String>,
+    /// Which subject is on screen.
+    choice: usize,
 }
 
 /// What a keypress asked for. Only a decision ends the review.
@@ -449,7 +555,39 @@ impl ReviewScreen {
             notice: None,
             refreshable: false,
             refreshing: None,
+            choices: Vec::new(),
+            choice_labels: Vec::new(),
+            choice: 0,
         }
+    }
+
+    /// Whether there is more than one subject to switch between.
+    fn switchable(&self) -> bool {
+        self.choices.len() > 1
+    }
+
+    /// Point the review at the next subject, wrapping.
+    ///
+    /// Everything that recorded the reviewer's engagement with the previous
+    /// document is reset: they have not read this one, and Approve is gated on
+    /// having seen the end of the document actually on screen. Without that,
+    /// scrolling account A's review to the end and then switching would leave
+    /// Approve live over a document nobody had looked at.
+    fn select_next_choice(&mut self) {
+        if !self.switchable() {
+            return;
+        }
+        self.choice = (self.choice + 1) % self.choices.len();
+        self.document = self.choices[self.choice].clone();
+        self.offset = 0;
+        self.reached_end = false;
+        self.on_approve = false;
+        self.notice = Some(format!(
+            "Now connecting {}. Read this review before approving.",
+            self.choice_labels
+                .get(self.choice)
+                .map_or("a different account", String::as_str)
+        ));
     }
 
     /// Enter the waiting state. The cursor goes back to Reject immediately:
@@ -501,6 +639,9 @@ impl ReviewScreen {
     /// decide, and Enter on Approve is refused until the end of the document
     /// has been seen.
     fn handle_key(&mut self, key: KeyEvent) -> Option<ReviewAction> {
+        // Cleared first so a notice lasts exactly until the next keystroke.
+        // A branch that sets one below therefore has to set it after this,
+        // which `select_next_choice` does.
         self.notice = None;
         if fullscreen::is_interrupt(key) {
             return Some(ReviewAction::Decide(ApprovalDecision::Rejected));
@@ -511,6 +652,14 @@ impl ReviewScreen {
                 return Some(ReviewAction::Decide(ApprovalDecision::Rejected));
             }
             KeyCode::Char('r') if self.refreshable => return Some(ReviewAction::Refresh),
+            // Not Tab: Tab moves the decision cursor on every review in this
+            // program, and that movement is what makes approving deliberate.
+            // Giving it a second meaning on one screen is how a reviewer ends
+            // up pressing it for one thing and getting the other.
+            KeyCode::Char('a') if self.switchable() => {
+                self.select_next_choice();
+                return None;
+            }
             KeyCode::Enter => {
                 if !self.on_approve {
                     return Some(ReviewAction::Decide(ApprovalDecision::Rejected));
@@ -564,8 +713,23 @@ impl ReviewScreen {
         } else {
             ""
         };
+        // The account is named, not just the key: a legend reading "a account"
+        // says a switch is possible without saying which one is selected now,
+        // and that is the fact the reviewer is deciding on.
+        let switch = if self.switchable() {
+            format!(
+                " · a account ({}/{}: {})",
+                self.choice + 1,
+                self.choices.len(),
+                self.choice_labels
+                    .get(self.choice)
+                    .map_or("?", String::as_str)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} · ↑↓ scroll · PgUp/PgDn page{refresh} · Tab switch · Enter decide · Esc rejects",
+            "{} · ↑↓ scroll · PgUp/PgDn page{refresh}{switch} · Tab switch · Enter decide · Esc rejects",
             self.position()
         )
     }

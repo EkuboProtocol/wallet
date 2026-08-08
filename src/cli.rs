@@ -213,8 +213,11 @@ struct ConnectArgs {
     /// Quote it: it contains `&`, which every shell reads as "run this in the
     /// background" long before the wallet ever sees it.
     uri: Option<String>,
-    /// Which account to expose. Required only when this wallet holds more than
-    /// one, because a dapp session exposes exactly one account.
+    /// Which account to start the connection review on.
+    ///
+    /// A session exposes exactly one account, but you pick it on the review
+    /// screen — press `a` there to cycle through the wallet's accounts and see
+    /// what each one would expose. This only chooses where that starts.
     #[arg(long, short)]
     account: Option<String>,
     #[allow(clippy::doc_markdown)]

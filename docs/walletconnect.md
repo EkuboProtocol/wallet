@@ -53,6 +53,29 @@ approval document, so a review never shows you something the request disagreed
 with.
 
 
+## Choosing which account the dapp gets
+
+A session exposes exactly one account, and you choose it on the review screen
+rather than before it. Press `a` to cycle through this wallet's accounts: each
+press swaps in that account's own complete review, so you are looking at the
+address that would be exposed and the chains it would be exposed on at the
+moment you decide. The footer names the account currently selected and counts
+the accounts available.
+
+Switching resets the review — scroll position returns to the top and Approve
+becomes unavailable until you have read to the end again. Having read one
+account's consequences is not having read another's.
+
+`--account` chooses where the cycle starts. It does not restrict it, because
+the review names the selected account in its own document and changing it takes
+a deliberate keystroke.
+
+`a` rather than Tab: Tab moves the Reject/Approve cursor on every review screen
+in this program, and that movement is what makes approving deliberate. Giving
+it a second meaning on one screen is how you press it for one thing and get the
+other.
+
+
 ## The connection review
 
 Approving a connection settles a session with an explicit scope: one account,
@@ -110,7 +133,8 @@ prompt over an argument, and treat a link you did not just generate as spent.
 
 - One session per `connect` run. A second proposal on the same pairing is
   refused, because reviewing it would need a second terminal.
-- One account per session, named with `--account` when the wallet holds more
-  than one.
+- One account per session, chosen on the connection review. It is fixed once
+  the session settles: the account is part of what the session advertised to
+  the dapp, so changing it means disconnecting and reconnecting.
 - The session ends if the relay connection drops; the dapp will show it as
   disconnected and you reconnect with a fresh link.
