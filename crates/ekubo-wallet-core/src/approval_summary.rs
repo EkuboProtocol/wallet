@@ -459,7 +459,7 @@ pub(crate) fn token_label(token: Address, display: &TokenMetadata) -> String {
 /// characters real symbols actually use, which drops the brackets and the
 /// separating spaces, and then refuses any symbol still containing `0x`.
 /// Nothing that survives can look like a second address.
-fn display_symbol(symbol: &str) -> Option<String> {
+pub(crate) fn display_symbol(symbol: &str) -> Option<String> {
     let cleaned: String = crate::sanitize::stripped_capped(symbol, 32)
         .chars()
         .filter(|character| {

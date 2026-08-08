@@ -170,6 +170,24 @@ pub struct ClearSigned {
 struct MapProvider<'a>(&'a TokenMetadataMap);
 
 impl DataProvider for MapProvider<'_> {
+    /// A stored symbol reaches this through the same door it reaches
+    /// [`crate::approval_summary::token_label`] through — a token list, which
+    /// is only as careful as whoever wrote it, and which a fresh database
+    /// seeds from an aggregated upstream feed without asking the owner about
+    /// each row. That renderer answers the danger by keeping only the
+    /// characters real symbols use, refusing anything still containing `0x`,
+    /// and printing the resolved address beside the symbol it found.
+    ///
+    /// This bridge did none of it, so a descriptor rendered `1000 USDC
+    /// (0x<the real USDC>)` for a swap whose calldata named an attacker's
+    /// token, with the address that would have given it away left in the
+    /// calldata the descriptor exists to save the reviewer from reading. Both
+    /// halves are applied here now: the same symbol rule, and the address
+    /// bound to the symbol rather than trusted to appear somewhere else.
+    ///
+    /// A symbol the rule refuses answers `None`, which leaves the engine
+    /// rendering the bare address — the same conservative fallback an unlisted
+    /// token already gets.
     fn resolve_token(
         &self,
         _chain_id: u64,
@@ -178,12 +196,14 @@ impl DataProvider for MapProvider<'_> {
         let meta = address
             .parse::<Address>()
             .ok()
-            .and_then(|address| self.0.get(&address))
-            .and_then(|metadata| {
+            .and_then(|address| Some((address, self.0.get(&address)?)))
+            .and_then(|(address, metadata)| {
+                let symbol = crate::approval_summary::display_symbol(metadata.symbol.as_deref()?)?;
+                let bound = format!("{symbol} ({address:#x})");
                 Some(TokenMeta {
-                    symbol: metadata.symbol.clone()?,
+                    symbol: bound.clone(),
                     decimals: metadata.decimals?,
-                    name: metadata.symbol.clone()?,
+                    name: bound,
                 })
             });
         Box::pin(async move { meta })

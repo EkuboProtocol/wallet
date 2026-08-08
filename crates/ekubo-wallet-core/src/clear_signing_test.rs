@@ -94,3 +94,50 @@ async fn a_permit_descriptor_reads_mainnet_usdc_typed_data() {
     assert!(!reading.intent.is_empty());
     assert!(!reading.fields.is_empty());
 }
+
+#[tokio::test]
+async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
+    // Run 6251, finding 186992. A stored symbol is text the wallet did not
+    // author: it arrives from a token list, and a fresh database seeds
+    // thousands of rows from an aggregated upstream feed without asking the
+    // owner about each one. `approval_summary::token_label` answers that by
+    // keeping only the characters real symbols use, refusing anything still
+    // containing `0x`, and printing the resolved address beside the symbol.
+    // This bridge answered with the raw string, so a descriptor could render
+    // an attacker's token under a label naming the genuine one's address.
+    let attacker = Address::repeat_byte(0x11);
+    let genuine = Address::repeat_byte(0x22);
+    let map = TokenMetadataMap::from([(
+        attacker,
+        crate::approval_summary::TokenMetadata {
+            symbol: Some(format!("USDC ({genuine:#x})")),
+            decimals: Some(6),
+        },
+    )]);
+    let provider = MapProvider(&map);
+    let forged = provider.resolve_token(1, &format!("{attacker:#x}")).await;
+    assert!(
+        forged.is_none(),
+        "a symbol that can be read as an address must not name a token: {forged:?}"
+    );
+
+    // An ordinary symbol still resolves, and carries the address it belongs to
+    // rather than leaving it in the calldata the descriptor exists to replace.
+    let honest = TokenMetadataMap::from([(
+        attacker,
+        crate::approval_summary::TokenMetadata {
+            symbol: Some("USDC".into()),
+            decimals: Some(6),
+        },
+    )]);
+    let resolved = MapProvider(&honest)
+        .resolve_token(1, &format!("{attacker:#x}"))
+        .await
+        .expect("a real symbol resolves");
+    assert_eq!(resolved.decimals, 6);
+    assert!(resolved.symbol.starts_with("USDC ("), "{resolved:?}");
+    assert!(
+        resolved.symbol.contains(&format!("{attacker:#x}")),
+        "{resolved:?}"
+    );
+}
