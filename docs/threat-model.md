@@ -268,6 +268,85 @@ took ten seconds to answer would be a different product, and the reason to
 write this down is so the choice stays visible rather than becoming an
 assumption nobody remembers making.
 
+### What verifying an endpoint would actually take
+
+None of what follows is scheduled or committed to. It is recorded here so the
+next person to reach for a fix reaches for one that helps, because the obvious
+ordering is the wrong one.
+
+There are two separable problems, and the expensive answer only addresses the
+second:
+
+1. **Chain identity and head authenticity** — is this the real head of the chain
+   this wallet thinks it is on? Local execution does not help at all. Only
+   consensus verification, an L1 anchor for a rollup, or pinned identity plus
+   agreement across independent operators answers it.
+2. **State authenticity for that head** — is this state real for that header?
+   `eth_getProof` against a verified state root answers it, and local execution
+   in `revm` then removes the endpoint from execution too.
+
+Running a local EVM without solving the first proves a state transition against
+a root the attacker chose, which is worth close to nothing. Sequencing is the
+whole of the advice.
+
+**A sync-committee light client**, for the chains that have one.
+[Helios](https://github.com/a16z/helios) verifies beacon-chain headers against
+the sync committee and serves a standard `eth_*` endpoint locally, syncing in
+seconds with no storage. The header — and so the state root everything else
+hangs off — becomes signed by 512 validators rather than asserted by whoever
+answers the socket, and it composes with this design rather than replacing it:
+point a network's RPC URL at the local endpoint and `eth_simulateV1`, the pinned
+parent, and preflight validation keep working unchanged. Out of process that
+works today, since a loopback endpoint from owner configuration is admitted,
+but leaves the wallet unaware the endpoint is verified; embedded as a library,
+the wallet could mark those networks verified and say so at approval time. The
+residual is a weak-subjectivity checkpoint, which is genuine but categorically
+better — one value, fixed in time, auditable by a human and cross-checkable
+against independent sources, rather than trusting every answer from one party
+forever. It covers Ethereum, OP Mainnet, and Base out of the shipped defaults.
+
+**An L1 anchor for OP Stack rollups.** Output roots are posted to a contract on
+Ethereum, so an L2 state root can be checked against L1 rather than believed
+from the L2 endpoint, reducing trust in every OP Stack chain here to trust in
+Ethereum. The catch is finality lag: roots are posted periodically, so an anchor
+verifies a root minutes to hours behind the head, and a wallet signing against
+the head cannot wait. The honest use is a consistency check rather than a
+signing precondition — the endpoint's account of history must stay compatible
+with what L1 recorded, and divergence is strong evidence of a lying endpoint
+even when it arrives late. Fault-proof and output-oracle mechanics differ across
+deployments and have changed over time, so this needs per-chain verification
+rather than one implementation assumed to fit all of them.
+
+**Pinned identity and a local header chain, everywhere else.** Most of the
+shipped defaults have no embeddable light client, so there is no cryptographic
+answer to "am I talking to the real chain" for them. Two cheap measures still
+apply. Chain-ID verification asks the endpoint who it is, which a hostile
+endpoint answers correctly while lying about everything else; shipping a pinned
+genesis hash and one known historical block hash per network, checked at
+acceptance and periodically, would at least catch being pointed at a fork, a
+testnet, or a private chain replaying mainnet addresses. And persisting the last
+seen `(number, hash)` per network, requiring each new head to descend from it,
+makes the endpoint's account of history tamper-evident over time: it must stay
+consistent with everything it has already said, and cannot quietly rewrite
+history between sessions or be swapped mid-life without detection. Reorg
+handling is the part that needs care — tolerate legitimate reorgs within a
+bounded depth, treat a deep or incompatible rewrite as divergence.
+
+**Whatever lands, the difference has to be visible.** Once some networks are
+consensus-verified and others are not, a per-network tier — consensus-verified,
+L1-anchored, single-endpoint, self-hosted — belongs in `wallet_get_status`, at
+network acceptance, and here. Saying a chain is single-endpoint is not an
+embarrassment; implying it is verified when it is not would be. Inventing a
+bespoke verification scheme for a chain that provides none is out of scope.
+
+Two approaches were considered and declined rather than deferred. Simulating
+against several endpoints and refusing to sign when they disagree turns every
+signature into a liveness problem across operators who are frequently the same
+infrastructure wearing different names, and it answers neither question above.
+Re-checking broadcast outcomes against a second endpoint after the fact reports
+a divergence when the transaction has already executed, which is monitoring
+rather than a control.
+
 RPC URLs can contain provider credentials, and the wallet deliberately does not
 treat them as secrets: `wallet_list` returns them, and surfaced RPC errors name
 the endpoint verbatim. Such credentials are read-only and easy to rotate, so
