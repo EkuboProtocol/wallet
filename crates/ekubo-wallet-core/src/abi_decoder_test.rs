@@ -196,6 +196,74 @@ fn applies_only_the_exact_pinned_ekubo_codec() {
 }
 
 #[test]
+fn an_out_of_domain_sqrt_ratio_fails_the_decode_rather_than_panicking() {
+    // A 32-byte word from `wallet_decode_abi_result`, or a `uint256` a contract
+    // returned through `wallet_batch_eth_call`, is not bounded by the codec's
+    // 96-bit domain. `(encoded >> 89).to::<u8>()` used to panic on one, taking
+    // the request — and the stdio task — with it, where every other malformed
+    // input on this path is a structured failure.
+    let codec = CodecIdentity {
+        id: ALLOWED_CODEC_ID.into(),
+        version: 1,
+        implementations: vec![CodecImplementation {
+            ecosystem: "npm".into(),
+            registry: ALLOWED_REGISTRY.into(),
+            package_url: ALLOWED_PACKAGE_URL.into(),
+            export_name: ALLOWED_EXPORT.into(),
+            integrity: ALLOWED_INTEGRITY.into(),
+        }],
+    };
+    let plan = AbiDecodePlan::SemanticValue {
+        semantic_type: ALLOWED_SEMANTIC_TYPE.into(),
+        codec: codec.clone(),
+        required: true,
+    };
+    for word in [U256::MAX, U256::from(1_u8) << 96_usize] {
+        let decoded = decode_abi_result(&format!("0x{word:064x}"), &plan, false);
+        assert_eq!(decoded.decode_status, DecodeStatus::Failed);
+        assert_eq!(decoded.decode_error.unwrap().code, "codec_failure");
+    }
+
+    // The same expression reached from an inline decode plan, where the value
+    // is whatever the contract — or the configured RPC — returned.
+    let named = |name: &str, ty: &str| AbiParameterInput {
+        name: Some(name.into()),
+        ty: ty.into(),
+        internal_type: None,
+        components: None,
+    };
+    let at_a_path = AbiDecodePlan::AbiParameters {
+        parameters: vec![named("sqrt_ratio", "uint256"), named("tick", "int32")],
+        semantic_codecs: vec![SemanticCodec {
+            path: "sqrt_ratio".into(),
+            semantic_type: ALLOWED_SEMANTIC_TYPE.into(),
+            codec,
+            required: true,
+        }],
+        required: true,
+    };
+    let returned = encode(&[
+        DynSolValue::Uint(U256::MAX, 256),
+        DynSolValue::Int(I256::ZERO, 32),
+    ]);
+    let decoded = decode_abi_result(&returned, &at_a_path, false);
+    assert_eq!(decoded.decode_status, DecodeStatus::Failed);
+    assert_eq!(decoded.decode_error.unwrap().code, "codec_failure");
+
+    // The widest value the domain does contain still decodes: every mantissa
+    // bit set under the largest exponent, which the guard must not exclude.
+    let widest = (U256::from(1_u8) << 96_usize) - U256::from(1_u8);
+    let decoded = decode_abi_result(&format!("0x{widest:x}"), &plan, false);
+    assert_eq!(decoded.decode_status, DecodeStatus::Decoded);
+    assert_eq!(
+        decoded.decoded.unwrap()["semantic_value"],
+        Value::String(
+            (((U256::from(1_u8) << 89_usize) - U256::from(1_u8)) << 129_usize).to_string()
+        )
+    );
+}
+
+#[test]
 fn serializes_named_tuple_as_object() {
     let plan: AbiDecodePlan = serde_json::from_value(json!({
         "kind": "abi_parameters",

@@ -1205,8 +1205,15 @@ fn execute_semantic_codec(
             details: None,
         })
     })?;
+    // The encoding is 89 mantissa bits under a 7-bit exponent, so anything at
+    // or above 2^96 was never one. Refusing it here is what keeps a hostile
+    // return value a `decode_status: "failed"` rather than an unwind out of the
+    // tool handler: `to::<u8>()` panics on a value too wide for the target.
+    if encoded >= U256::from(1_u8) << 96_usize {
+        return codec_failure("sqrt ratio float exceeds its 96-bit encoding", path);
+    }
     let mantissa_mask = (U256::from(1_u8) << 89) - U256::from(1_u8);
-    let exponent = ((encoded >> 89_usize).to::<u8>()) & 0x7f;
+    let exponent = (encoded >> 89_usize).to::<u8>();
     let shift = usize::from(exponent) + 2;
     let fixed: U256 = (encoded & mantissa_mask) << shift;
     Ok(fixed.to_string())
