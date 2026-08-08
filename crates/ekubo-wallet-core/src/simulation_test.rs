@@ -378,3 +378,81 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
         Some("0")
     );
 }
+
+#[test]
+fn the_agreement_projection_covers_everything_an_endpoint_asserts() {
+    use crate::fork::ForkParent;
+
+    // Run 6251, findings 186984 and 186985. Two fields sat outside the
+    // comparison because they read as locally derived, and both follow from
+    // what an endpoint returned: the block gas limit is copied out of the
+    // simulated header, and the delegation flags are this module's reading of
+    // the code an endpoint reported at the wallet's own address. A dishonest
+    // endpoint could move either while leaving every compared field alone, and
+    // the quorum returned its complete result — including the field nobody had
+    // agreed on.
+    let parent = ForkParent {
+        number: 100,
+        hash: B256::repeat_byte(0xab),
+        gas_limit: 30_000_000,
+    };
+    let baseline = SimulationResult {
+        simulation_id: None,
+        digest: format!("{:#x}", plan(1).digest()),
+        allowed: true,
+        policy_outcome: PolicyOutcome::Allowed,
+        policy_findings: Vec::new(),
+        policy_revision: 1,
+        execution_mode: ExecutionMode::Direct,
+        implementation: None,
+        will_authorize_delegation: false,
+        replaces_delegated_implementation: None,
+        block_number: "100".into(),
+        fork: None,
+        simulation: SimulationExecution {
+            success: true,
+            gas_used: Some("21000".into()),
+            block_gas_limit: Some("30000000".into()),
+            output: Some("0x".into()),
+            error: None,
+            failure: None,
+        },
+        token_spends: BTreeMap::new(),
+        balance_changes: None,
+    };
+    let agreed = SimulationAgreement::of(&baseline, parent);
+
+    // The same answer twice is the same witness, or `m_of_n` could never be
+    // satisfied by honest endpoints.
+    assert_eq!(agreed, SimulationAgreement::of(&baseline, parent));
+
+    let differing = |mutate: fn(&mut SimulationResult)| {
+        let mut altered = baseline.clone();
+        mutate(&mut altered);
+        SimulationAgreement::of(&altered, parent)
+    };
+    assert_ne!(
+        agreed,
+        differing(|result| result.simulation.block_gas_limit = Some("15000000".into())),
+        "the ceiling the signed gas limit is computed against must be agreed"
+    );
+    assert_ne!(
+        agreed,
+        differing(|result| result.will_authorize_delegation = true),
+        "whether this plan authorizes a delegation must be agreed"
+    );
+    assert_ne!(
+        agreed,
+        differing(|result| result.replaces_delegated_implementation =
+            Some(format!("{:#x}", Address::repeat_byte(0x42)))),
+        "replacing an existing delegation must be agreed"
+    );
+
+    // And the fields that differ for honest reasons still do not split a
+    // quorum: a node's own wording of an error, and the identifier the caller
+    // stamps on a result it stores.
+    assert_eq!(
+        agreed,
+        differing(|result| result.simulation_id = Some(uuid::Uuid::nil()))
+    );
+}

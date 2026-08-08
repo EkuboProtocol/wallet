@@ -410,6 +410,36 @@ pub async fn simulate_execution(
                 pin.unwrap_or_default(),
             ));
         }
+        // No endpoint produced a simulation to agree on, so `last` holds one
+        // endpoint's failure — and returning it fell out of the loop looking
+        // exactly like an answer. Under `m_of_n` one endpoint's word is the
+        // thing the owner configured this strategy in order not to act on,
+        // and a failure is the word most worth doubting: a reverted plan is
+        // reviewed with its effects unavailable, and a human override may
+        // sign it anyway, so an endpoint that invents a revert hides what the
+        // call really does from the person approving it.
+        //
+        // The reason still reaches the reviewer, because a plan that honestly
+        // reverts everywhere is the ordinary case here and they need to know
+        // why. What changes is that it arrives as a setup failure that says
+        // the threshold was never met — carrying no gas figures, so nothing
+        // downstream can sign against numbers a single endpoint chose.
+        let reported = last
+            .as_ref()
+            .and_then(|result| result.simulation.error.clone())
+            .unwrap_or_else(|| "no endpoint answered".to_owned());
+        return Ok(setup_failure_result_at_block(
+            plan,
+            stored_policy,
+            context,
+            planned_call(plan, wallet.address).mode,
+            &format!(
+                "{} requires {required} endpoints to agree on this simulation and none produced \
+                 one to agree on, so no endpoint's answer was used; the last reported: {reported}",
+                network.name
+            ),
+            pin.unwrap_or_default(),
+        ));
     }
 
     // Unreachable while a network is required to list an endpoint, but a
@@ -427,7 +457,16 @@ pub async fn simulate_execution(
 /// derived locally from the plan and the policy, which cannot differ because
 /// no endpoint contributes to them. What is left is exactly what an endpoint
 /// gets to assert: which block it built on, whether the plan executed, what
-/// it cost, what it returned, and what moved.
+/// it cost, what it may cost, what it returned, what moved, and what it found
+/// at the wallet's own address.
+///
+/// "Derived locally" is the line to be careful about, and run 6251 found two
+/// fields on the wrong side of it. A value computed here from an endpoint's
+/// answer is the endpoint's assertion however much arithmetic sits in
+/// between — the delegation fields read as decisions this module makes and
+/// are decisions it makes *about the code an endpoint returned*. The test is
+/// not who computes the field. It is whether a dishonest endpoint could
+/// change it while leaving everything else compared here alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SimulationAgreement {
     /// The hash of the block simulated on top of. Two endpoints naming
@@ -436,9 +475,30 @@ struct SimulationAgreement {
     parent_hash: alloy::primitives::B256,
     success: bool,
     gas_used: Option<String>,
+    /// The ceiling the signed gas limit is computed against, and so the one
+    /// number here that reaches the chain rather than the screen. It comes out
+    /// of the simulated header, which is the endpoint's to write and is bound
+    /// to nothing: an endpoint that matched every other field could set this
+    /// alone and either fail preparation outright or collapse the margin
+    /// `signing_gas_limit` leaves, so a transaction the quorum agreed on runs
+    /// out of gas and burns its fee.
+    block_gas_limit: Option<String>,
     output: Option<String>,
     token_spends: BTreeMap<String, String>,
     balance_changes: Option<BalanceChanges>,
+    /// What the endpoint said about the wallet's own code, by way of what this
+    /// plan would then do about it.
+    ///
+    /// These read as locally derived and are not: both follow from the code
+    /// the endpoint returned for the wallet at the pinned block. An endpoint
+    /// reporting canonical delegation code for an EOA that has none turns
+    /// `will_authorize_delegation` off while every compared field stays put,
+    /// and preparation then signs a plain EIP-1559 call to the wallet itself —
+    /// which mines successfully, executing none of the batch. The other
+    /// direction buys an unnecessary authorization, or hides that an existing
+    /// non-canonical delegation is about to be replaced.
+    will_authorize_delegation: bool,
+    replaces_delegated_implementation: Option<String>,
 }
 
 impl SimulationAgreement {
@@ -447,9 +507,12 @@ impl SimulationAgreement {
             parent_hash: parent.hash,
             success: result.simulation.success,
             gas_used: result.simulation.gas_used.clone(),
+            block_gas_limit: result.simulation.block_gas_limit.clone(),
             output: result.simulation.output.clone(),
             token_spends: result.token_spends.clone(),
             balance_changes: result.balance_changes.clone(),
+            will_authorize_delegation: result.will_authorize_delegation,
+            replaces_delegated_implementation: result.replaces_delegated_implementation.clone(),
         }
     }
 }
