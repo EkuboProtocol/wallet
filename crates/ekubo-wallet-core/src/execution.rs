@@ -363,6 +363,28 @@ fn validate_preflight(
     Ok(())
 }
 
+/// The highest gas limit this network will let a transaction carry.
+///
+/// The configured maximum when the owner set one, the block's own limit
+/// otherwise, and never more than the block's limit either way — an envelope
+/// above that is one no honest peer will accept.
+///
+/// Shared by the two paths that sign, because they had drifted: signing after
+/// a simulation always fell back to the block limit, while cancellation
+/// bounded nothing at all unless the network carried a configured maximum,
+/// which most shipped profiles do not. On an ordinary network that left one
+/// endpoint's `estimate_gas` deciding the signed gas limit by itself.
+fn usable_gas_ceiling(network: &NetworkConfig, block_maximum: u64) -> Result<u64> {
+    let configured = network
+        .max_gas_limit
+        .as_deref()
+        .map(str::parse::<u64>)
+        .transpose()
+        .context("configured maximum gas limit does not fit uint64")?
+        .unwrap_or(block_maximum);
+    Ok(configured.min(block_maximum))
+}
+
 fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> Result<u64> {
     let used = simulation
         .simulation
@@ -378,14 +400,7 @@ fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> 
         .context("simulation did not provide a block gas limit")?
         .parse::<u64>()
         .context("simulated block gas limit does not fit uint64")?;
-    let configured = network
-        .max_gas_limit
-        .as_deref()
-        .map(str::parse::<u64>)
-        .transpose()
-        .context("configured maximum gas limit does not fit uint64")?
-        .unwrap_or(block_maximum);
-    let maximum = configured.min(block_maximum);
+    let maximum = usable_gas_ceiling(network, block_maximum)?;
     let authorization_cost = if simulation.will_authorize_delegation {
         EIP7702_AUTHORIZATION_INTRINSIC_COST
     } else {
@@ -709,28 +724,37 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
         data: alloy::primitives::Bytes::new(),
         value: U256::ZERO,
     };
-    let (_chain_id, market, estimated_gas) =
+    let (_chain_id, market, estimated_gas, block_maximum) =
         crate::rpc::try_endpoints(network, |provider| async move {
             let estimate_request = alloy::rpc::types::TransactionRequest::default()
                 .from(wallet.address)
                 .to(wallet.address)
                 .value(U256::ZERO);
-            let (chain_id, market, estimated_gas) = tokio::time::timeout(RPC_TIMEOUT, async {
-                tokio::try_join!(
-                    provider.get_chain_id(),
-                    provider.estimate_eip1559_fees(),
-                    provider.estimate_gas(estimate_request),
-                )
-            })
-            .await
-            .context("cancellation preparation RPC timed out")?
-            .map_err(|error| rpc_error(&error))?;
+            let (chain_id, market, estimated_gas, head) =
+                tokio::time::timeout(RPC_TIMEOUT, async {
+                    tokio::try_join!(
+                        provider.get_chain_id(),
+                        provider.estimate_eip1559_fees(),
+                        provider.estimate_gas(estimate_request),
+                        provider.get_block(alloy::eips::BlockId::latest()),
+                    )
+                })
+                .await
+                .context("cancellation preparation RPC timed out")?
+                .map_err(|error| rpc_error(&error))?;
             ensure!(
                 chain_id == network.chain_id,
                 "RPC reports chain {chain_id}, not {}",
                 network.chain_id
             );
-            Ok((chain_id, market, estimated_gas))
+            // Read from the same endpoint and in the same breath as the
+            // estimate it bounds, so an endpoint cannot answer one of the two
+            // and have the other come from somewhere it does not control.
+            let block_maximum = head
+                .context("cancellation preparation could not read the chain head")?
+                .header
+                .gas_limit;
+            Ok((chain_id, market, estimated_gas, block_maximum))
         })
         .await?;
     let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(
@@ -738,17 +762,22 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
         market.max_fee_per_gas,
         market.max_priority_fee_per_gas,
     )?;
-    let mut gas_limit = estimated_gas.saturating_mul(CANCELLATION_GAS_MULTIPLIER);
-    if let Some(maximum) = network.max_gas_limit.as_deref() {
-        let maximum = maximum
-            .parse::<u64>()
-            .context("configured maximum gas limit does not fit uint64")?;
-        ensure!(
-            estimated_gas <= maximum,
-            "estimated cancellation gas {estimated_gas} exceeds the network maximum gas limit {maximum}"
-        );
-        gas_limit = gas_limit.min(maximum);
-    }
+    // The same ceiling `signing_gas_limit` computes, and for the same reason.
+    // This bound used to exist only when the network carried a configured
+    // maximum, which most shipped profiles do not — so on an ordinary network
+    // an endpoint's `estimate_gas` was the whole of what decided the signed
+    // gas limit. A cancellation cannot be simulated, and it is asked for
+    // exactly when something is already stuck, so an endpoint that returns an
+    // absurd estimate produces an envelope every honest peer rejects while
+    // spending one of the eight attempts this wallet will ever make.
+    let maximum = usable_gas_ceiling(network, block_maximum)?;
+    ensure!(
+        estimated_gas <= maximum,
+        "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas limit {maximum}"
+    );
+    let gas_limit = estimated_gas
+        .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
+        .min(maximum);
 
     // All RPC preparation completed before this function loads key material.
     let local_signer = load_matching_signer(keys, wallet)?;

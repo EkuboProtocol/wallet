@@ -327,3 +327,34 @@ fn signed_envelope_must_match_reviewed_preparation() {
     changed.nonce += 1;
     assert!(validate_signed_preparation(&signed, &changed).is_err());
 }
+
+#[test]
+fn the_gas_ceiling_falls_back_to_the_block_when_nothing_is_configured() {
+    // Run 6251, finding 186999. Signing after a simulation always had this
+    // fallback; cancellation bounded nothing at all unless the network carried
+    // a configured maximum — which most shipped profiles do not, so on an
+    // ordinary network one endpoint's `estimate_gas` decided the signed gas
+    // limit by itself. A cancellation cannot be simulated and is asked for
+    // exactly when something is already stuck, so an absurd estimate produced
+    // an envelope every honest peer rejects while spending one of the eight
+    // attempts this wallet will ever make.
+    let mut network = network();
+
+    network.max_gas_limit = None;
+    assert_eq!(
+        usable_gas_ceiling(&network, 30_000_000).unwrap(),
+        30_000_000,
+        "with nothing configured the block's own limit is the ceiling"
+    );
+
+    // A configured maximum narrows it.
+    network.max_gas_limit = Some("1000000".into());
+    assert_eq!(usable_gas_ceiling(&network, 30_000_000).unwrap(), 1_000_000);
+
+    // And never widens it past what the block will accept, however the owner
+    // wrote it.
+    assert_eq!(usable_gas_ceiling(&network, 500_000).unwrap(), 500_000);
+
+    network.max_gas_limit = Some("not a number".into());
+    assert!(usable_gas_ceiling(&network, 30_000_000).is_err());
+}
