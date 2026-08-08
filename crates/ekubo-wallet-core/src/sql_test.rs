@@ -177,6 +177,50 @@ fn prices_order_as_numbers() {
     assert_eq!(ordered, vec![1, u128::from(u64::MAX) + 1, u128::MAX]);
 }
 
+/// The column is a signed 64-bit integer, which in milliseconds reaches about
+/// 292 million years either side of the epoch. `DateTime<Utc>` is the tighter
+/// bound by three orders of magnitude — it stops at year 262142 — so every
+/// moment this program can represent at all fits, with room to spare, and the
+/// column can never be what refuses one.
+#[test]
+fn the_column_holds_every_representable_moment() {
+    let connection = scratch();
+    for (id, moment) in [(1, DateTime::<Utc>::MIN_UTC), (2, DateTime::<Utc>::MAX_UTC)] {
+        connection
+            .execute(
+                "INSERT INTO probe(id, at) VALUES (?1, ?2)",
+                rusqlite::params![id, Millis(moment)],
+            )
+            .expect("chrono's extremes are storable");
+        let read = connection
+            .query_row("SELECT at FROM probe WHERE id = ?1", [id], |row| {
+                row.time(0)
+            })
+            .expect("read");
+        // Truncated to the millisecond the column keeps, which is all a
+        // moment loses on the way in.
+        assert_eq!(read, moment.trunc_subsecs(3));
+    }
+}
+
+/// An integer the column accepts but chrono cannot name is refused on the way
+/// out rather than wrapping into some other moment. Only a corrupt or edited
+/// file produces one, since nothing here can write it.
+#[test]
+fn an_integer_that_is_not_a_moment_is_refused() {
+    let connection = scratch();
+    connection
+        .execute("INSERT INTO probe(id, at) VALUES (1, ?1)", [i64::MAX])
+        .expect("the column takes any i64");
+    let error = connection
+        .query_row("SELECT at FROM probe WHERE id = 1", [], |row| row.time(0))
+        .expect_err("i64::MAX milliseconds is not a date");
+    assert!(
+        error.to_string().contains("is not a moment"),
+        "unexpected error: {error}"
+    );
+}
+
 #[test]
 fn a_null_column_reads_as_absent() {
     let connection = scratch();
