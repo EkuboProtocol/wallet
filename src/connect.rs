@@ -27,6 +27,7 @@
 use crate::{
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest},
     config::{ConfigStore, NetworkConfig, WalletMetadata},
+    connect_screen::{IdleView, SessionState},
     core::execution_plan::{
         DecimalU256, ExecutionPlan, ExecutionStep, ExecutionStepKind, PlannedTransaction,
     },
@@ -43,6 +44,7 @@ use crate::{
     typed_data::{TypedDataStore, parse_typed_data},
     walletconnect::{
         crypto::ClientIdentity,
+        identity::DappIdentity,
         protocol::{AppMetadata, error_code},
         relay::{DEFAULT_RELAY_URL, RelayConfig, RelayConnection},
         request as dapp_request,
@@ -56,7 +58,11 @@ use crate::{
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Mutex};
+use std::{
+    cell::RefCell,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use url::Url;
 
 /// Environment variable holding the relay project id, so it need not be typed
@@ -116,26 +122,26 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
         None => Url::parse(DEFAULT_RELAY_URL).expect("the default relay URL is valid"),
     };
 
-    let uri = match options.uri {
-        Some(uri) => uri,
-        None => prompt_for_uri()?,
+    // Full-screen, like everything after it. A command that opens full-screen
+    // surfaces opens them from its first question.
+    let uri = if let Some(uri) = options.uri {
+        uri
+    } else {
+        let Some(uri) = crate::connect_screen::prompt_for_uri(
+            &accounts[selected].id,
+            &accounts[selected].address.to_checksum(None),
+            relay_url.as_str(),
+        )
+        .await?
+        else {
+            crate::tui::outro_cancel("No link given; nothing was connected.");
+            return Ok(());
+        };
+        uri
     };
     let pairing = PairingUri::parse(&uri, chrono::Utc::now())?;
 
-    crate::tui::info(format!(
-        "Connecting as {} ({}) through {}.",
-        accounts[selected].id,
-        accounts[selected].address.to_checksum(None),
-        relay_url.as_str()
-    ));
-    if accounts.len() > 1 {
-        crate::tui::info(format!(
-            "{} accounts available; press `a` on the connection review to change which one the \
-             dapp gets.",
-            accounts.len()
-        ));
-    }
-
+    let relay_display = relay_url.to_string();
     let identity = ClientIdentity::generate()?;
     let relay = RelayConnection::connect(
         &RelayConfig {
@@ -146,11 +152,23 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
     )
     .await?;
 
+    let state = Arc::new(Mutex::new(SessionState {
+        title: "Connecting…".to_owned(),
+        header: vec![
+            crate::connect_screen::fact("Account", &accounts[selected].id),
+            crate::connect_screen::fact("Address", &accounts[selected].address.to_checksum(None)),
+            crate::connect_screen::fact("Relay", &relay_display),
+        ],
+        log: Vec::new(),
+        status: "Pairing".to_owned(),
+    }));
     let handler = DappSession {
         config,
         accounts,
         selected: std::cell::Cell::new(selected),
         data_dir: config.data_dir().to_path_buf(),
+        state: Arc::clone(&state),
+        idle: RefCell::new(None),
     };
     let session = Session::new(relay, pairing, &handler);
     let outcome = session
@@ -158,6 +176,10 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await;
+    // The surface is released before anything is printed, so the closing
+    // line lands in the ordinary scrollback rather than behind an alternate
+    // screen nobody will see again.
+    handler.suspend_idle().await;
     match outcome {
         Ok(()) => {
             crate::tui::outro("Session closed.");
@@ -224,28 +246,6 @@ fn resolve_project_id(requested: Option<String>) -> Result<String> {
     Ok(project_id)
 }
 
-/// Ask for the link.
-///
-/// Inline, and before anything full-screen opens, which is the same shape
-/// `account create` uses for its one starting question. Nothing after this
-/// point prompts inline.
-fn prompt_for_uri() -> Result<String> {
-    crate::tui::text("Paste the WalletConnect link from the dapp")
-        .placeholder("wc:…@2?relay-protocol=irn&symKey=…")
-        .help(
-            "In the dapp, choose WalletConnect and use its \"copy link\" button rather than \
-             scanning the QR code.",
-        )
-        .validate(|value| {
-            if crate::walletconnect::uri::looks_like_pairing_uri(value) {
-                Ok(())
-            } else {
-                Err("a WalletConnect link starts with `wc:`".to_owned())
-            }
-        })
-        .prompt_required()
-}
-
 /// One dapp session, bound to one account.
 struct DappSession<'a> {
     config: &'a ConfigStore,
@@ -262,11 +262,76 @@ struct DappSession<'a> {
     /// terminal.
     selected: std::cell::Cell<usize>,
     data_dir: PathBuf,
+    /// What the idle surface draws. Shared with the loop drawing it.
+    state: Arc<Mutex<SessionState>>,
+    /// The running idle surface, when it holds the terminal.
+    ///
+    /// `None` means something else does — a review, or owner authentication.
+    /// Exactly one of them ever reads a keystroke, and the handover is the
+    /// `suspend_idle`/`enter_idle` pair rather than anything implicit.
+    idle: RefCell<Option<IdleView>>,
+}
+
+impl DappSession<'_> {
+    /// Take the terminal back from the idle surface and wait until it is
+    /// really free.
+    ///
+    /// Called before anything that draws: a review, a paste, an owner
+    /// authentication prompt. Awaiting matters — returning while the idle loop
+    /// was still restoring the terminal would let two surfaces fight over it.
+    async fn suspend_idle(&self) {
+        let running = self.idle.borrow_mut().take();
+        if let Some(view) = running {
+            view.stop().await;
+        }
+    }
+
+    /// Record something that happened, for the idle surface's log.
+    fn log(&self, tone: crate::tui::Tone, text: impl AsRef<str>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.push(crate::connect_screen::event(tone, text));
+        }
+    }
+
+    fn set_status(&self, status: impl Into<String>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.status = status.into();
+        }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
 impl SessionHandler for DappSession<'_> {
+    async fn enter_idle(&self) {
+        if self.idle.borrow().is_some() {
+            return;
+        }
+        let view = IdleView::start(Arc::clone(&self.state));
+        *self.idle.borrow_mut() = Some(view);
+    }
+
+    async fn quit_requested(&self) {
+        // Polled rather than signalled: the alternative is a channel whose
+        // receiver has to survive the surface being stopped and restarted
+        // around every review, and this future is dropped and rebuilt on every
+        // turn of the session loop anyway.
+        loop {
+            if self
+                .idle
+                .borrow()
+                .as_ref()
+                .is_some_and(IdleView::wants_quit)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     async fn review_proposal(&self, proposal: &ProposalSummary) -> Result<ProposalDecision> {
+        // Everything below draws, so the idle surface hands the terminal over
+        // first and does not take it back until the session loop waits again.
+        self.suspend_idle().await;
         // Anything the dapp cannot work without has to be satisfiable before a
         // person is asked, because approving a session that cannot serve the
         // dapp's required scope produces a connection that fails on its first
@@ -370,6 +435,10 @@ impl SessionHandler for DappSession<'_> {
     }
 
     async fn handle_request(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
+        // Two of these paths open a review and all of them may reach owner
+        // authentication, so the terminal is handed over for the whole
+        // request rather than guessed at per method.
+        self.suspend_idle().await;
         // A failure carrying out one request answers that request and leaves
         // the session up. Ending the whole session because one call could not
         // be served would disconnect the dapp mid-flow over, say, one RPC
@@ -381,63 +450,107 @@ impl SessionHandler for DappSession<'_> {
     }
 
     fn notify(&self, event: &SessionEvent<'_>) {
+        use crate::tui::Tone;
         match event {
             SessionEvent::Pairing => {
-                crate::tui::info("Paired. Waiting for the dapp's connection proposal…");
+                self.set_status("Waiting for the dapp");
+                self.log(Tone::Muted, "Paired. Waiting for the connection proposal…");
             }
             SessionEvent::ProposalReceived => {
-                crate::tui::info("A connection proposal arrived; opening the review.");
+                self.log(Tone::Info, "A connection proposal arrived.");
             }
             SessionEvent::Settled { scope, metadata } => {
-                crate::tui::note(
-                    format!("Connected to {}", describe_dapp(metadata)),
-                    format!(
-                        "Account {}\nChains  {}\nMethods {}\n\nRequests will appear here as the \
-                         dapp sends them. Press Ctrl-C to disconnect.",
-                        scope.address,
-                        scope.chains.join(", "),
-                        scope.methods.join(", "),
-                    ),
-                );
+                let dapp = DappIdentity::of(metadata);
+                // The identity block is pinned above the log rather than
+                // scrolling with it: who this session is with is the context
+                // every line below it has to be read against, and a busy dapp
+                // would otherwise push it off the top within seconds.
+                //
+                // Chains are named rather than listed as CAIP-2 ids, and each
+                // fact gets its own line, because on a small terminal a
+                // paragraph of comma-joined identifiers is a paragraph nobody
+                // reads.
+                let chains = scope
+                    .chains
+                    .iter()
+                    .map(|chain| {
+                        self.network_for(chain)
+                            .map_or_else(|| chain.clone(), |network| network.name)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if let Ok(mut state) = self.state.lock() {
+                    state.title = format!("Connected to {}", dapp.host_or_unknown());
+                    state.header = vec![
+                        crate::connect_screen::fact("Site", &dapp.host_or_unknown()),
+                        crate::connect_screen::fact(
+                            "Name",
+                            dapp.name.as_deref().unwrap_or("not stated"),
+                        ),
+                        crate::connect_screen::fact("Account", &self.wallet().id),
+                        crate::connect_screen::fact("Address", &scope.address),
+                        crate::connect_screen::fact("Chains", &chains),
+                        Vec::new(),
+                    ];
+                    "Connected".clone_into(&mut state.status);
+                }
+                self.log(Tone::Success, "Connected. Waiting for requests…");
             }
             SessionEvent::RequestReceived {
                 method,
                 caip2_chain_id,
             } => {
-                crate::tui::info(format!(
-                    "{} on {}",
-                    terminal_safe_line(method),
-                    terminal_safe_line(caip2_chain_id)
-                ));
-            }
-            SessionEvent::RequestAnswered { method, outcome } => match outcome {
-                RequestOutcome::Result(_) => {
-                    crate::tui::info(format!("{} — answered.", terminal_safe_line(method)));
-                }
-                RequestOutcome::Error { message, .. } => {
-                    crate::tui::warning(format!(
-                        "{} — refused: {}",
+                self.set_status(format!("Serving {}", terminal_safe_line(method)));
+                self.log(
+                    Tone::Info,
+                    format!(
+                        "{} on {}",
                         terminal_safe_line(method),
-                        terminal_safe_line(message)
-                    ));
+                        terminal_safe_line(caip2_chain_id)
+                    ),
+                );
+            }
+            SessionEvent::RequestAnswered { method, outcome } => {
+                self.set_status("Connected");
+                match outcome {
+                    RequestOutcome::Result(_) => self.log(
+                        Tone::Success,
+                        format!("{} — answered.", terminal_safe_line(method)),
+                    ),
+                    RequestOutcome::Error { message, .. } => self.log(
+                        Tone::Danger,
+                        format!(
+                            "{} — refused: {}",
+                            terminal_safe_line(method),
+                            terminal_safe_line(message)
+                        ),
+                    ),
                 }
-            },
+            }
             SessionEvent::RequestRefused { method, reason } => {
-                crate::tui::warning(format!(
-                    "{} — outside this session's scope: {}",
-                    terminal_safe_line(method),
-                    terminal_safe_line(reason)
-                ));
+                self.set_status("Connected");
+                self.log(
+                    Tone::Danger,
+                    format!(
+                        "{} — outside this session's scope: {}",
+                        terminal_safe_line(method),
+                        terminal_safe_line(reason)
+                    ),
+                );
             }
             SessionEvent::Ping => {}
             SessionEvent::DappDisconnected { code, message } => {
-                crate::tui::info(format!(
-                    "The dapp closed the session ({code}): {}",
-                    terminal_safe_line(message)
-                ));
+                self.set_status("Disconnected");
+                self.log(
+                    Tone::Info,
+                    format!(
+                        "The dapp closed the session ({code}): {}",
+                        terminal_safe_line(message)
+                    ),
+                );
             }
             SessionEvent::RelayReconnected => {
-                crate::tui::info("Reconnected to the relay.");
+                self.log(Tone::Info, "Reconnected to the relay.");
             }
         }
     }
@@ -474,9 +587,20 @@ impl DappSession<'_> {
 
     /// The review a person decides the connection on.
     ///
-    /// Every dapp-authored string on this screen goes through the sanitizer.
-    /// A name is the one thing a person actually reads here, and it is chosen
-    /// entirely by the dapp — including, if it likes, a name with a
+    /// Ordered for a small terminal: the four facts the decision actually
+    /// turns on — which site, which account, which chains, which powers — are
+    /// the first thing drawn, so they are legible without scrolling on a
+    /// short screen. Everything a reviewer might want but rarely needs comes
+    /// after, and the warnings come last because the decision pane refuses
+    /// Approve until the end of the document has been on screen, which makes
+    /// last the one position they can never be scrolled away from.
+    ///
+    /// Labels are kept short for the same reason: they occupy a fixed column
+    /// on every line, and a narrow terminal spends what is left on the value.
+    ///
+    /// Every dapp-authored string here goes through [`DappIdentity`], which
+    /// sanitizes it. A name is the thing a person actually reads, and it is
+    /// chosen entirely by the dapp — including, if it likes, a name with a
     /// right-to-left override in it that rewrites the line it sits on.
     fn proposal_document(
         &self,
@@ -484,6 +608,7 @@ impl DappSession<'_> {
         account: &WalletMetadata,
         scope: &ApprovedScope,
     ) -> ApprovalRequest {
+        let dapp = DappIdentity::of(&proposal.metadata);
         let mut approval = ApprovalRequest::new(
             ApprovalKind::PolicyException,
             "Approve a dapp connection",
@@ -492,27 +617,35 @@ impl DappSession<'_> {
              and, unless the policy already allows it outright, shown to you before anything is \
              signed.",
         )
-        .fact("Dapp name", sanitized(&proposal.metadata.name))
-        .fact("Dapp URL", sanitized(&proposal.metadata.url))
-        .fact("Description", sanitized(&proposal.metadata.description))
-        .fact("Pairing topic", &proposal.pairing_topic)
+        // The host leads. It is the only field on this screen with a shape
+        // that can be wrong, and the only one a person can check against the
+        // address bar of the page they opened.
+        .fact("Site", dapp.host_or_unknown())
         .fact(
-            "Account exposed",
-            format!("{} — {}", account.id, scope.address),
+            "Name",
+            dapp.name.clone().unwrap_or_else(|| "not stated".to_owned()),
         );
+        if let Some(description) = &dapp.description {
+            approval = approval.fact("About", description);
+        }
+        approval = approval
+            .fact("Account", &account.id)
+            .fact("Address", &scope.address);
+        // Every account, not just the selected one, with the cursor on the
+        // one this document is about. A list you can see is what makes Tab
+        // discoverable; a single "press Tab to change" line asks the reviewer
+        // to take on faith both that there is something else and that it is
+        // the account they wanted.
         if self.accounts.len() > 1 {
-            approval = approval.fact(
-                "Other accounts",
-                format!(
-                    "press `a` to connect a different one ({})",
-                    self.accounts
-                        .iter()
-                        .filter(|other| other.id != account.id)
-                        .map(|other| other.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
+            approval = approval.section("Connect as");
+            for other in &self.accounts {
+                let selected = other.id == account.id;
+                approval = approval.fact(
+                    format!("{} {}", if selected { "▸" } else { " " }, other.id),
+                    other.address.to_checksum(None),
+                );
+            }
+            approval = approval.fact("", "Tab moves between them; ← and → choose reject/approve.");
         }
 
         approval = approval.section("What this session will allow");
@@ -521,23 +654,47 @@ impl DappSession<'_> {
                 || "not configured".to_owned(),
                 |network| network.name.clone(),
             );
-            approval = approval.fact("Chain", format!("{chain} ({name})"));
+            approval = approval.fact("Chain", format!("{name} ({chain})"));
         }
-        approval = approval.fact("Methods", scope.methods.join(", "));
+        // One method per line rather than one long comma-joined value: on a
+        // narrow terminal the joined form wraps into a paragraph of names
+        // nobody reads, and this is the list that says what the dapp may do.
+        for method in &scope.methods {
+            approval = approval.fact("Can call", method);
+        }
 
-        approval = approval.section("What the dapp asked for");
-        approval = approval.fact("Required chains", join_or_none(&proposal.required_chains));
-        approval = approval.fact("Required methods", join_or_none(&proposal.required_methods));
-        approval = approval.fact("Optional chains", join_or_none(&proposal.optional_chains));
-        approval = approval.fact("Optional methods", join_or_none(&proposal.optional_methods));
+        // Required and optional get a heading each rather than four labels
+        // that all begin with the same word: on a narrow screen the label
+        // column is the scarcest thing on the line, and "Needs chains" spends
+        // it repeating what a heading can say once.
+        approval = approval
+            .section("What the dapp cannot work without")
+            .fact("Chains", join_or_none(&proposal.required_chains))
+            .fact("Methods", join_or_none(&proposal.required_methods))
+            .section("What it would also like")
+            .fact("Chains", join_or_none(&proposal.optional_chains))
+            .fact("Methods", join_or_none(&proposal.optional_methods));
 
-        // Two facts about this screen that a person cannot see from the screen
-        // itself, and that decide whether the name above means anything.
-        approval = approval.warning(
-            "The name, URL, and description above are supplied by the dapp and verified by \
-             nobody. A site impersonating another one will claim the other one's name here. Trust \
-             this only if you started the connection yourself, just now, from the site you meant.",
+        approval = approval.section("About this connection");
+        approval = approval.fact(
+            "URL",
+            dapp.url.clone().unwrap_or_else(|| "not stated".to_owned()),
         );
+        if !dapp.icon_hosts.is_empty() {
+            approval = approval.fact("Icons", dapp.icon_hosts.join(", "));
+        }
+        approval = approval.fact("Pairing", &proposal.pairing_topic);
+
+        // What a reviewer cannot see from the screen itself, and what decides
+        // whether the name above means anything at all.
+        approval = approval.warning(
+            "The site, name, and description above are supplied by the dapp and verified by \
+             nobody. A site impersonating another one will claim the other one's name here. Trust \
+             this only if you started the connection yourself, just now, from the page you meant.",
+        );
+        for caution in dapp.cautions {
+            approval = approval.warning(caution);
+        }
         if !proposal
             .required_methods
             .iter()
@@ -621,6 +778,7 @@ impl DappSession<'_> {
             )));
         }
 
+        let requester = DappIdentity::of(request.dapp).headline();
         let encoding = if was_hex {
             MessageEncoding::Hex
         } else {
@@ -633,7 +791,7 @@ impl DappSession<'_> {
             encoding,
         )?;
         let store = MessageStore::production(&self.data_dir)?;
-        match decide_message(self.config, store, record, false).await? {
+        match decide_message(self.config, store, record, Some(&requester), false).await? {
             MessageDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this message.",
             )),
@@ -650,6 +808,7 @@ impl DappSession<'_> {
         if let Some(refusal) = self.refuse_foreign_signer(signer) {
             return Ok(refusal);
         }
+        let requester = DappIdentity::of(request.dapp).headline();
         let (_, chain_id, digest) = parse_typed_data(&payload)?;
         // The domain's own chain has to be the chain the request came in on.
         // Without this, a session approved on a testnet could collect a
@@ -671,7 +830,7 @@ impl DappSession<'_> {
             digest,
         )?;
         let store = TypedDataStore::production(&self.data_dir)?;
-        match decide_typed_data(self.config, store, record, false).await? {
+        match decide_typed_data(self.config, store, record, Some(&requester), false).await? {
             TypedDataDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this payload.",
             )),
@@ -888,7 +1047,10 @@ impl crate::approval::ReviewPresenter for FullScreenPresenter {
 fn describe_plan_source(dapp: &AppMetadata, proposed: &dapp_request::TransactionRequest) -> String {
     use std::fmt::Write as _;
 
-    let mut source = format!("{}, connected over WalletConnect", describe_dapp(dapp));
+    let mut source = format!(
+        "{}, connected over WalletConnect",
+        DappIdentity::of(dapp).headline()
+    );
     if let Some(gas) = proposed.suggested_gas {
         let _ = write!(source, "; it suggested a gas limit of {gas}");
     }
@@ -900,36 +1062,6 @@ fn describe_plan_source(dapp: &AppMetadata, proposed: &dapp_request::Transaction
         );
     }
     terminal_safe_line(&source)
-}
-
-/// A dapp's name and URL, for a status line.
-fn describe_dapp(metadata: &AppMetadata) -> String {
-    match (
-        sanitized_optional(&metadata.name),
-        sanitized_optional(&metadata.url),
-    ) {
-        (Some(name), Some(url)) => format!("{name} ({url})"),
-        (Some(text), None) | (None, Some(text)) => text,
-        (None, None) => "an unnamed dapp".to_owned(),
-    }
-}
-
-/// Dapp-authored text, made safe to draw and kept to one line, or `None` when
-/// what is left after sanitizing says nothing.
-///
-/// The `None` case is not just the empty string: a name of one zero-width
-/// space survives `trim` and disappears in the sanitizer, and a caller that
-/// tested the input for emptiness would still print an empty field.
-fn sanitized_optional(value: &str) -> Option<String> {
-    const MAX_CHARACTERS: usize = 120;
-    let safe = crate::sanitize::stripped_capped(value.trim(), MAX_CHARACTERS);
-    (!safe.trim().is_empty()).then_some(safe)
-}
-
-/// The same, for a review fact, where a field is always drawn and so needs
-/// something to say when the dapp left it blank.
-fn sanitized(value: &str) -> String {
-    sanitized_optional(value).unwrap_or_else(|| "not stated".to_owned())
 }
 
 fn join_or_none(values: &[String]) -> String {

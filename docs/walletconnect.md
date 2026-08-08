@@ -56,24 +56,34 @@ with.
 ## Choosing which account the dapp gets
 
 A session exposes exactly one account, and you choose it on the review screen
-rather than before it. Press `a` to cycle through this wallet's accounts: each
-press swaps in that account's own complete review, so you are looking at the
-address that would be exposed and the chains it would be exposed on at the
-moment you decide. The footer names the account currently selected and counts
-the accounts available.
+rather than before it. Every account this wallet holds is listed there, with a
+cursor on the one about to be connected:
 
-Switching resets the review — scroll position returns to the top and Approve
+```
+ Connect as
+   ▸ primary  0x1111111111111111111111111111111111111111
+     cold     0x2222222222222222222222222222222222222222
+     hot      0x3333333333333333333333333333333333333333
+```
+
+**Tab** moves through the list and **Shift-Tab** moves back. Each press swaps
+in that account's own complete review, so the address that would be exposed and
+the chains it would be exposed on are the ones on screen at the moment you
+decide. **←** and **→** move between Reject and Approve, and the footer names
+the account currently selected.
+
+Switching resets the review: scroll position returns to the top and Approve
 becomes unavailable until you have read to the end again. Having read one
-account's consequences is not having read another's.
+account's consequences is not having read another's. That also makes Tab safe
+on this screen — it can only ever move *away* from approving, so a Tab and an
+Enter typed before the screen was drawn cannot approve anything.
 
-`--account` chooses where the cycle starts. It does not restrict it, because
-the review names the selected account in its own document and changing it takes
-a deliberate keystroke.
+On reviews with no account list — a transaction, a message, a typed-data
+payload — Tab keeps its usual job of moving between Reject and Approve.
 
-`a` rather than Tab: Tab moves the Reject/Approve cursor on every review screen
-in this program, and that movement is what makes approving deliberate. Giving
-it a second meaning on one screen is how you press it for one thing and get the
-other.
+`--account` chooses where the list starts. It does not restrict it, because the
+review names the selected account in its own document and changing it takes a
+deliberate keystroke.
 
 
 ## The connection review
@@ -85,12 +95,43 @@ be changed afterwards — a dapp that asks to change it (`wc_sessionUpdate`) is
 refused, because widening what a session exposes is a decision only you can
 make, and there is no way to ask you for it mid-flight.
 
-The review screen shows the dapp's name, URL, and description. **None of it is
-verified.** A site impersonating another one will claim the other one's name
-there, so the screen says so, and every one of those strings is sanitized
-before it is drawn — a name carrying a right-to-left override would otherwise
-rewrite the line it sits on. Approve only a connection you started yourself,
-just now, from the site you meant.
+### What the screen tells you about the dapp
+
+A session proposal carries a name, a description, a URL, and some icon links,
+all typed by whoever wrote the dapp and attested by nobody. The review
+separates the part with a checkable shape from the part that is pure claim:
+
+- **Site** leads: the host parsed out of the URL the dapp gave. This is the one
+  field you can compare against the address bar of the page you opened, so it
+  is the first line on the screen.
+- **Name** and **About** are shown as claims. A site impersonating another one
+  will put the other one's name here.
+- **URL** and **Icons** appear further down, for when you want the whole thing
+  rather than just the host.
+
+The wallet also points out a few things worth weighing. None is a verdict — a
+legitimate dapp can trip any of them:
+
+- The dapp gave no URL, or one that does not parse.
+- Its URL is not `https`.
+- Its icons are served from a different host than its site.
+- **Its name spells a domain it does not serve from** — calling itself
+  `app.uniswap.org` while serving from `claim-rewards.example`. That is the
+  exact shape of the attack this screen exists to catch.
+
+There is no allowlist of known-good dapps and no reputation lookup. Both would
+need a third party, and a wallet that prints "verified" on someone else's
+authority has moved the decision somewhere you cannot see it. Nothing on this
+screen reaches the network, and no icon is ever fetched — so connecting reveals
+nothing to the dapp beyond what the relay already carries.
+
+Every dapp-authored string is sanitized before it is drawn; a name carrying a
+right-to-left override would otherwise rewrite the line it sits on. Approve
+only a connection you started yourself, just now, from the page you meant.
+
+Once connected, the dapp is named again on every request it sends: a
+transaction's review says which site produced the plan, and a message or
+typed-data review says who asked for the signature.
 
 Chains the dapp lists as *required* must already be configured in this wallet,
 or the proposal is refused with a message naming them; add one with
@@ -127,6 +168,49 @@ The pairing link itself is a secret while it is valid. The symmetric key is in
 the link — that is what makes the QR code a key exchange — so anyone who reads
 one can impersonate the dapp for the length of the pairing. Prefer the paste
 prompt over an argument, and treat a link you did not just generate as spent.
+
+
+## The session screen
+
+`connect` is full-screen from its first question to its last. Before pairing it
+shows a paste surface for the link; once connected it shows a session screen
+with the dapp's identity pinned at the top and a live log of every request
+below it:
+
+```
+ Connected to app.example.com
+ Site     app.example.com
+ Account  primary
+ Address  0x1111111111111111111111111111111111111111
+ Chains   Ethereum, Optimism
+
+ 14:02:31  Connected. Waiting for requests…
+ 14:03:07  personal_sign on eip155:1
+ 14:03:19  personal_sign — answered.
+ Connected · q or Ctrl-C disconnects
+```
+
+Who the session is with never scrolls away: a busy dapp fills the log, not the
+identity block above it. Press `q` or Ctrl-C to disconnect.
+
+The session screen hands the terminal over whenever a review opens and takes it
+back afterwards, so exactly one surface is ever reading your keystrokes. That
+handover is also what keeps owner authentication — Touch ID, or a polkit prompt
+on Linux — on the ordinary screen where it belongs.
+
+
+## Small terminals
+
+The review is designed to be read in a split pane. The facts a connection turns
+on — site, account, address, chains — are the first thing drawn, so they are
+legible without scrolling on a short screen, and the warnings are last because
+Approve stays unavailable until the end of the document has been on screen.
+
+The key legend at the bottom shortens as the terminal narrows, dropping the
+least important hints first so that `Esc` — the way out — survives at every
+width. The Reject and Approve labels shorten rather than being cut, because
+"Approve — scroll to the end of the document first" truncated to "Approve"
+reads as an invitation to press it.
 
 
 ## Limits

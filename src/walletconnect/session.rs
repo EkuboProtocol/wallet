@@ -193,6 +193,35 @@ pub trait SessionHandler {
 
     /// Progress, for the terminal. Never fails and never blocks the protocol.
     fn notify(&self, event: &SessionEvent<'_>);
+
+    /// Called before the session waits, so a handler that draws something
+    /// while idle can put it back up.
+    ///
+    /// Idempotent: the session calls it before every wait, including the ones
+    /// that follow a request the handler served without touching the terminal.
+    /// A handler that needs the terminal takes it during `review_proposal` or
+    /// `handle_request` and simply does not put the idle surface back until
+    /// this is called again — which is what keeps exactly one thing reading
+    /// keystrokes at any moment.
+    async fn enter_idle(&self) {}
+
+    /// Resolves when the person asks, from whatever the handler draws while
+    /// idle, to end the session.
+    ///
+    /// Must be cancellation-safe: the session drops this future whenever a
+    /// relay message or a shutdown arrives first. The default never resolves,
+    /// for a handler with no such surface.
+    async fn quit_requested(&self) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Why one turn of the session loop stopped waiting.
+enum Woke {
+    /// Ctrl-C, or the person asking to disconnect from the idle surface.
+    Stop,
+    /// The relay delivered something, or closed.
+    Delivered(Option<super::relay::RelayMessage>),
 }
 
 /// A settled session's live state.
@@ -257,18 +286,30 @@ impl<'a> Session<'a> {
 
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
-            tokio::select! {
-                () = &mut shutdown => {
+            // Before every wait, not only the first: a request the handler
+            // just served may have taken the terminal to review something, and
+            // this is where it gets to put its own surface back.
+            self.handler.enter_idle().await;
+            // Bound separately so the shared borrow of the handler and the
+            // exclusive one of the relay do not overlap on `self`.
+            let handler = self.handler;
+            let woke = tokio::select! {
+                () = &mut shutdown => Woke::Stop,
+                () = handler.quit_requested() => Woke::Stop,
+                message = self.relay.next_message() => Woke::Delivered(message),
+            };
+            match woke {
+                Woke::Stop => {
                     self.disconnect("The wallet closed the session.").await;
                     return Ok(());
                 }
-                message = self.relay.next_message() => {
-                    let Some(message) = message else {
-                        bail!(
-                            "the relay connection closed. The dapp will show the session as \
-                             disconnected; run `ekubo-wallet connect` again with a fresh link."
-                        );
-                    };
+                Woke::Delivered(None) => {
+                    bail!(
+                        "the relay connection closed. The dapp will show the session as \
+                         disconnected; run `ekubo-wallet connect` again with a fresh link."
+                    );
+                }
+                Woke::Delivered(Some(message)) => {
                     if self.receive(&message.topic, &message.message).await? {
                         return Ok(());
                     }

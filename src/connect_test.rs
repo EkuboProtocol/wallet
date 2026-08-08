@@ -63,49 +63,6 @@ fn the_methods_offered_exclude_the_two_that_cannot_be_reviewed_or_tracked() {
 }
 
 #[test]
-fn dapp_authored_text_cannot_redraw_the_review_it_appears_on() {
-    // The name is the one thing a person actually reads on the connection
-    // screen, and it is chosen entirely by the dapp. A right-to-left override
-    // in it rewrites the line it sits on.
-    let hostile = "Uni\u{202e}swap\u{200b} \u{2066}official\u{2069}";
-    let safe = sanitized(hostile);
-    for character in ['\u{202e}', '\u{200b}', '\u{2066}', '\u{2069}'] {
-        assert!(!safe.contains(character), "{character:?} survived: {safe}");
-    }
-}
-
-#[test]
-fn an_over_long_dapp_name_is_capped_rather_than_filling_the_screen() {
-    let capped = sanitized(&"a".repeat(5_000));
-    assert!(capped.chars().count() <= 130, "{}", capped.chars().count());
-}
-
-#[test]
-fn a_dapp_that_names_itself_nothing_is_shown_as_such() {
-    assert_eq!(sanitized(""), "not stated");
-    assert_eq!(sanitized("   "), "not stated");
-    assert_eq!(sanitized("\u{200b}"), "not stated");
-}
-
-#[test]
-fn a_dapp_is_described_by_whichever_of_name_and_url_it_gave() {
-    let describe = |name: &str, url: &str| {
-        describe_dapp(&AppMetadata {
-            name: name.to_owned(),
-            url: url.to_owned(),
-            ..AppMetadata::default()
-        })
-    };
-    assert_eq!(
-        describe("Example", "https://example.com"),
-        "Example (https://example.com)"
-    );
-    assert_eq!(describe("Example", ""), "Example");
-    assert_eq!(describe("", "https://example.com"), "https://example.com");
-    assert_eq!(describe("", ""), "an unnamed dapp");
-}
-
-#[test]
 fn the_plan_source_records_what_the_dapp_asked_for_and_did_not_get() {
     let proposed = dapp_request::TransactionRequest {
         from: Address::ZERO,
@@ -135,9 +92,11 @@ fn a_plan_source_from_a_plain_request_stays_plain() {
         suggested_gas: None,
         overridden: Vec::new(),
     };
+    // The host, not the URL: the plan's source line is what a reviewer reads
+    // to know who asked, and the host is the part they can check.
     assert_eq!(
         describe_plan_source(&example_dapp(), &proposed),
-        "Example (https://example.com), connected over WalletConnect"
+        "Example (example.com), connected over WalletConnect"
     );
 
     // A dapp that named itself nothing still produces a readable line.

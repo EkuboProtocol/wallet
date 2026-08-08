@@ -566,6 +566,19 @@ impl ReviewScreen {
         self.choices.len() > 1
     }
 
+    /// Point the review at the previous subject, wrapping.
+    fn select_previous_choice(&mut self) {
+        if !self.switchable() {
+            return;
+        }
+        let last = self.choices.len() - 1;
+        self.apply_choice(if self.choice == 0 {
+            last
+        } else {
+            self.choice - 1
+        });
+    }
+
     /// Point the review at the next subject, wrapping.
     ///
     /// Everything that recorded the reviewer's engagement with the previous
@@ -577,7 +590,11 @@ impl ReviewScreen {
         if !self.switchable() {
             return;
         }
-        self.choice = (self.choice + 1) % self.choices.len();
+        self.apply_choice((self.choice + 1) % self.choices.len());
+    }
+
+    fn apply_choice(&mut self, choice: usize) {
+        self.choice = choice;
         self.document = self.choices[self.choice].clone();
         self.offset = 0;
         self.reached_end = false;
@@ -652,12 +669,22 @@ impl ReviewScreen {
                 return Some(ReviewAction::Decide(ApprovalDecision::Rejected));
             }
             KeyCode::Char('r') if self.refreshable => return Some(ReviewAction::Refresh),
-            // Not Tab: Tab moves the decision cursor on every review in this
-            // program, and that movement is what makes approving deliberate.
-            // Giving it a second meaning on one screen is how a reviewer ends
-            // up pressing it for one thing and getting the other.
-            KeyCode::Char('a') if self.switchable() => {
+            // Tab moves through the list when this review has one, which is
+            // what a list of accounts on screen invites. The decision cursor
+            // keeps ← and →, and the footer says so.
+            //
+            // This is safe in the direction that matters: Tab here can only
+            // ever move *away* from Approve — every switch resets the cursor to
+            // Reject and withdraws the right to approve — so a buffered Tab and
+            // Enter, typed before this screen was drawn, cannot approve
+            // anything. On a review with no list, Tab still toggles the
+            // decision as it always has.
+            KeyCode::Tab | KeyCode::Char('a') if self.switchable() => {
                 self.select_next_choice();
+                return None;
+            }
+            KeyCode::BackTab if self.switchable() => {
+                self.select_previous_choice();
                 return None;
             }
             KeyCode::Enter => {
@@ -704,34 +731,78 @@ impl ReviewScreen {
         })
     }
 
-    /// The footer key legend. A refresh nobody knows about is a refresh
-    /// nobody uses, so the key is advertised exactly where it is available
-    /// and nowhere else.
-    fn hints(&self) -> String {
-        let refresh = if self.refreshable {
-            " · r re-simulate"
-        } else {
-            ""
-        };
-        // The account is named, not just the key: a legend reading "a account"
-        // says a switch is possible without saying which one is selected now,
-        // and that is the fact the reviewer is deciding on.
-        let switch = if self.switchable() {
-            format!(
-                " · a account ({}/{}: {})",
-                self.choice + 1,
-                self.choices.len(),
-                self.choice_labels
-                    .get(self.choice)
-                    .map_or("?", String::as_str)
-            )
-        } else {
-            String::new()
-        };
-        format!(
-            "{} · ↑↓ scroll · PgUp/PgDn page{refresh}{switch} · Tab switch · Enter decide · Esc rejects",
-            self.position()
-        )
+    /// The footer key legend, sized to the terminal it will be drawn in.
+    ///
+    /// The footer is one line and the renderer simply cuts whatever does not
+    /// fit, so on a narrow terminal a legend written for a wide one loses its
+    /// *last* segments — which is where "Esc rejects" sits. Dropping segments
+    /// deliberately, worst-first, keeps the way out of this screen on screen
+    /// at every width.
+    ///
+    /// A refresh or an account switch nobody knows about is one nobody uses,
+    /// so each is advertised exactly where it is available and nowhere else.
+    fn hints(&self, width: usize) -> String {
+        // Ordered by what a reviewer cannot afford to lose. Esc first: it is
+        // the escape hatch, and it is the one that used to be cut. Each entry
+        // is (long, short); the short form is dropped to before the segment
+        // itself is.
+        let mut segments: Vec<(String, String)> = vec![
+            ("Esc rejects".to_owned(), "Esc".to_owned()),
+            ("Enter decide".to_owned(), "Enter".to_owned()),
+            ("↑↓ scroll".to_owned(), "↑↓".to_owned()),
+            // Which key moves the decision cursor depends on whether Tab is
+            // busy with the list, so the legend names the one that works here
+            // rather than the one that usually does.
+            if self.switchable() {
+                ("←→ reject/approve".to_owned(), "←→".to_owned())
+            } else {
+                ("Tab switch".to_owned(), "Tab".to_owned())
+            },
+        ];
+        if self.switchable() {
+            // The account is named, not just the key: a legend reading
+            // "a account" says a switch is possible without saying which one
+            // is selected, and that is the fact being decided on.
+            segments.push((
+                format!(
+                    "Tab account ({}/{}: {})",
+                    self.choice + 1,
+                    self.choices.len(),
+                    self.choice_labels
+                        .get(self.choice)
+                        .map_or("?", String::as_str)
+                ),
+                format!("Tab acct ({}/{})", self.choice + 1, self.choices.len()),
+            ));
+        }
+        if self.refreshable {
+            segments.push(("r re-simulate".to_owned(), "r resim".to_owned()));
+        }
+        segments.push(("PgUp/PgDn page".to_owned(), "PgDn".to_owned()));
+        segments.push((self.position(), self.position()));
+
+        // Longest that fits: every segment long, then every segment short,
+        // then shedding the least important ones one at a time.
+        let mut candidates: Vec<Vec<String>> = vec![
+            segments.iter().map(|(long, _)| long.clone()).collect(),
+            segments.iter().map(|(_, short)| short.clone()).collect(),
+        ];
+        for keep in (1..segments.len()).rev() {
+            candidates.push(
+                segments
+                    .iter()
+                    .take(keep)
+                    .map(|(_, short)| short.clone())
+                    .collect(),
+            );
+        }
+        candidates
+            .into_iter()
+            .map(|parts| parts.join(" · "))
+            .find(|legend| crate::render::display_width(legend) <= width)
+            // Nothing fits: the renderer cuts it, and the first thing on the
+            // line is the thing worth keeping.
+            .unwrap_or_else(|| segments[0].1.clone())
     }
 
     fn position(&self) -> String {
@@ -761,6 +832,20 @@ fn wrap_document(document: &[Line], columns: usize) -> Vec<Line> {
             fullscreen::wrap_line_hanging(line, columns, indent)
         })
         .collect()
+}
+
+/// The first phrasing that fits, or the shortest one when none does.
+///
+/// Written longest-first so a roomy terminal shows the fullest wording and a
+/// cramped one still shows a complete sentence rather than half of one.
+fn fitting(width: usize, options: &[&str]) -> String {
+    options
+        .iter()
+        .find(|option| crate::render::display_width(option) <= width)
+        .map_or_else(
+            || (*options.last().expect("at least one phrasing")).to_owned(),
+            |option| (*option).to_owned(),
+        )
 }
 
 fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
@@ -812,29 +897,55 @@ fn draw(frame: &mut ratatui::Frame, title: &str, review: &mut ReviewScreen) {
             line
         }
     };
+    // The decision pane is the one place a truncated line changes what the
+    // screen appears to offer: "Approve — scroll to the end of the document
+    // first" cut to "Approve — scroll to the end of the do" still reads as an
+    // instruction, but cut to "Approve" reads as an invitation to press it.
+    // So the qualifier is shortened rather than left to be cut.
+    let room = (decision.width as usize).saturating_sub(4);
     let approve_label = if review.refreshing.is_some() {
         // Nothing on screen is settled while a refresh is running, so the
         // affirmative option says so rather than inviting a decision on
         // numbers that are about to be replaced.
-        "Approve — waiting for the new simulation".to_owned()
+        fitting(
+            room,
+            &[
+                "Approve — waiting for the new simulation",
+                "Approve — waiting…",
+            ],
+        )
     } else if review.reached_end {
-        "Approve — sign this exact action".to_owned()
+        fitting(
+            room,
+            &["Approve — sign this exact action", "Approve — sign this"],
+        )
     } else {
-        "Approve — scroll to the end of the document first".to_owned()
+        fitting(
+            room,
+            &[
+                "Approve — scroll to the end of the document first",
+                "Approve — read to the end first",
+                "Approve — read it all first",
+            ],
+        )
     };
+    let reject_label = fitting(
+        room,
+        &[
+            "Reject — nothing is signed or submitted",
+            "Reject — sign nothing",
+        ],
+    );
     frame.render_widget(
         Paragraph::new(vec![
             UiLine::default(),
-            option(
-                !review.on_approve,
-                "Reject — nothing is signed or submitted".to_owned(),
-            ),
+            option(!review.on_approve, reject_label),
             option(review.on_approve, approve_label),
         ]),
         decision,
     );
 
-    let hints = review.hints();
+    let hints = review.hints((footer.width as usize).saturating_sub(1));
     // The waiting message outranks any notice: it is the only thing on screen
     // that is still changing, and it tells the reviewer why their keys are
     // being ignored.

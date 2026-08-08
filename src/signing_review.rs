@@ -50,6 +50,13 @@ pub enum TypedDataDecision {
 
 /// Review one queued EIP-191 message and resolve it, either way.
 ///
+/// `requester` names who asked, when the caller knows: a dapp reached over
+/// `WalletConnect` does, and `ekubo-wallet review` does not, because a request
+/// queued by an MCP agent carries no record of which agent. A signature is the
+/// one thing here that authorizes something without naming a counterparty in
+/// its own bytes, so "who asked for this" is a fact the reviewer otherwise has
+/// to supply from memory.
+///
 /// `no_confirm` skips only the interactive review. Owner authentication still
 /// follows, and the transcript is still printed, so the reviewer sees the
 /// subject even on the path that answers the question for them.
@@ -57,6 +64,7 @@ pub async fn decide_message(
     config: &ConfigStore,
     mut store: MessageStore,
     request: PendingMessage,
+    requester: Option<&str>,
     no_confirm: bool,
 ) -> Result<MessageDecision> {
     ensure!(
@@ -95,6 +103,10 @@ pub async fn decide_message(
     )
     .fact("Wallet", &request.wallet_id)
     .fact("Signer", wallet.address.to_checksum(None))
+    .fact(
+        "Asked by",
+        requester.unwrap_or("an MCP agent; this queue does not record which"),
+    )
     .fact(
         "Chain",
         request.chain_id.as_ref().map_or_else(
@@ -224,10 +236,13 @@ pub async fn decide_message(
 }
 
 /// Review one queued EIP-712 payload and resolve it, either way.
+///
+/// `requester` names who asked, on the same terms as [`decide_message`].
 pub async fn decide_typed_data(
     config: &ConfigStore,
     mut store: TypedDataStore,
     request: PendingTypedData,
+    requester: Option<&str>,
     no_confirm: bool,
 ) -> Result<TypedDataDecision> {
     ensure!(
@@ -250,6 +265,10 @@ pub async fn decide_typed_data(
          shown at the end of this review.",
     )
     .fact("Wallet", &request.wallet_id)
+    .fact(
+        "Asked by",
+        requester.unwrap_or("an MCP agent; this queue does not record which"),
+    )
     .fact("Chain ID", &request.chain_id)
     .fact("Primary type", &typed.primary_type)
     .fact(

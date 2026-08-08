@@ -14,6 +14,7 @@ pub mod batch_read;
 pub mod cli;
 pub mod completion;
 pub mod connect;
+pub mod connect_screen;
 pub mod fullscreen;
 pub mod mcp;
 pub mod pager;

@@ -16,6 +16,7 @@
 //! * [`crypto`] and [`relay`] are transport: confidentiality with one peer over
 //!   an untrusted pipe.
 //! * [`uri`] and [`protocol`] are parsing: hostile bytes into typed values.
+//! * [`identity`] separates what is checkable about a dapp from what it claims.
 //! * [`session`] owns the conversation and the approved scope, and refuses
 //!   anything outside it.
 //! * [`request`] translates a dapp's JSON-RPC into the wallet's own vocabulary,
@@ -25,6 +26,7 @@
 //! review — lives in `crate::connect`, not here.
 
 pub mod crypto;
+pub mod identity;
 pub mod protocol;
 pub mod relay;
 pub mod request;
