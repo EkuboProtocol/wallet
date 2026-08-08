@@ -9,8 +9,9 @@
 //
 // Writes <out-dir>/candidates.json. Network access required.
 
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -110,11 +111,27 @@ async function fetchExtraRpcs() {
   // real thing keeps the parse honest without vendoring a JS parser; it goes
   // through a scratch file because the module is far too large to import as a
   // data: URL. Importing it runs it — see the note on the pin above.
-  const scratch = join(outDir, ".extra-rpcs.mjs");
-  writeFileSync(scratch, source);
-  const module = await import(pathToFileURL(scratch).href);
-  rmSync(scratch, { force: true });
-  return module.default ?? module.extraRpcs ?? {};
+  //
+  // In a private directory rather than beside the output, and the reason is
+  // the digest above: it is computed on the bytes in memory, and what runs is
+  // whatever the loader reads back off the disk. Staged at a predictable path
+  // — `.extra-rpcs.mjs` under a `/tmp/probe` the documented command names —
+  // another local user could have replaced the file in between and had the
+  // check pass on bytes that never ran. `mkdtemp` gives a name nobody can
+  // predict inside a directory only this user can enter, which closes that
+  // window without needing to hold a descriptor across the import.
+  const staging = mkdtempSync(join(tmpdir(), "ekubo-rpc-probe-"));
+  const scratch = join(staging, "extra-rpcs.mjs");
+  try {
+    writeFileSync(scratch, source);
+    const module = await import(pathToFileURL(scratch).href);
+    return module.default ?? module.extraRpcs ?? {};
+  } finally {
+    // In a `finally` because the import is what is most likely to throw, and
+    // a module that failed halfway is exactly the one not to leave lying
+    // around under a name something else might pick up.
+    rmSync(staging, { recursive: true, force: true });
+  }
 }
 
 const [chains, extraRpcs] = await Promise.all([fetchJson(CHAINS_URL), fetchExtraRpcs()]);

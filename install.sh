@@ -416,11 +416,20 @@ if [ "$OS" = Linux ] && [ -f "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.
     # temporary instead, verify that copy, and install that same copy — so the
     # bytes checked and the bytes installed cannot be different bytes.
     #
+    # The copy is bounded, and that is the second half of the same problem.
+    # Root reads a path the user can still replace, so replacing it with a
+    # symlink to /dev/zero turned this line into an unbounded privileged write
+    # that fills the filesystem before the digest is ever computed. `-f`
+    # refuses anything that is not a regular file — a device or a FIFO no
+    # longer gets read at all — and `head -c` bounds what a regular file can
+    # cost even so. A file larger than the cap is truncated, fails the digest,
+    # and installs nothing, which is the same answer as any other wrong file.
+    #
     # Single-quoted: none of this expands here. It is the text the operator
     # runs, and the digest and path reach it as arguments rather than being
     # spliced into the script.
     # shellcheck disable=SC2016  # deliberate: this text is not for this shell
-    POLKIT_COMMAND='t=$(mktemp) || exit 1; cat "$2" > "$t" && printf "%s  %s\n" "$1" "$t" | sha256sum -c >/dev/null && install -m 0644 "$t" /usr/share/polkit-1/actions/com.ekubo.wallet.policy; status=$?; rm -f "$t"; exit $status'
+    POLKIT_COMMAND='[ -f "$2" ] || { echo "not a regular file: $2" >&2; exit 1; }; t=$(mktemp) || exit 1; head -c 65536 "$2" > "$t" && printf "%s  %s\n" "$1" "$t" | sha256sum -c >/dev/null && install -m 0644 "$t" /usr/share/polkit-1/actions/com.ekubo.wallet.policy; status=$?; rm -f "$t"; exit $status'
     log "  sudo sh -c $(shell_quote "$POLKIT_COMMAND") sh \\"
     log "    $(shell_quote "$POLKIT_DIGEST") $(shell_quote "$POLKIT_FILE")"
     log "that copies, verifies, and installs one set of bytes, so a file \
