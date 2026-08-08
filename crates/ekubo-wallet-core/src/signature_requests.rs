@@ -6,6 +6,8 @@
 //! each store keeps only its payload encoding and its integrity
 //! re-derivation of the stored digest.
 
+use crate::sql::{self, Blob, Millis};
+use alloy::primitives::B256;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -27,32 +29,38 @@ impl SignatureQueue {
     /// Queue a payload, reusing an identical one already awaiting approval
     /// for the same wallet and chain key. `insert` runs inside the same
     /// transaction that checked for duplicates and capacity, receiving the
-    /// new request ID and the RFC 3339 timestamp to store as both
-    /// `created_at` and `updated_at`.
+    /// new request ID and the moment to store as both `created_at` and
+    /// `updated_at`.
+    ///
+    /// `chain_key` is 0 for a request that declares no chain, which only
+    /// `personal_sign` does. NULL would read better and would silently break
+    /// the deduplication below, because `SQLite` counts NULLs as distinct in a
+    /// unique index.
     pub fn create_or_reuse(
         &self,
         connection: &mut Connection,
         wallet_id: &str,
-        chain_key: &str,
-        digest: &str,
-        insert: impl FnOnce(&rusqlite::Transaction<'_>, Uuid, &str) -> Result<()>,
+        chain_key: u64,
+        digest: B256,
+        insert: impl FnOnce(&rusqlite::Transaction<'_>, Uuid, DateTime<Utc>) -> Result<()>,
     ) -> Result<Uuid> {
         crate::config::validate_wallet_id(wallet_id)?;
+        let chain_key = i64::try_from(chain_key).context("chain ID out of range")?;
         let transaction = connection.transaction()?;
-        let existing: Option<String> = transaction
+        let existing: Option<Uuid> = transaction
             .query_row(
                 &format!(
                     "SELECT request_id FROM {} WHERE wallet_id = ?1 AND chain_id = ?2 \
                      AND digest = ?3 AND status = 'awaiting_approval'",
                     self.table
                 ),
-                params![wallet_id, chain_key, digest],
+                params![wallet_id, chain_key, Blob(digest)],
                 |row| row.get(0),
             )
             .optional()?;
         if let Some(existing) = existing {
             transaction.commit()?;
-            return Uuid::parse_str(&existing).context("stored request ID is invalid");
+            return Ok(existing);
         }
         let awaiting: i64 = transaction.query_row(
             &format!(
@@ -68,21 +76,20 @@ impl SignatureQueue {
             self.noun
         );
         let request_id = Uuid::new_v4();
-        insert(&transaction, request_id, &Utc::now().to_rfc3339())?;
+        insert(&transaction, request_id, sql::now())?;
         transaction.commit()?;
         Ok(request_id)
     }
 
     /// Marks an awaiting request rejected; refuses when the row moved.
     pub fn reject(&self, connection: &Connection, request_id: Uuid) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
         let changed = connection.execute(
             &format!(
                 "UPDATE {} SET status = 'rejected', rejected_at = ?2, updated_at = ?2 \
                  WHERE request_id = ?1 AND status = 'awaiting_approval'",
                 self.table
             ),
-            params![request_id.to_string(), now],
+            params![request_id, Millis(sql::now())],
         )?;
         ensure!(changed == 1, "{} changed during rejection", self.noun);
         Ok(())
@@ -95,35 +102,34 @@ impl SignatureQueue {
         &self,
         connection: &mut Connection,
         request_id: Uuid,
-        expected_digest: &str,
+        expected_digest: B256,
         signature: &str,
     ) -> Result<()> {
-        validate_signature_hex(signature)?;
+        let signature = parse_signature(signature)?;
         let transaction = connection.transaction()?;
-        let (digest, status): (String, String) = transaction
+        let (digest, status): (Blob<B256>, String) = transaction
             .query_row(
                 &format!(
                     "SELECT digest, status FROM {} WHERE request_id = ?1",
                     self.table
                 ),
-                [request_id.to_string()],
+                [request_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .with_context(|| format!("unknown {} {request_id}", self.noun))?;
-        ensure!(digest == expected_digest, "{} digest mismatch", self.noun);
+        ensure!(digest.0 == expected_digest, "{} digest mismatch", self.noun);
         ensure!(
             status == "awaiting_approval",
             "{} is not awaiting approval",
             self.noun
         );
-        let now = Utc::now().to_rfc3339();
         transaction.execute(
             &format!(
                 "UPDATE {} SET status = 'signed', approved_at = ?2, updated_at = ?2, \
                  signature = ?3 WHERE request_id = ?1 AND status = 'awaiting_approval'",
                 self.table
             ),
-            params![request_id.to_string(), now, signature],
+            params![request_id, Millis(sql::now()), Blob(signature)],
         )?;
         transaction.commit()?;
         Ok(())
@@ -143,31 +149,30 @@ impl SignatureQueue {
              AND (?1 IS NULL OR wallet_id = ?1) ORDER BY created_at DESC",
             self.table
         ))?;
-        let ids = statement
-            .query_map([wallet_id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids.into_iter()
-            .map(|value| Uuid::parse_str(&value).context("stored request ID is invalid"))
-            .collect()
+        Ok(statement
+            .query_map([wallet_id], |row| row.get::<_, Uuid>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 
-pub(crate) fn parse_time(value: &str) -> Result<DateTime<Utc>> {
-    Ok(DateTime::parse_from_rfc3339(value)
-        .context("stored timestamp is invalid")?
-        .with_timezone(&Utc))
-}
-
-pub(crate) fn validate_signature_hex(value: &str) -> Result<()> {
-    use alloy::primitives::B256;
-    use std::str::FromStr;
+/// The 65 bytes of an `r ‖ s ‖ v` signature, from the hex a caller passed.
+///
+/// Callers hand signatures across the API as hex strings, and the column holds
+/// the bytes, so exactly one place converts between them and it is the same
+/// place that decides what a valid signature looks like.
+pub(crate) fn parse_signature(value: &str) -> Result<[u8; 65]> {
     let encoded = value
         .strip_prefix("0x")
         .context("signature must start with 0x")?;
+    let mut bytes = [0_u8; 65];
     ensure!(
-        encoded.len() == 130 && encoded.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        encoded.len() == 130 && hex::decode_to_slice(encoded, &mut bytes).is_ok(),
         "signature must be 65 hexadecimal bytes"
     );
-    B256::from_str(&format!("0x{}", &encoded[..64])).context("invalid signature encoding")?;
-    Ok(())
+    Ok(bytes)
+}
+
+#[must_use]
+pub(crate) fn encode_signature(signature: [u8; 65]) -> String {
+    format!("0x{}", hex::encode(signature))
 }

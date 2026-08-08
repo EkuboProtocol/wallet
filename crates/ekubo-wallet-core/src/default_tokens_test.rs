@@ -113,7 +113,7 @@ fn reopening_a_database_does_not_reseed_it() {
             "DELETE FROM tokens WHERE chain_id = ?1 AND address = ?2",
             rusqlite::params![
                 i64::try_from(first.chain_id).unwrap(),
-                format!("{:#x}", first.address)
+                crate::sql::Blob(first.address)
             ],
         )
         .unwrap();

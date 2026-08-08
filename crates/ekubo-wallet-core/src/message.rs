@@ -18,7 +18,8 @@
 use crate::{
     policy_store::PolicyStore,
     sanitize::is_bidirectional_control,
-    signature_requests::{SignatureQueue, parse_time, validate_signature_hex},
+    signature_requests::{SignatureQueue, encode_signature},
+    sql::{Blob, Millis, RowExt},
 };
 use alloy::primitives::{Address, B256, eip191_hash_message};
 use anyhow::{Context, Result, bail, ensure};
@@ -505,31 +506,35 @@ impl MessageStore {
         encoding: MessageEncoding,
     ) -> Result<PendingMessage> {
         validate_message_length(message)?;
-        let message_hex = encode_message_hex(message);
-        let digest = format!("{:#x}", message_digest(message));
-        // The empty string, not NULL, stands for "no chain declared": SQLite
-        // treats NULLs as distinct in a unique index, which would silently
-        // disable the awaiting-request deduplication in the shared queue.
-        let chain_id = chain_id.unwrap_or_default();
+        let digest = message_digest(message);
+        // 0, not NULL, stands for "no chain declared": SQLite treats NULLs as
+        // distinct in a unique index, which would silently disable the
+        // awaiting-request deduplication in the shared queue. No chain has ID
+        // 0, so the sentinel cannot collide with a declared one.
+        let chain_id = chain_id
+            .map(|declared| declared.parse::<u64>().context("chain ID is not a number"))
+            .transpose()?
+            .unwrap_or_default();
+        let stored_chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
         let request_id = QUEUE.create_or_reuse(
             &mut self.database.connection,
             wallet_id,
             chain_id,
-            &digest,
+            digest,
             |transaction, request_id, now| {
                 transaction.execute(
                     "INSERT INTO pending_messages(
-                        request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
+                        request_id, wallet_id, chain_id, message, message_encoding, digest,
                         status, created_at, updated_at
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?7)",
                     params![
-                        request_id.to_string(),
+                        request_id,
                         wallet_id,
-                        chain_id,
-                        message_hex,
+                        stored_chain_id,
+                        message,
                         encoding.as_str(),
-                        digest,
-                        now,
+                        Blob(digest),
+                        Millis(now),
                     ],
                 )?;
                 Ok(())
@@ -557,7 +562,7 @@ impl MessageStore {
     pub fn store_signature(
         &mut self,
         request_id: Uuid,
-        expected_digest: &str,
+        expected_digest: B256,
         signature: &str,
     ) -> Result<PendingMessage> {
         QUEUE.store_signature(
@@ -587,23 +592,23 @@ impl MessageStore {
             .database
             .connection
             .query_row(
-                "SELECT wallet_id, chain_id, message_hex, message_encoding, digest, status,
+                "SELECT wallet_id, chain_id, message, message_encoding, digest, status,
                         created_at, updated_at, approved_at, rejected_at, signature
                  FROM pending_messages WHERE request_id = ?1",
-                [request_id.to_string()],
+                [request_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.blob::<B256>(4)?,
                         row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                        row.get::<_, Option<String>>(10)?,
+                        row.time(6)?,
+                        row.time(7)?,
+                        row.time_opt(8)?,
+                        row.time_opt(9)?,
+                        row.blob_opt::<[u8; 65]>(10)?,
                     ))
                 },
             )
@@ -611,7 +616,7 @@ impl MessageStore {
         let (
             wallet_id,
             chain_id,
-            message_hex,
+            message,
             encoding,
             digest,
             status,
@@ -625,27 +630,23 @@ impl MessageStore {
         // Re-derive the digest from the stored bytes so a corrupted or edited
         // row can never present one message while binding a signature to
         // another.
-        let message = decode_message_hex(&message_hex)?;
         ensure!(
-            format!("{:#x}", message_digest(&message)) == digest,
+            message_digest(&message) == digest,
             "stored message digest mismatch"
         );
-        if let Some(signature) = &signature {
-            validate_signature_hex(signature)?;
-        }
         Ok(PendingMessage {
             request_id,
             wallet_id,
-            chain_id: (!chain_id.is_empty()).then_some(chain_id),
-            message_hex,
+            chain_id: (chain_id != 0).then(|| chain_id.to_string()),
+            message_hex: encode_message_hex(&message),
             encoding: MessageEncoding::parse(&encoding)?,
-            digest,
+            digest: format!("{digest:#x}"),
             status: MessageStatus::parse(&status)?,
-            created_at: parse_time(&created_at)?,
-            updated_at: parse_time(&updated_at)?,
-            approved_at: approved_at.as_deref().map(parse_time).transpose()?,
-            rejected_at: rejected_at.as_deref().map(parse_time).transpose()?,
-            signature,
+            created_at,
+            updated_at,
+            approved_at,
+            rejected_at,
+            signature: signature.map(encode_signature),
         })
     }
 }

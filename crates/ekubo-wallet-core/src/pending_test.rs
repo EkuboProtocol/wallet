@@ -74,7 +74,7 @@ fn persists_exact_plan_and_lifecycle_without_spend_state() {
     );
     assert_eq!(
         store
-            .finalize(request.request_id, true, "123", None)
+            .finalize(request.request_id, true, 123, None)
             .unwrap()
             .status,
         PendingStatus::Confirmed
@@ -144,7 +144,7 @@ fn only_one_signed_transaction_can_be_in_flight_per_wallet_and_chain() {
     store
         .mark_broadcast(first.request_id, first_hash, leased.updated_at)
         .unwrap();
-    store.finalize(first.request_id, true, "123", None).unwrap();
+    store.finalize(first.request_id, true, 123, None).unwrap();
     assert!(
         store
             .record_automatic_signed(
@@ -283,7 +283,7 @@ fn settlement_records_what_the_transaction_actually_cost() {
         transaction_fee_wei: "143273600000000".into(),
     };
     let settled = store
-        .finalize(signed.request_id, true, "123", Some(&fee))
+        .finalize(signed.request_id, true, 123, Some(&fee))
         .unwrap();
     assert_eq!(settled.mined_fee.as_ref(), Some(&fee));
     // Survives a reload: the fee is persisted, not just returned.
@@ -382,7 +382,7 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
     // gap says "replaced" forever about funds that moved.
     assert_eq!(
         store
-            .finalize(first.request_id, true, "123", None)
+            .finalize(first.request_id, true, 123, None)
             .unwrap()
             .status,
         PendingStatus::Confirmed
@@ -534,11 +534,11 @@ fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
         .to_string();
     assert!(stale.contains("while this one was being priced"), "{stale}");
 
-    let cancelled = store.mark_cancelled(request_id, "123", None).unwrap();
+    let cancelled = store.mark_cancelled(request_id, 123, None).unwrap();
     assert_eq!(cancelled.status, PendingStatus::Cancelled);
     assert_eq!(cancelled.block_number.as_deref(), Some("123"));
-    assert!(store.mark_cancelled(request_id, "124", None).is_err());
-    assert!(store.finalize(request_id, true, "124", None).is_err());
+    assert!(store.mark_cancelled(request_id, 124, None).is_err());
+    assert!(store.finalize(request_id, true, 124, None).is_err());
 
     // Terminal: the wallet+chain in-flight slot is free again.
     broadcast_original(&mut store);
@@ -593,10 +593,7 @@ fn original_can_still_win_the_race_against_its_own_cancellation() {
         )
         .unwrap();
     assert_eq!(
-        store
-            .finalize(request_id, true, "123", None)
-            .unwrap()
-            .status,
+        store.finalize(request_id, true, 123, None).unwrap().status,
         PendingStatus::Confirmed
     );
 }

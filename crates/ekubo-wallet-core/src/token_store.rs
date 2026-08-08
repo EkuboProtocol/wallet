@@ -32,6 +32,7 @@ use crate::{
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, execute_reads},
     policy_store::PolicyStore,
+    sql::{self, Blob, Millis, RowExt},
 };
 use alloy::{
     eips::BlockId,
@@ -43,7 +44,7 @@ use alloy::{
     sol_types::SolCall,
 };
 use anyhow::{Context, Result, ensure};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -159,7 +160,7 @@ pub struct StoredToken {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decimals: Option<u8>,
     pub source: String,
-    pub added_at: String,
+    pub added_at: DateTime<Utc>,
 }
 
 /// What a token list says about one token, and the only thing the wallet will
@@ -184,7 +185,7 @@ pub struct TokenProposal {
     pub token: ListedToken,
     /// The list the suggestion came from, used to group the review screen.
     pub source: String,
-    pub proposed_at: String,
+    pub proposed_at: DateTime<Utc>,
 }
 
 /// What one call to [`TokenStore::propose`] did.
@@ -250,12 +251,12 @@ impl TokenStore {
              ON CONFLICT(chain_id, address) DO NOTHING",
             params![
                 i64::try_from(token.chain_id).context("chain ID out of range")?,
-                format!("{:#x}", token.address),
+                Blob(token.address),
                 symbol,
                 token.name.as_deref().map(sanitize),
                 token.decimals,
                 source,
-                Utc::now().to_rfc3339(),
+                Millis(sql::now()),
             ],
         )?;
         Ok(changed == 1)
@@ -277,7 +278,7 @@ impl TokenStore {
             "DELETE FROM tokens WHERE chain_id = ?1 AND address = ?2",
             params![
                 i64::try_from(chain_id).context("chain ID out of range")?,
-                format!("{address:#x}"),
+                Blob(address),
             ],
         )?;
         Ok(removed == 1)
@@ -291,7 +292,7 @@ impl TokenStore {
                  FROM tokens WHERE chain_id = ?1 AND address = ?2",
                 params![
                     i64::try_from(chain_id).context("chain ID out of range")?,
-                    format!("{address:#x}")
+                    Blob(address)
                 ],
                 row_to_token,
             )
@@ -341,7 +342,7 @@ impl TokenStore {
                     "SELECT 1 FROM tokens WHERE chain_id = ?1 AND address = ?2",
                     params![
                         i64::try_from(token.chain_id).context("chain ID out of range")?,
-                        format!("{:#x}", token.address)
+                        Blob(token.address)
                     ],
                     |_| Ok(()),
                 )
@@ -360,7 +361,7 @@ impl TokenStore {
                     "SELECT 1 FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
                     params![
                         i64::try_from(token.chain_id).context("chain ID out of range")?,
-                        format!("{:#x}", token.address)
+                        Blob(token.address)
                     ],
                     |_| Ok(()),
                 )
@@ -405,12 +406,12 @@ impl TokenStore {
                     OR source IS NOT excluded.source",
                 params![
                     i64::try_from(token.chain_id).context("chain ID out of range")?,
-                    format!("{:#x}", token.address),
+                    Blob(token.address),
                     symbol,
                     token.name.as_deref().map(sanitize),
                     token.decimals,
                     source,
-                    Utc::now().to_rfc3339(),
+                    Millis(sql::now()),
                 ],
             )?;
             summary.pending += 1;
@@ -445,18 +446,17 @@ impl TokenStore {
         )?;
         let mapped = statement.query_map([], |row| {
             let chain_id: i64 = row.get(0)?;
-            let address: String = row.get(1)?;
             let decimals: i64 = row.get(4)?;
             Ok(TokenProposal {
                 token: ListedToken {
                     chain_id: u64::try_from(chain_id).unwrap_or_default(),
-                    address: Address::from_str(&address).unwrap_or(Address::ZERO),
+                    address: row.blob(1)?,
                     symbol: row.get(2)?,
                     name: row.get(3)?,
                     decimals: u8::try_from(decimals).unwrap_or_default(),
                 },
                 source: row.get(5)?,
-                proposed_at: row.get(6)?,
+                proposed_at: row.time(6)?,
             })
         })?;
         let mut rows = Vec::new();
@@ -487,7 +487,7 @@ impl TokenStore {
     /// consumed that replacement under a decision made about its predecessor,
     /// and the owner was never shown the row that disappeared. A row whose
     /// timestamp has moved is left in place to be reviewed on its own terms.
-    pub fn discard_proposals(&mut self, tokens: &[(u64, Address, String)]) -> Result<u64> {
+    pub fn discard_proposals(&mut self, tokens: &[(u64, Address, DateTime<Utc>)]) -> Result<u64> {
         let mut removed = 0;
         for (chain_id, address, proposed_at) in tokens {
             removed += self.database.connection.execute(
@@ -495,8 +495,8 @@ impl TokenStore {
                  WHERE chain_id = ?1 AND address = ?2 AND proposed_at = ?3",
                 params![
                     i64::try_from(*chain_id).context("chain ID out of range")?,
-                    format!("{address:#x}"),
-                    proposed_at
+                    Blob(*address),
+                    Millis(*proposed_at)
                 ],
             )?;
         }
@@ -548,10 +548,8 @@ impl TokenStore {
         let query = query.trim();
         ensure!(!query.is_empty(), "a search needs something to search for");
         let limit = i64::try_from(limit.min(1_000)).unwrap_or(1_000);
-        // An address is matched as itself, in the lowercase form stored.
-        let address = Address::from_str(query)
-            .ok()
-            .map(|address| format!("{address:#x}"));
+        // An address is matched as itself, as the exact bytes stored.
+        let address = Address::from_str(query).ok().map(Blob);
         let pattern = format!("%{}%", escape_like(&query.to_lowercase()));
         let chain = chain_id
             .map(|chain| i64::try_from(chain).context("chain ID out of range"))
@@ -645,20 +643,19 @@ impl TokenStore {
 
 fn row_to_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredToken> {
     let chain_id: i64 = row.get(0)?;
-    let address: String = row.get(1)?;
-    let checksummed = Address::from_str(&address)
-        .map(|address| address.to_checksum(None))
-        .unwrap_or(address);
+    // No fallback for an unparseable address: the column holds 20 bytes or the
+    // row does not exist, so checksumming cannot fail.
+    let address: Address = row.blob(1)?;
     Ok(StoredToken {
         chain_id: chain_id.to_string(),
-        address: checksummed,
+        address: address.to_checksum(None),
         symbol: row.get(2)?,
         name: row.get(3)?,
         decimals: row
             .get::<_, Option<i64>>(4)?
             .and_then(|value| u8::try_from(value).ok()),
         source: row.get(5)?,
-        added_at: row.get(6)?,
+        added_at: row.time(6)?,
     })
 }
 

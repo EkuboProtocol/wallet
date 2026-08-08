@@ -206,17 +206,18 @@ fn purging_a_wallet_leaves_nothing_for_the_next_one_to_inherit() {
         "INSERT INTO pending_transactions(
                  request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
                  policy_revision, status, created_at, updated_at
-             ) VALUES ('tx', 'primary', 'mainnet', '1', '{}', '0xaa', 1,
-                       'awaiting_approval', 't0', 't0')",
+             ) VALUES (randomblob(16), 'primary', 'mainnet', 1, '{}', zeroblob(32), 1,
+                       'awaiting_approval', 0, 0)",
         "INSERT INTO pending_typed_data(
                  request_id, wallet_id, chain_id, typed_data_json, digest, status,
                  created_at, updated_at
-             ) VALUES ('td', 'primary', '1', '{}', '0xbb', 'awaiting_approval', 't0', 't0')",
+             ) VALUES (randomblob(16), 'primary', 1, '{}', zeroblob(32),
+                       'awaiting_approval', 0, 0)",
         "INSERT INTO pending_messages(
-                 request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
+                 request_id, wallet_id, chain_id, message, message_encoding, digest,
                  status, created_at, updated_at
-             ) VALUES ('msg', 'primary', '1', '0x6869', 'text', '0xcc',
-                       'awaiting_approval', 't0', 't0')",
+             ) VALUES (randomblob(16), 'primary', 1, x'6869', 'text', zeroblob(32),
+                       'awaiting_approval', 0, 0)",
     ] {
         store.connection.execute_batch(statement).unwrap();
     }
@@ -268,10 +269,7 @@ fn any_other_schema_is_refused_and_left_untouched() {
         .err()
         .expect("a foreign schema must be refused")
         .to_string();
-    assert!(
-        error.contains("schema 9 is newer than the schema"),
-        "{error}"
-    );
+    assert!(error.contains("schema 9 is not the schema"), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
@@ -292,7 +290,7 @@ fn a_schema_from_a_newer_build_is_refused() {
         .err()
         .expect("a newer schema must be refused")
         .to_string();
-    assert!(error.contains("is newer than the schema"), "{error}");
+    assert!(error.contains("is not the schema"), "{error}");
 }
 
 #[test]

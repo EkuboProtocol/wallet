@@ -11,6 +11,7 @@ use crate::{
         set_private_handle_permissions, validate_network, validate_wallet_id,
     },
     core::policy::WalletPolicy,
+    sql::{Millis, RowExt},
 };
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -26,16 +27,16 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// databases nobody outside development ever held, so carrying upgrade steps
 /// for them would have been machinery for a population of zero — and it would
 /// have told a first-time owner that their brand-new database had a history.
-// Schema 2 (2026-08-06): execution plans dropped submit_condition /
-// execution_policy / adapters / eip1193 and gained required_capabilities /
-// extensions, which changes both stored plan_json parsing and plan_digest
-// derivation, and pending_transactions gained plan_source. Re-hashing rows
-// the owner already approved would re-label signed history, so pre-change
-// databases are refused instead of migrated.
-// Schema 3 (2026-08-06): network_proposals. An agent can no longer write a
-// network profile; it queues one for the owner to confirm, so the table has
-// to exist before the MCP surface will accept a proposal at all.
-const SCHEMA_VERSION: i64 = 3;
+// The version was reset to 1 on 2026-08-08, when every value with a byte
+// representation of its own — hashes, addresses, signatures, signed envelopes,
+// request IDs — moved from hex text to `BLOB`, every moment moved from RFC 3339
+// text to epoch milliseconds, and `chain_id` became `INTEGER` in the three
+// tables that still spelled it as text. That rewrites the type of most columns
+// in the file, so no database written by an earlier build can be read by this
+// one, and none of them held anything a pre-1.0 owner cannot recreate. Numbering
+// restarts rather than climbing, because this is the first shape of the database
+// that ships.
+const SCHEMA_VERSION: i64 = 1;
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 /// The credential-store entry holding this database's key.
@@ -294,18 +295,16 @@ impl PolicyStore {
             }
             Some(version) => version,
         };
-        if version < SCHEMA_VERSION {
-            anyhow::bail!(
-                "policy database schema {version} predates the schema this build understands \
-                 ({SCHEMA_VERSION}); this pre-release build does not migrate old databases — \
-                 move the database aside and let ekubo-wallet create a fresh one (any \
-                 in-flight pending rows are lost with it)"
-            );
-        }
+        // Older or newer is not a distinction worth drawing, because there is
+        // no migration machinery for either answer to lead to: this build
+        // creates schema SCHEMA_VERSION and reads nothing else. One message
+        // says what to do about it.
         ensure!(
             version == SCHEMA_VERSION,
-            "policy database schema {version} is newer than the schema this build understands \
-             ({SCHEMA_VERSION}); upgrade ekubo-wallet"
+            "policy database schema {version} is not the schema this build understands \
+             ({SCHEMA_VERSION}); this pre-release build does not migrate databases — move it \
+             aside and let ekubo-wallet create a fresh one (any in-flight pending rows are \
+             lost with it)"
         );
         verify_integrity(&connection)?;
         set_private_file_permissions(path)?;
@@ -341,7 +340,7 @@ impl PolicyStore {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
+                        row.time(2)?,
                     ))
                 },
             )
@@ -350,9 +349,6 @@ impl PolicyStore {
             let revision = u64::try_from(revision).context("stored policy revision is invalid")?;
             let value = serde_json::from_str(&json).context("stored policy is invalid JSON")?;
             let policy = WalletPolicy::parse(value).context("stored policy is invalid")?;
-            let updated_at = DateTime::parse_from_rfc3339(&updated_at)
-                .context("stored policy timestamp is invalid")?
-                .with_timezone(&Utc);
             Ok(StoredPolicy {
                 wallet_id: wallet_id.into(),
                 policy,
@@ -405,7 +401,7 @@ impl PolicyStore {
                AND policy_json = ?4 AND rationale = ?5",
             params![
                 proposal.wallet_id,
-                proposal.created_at.to_rfc3339(),
+                Millis(proposal.created_at),
                 i64::try_from(proposal.source_revision).context("source revision out of range")?,
                 policy_json,
                 proposal.rationale
@@ -446,7 +442,7 @@ impl PolicyStore {
             policy_json.len() <= MAX_POLICY_BYTES,
             "policy document exceeds {MAX_POLICY_BYTES} bytes"
         );
-        let updated_at = Utc::now();
+        let updated_at = crate::sql::now();
         let current: Option<i64> = transaction
             .query_row(
                 "SELECT revision FROM wallet_policies WHERE wallet_id = ?1",
@@ -470,13 +466,13 @@ impl PolicyStore {
                  policy_json = excluded.policy_json,
                  revision = excluded.revision,
                  updated_at = excluded.updated_at",
-            params![wallet_id, policy_json, revision, updated_at.to_rfc3339()],
+            params![wallet_id, policy_json, revision, Millis(updated_at)],
         )?;
         transaction.execute(
             "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?3
              WHERE wallet_id = ?1 AND policy_revision <> ?2
                AND status IN ('awaiting_approval', 'signed')",
-            params![wallet_id, revision, updated_at.to_rfc3339()],
+            params![wallet_id, revision, Millis(updated_at)],
         )?;
         Ok(StoredPolicy {
             wallet_id: wallet_id.into(),
@@ -525,7 +521,7 @@ impl PolicyStore {
             "the proposal references policy revision {source_revision}, but the active revision \
              is {current:?}; read the current policy with wallet_get_policy and propose again"
         );
-        let created_at = Utc::now();
+        let created_at = crate::sql::now();
         transaction.execute(
             "INSERT INTO policy_proposals(
                 wallet_id, source_revision, policy_json, rationale, created_at
@@ -540,7 +536,7 @@ impl PolicyStore {
                 source,
                 policy_json,
                 rationale,
-                created_at.to_rfc3339()
+                Millis(created_at)
             ],
         )?;
         transaction.commit()?;
@@ -565,7 +561,7 @@ impl PolicyStore {
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
+                        row.time(3)?,
                     ))
                 },
             )
@@ -576,7 +572,7 @@ impl PolicyStore {
                     source_revision,
                     &policy_json,
                     rationale,
-                    &created_at,
+                    created_at,
                 )
             })
             .transpose()
@@ -594,7 +590,7 @@ impl PolicyStore {
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    row.time(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -607,7 +603,7 @@ impl PolicyStore {
                         source_revision,
                         &policy_json,
                         rationale,
-                        &created_at,
+                        created_at,
                     )
                 },
             )
@@ -632,7 +628,7 @@ impl PolicyStore {
                AND policy_json = ?4 AND rationale = ?5",
             params![
                 proposal.wallet_id,
-                proposal.created_at.to_rfc3339(),
+                Millis(proposal.created_at),
                 i64::try_from(proposal.source_revision).context("source revision out of range")?,
                 policy_json,
                 proposal.rationale
@@ -669,7 +665,7 @@ impl PolicyStore {
             params![
                 i64::try_from(profile.chain_id).context("chain ID out of range")?,
                 profile_json,
-                Utc::now().to_rfc3339(),
+                Millis(crate::sql::now()),
             ],
         )?;
         Ok(())
@@ -789,7 +785,7 @@ impl PolicyStore {
             "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2
              WHERE wallet_id = ?1
                AND status IN ('awaiting_approval', 'signed')",
-            params![wallet_id, Utc::now().to_rfc3339()],
+            params![wallet_id, Millis(crate::sql::now())],
         )?;
         transaction.commit()?;
         Ok(())
@@ -801,7 +797,7 @@ fn parse_proposal(
     source_revision: i64,
     policy_json: &str,
     rationale: String,
-    created_at: &str,
+    created_at: DateTime<Utc>,
 ) -> Result<PolicyProposal> {
     let value = serde_json::from_str(policy_json).context("stored proposal is invalid JSON")?;
     Ok(PolicyProposal {
@@ -810,9 +806,7 @@ fn parse_proposal(
             .context("stored proposal revision is invalid")?,
         policy: WalletPolicy::parse(value).context("stored proposal policy is invalid")?,
         rationale,
-        created_at: DateTime::parse_from_rfc3339(created_at)
-            .context("stored proposal timestamp is invalid")?
-            .with_timezone(&Utc),
+        created_at,
     })
 }
 
@@ -874,7 +868,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  wallet_id TEXT PRIMARY KEY NOT NULL,
                  policy_json TEXT NOT NULL,
                  revision INTEGER NOT NULL CHECK (revision > 0),
-                 updated_at TEXT NOT NULL
+                 updated_at INTEGER NOT NULL
              ) STRICT",
             // Transaction lifecycle. 'replaced' marks an envelope whose nonce
             // was consumed by a different transaction (for example the same
@@ -885,12 +879,12 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             // in-flight unique index counts the pair as one slot, so one
             // wallet and chain never has two logical transactions in flight.
             "CREATE TABLE pending_transactions (
-                 request_id TEXT PRIMARY KEY NOT NULL,
+                 request_id BLOB PRIMARY KEY NOT NULL CHECK (length(request_id) = 16),
                  wallet_id TEXT NOT NULL,
                  network_name TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
+                 chain_id INTEGER NOT NULL CHECK (chain_id > 0),
                  plan_json TEXT NOT NULL,
-                 plan_digest TEXT NOT NULL,
+                 plan_digest BLOB NOT NULL CHECK (length(plan_digest) = 32),
                  plan_source TEXT,
                  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
                  status TEXT NOT NULL CHECK (status IN (
@@ -898,21 +892,41 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                      'broadcast', 'confirmed', 'reverted', 'cancelled',
                      'replaced', 'cancelling'
                  )),
-                 created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 serialized_transaction TEXT,
-                 signed_transaction_hash TEXT,
-                 broadcast_transaction_hash TEXT,
-                 block_number TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 approved_at INTEGER,
+                 rejected_at INTEGER,
+                 serialized_transaction BLOB
+                     CHECK (serialized_transaction IS NULL
+                         OR length(serialized_transaction) > 0),
+                 signed_transaction_hash BLOB
+                     CHECK (signed_transaction_hash IS NULL
+                         OR length(signed_transaction_hash) = 32),
+                 broadcast_transaction_hash BLOB
+                     CHECK (broadcast_transaction_hash IS NULL
+                         OR length(broadcast_transaction_hash) = 32),
+                 block_number INTEGER CHECK (block_number IS NULL OR block_number >= 0),
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
-                 review_digest TEXT,
-                 cancel_serialized_transaction TEXT,
-                 cancel_transaction_hashes TEXT,
-                 gas_used TEXT,
-                 effective_gas_price TEXT,
+                 review_digest BLOB
+                     CHECK (review_digest IS NULL OR length(review_digest) = 32),
+                 cancel_serialized_transaction BLOB
+                     CHECK (cancel_serialized_transaction IS NULL
+                         OR length(cancel_serialized_transaction) > 0),
+                 -- The cancellation hashes concatenated, oldest first. A JSON
+                 -- array of hex strings needed a parser and a length check on
+                 -- every element; a blob whose length is a multiple of 32 and
+                 -- within the attempt cap is the same claim, made by the
+                 -- schema, and it slices apart without allocating.
+                 cancel_transaction_hashes BLOB
+                     CHECK (cancel_transaction_hashes IS NULL
+                         OR (length(cancel_transaction_hashes) > 0
+                             AND length(cancel_transaction_hashes) % 32 = 0
+                             AND length(cancel_transaction_hashes) <= 256)),
+                 gas_used INTEGER CHECK (gas_used IS NULL OR gas_used >= 0),
+                 effective_gas_price BLOB
+                     CHECK (effective_gas_price IS NULL
+                         OR length(effective_gas_price) = 16),
                  CHECK (
                      (status = 'awaiting_approval' AND approved_at IS NULL AND rejected_at IS NULL
                          AND serialized_transaction IS NULL AND signed_transaction_hash IS NULL)
@@ -941,11 +955,11 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  ON pending_transactions(wallet_id, chain_id, plan_digest)
                  WHERE status = 'awaiting_approval'",
             "CREATE TABLE pending_typed_data (
-                 request_id TEXT PRIMARY KEY NOT NULL,
+                 request_id BLOB PRIMARY KEY NOT NULL CHECK (length(request_id) = 16),
                  wallet_id TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
+                 chain_id INTEGER NOT NULL CHECK (chain_id > 0),
                  typed_data_json TEXT NOT NULL,
-                 digest TEXT NOT NULL,
+                 digest BLOB NOT NULL CHECK (length(digest) = 32),
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed'
                  )),
@@ -953,11 +967,11 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                      CHECK (approval_required IN (0, 1)),
                  policy_revision INTEGER
                      CHECK (policy_revision IS NULL OR policy_revision > 0),
-                 created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 signature TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 approved_at INTEGER,
+                 rejected_at INTEGER,
+                 signature BLOB CHECK (signature IS NULL OR length(signature) = 65),
                  CHECK ((status = 'signed') = (signature IS NOT NULL)),
                  CHECK (approval_required = 1 OR policy_revision IS NOT NULL)
              ) STRICT",
@@ -970,27 +984,27 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             // every automatic path: no policy can score a message, so there is
             // no approval_required or policy_revision column to carry.
             //
-            // chain_id is the empty string when the requester declared none —
-            // `personal_sign` binds no chain — because SQLite treats NULLs as
-            // distinct in a unique index, which would silently disable the
-            // awaiting-request deduplication below.
+            // chain_id is 0 when the requester declared none — `personal_sign`
+            // binds no chain — because SQLite treats NULLs as distinct in a
+            // unique index, which would silently disable the awaiting-request
+            // deduplication below. No chain has ID 0, so the sentinel cannot
+            // collide with a declared one.
             "CREATE TABLE pending_messages (
-                 request_id TEXT PRIMARY KEY NOT NULL,
+                 request_id BLOB PRIMARY KEY NOT NULL CHECK (length(request_id) = 16),
                  wallet_id TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
-                 message_hex TEXT NOT NULL
-                     CHECK (message_hex LIKE '0x%' AND length(message_hex) % 2 = 0),
+                 chain_id INTEGER NOT NULL CHECK (chain_id >= 0),
+                 message BLOB NOT NULL CHECK (length(message) > 0),
                  message_encoding TEXT NOT NULL
                      CHECK (message_encoding IN ('text', 'hex')),
-                 digest TEXT NOT NULL,
+                 digest BLOB NOT NULL CHECK (length(digest) = 32),
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed'
                  )),
-                 created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 signature TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 approved_at INTEGER,
+                 rejected_at INTEGER,
+                 signature BLOB CHECK (signature IS NULL OR length(signature) = 65),
                  CHECK ((status = 'signed') = (signature IS NOT NULL))
              ) STRICT",
             "CREATE UNIQUE INDEX pending_messages_unique_awaiting
@@ -1004,38 +1018,36 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             // outside this process.
             "CREATE TABLE tokens (
                  chain_id INTEGER NOT NULL CHECK (chain_id > 0),
-                 address TEXT NOT NULL
-                     CHECK (address = lower(address) AND length(address) = 42),
+                 address BLOB NOT NULL CHECK (length(address) = 20),
                  symbol TEXT,
                  name TEXT,
                  decimals INTEGER
                      CHECK (decimals IS NULL OR (decimals >= 0 AND decimals <= 255)),
                  source TEXT NOT NULL,
-                 added_at TEXT NOT NULL,
+                 added_at INTEGER NOT NULL,
                  PRIMARY KEY (chain_id, address)
              ) STRICT",
             "CREATE TABLE address_book (
                  chain_id INTEGER NOT NULL CHECK (chain_id > 0),
                  alias TEXT NOT NULL,
-                 address TEXT NOT NULL
-                     CHECK (address = lower(address) AND length(address) = 42),
+                 address BLOB NOT NULL CHECK (length(address) = 20),
                  note TEXT,
-                 added_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
+                 added_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
                  PRIMARY KEY (chain_id, alias)
              ) STRICT",
             "CREATE TABLE legal_acceptance (
                  document TEXT PRIMARY KEY NOT NULL
                      CHECK (document IN ('terms_of_service', 'privacy_policy')),
-                 digest TEXT NOT NULL,
-                 accepted_at TEXT NOT NULL
+                 digest BLOB NOT NULL CHECK (length(digest) = 32),
+                 accepted_at INTEGER NOT NULL
              ) STRICT",
             "CREATE TABLE policy_proposals (
                  wallet_id TEXT PRIMARY KEY NOT NULL,
                  source_revision INTEGER NOT NULL CHECK (source_revision > 0),
                  policy_json TEXT NOT NULL,
                  rationale TEXT NOT NULL,
-                 created_at TEXT NOT NULL
+                 created_at INTEGER NOT NULL
              ) STRICT",
             TOKEN_PROPOSALS_TABLE,
             NETWORK_PROPOSALS_TABLE,
@@ -1060,7 +1072,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
 const NETWORK_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS network_proposals (
      chain_id INTEGER PRIMARY KEY NOT NULL CHECK (chain_id > 0),
      profile_json TEXT NOT NULL,
-     proposed_at TEXT NOT NULL
+     proposed_at INTEGER NOT NULL
  ) STRICT";
 
 /// Tokens an agent has suggested, held apart from `tokens` until the owner
@@ -1071,13 +1083,12 @@ const NETWORK_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS network_propos
 /// group a hundred suggestions into the handful of decisions they really are.
 const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals (
      chain_id INTEGER NOT NULL CHECK (chain_id > 0),
-     address TEXT NOT NULL
-         CHECK (address = lower(address) AND length(address) = 42),
+     address BLOB NOT NULL CHECK (length(address) = 20),
      symbol TEXT NOT NULL,
      name TEXT,
      decimals INTEGER NOT NULL CHECK (decimals >= 0 AND decimals <= 255),
      source TEXT NOT NULL,
-     proposed_at TEXT NOT NULL,
+     proposed_at INTEGER NOT NULL,
      PRIMARY KEY (chain_id, address)
  ) STRICT";
 

@@ -16,9 +16,12 @@
 //! Acceptance records live in the authenticated encrypted database, not in a
 //! plain file, so an agent with filesystem access cannot forge acceptance.
 
-use crate::policy_store::PolicyStore;
-use alloy::primitives::keccak256;
-use anyhow::{Context, Result, ensure};
+use crate::{
+    policy_store::PolicyStore,
+    sql::{self, Blob, Millis, RowExt},
+};
+use alloy::primitives::{B256, keccak256};
+use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 use schemars::JsonSchema;
@@ -234,8 +237,14 @@ impl LegalDocument {
 
     /// Keccak-256 digest of the exact document text.
     #[must_use]
+    pub fn digest_bytes(self) -> B256 {
+        keccak256(self.text())
+    }
+
+    /// The same digest as the hex the CLI and MCP surfaces display.
+    #[must_use]
     pub fn digest(self) -> String {
-        format!("0x{}", hex::encode(keccak256(self.text())))
+        format!("{:#x}", self.digest_bytes())
     }
 
     #[must_use]
@@ -304,23 +313,19 @@ impl LegalStore {
             LegalDocument::PrivacyPolicy => "privacy_policy",
             LegalDocument::ThirdPartyLicenses => return Ok(None),
         };
-        self.database
+        Ok(self
+            .database
             .connection
             .query_row(
                 "SELECT digest, accepted_at FROM legal_acceptance WHERE document = ?1",
                 [key],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| Ok((row.blob::<B256>(0)?, row.time(1)?)),
             )
             .optional()?
-            .map(|(digest, accepted_at)| {
-                Ok(AcceptanceRecord {
-                    digest,
-                    accepted_at: DateTime::parse_from_rfc3339(&accepted_at)
-                        .context("stored acceptance timestamp is invalid")?
-                        .with_timezone(&Utc),
-                })
-            })
-            .transpose()
+            .map(|(digest, accepted_at)| AcceptanceRecord {
+                digest: format!("{digest:#x}"),
+                accepted_at,
+            }))
     }
 
     /// Record acceptance of the current revision of one document. The digest
@@ -347,7 +352,7 @@ impl LegalStore {
              ON CONFLICT(document) DO UPDATE SET
                  digest = excluded.digest,
                  accepted_at = excluded.accepted_at",
-            rusqlite::params![key, document.digest(), Utc::now().to_rfc3339()],
+            rusqlite::params![key, Blob(document.digest_bytes()), Millis(sql::now())],
         )?;
         Ok(())
     }

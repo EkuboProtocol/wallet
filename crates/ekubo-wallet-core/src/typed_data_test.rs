@@ -113,7 +113,7 @@ fn lifecycle_persists_exact_payload_and_signature() {
 
     let signature = format!("0x{}", "11".repeat(65));
     let signed = store
-        .store_signature(request.request_id, &request.digest, &signature)
+        .store_signature(request.request_id, digest, &signature)
         .unwrap();
     assert_eq!(signed.status, TypedDataStatus::Signed);
     assert_eq!(signed.signature.as_deref(), Some(signature.as_str()));
@@ -123,7 +123,7 @@ fn lifecycle_persists_exact_payload_and_signature() {
     // A signed request cannot be re-signed or rejected.
     assert!(
         store
-            .store_signature(request.request_id, &request.digest, &signature)
+            .store_signature(request.request_id, digest, &signature)
             .is_err()
     );
     assert!(store.reject(request.request_id).is_err());
@@ -248,7 +248,7 @@ fn a_signature_can_only_come_from_an_approved_request() {
         store
             .store_signature(
                 request.request_id,
-                &request.digest,
+                digest,
                 &format!("0x{}", "33".repeat(65)),
             )
             .is_err()
@@ -265,7 +265,7 @@ fn rejection_is_terminal_and_digest_is_bound() {
         store
             .store_signature(
                 request.request_id,
-                &format!("{:#x}", B256::repeat_byte(0xEE)),
+                B256::repeat_byte(0xEE),
                 &format!("0x{}", "22".repeat(65)),
             )
             .is_err()

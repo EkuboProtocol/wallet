@@ -189,7 +189,7 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
     let proposals = store.proposals().unwrap();
     assert_eq!(proposals.len(), 1);
     assert_eq!(proposals[0].source, "ekubo-default");
-    let reviewed = proposals[0].proposed_at.clone();
+    let reviewed = proposals[0].proposed_at;
     store.add(&proposals[0].token, "ekubo-default").unwrap();
     assert_eq!(
         store.display_metadata(1, &[token]).unwrap()[&token].symbol,
@@ -211,7 +211,7 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
     // rather than silently consumed.
     assert_eq!(
         store
-            .discard_proposals(&[(1, token, "1999-01-01T00:00:00+00:00".to_string())])
+            .discard_proposals(&[(1, token, chrono::DateTime::UNIX_EPOCH)])
             .unwrap(),
         0,
         "a stale reading must not consume the current row"
@@ -518,7 +518,7 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
     store.propose(&[usdc(1, address)], "list-a").unwrap();
     let queued = store.proposals().unwrap();
     assert_eq!(queued.len(), 1);
-    let reviewed = queued[0].proposed_at.clone();
+    let reviewed = queued[0].proposed_at;
 
     // The same suggestion again, from the same list: nothing the owner reads
     // has changed, so nothing about what they are deciding has changed.
@@ -531,9 +531,7 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
 
     // And the decision taken against what was shown still consumes the row.
     assert_eq!(
-        store
-            .discard_proposals(&[(1, address, reviewed.clone())])
-            .unwrap(),
+        store.discard_proposals(&[(1, address, reviewed)]).unwrap(),
         1
     );
     assert!(store.proposals().unwrap().is_empty());
@@ -542,13 +540,13 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
     // is being asked about something else, and an answer to the old text is
     // not an answer to this one.
     store.propose(&[usdc(1, address)], "list-a").unwrap();
-    let first = store.proposals().unwrap()[0].proposed_at.clone();
+    let first = store.proposals().unwrap()[0].proposed_at;
     let renamed = ListedToken {
         symbol: "USDC.e".into(),
         ..usdc(1, address)
     };
     store.propose(&[renamed], "list-a").unwrap();
-    let second = store.proposals().unwrap()[0].proposed_at.clone();
+    let second = store.proposals().unwrap()[0].proposed_at;
     assert_ne!(first, second);
     assert_eq!(store.discard_proposals(&[(1, address, first)]).unwrap(), 0);
 }

@@ -107,21 +107,24 @@ fn stale_digests_cannot_be_recorded_and_stale_acceptance_is_superseded() {
     );
 
     // Simulate acceptance of a previous revision by writing the row
-    // directly, as a build shipping older document text would have.
+    // directly, as a build shipping older document text would have. It is a
+    // real digest of some other text rather than a placeholder string: the
+    // column holds 32 bytes, so there is no way to write anything else.
+    let superseded = B256::repeat_byte(0xAA);
     store
         .database
         .connection
         .execute(
             "INSERT INTO legal_acceptance(document, digest, accepted_at)
-                 VALUES ('terms_of_service', '0xoutdated', ?1)",
-            [Utc::now().to_rfc3339()],
+                 VALUES ('terms_of_service', ?1, ?2)",
+            rusqlite::params![crate::sql::Blob(superseded), crate::sql::Millis(Utc::now())],
         )
         .unwrap();
     let status = store.status().unwrap();
     assert!(!status.terms_of_service.accepted);
     assert_eq!(
-        status.terms_of_service.superseded_digest.as_deref(),
-        Some("0xoutdated")
+        status.terms_of_service.superseded_digest,
+        Some(format!("{superseded:#x}"))
     );
     assert!(status.terms_of_service.accepted_at.is_none());
 }

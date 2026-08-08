@@ -4,10 +4,13 @@
 //! counters, policy reservations, or rolling-limit state.
 
 use crate::{
-    config::validate_wallet_id, core::execution_plan::ExecutionPlan, policy_store::PolicyStore,
+    config::validate_wallet_id,
+    core::execution_plan::{DecimalU256, ExecutionPlan},
+    policy_store::PolicyStore,
     rpc::MinedFee,
+    sql::{self, Blob, Millis, RowExt},
 };
-use alloy::primitives::B256;
+use alloy::primitives::{B256, Bytes, keccak256};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
@@ -155,20 +158,21 @@ impl PendingStore {
             "active policy revision changed before pending request creation"
         );
 
-        let created_at = Utc::now();
-        let digest = format!("{:#x}", plan.digest());
-        let existing: Option<String> = transaction
+        let created_at = sql::now();
+        let digest = plan.digest();
+        let chain_id = chain_id_column(&plan.chain_id)?;
+        let existing: Option<Uuid> = transaction
             .query_row(
                 "SELECT request_id FROM pending_transactions
                  WHERE wallet_id = ?1 AND chain_id = ?2 AND plan_digest = ?3
                    AND status = 'awaiting_approval'",
-                params![wallet_id, plan.chain_id.as_str(), digest],
+                params![wallet_id, chain_id, Blob(digest)],
                 |row| row.get(0),
             )
             .optional()?;
         if let Some(existing) = existing {
             transaction.commit()?;
-            return self.get(Uuid::parse_str(&existing).context("stored request ID is invalid")?);
+            return self.get(existing);
         }
         let awaiting: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM pending_transactions
@@ -189,15 +193,15 @@ impl PendingStore {
                 plan_digest, plan_source, policy_revision, status, created_at, updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'awaiting_approval', ?9, ?9)",
             params![
-                request_id.to_string(),
+                request_id,
                 wallet_id,
                 network_name,
-                plan.chain_id.as_str(),
+                chain_id,
                 plan_json,
-                digest,
+                Blob(digest),
                 plan_source,
                 policy_revision,
-                created_at.to_rfc3339(),
+                Millis(created_at),
             ],
         )?;
         transaction.commit()?;
@@ -225,8 +229,8 @@ impl PendingStore {
             "network name cannot be empty"
         );
         plan.validate()?;
-        validate_hex(serialized_transaction, None)?;
-        validate_hex(transaction_hash, Some(32))?;
+        let serialized_transaction = parse_envelope(serialized_transaction)?;
+        let transaction_hash = parse_hash(transaction_hash)?;
         let policy_revision =
             i64::try_from(policy_revision).context("policy revision is too large")?;
         let transaction = self.database.connection.transaction()?;
@@ -243,7 +247,8 @@ impl PendingStore {
         );
 
         let request_id = Uuid::new_v4();
-        let created_at = Utc::now();
+        let created_at = sql::now();
+        let chain_id = chain_id_column(&plan.chain_id)?;
         transaction
             .execute(
                 "INSERT INTO pending_transactions(
@@ -252,20 +257,20 @@ impl PendingStore {
                 serialized_transaction, signed_transaction_hash, approval_required
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'signed', ?9, ?9, ?10, ?11, 0)",
                 params![
-                    request_id.to_string(),
+                    request_id,
                     wallet_id,
                     network_name,
-                    plan.chain_id.as_str(),
+                    chain_id,
                     serde_json::to_string(plan)?,
-                    format!("{:#x}", plan.digest()),
+                    Blob(plan.digest()),
                     plan_source,
                     policy_revision,
-                    created_at.to_rfc3339(),
-                    serialized_transaction,
-                    transaction_hash,
+                    Millis(created_at),
+                    Blob(serialized_transaction),
+                    Blob(transaction_hash),
                 ],
             )
-            .with_context(|| in_flight_conflict(&transaction, wallet_id, plan.chain_id.as_str()))?;
+            .with_context(|| in_flight_conflict(&transaction, wallet_id, chain_id))?;
         transaction.commit()?;
         self.get(request_id)
     }
@@ -277,20 +282,18 @@ impl PendingStore {
     /// already mined (or was replaced) never blocks the next transaction.
     pub fn in_flight(&self, wallet_id: &str, chain_id: &str) -> Result<Option<PendingTransaction>> {
         validate_wallet_id(wallet_id)?;
-        let request_id: Option<String> = self
+        let request_id: Option<Uuid> = self
             .database
             .connection
             .query_row(
                 "SELECT request_id FROM pending_transactions
                  WHERE wallet_id = ?1 AND chain_id = ?2
                    AND status IN ('signed', 'submitting', 'broadcast', 'cancelling')",
-                params![wallet_id, chain_id],
+                params![wallet_id, parse_chain_id(chain_id)?],
                 |row| row.get(0),
             )
             .optional()?;
-        request_id
-            .map(|value| self.get(Uuid::parse_str(&value).context("stored request ID is invalid")?))
-            .transpose()
+        request_id.map(|value| self.get(value)).transpose()
     }
 
     /// Discard a signed envelope, freeing the wallet+chain in-flight slot.
@@ -311,7 +314,7 @@ impl PendingStore {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2
              WHERE request_id = ?1 AND status = 'signed'",
-            params![request_id.to_string(), Utc::now().to_rfc3339()],
+            params![request_id, Millis(sql::now())],
         )?;
         ensure!(
             changed == 1,
@@ -330,7 +333,7 @@ impl PendingStore {
             .query_row(
                 "SELECT status, approval_required
                  FROM pending_transactions WHERE request_id = ?1",
-                [request_id.to_string()],
+                [request_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .with_context(|| format!("unknown pending request {request_id}"))?;
@@ -342,12 +345,11 @@ impl PendingStore {
             PendingStatus::parse(&status)? == PendingStatus::AwaitingApproval,
             "pending request is not awaiting approval"
         );
-        let now = Utc::now().to_rfc3339();
         transaction.execute(
             "UPDATE pending_transactions
              SET status = 'rejected', rejected_at = ?2, updated_at = ?2
              WHERE request_id = ?1 AND status = 'awaiting_approval'",
-            params![request_id.to_string(), now],
+            params![request_id, Millis(sql::now())],
         )?;
         transaction.commit()?;
         self.get(request_id)
@@ -363,14 +365,15 @@ impl PendingStore {
         serialized_transaction: &str,
         transaction_hash: &str,
     ) -> Result<PendingTransaction> {
-        validate_hex(review_digest, Some(32))?;
-        validate_hex(serialized_transaction, None)?;
-        validate_hex(transaction_hash, Some(32))?;
+        let review_digest = parse_hash(review_digest)?;
+        let serialized_transaction = parse_envelope(serialized_transaction)?;
+        let transaction_hash = parse_hash(transaction_hash)?;
+        let expected_digest = parse_hash(expected_digest)?;
         let transaction = self.database.connection.transaction()?;
         let (wallet_id, chain_id, digest, policy_revision, status, approval_required): (
             String,
-            String,
-            String,
+            i64,
+            Blob<B256>,
             i64,
             String,
             i64,
@@ -379,7 +382,7 @@ impl PendingStore {
                 "SELECT wallet_id, chain_id, plan_digest, policy_revision, status,
                         approval_required
                  FROM pending_transactions WHERE request_id = ?1",
-                [request_id.to_string()],
+                [request_id],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -396,7 +399,10 @@ impl PendingStore {
             approval_required == 1,
             "transaction did not require approval"
         );
-        ensure!(digest == expected_digest, "pending request digest mismatch");
+        ensure!(
+            digest.0 == expected_digest,
+            "pending request digest mismatch"
+        );
         ensure!(
             PendingStatus::parse(&status)? == PendingStatus::AwaitingApproval,
             "pending request is not awaiting approval"
@@ -412,7 +418,6 @@ impl PendingStore {
             active_revision == Some(policy_revision),
             "active policy changed while approval was pending"
         );
-        let now = Utc::now().to_rfc3339();
         transaction
             .execute(
                 "UPDATE pending_transactions SET
@@ -421,14 +426,14 @@ impl PendingStore {
                 review_digest = ?5
              WHERE request_id = ?1 AND status = 'awaiting_approval'",
                 params![
-                    request_id.to_string(),
-                    now,
-                    serialized_transaction,
-                    transaction_hash,
-                    review_digest,
+                    request_id,
+                    Millis(sql::now()),
+                    Blob(serialized_transaction),
+                    Blob(transaction_hash),
+                    Blob(review_digest),
                 ],
             )
-            .with_context(|| in_flight_conflict(&transaction, &wallet_id, &chain_id))?;
+            .with_context(|| in_flight_conflict(&transaction, &wallet_id, chain_id))?;
         transaction.commit()?;
         self.get(request_id)
     }
@@ -441,7 +446,7 @@ impl PendingStore {
             .query_row(
                 "SELECT wallet_id, policy_revision, status
                  FROM pending_transactions WHERE request_id = ?1",
-                [request_id.to_string()],
+                [request_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .with_context(|| format!("unknown pending request {request_id}"))?;
@@ -460,7 +465,7 @@ impl PendingStore {
             transaction.execute(
                 "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2
                  WHERE request_id = ?1 AND status = 'signed'",
-                params![request_id.to_string(), Utc::now().to_rfc3339()],
+                params![request_id, Millis(sql::now())],
             )?;
             transaction.commit()?;
             anyhow::bail!("active policy changed after this transaction was signed");
@@ -468,7 +473,7 @@ impl PendingStore {
         transaction.execute(
             "UPDATE pending_transactions SET status = 'submitting', updated_at = ?2
              WHERE request_id = ?1 AND status = 'signed'",
-            params![request_id.to_string(), Utc::now().to_rfc3339()],
+            params![request_id, Millis(sql::now())],
         )?;
         transaction.commit()?;
         self.get(request_id)
@@ -494,11 +499,7 @@ impl PendingStore {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = 'signed', updated_at = ?2
              WHERE request_id = ?1 AND status = 'submitting' AND updated_at = ?3",
-            params![
-                request_id.to_string(),
-                Utc::now().to_rfc3339(),
-                leased_at.to_rfc3339()
-            ],
+            params![request_id, Millis(sql::now()), Millis(leased_at)],
         )?;
         ensure!(
             changed == 1,
@@ -521,17 +522,17 @@ impl PendingStore {
         transaction_hash: &str,
         leased_at: DateTime<Utc>,
     ) -> Result<PendingTransaction> {
-        validate_hex(transaction_hash, Some(32))?;
+        let transaction_hash = parse_hash(transaction_hash)?;
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET
                 status = 'broadcast', broadcast_transaction_hash = ?2, updated_at = ?3
              WHERE request_id = ?1 AND status = 'submitting'
                AND signed_transaction_hash = ?2 AND updated_at = ?4",
             params![
-                request_id.to_string(),
-                transaction_hash,
-                Utc::now().to_rfc3339(),
-                leased_at.to_rfc3339()
+                request_id,
+                Blob(transaction_hash),
+                Millis(sql::now()),
+                Millis(leased_at)
             ],
         )?;
         ensure!(
@@ -552,7 +553,7 @@ impl PendingStore {
                AND serialized_transaction IS NOT NULL
                AND signed_transaction_hash IS NOT NULL
                AND signed_transaction_hash = broadcast_transaction_hash",
-            params![request_id.to_string(), Utc::now().to_rfc3339()],
+            params![request_id, Millis(sql::now())],
         )?;
         ensure!(
             changed == 1,
@@ -584,14 +585,15 @@ impl PendingStore {
         cancel_serialized_transaction: &str,
         cancel_transaction_hash: &str,
     ) -> Result<PendingTransaction> {
-        validate_hex(cancel_serialized_transaction, None)?;
-        validate_hex(cancel_transaction_hash, Some(32))?;
+        let cancel_serialized_transaction = parse_envelope(cancel_serialized_transaction)?;
+        let cancel_transaction_hash = parse_hash(cancel_transaction_hash)?;
+        let priced_against = priced_against.map(parse_hash).transpose()?;
         let transaction = self.database.connection.transaction()?;
-        let (status, hashes): (String, Option<String>) = transaction
+        let (status, hashes): (String, Option<Vec<u8>>) = transaction
             .query_row(
                 "SELECT status, cancel_transaction_hashes
                  FROM pending_transactions WHERE request_id = ?1",
-                [request_id.to_string()],
+                [request_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .with_context(|| format!("unknown pending request {request_id}"))?;
@@ -608,29 +610,29 @@ impl PendingStore {
             .transpose()?
             .unwrap_or_default();
         ensure!(
-            hashes.last().map(String::as_str) == priced_against,
+            hashes.last().copied() == priced_against,
             "another cancellation was recorded while this one was being priced; \
              re-read the request and reprice against the newest envelope"
         );
         ensure!(
-            !hashes.contains(&cancel_transaction_hash.to_owned()),
+            !hashes.contains(&cancel_transaction_hash),
             "this exact cancellation was already recorded"
         );
         ensure!(
             hashes.len() < MAX_CANCELLATION_ATTEMPTS,
             "too many cancellation attempts for this transaction"
         );
-        hashes.push(cancel_transaction_hash.to_owned());
+        hashes.push(cancel_transaction_hash);
         transaction.execute(
             "UPDATE pending_transactions SET
                 status = 'cancelling', cancel_serialized_transaction = ?2,
                 cancel_transaction_hashes = ?3, updated_at = ?4
              WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
             params![
-                request_id.to_string(),
-                cancel_serialized_transaction,
-                serde_json::to_string(&hashes).expect("hash list serializes"),
-                Utc::now().to_rfc3339(),
+                request_id,
+                Blob(cancel_serialized_transaction),
+                encode_cancel_hashes(&hashes),
+                Millis(sql::now()),
             ],
         )?;
         transaction.commit()?;
@@ -643,21 +645,21 @@ impl PendingStore {
     pub fn mark_cancelled(
         &mut self,
         request_id: Uuid,
-        block_number: &str,
+        block_number: u64,
         fee: Option<&MinedFee>,
     ) -> Result<PendingTransaction> {
-        validate_block_number(block_number)?;
+        let fee = fee.map(stored_fee).transpose()?;
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET
                 status = 'cancelled', block_number = ?2, updated_at = ?3,
                 gas_used = ?4, effective_gas_price = ?5
              WHERE request_id = ?1 AND status IN ('cancelling', 'replaced')",
             params![
-                request_id.to_string(),
-                block_number,
-                Utc::now().to_rfc3339(),
-                fee.map(|fee| fee.gas_used.as_str()),
-                fee.map(|fee| fee.effective_gas_price.as_str()),
+                request_id,
+                block_number_column(block_number)?,
+                Millis(sql::now()),
+                fee.map(|(gas_used, _)| gas_used),
+                fee.map(|(_, price)| Blob(price)),
             ],
         )?;
         ensure!(changed == 1, "pending transaction is not being cancelled");
@@ -696,11 +698,7 @@ impl PendingStore {
             "UPDATE pending_transactions SET status = 'replaced', updated_at = ?2
              WHERE request_id = ?1 AND status IN ('submitting', 'broadcast', 'cancelling')
                AND updated_at = ?3",
-            params![
-                request_id.to_string(),
-                Utc::now().to_rfc3339(),
-                observed_at.to_rfc3339()
-            ],
+            params![request_id, Millis(sql::now()), Millis(observed_at)],
         )?;
         ensure!(
             changed == 1,
@@ -717,22 +715,22 @@ impl PendingStore {
         &mut self,
         request_id: Uuid,
         succeeded: bool,
-        block_number: &str,
+        block_number: u64,
         fee: Option<&MinedFee>,
     ) -> Result<PendingTransaction> {
-        validate_block_number(block_number)?;
+        let fee = fee.map(stored_fee).transpose()?;
         let status = if succeeded { "confirmed" } else { "reverted" };
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = ?2, block_number = ?3, updated_at = ?4,
                 gas_used = ?5, effective_gas_price = ?6
              WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling', 'replaced')",
             params![
-                request_id.to_string(),
+                request_id,
                 status,
-                block_number,
-                Utc::now().to_rfc3339(),
-                fee.map(|fee| fee.gas_used.as_str()),
-                fee.map(|fee| fee.effective_gas_price.as_str()),
+                block_number_column(block_number)?,
+                Millis(sql::now()),
+                fee.map(|(gas_used, _)| gas_used),
+                fee.map(|(_, price)| Blob(price)),
             ],
         )?;
         ensure!(
@@ -753,15 +751,12 @@ impl PendingStore {
              ORDER BY created_at DESC",
         )?;
         let request_ids = statement
-            .query_map([wallet_id], |row| row.get::<_, String>(0))?
+            .query_map([wallet_id], |row| row.get::<_, Uuid>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         request_ids
             .into_iter()
-            .map(|value| {
-                let id = Uuid::parse_str(&value).context("stored request ID is invalid")?;
-                self.get(id)
-            })
+            .map(|id| self.get(id))
             .filter(|result| {
                 result.as_ref().map_or(true, |record| {
                     record.status == PendingStatus::AwaitingApproval
@@ -785,33 +780,30 @@ impl PendingStore {
         )?;
         let request_ids = statement
             .query_map(params![wallet_id, i64::from(limit)], |row| {
-                row.get::<_, String>(0)
+                row.get::<_, Uuid>(0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
-        request_ids
-            .into_iter()
-            .map(|value| self.get(Uuid::parse_str(&value).context("stored request ID is invalid")?))
-            .collect()
+        request_ids.into_iter().map(|id| self.get(id)).collect()
     }
 
     pub fn get_by_identifier(&self, identifier: &str) -> Result<PendingTransaction> {
         if let Ok(request_id) = Uuid::parse_str(identifier) {
             return self.get(request_id);
         }
-        validate_hex(identifier, Some(32))?;
-        let request_id: String = self
+        let hash = parse_hash(identifier)?;
+        let request_id: Uuid = self
             .database
             .connection
             .query_row(
                 "SELECT request_id FROM pending_transactions
                  WHERE signed_transaction_hash = ?1 OR broadcast_transaction_hash = ?1
                  ORDER BY created_at DESC LIMIT 1",
-                [identifier],
+                [Blob(hash)],
                 |row| row.get(0),
             )
             .with_context(|| format!("unknown transaction {identifier}"))?;
-        self.get(Uuid::parse_str(&request_id).context("stored request ID is invalid")?)
+        self.get(request_id)
     }
 
     fn read(&self, request_id: Uuid) -> Result<PendingTransaction> {
@@ -826,30 +818,30 @@ impl PendingStore {
                         approval_required, review_digest, cancel_serialized_transaction,
                         cancel_transaction_hashes, gas_used, effective_gas_price, plan_source
                  FROM pending_transactions WHERE request_id = ?1",
-                [request_id.to_string()],
+                [request_id],
                 |row| {
                     Ok(PendingRow {
                         wallet_id: row.get(0)?,
                         network_name: row.get(1)?,
                         chain_id: row.get(2)?,
                         plan_json: row.get(3)?,
-                        digest: row.get(4)?,
+                        digest: row.blob(4)?,
                         policy_revision: row.get(5)?,
                         status: row.get(6)?,
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                        approved_at: row.get(9)?,
-                        rejected_at: row.get(10)?,
-                        serialized_transaction: row.get(11)?,
-                        signed_transaction_hash: row.get(12)?,
-                        broadcast_transaction_hash: row.get(13)?,
+                        created_at: row.time(7)?,
+                        updated_at: row.time(8)?,
+                        approved_at: row.time_opt(9)?,
+                        rejected_at: row.time_opt(10)?,
+                        serialized_transaction: row.blob_opt(11)?,
+                        signed_transaction_hash: row.blob_opt(12)?,
+                        broadcast_transaction_hash: row.blob_opt(13)?,
                         block_number: row.get(14)?,
                         approval_required: row.get(15)?,
-                        review_digest: row.get(16)?,
-                        cancel_serialized_transaction: row.get(17)?,
+                        review_digest: row.blob_opt(16)?,
+                        cancel_serialized_transaction: row.blob_opt(17)?,
                         cancel_transaction_hashes: row.get(18)?,
                         gas_used: row.get(19)?,
-                        effective_gas_price: row.get(20)?,
+                        effective_gas_price: row.blob_opt(20)?,
                         plan_source: row.get(21)?,
                     })
                 },
@@ -859,28 +851,31 @@ impl PendingStore {
     }
 }
 
+/// One row exactly as the columns hold it. Every field is already the type its
+/// column declares, so [`PendingRow::parse`] checks how the values relate to
+/// each other rather than re-checking what each one is.
 struct PendingRow {
     wallet_id: String,
     network_name: String,
-    chain_id: String,
+    chain_id: i64,
     plan_json: String,
-    digest: String,
+    digest: B256,
     policy_revision: i64,
     status: String,
-    created_at: String,
-    updated_at: String,
-    approved_at: Option<String>,
-    rejected_at: Option<String>,
-    serialized_transaction: Option<String>,
-    signed_transaction_hash: Option<String>,
-    broadcast_transaction_hash: Option<String>,
-    block_number: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    approved_at: Option<DateTime<Utc>>,
+    rejected_at: Option<DateTime<Utc>>,
+    serialized_transaction: Option<Bytes>,
+    signed_transaction_hash: Option<B256>,
+    broadcast_transaction_hash: Option<B256>,
+    block_number: Option<i64>,
     approval_required: i64,
-    review_digest: Option<String>,
-    cancel_serialized_transaction: Option<String>,
-    cancel_transaction_hashes: Option<String>,
-    gas_used: Option<String>,
-    effective_gas_price: Option<String>,
+    review_digest: Option<B256>,
+    cancel_serialized_transaction: Option<Bytes>,
+    cancel_transaction_hashes: Option<Vec<u8>>,
+    gas_used: Option<i64>,
+    effective_gas_price: Option<u128>,
     plan_source: Option<String>,
 }
 
@@ -889,26 +884,16 @@ impl PendingRow {
         validate_wallet_id(&self.wallet_id)?;
         let value = serde_json::from_str(&self.plan_json).context("stored plan is invalid JSON")?;
         let execution_plan = ExecutionPlan::parse(value).context("stored plan is invalid")?;
-        let actual_digest = format!("{:#x}", execution_plan.digest());
-        ensure!(actual_digest == self.digest, "stored plan digest mismatch");
         ensure!(
-            execution_plan.chain_id.as_str() == self.chain_id,
+            execution_plan.digest() == self.digest,
+            "stored plan digest mismatch"
+        );
+        ensure!(
+            chain_id_column(&execution_plan.chain_id)
+                .is_ok_and(|declared| declared == self.chain_id),
             "stored pending chain ID mismatch"
         );
-        validate_hex(&self.digest, Some(32))?;
         validate_plan_source(self.plan_source.as_deref())?;
-        if let Some(bytes) = &self.serialized_transaction {
-            validate_hex(bytes, None)?;
-        }
-        if let Some(hash) = &self.signed_transaction_hash {
-            validate_hex(hash, Some(32))?;
-        }
-        if let Some(hash) = &self.broadcast_transaction_hash {
-            validate_hex(hash, Some(32))?;
-        }
-        if let Some(digest) = &self.review_digest {
-            validate_hex(digest, Some(32))?;
-        }
         ensure!(
             self.serialized_transaction.is_some() == self.signed_transaction_hash.is_some(),
             "stored signed transaction is incomplete"
@@ -924,10 +909,8 @@ impl PendingRow {
         if let (Some(serialized), Some(hash)) =
             (&self.serialized_transaction, &self.signed_transaction_hash)
         {
-            let bytes = hex::decode(serialized.trim_start_matches("0x"))
-                .context("stored signed transaction is not hexadecimal")?;
             ensure!(
-                format!("{:#x}", alloy::primitives::keccak256(&bytes)) == *hash,
+                keccak256(serialized) == *hash,
                 "stored signed transaction does not hash to its recorded hash"
             );
         }
@@ -946,9 +929,6 @@ impl PendingRow {
             self.review_digest.is_none() || self.approved_at.is_some(),
             "stored review digest has no exceptional approval timestamp"
         );
-        if let Some(bytes) = &self.cancel_serialized_transaction {
-            validate_hex(bytes, None)?;
-        }
         let cancel_transaction_hashes = self
             .cancel_transaction_hashes
             .as_deref()
@@ -968,10 +948,8 @@ impl PendingRow {
             &self.cancel_serialized_transaction,
             cancel_transaction_hashes.last(),
         ) {
-            let bytes = hex::decode(serialized.trim_start_matches("0x"))
-                .context("stored cancellation transaction is not hexadecimal")?;
             ensure!(
-                format!("{:#x}", alloy::primitives::keccak256(&bytes)) == *hash,
+                keccak256(serialized) == *hash,
                 "stored cancellation transaction does not hash to its newest recorded hash"
             );
         }
@@ -985,34 +963,47 @@ impl PendingRow {
         );
         // Both columns are written together at settlement, so either both are
         // present or the row predates fee recording.
-        let mined_fee = match (&self.gas_used, &self.effective_gas_price) {
+        let mined_fee = match (self.gas_used, self.effective_gas_price) {
             (Some(gas_used), Some(price)) => Some(mined_fee(gas_used, price)?),
             (None, None) => None,
             _ => anyhow::bail!("stored transaction fee is incomplete"),
         };
+        let block_number = self
+            .block_number
+            .map(|number| u64::try_from(number).context("stored block number is invalid"))
+            .transpose()?;
         Ok(PendingTransaction {
             request_id,
             wallet_id: self.wallet_id,
             network_name: self.network_name,
-            chain_id: self.chain_id,
+            chain_id: self.chain_id.to_string(),
             execution_plan,
             plan_source: self.plan_source,
-            digest: self.digest,
-            review_digest: self.review_digest,
+            digest: format!("{:#x}", self.digest),
+            review_digest: self.review_digest.map(|digest| format!("{digest:#x}")),
             policy_revision,
             approval_required,
             status: PendingStatus::parse(&self.status)?,
-            created_at: parse_time(&self.created_at)?,
-            updated_at: parse_time(&self.updated_at)?,
-            approved_at: self.approved_at.as_deref().map(parse_time).transpose()?,
-            rejected_at: self.rejected_at.as_deref().map(parse_time).transpose()?,
-            serialized_transaction: self.serialized_transaction,
-            signed_transaction_hash: self.signed_transaction_hash,
-            broadcast_transaction_hash: self.broadcast_transaction_hash,
-            block_number: self.block_number,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            approved_at: self.approved_at,
+            rejected_at: self.rejected_at,
+            serialized_transaction: self.serialized_transaction.map(|bytes| bytes.to_string()),
+            signed_transaction_hash: self
+                .signed_transaction_hash
+                .map(|hash| format!("{hash:#x}")),
+            broadcast_transaction_hash: self
+                .broadcast_transaction_hash
+                .map(|hash| format!("{hash:#x}")),
+            block_number: block_number.map(|number| number.to_string()),
             mined_fee,
-            cancel_serialized_transaction: self.cancel_serialized_transaction,
-            cancel_transaction_hashes,
+            cancel_serialized_transaction: self
+                .cancel_serialized_transaction
+                .map(|bytes| bytes.to_string()),
+            cancel_transaction_hashes: cancel_transaction_hashes
+                .iter()
+                .map(|hash| format!("{hash:#x}"))
+                .collect(),
         })
     }
 }
@@ -1048,27 +1039,74 @@ fn validate_plan_source(value: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn parse_cancel_hashes(value: &str) -> Result<Vec<String>> {
-    let hashes: Vec<String> =
-        serde_json::from_str(value).context("stored cancellation hashes are invalid JSON")?;
+/// The cancellation history, oldest first, from the concatenated bytes stored.
+///
+/// The column's own `CHECK` already refuses a length that is not a whole
+/// number of hashes within the attempt cap, so this splits rather than
+/// validates — but it still checks, because a `CHECK` constrains what this
+/// process writes and the point of re-deriving anything here is a file that
+/// was edited by something else.
+fn parse_cancel_hashes(bytes: &[u8]) -> Result<Vec<B256>> {
     ensure!(
-        !hashes.is_empty() && hashes.len() <= MAX_CANCELLATION_ATTEMPTS,
+        !bytes.is_empty()
+            && bytes.len().is_multiple_of(32)
+            && bytes.len() / 32 <= MAX_CANCELLATION_ATTEMPTS,
         "stored cancellation hash list has an invalid length"
     );
-    for hash in &hashes {
-        validate_hex(hash, Some(32))?;
-    }
-    Ok(hashes)
+    Ok(bytes.chunks_exact(32).map(B256::from_slice).collect())
 }
 
-fn validate_block_number(block_number: &str) -> Result<()> {
-    ensure!(
-        block_number == "0"
-            || (!block_number.starts_with('0')
-                && block_number.bytes().all(|byte| byte.is_ascii_digit())),
-        "block number must be canonical decimal"
-    );
-    Ok(())
+fn encode_cancel_hashes(hashes: &[B256]) -> Vec<u8> {
+    hashes.iter().flat_map(|hash| hash.0).collect()
+}
+
+/// One hash from the `0x`-prefixed hex a caller passed across the API.
+fn parse_hash(value: &str) -> Result<B256> {
+    B256::from_str(value).context("value must be a 0x-prefixed 32-byte hash")
+}
+
+/// One signed envelope from the `0x`-prefixed hex a caller passed.
+fn parse_envelope(value: &str) -> Result<Bytes> {
+    let bytes = Bytes::from_str(value).context("value must be 0x-prefixed hexadecimal")?;
+    ensure!(!bytes.is_empty(), "signed transaction bytes are empty");
+    Ok(bytes)
+}
+
+/// A plan's chain as the column holds it.
+///
+/// A plan carries its chain as a full uint256 because that is what EIP-155
+/// allows it to say, while `SQLite`'s `INTEGER` is signed 63-bit and no EVM chain
+/// needs more. A plan naming a chain outside that range is refused at
+/// persistence rather than silently truncated into a different chain.
+fn chain_id_column(chain_id: &DecimalU256) -> Result<i64> {
+    parse_chain_id(chain_id.as_str())
+}
+
+fn parse_chain_id(value: &str) -> Result<i64> {
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|chain_id| *chain_id > 0)
+        .context("chain ID must be a positive integer below 2^63")
+}
+
+fn block_number_column(block_number: u64) -> Result<i64> {
+    i64::try_from(block_number).context("block number out of range")
+}
+
+/// A receipt's fee as the two columns hold it: gas units as an integer, and
+/// wei per gas as sixteen big-endian bytes, since a uint128 price does not fit
+/// a signed 64-bit integer.
+fn stored_fee(fee: &MinedFee) -> Result<(i64, u128)> {
+    let gas_used: u64 = fee.gas_used.parse().context("gas usage is invalid")?;
+    let price: u128 = fee
+        .effective_gas_price
+        .parse()
+        .context("effective gas price is invalid")?;
+    Ok((
+        i64::try_from(gas_used).context("gas usage out of range")?,
+        price,
+    ))
 }
 
 /// Explain an in-flight slot conflict by naming the record that holds it.
@@ -1082,9 +1120,9 @@ fn validate_block_number(block_number: &str) -> Result<()> {
 fn in_flight_conflict(
     transaction: &rusqlite::Transaction<'_>,
     wallet_id: &str,
-    chain_id: &str,
+    chain_id: i64,
 ) -> String {
-    let blocker: Option<(String, String)> = transaction
+    let blocker: Option<(Uuid, String)> = transaction
         .query_row(
             "SELECT request_id, status FROM pending_transactions
              WHERE wallet_id = ?1 AND chain_id = ?2
@@ -1114,42 +1152,13 @@ fn in_flight_conflict(
 
 /// Rebuild a stored fee, recomputing the product rather than persisting it so
 /// the reported total can never disagree with its own components.
-fn mined_fee(gas_used: &str, effective_gas_price: &str) -> Result<MinedFee> {
-    let gas: u128 = gas_used.parse().context("stored gas usage is invalid")?;
-    let price: u128 = effective_gas_price
-        .parse()
-        .context("stored effective gas price is invalid")?;
+fn mined_fee(gas_used: i64, effective_gas_price: u128) -> Result<MinedFee> {
+    let gas = u128::try_from(gas_used).context("stored gas usage is invalid")?;
     Ok(MinedFee {
         gas_used: gas.to_string(),
-        effective_gas_price: price.to_string(),
-        transaction_fee_wei: gas.saturating_mul(price).to_string(),
+        effective_gas_price: effective_gas_price.to_string(),
+        transaction_fee_wei: gas.saturating_mul(effective_gas_price).to_string(),
     })
-}
-
-fn parse_time(value: &str) -> Result<DateTime<Utc>> {
-    Ok(DateTime::parse_from_rfc3339(value)
-        .context("stored timestamp is invalid")?
-        .with_timezone(&Utc))
-}
-
-fn validate_hex(value: &str, expected_bytes: Option<usize>) -> Result<()> {
-    let encoded = value
-        .strip_prefix("0x")
-        .context("hex value must start with 0x")?;
-    ensure!(
-        !encoded.is_empty()
-            && encoded.len().is_multiple_of(2)
-            && encoded.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "invalid hexadecimal value"
-    );
-    if let Some(expected_bytes) = expected_bytes {
-        ensure!(
-            encoded.len() == expected_bytes * 2,
-            "hex value must contain {expected_bytes} bytes"
-        );
-        B256::from_str(value).context("invalid 32-byte hash")?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

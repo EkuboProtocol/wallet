@@ -29,9 +29,12 @@
 //! differing only in its size limits. Vendored data is still data, and a second
 //! parser for it would be a second set of tolerances to keep true.
 
-use crate::token_list::{ParsedTokenList, parse_token_list_within};
+use crate::{
+    sql::{Blob, Millis},
+    token_list::{ParsedTokenList, parse_token_list_within},
+};
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 /// Limits for the compiled-in list, deliberately not an import's.
@@ -72,10 +75,10 @@ pub fn embedded() -> Result<ParsedTokenList> {
 /// never be able to rename a token that is already there.
 pub(crate) fn seed(connection: &Connection) -> Result<usize> {
     let parsed = embedded()?;
-    let added_at = Utc::now().to_rfc3339();
+    let added_at = crate::sql::now();
 
     connection.execute_batch("BEGIN IMMEDIATE")?;
-    let seeded = match insert_all(connection, &parsed, &added_at) {
+    let seeded = match insert_all(connection, &parsed, added_at) {
         Ok(seeded) => seeded,
         Err(error) => {
             let _ = connection.execute_batch("ROLLBACK");
@@ -86,7 +89,11 @@ pub(crate) fn seed(connection: &Connection) -> Result<usize> {
     Ok(seeded)
 }
 
-fn insert_all(connection: &Connection, parsed: &ParsedTokenList, added_at: &str) -> Result<usize> {
+fn insert_all(
+    connection: &Connection,
+    parsed: &ParsedTokenList,
+    added_at: DateTime<Utc>,
+) -> Result<usize> {
     let mut statement = connection.prepare(
         "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -105,12 +112,12 @@ fn insert_all(connection: &Connection, parsed: &ParsedTokenList, added_at: &str)
         }
         seeded += statement.execute(params![
             i64::try_from(token.chain_id).context("chain ID out of range")?,
-            format!("{:#x}", token.address),
+            Blob(token.address),
             symbol,
             token.name.as_deref().map(crate::token_store::sanitize),
             token.decimals,
             SOURCE,
-            added_at,
+            Millis(added_at),
         ])?;
     }
     Ok(seeded)

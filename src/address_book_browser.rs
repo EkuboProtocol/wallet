@@ -1011,10 +1011,7 @@ fn rows(networks: &[NetworkConfig], entries: &[AddressBookEntry], compact: bool)
                     .map_or_else(|| Span::toned("—", Tone::Muted), Span::plain),
             ];
             if !compact {
-                let updated = chrono::DateTime::parse_from_rfc3339(&entry.updated_at).map_or_else(
-                    |_| "—".to_owned(),
-                    |when| crate::render::relative_time(when.with_timezone(&chrono::Utc)),
-                );
+                let updated = crate::render::relative_time(entry.updated_at);
                 cells.push(Span::toned(updated, Tone::Muted));
             }
             TableRow::new(

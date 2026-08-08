@@ -150,7 +150,7 @@ pub async fn reconcile_record(
             pending.finalize(
                 record.request_id,
                 receipt.succeeded,
-                &receipt.block_number.to_string(),
+                receipt.block_number,
                 Some(&receipt.mined_fee()),
             )
         }
@@ -216,7 +216,7 @@ async fn recheck_replaced(
         return lock(pending)?.finalize(
             record.request_id,
             receipt.succeeded,
-            &receipt.block_number.to_string(),
+            receipt.block_number,
             Some(&receipt.mined_fee()),
         );
     }
@@ -226,7 +226,7 @@ async fn recheck_replaced(
             // the record the same way a successful one does.
             return lock(pending)?.mark_cancelled(
                 record.request_id,
-                &receipt.block_number.to_string(),
+                receipt.block_number,
                 Some(&receipt.mined_fee()),
             );
         }
@@ -259,7 +259,7 @@ async fn reconcile_cancelling(
         return lock(pending)?.finalize(
             record.request_id,
             receipt.succeeded,
-            &receipt.block_number.to_string(),
+            receipt.block_number,
             Some(&receipt.mined_fee()),
         );
     }
@@ -279,7 +279,7 @@ async fn reconcile_cancelling(
         if let Some(receipt) = transaction_receipt(network, cancel_hash).await? {
             return lock(pending)?.mark_cancelled(
                 record.request_id,
-                &receipt.block_number.to_string(),
+                receipt.block_number,
                 Some(&receipt.mined_fee()),
             );
         }
@@ -290,7 +290,7 @@ async fn reconcile_cancelling(
         return lock(pending)?.finalize(
             record.request_id,
             receipt.succeeded,
-            &receipt.block_number.to_string(),
+            receipt.block_number,
             Some(&receipt.mined_fee()),
         );
     }
@@ -347,7 +347,9 @@ pub async fn submit_claimed(
                     broadcast
                         .block_number
                         .as_deref()
-                        .context("confirmed transaction is missing a block number")?,
+                        .context("confirmed transaction is missing a block number")?
+                        .parse()
+                        .context("confirmed transaction has an invalid block number")?,
                     broadcast.mined_fee.as_ref(),
                 )?,
             BroadcastReceiptStatus::Pending => broadcast_record,
@@ -459,7 +461,9 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
                     broadcast
                         .block_number
                         .as_deref()
-                        .context("mined cancellation is missing a block number")?,
+                        .context("mined cancellation is missing a block number")?
+                        .parse()
+                        .context("mined cancellation has an invalid block number")?,
                     broadcast.mined_fee.as_ref(),
                 )?,
             BroadcastReceiptStatus::Pending if broadcast.broadcast_error.is_some() => {
@@ -499,7 +503,9 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
                 broadcast
                     .block_number
                     .as_deref()
-                    .context("mined cancellation is missing a block number")?,
+                    .context("mined cancellation is missing a block number")?
+                    .parse()
+                    .context("mined cancellation has an invalid block number")?,
                 broadcast.mined_fee.as_ref(),
             )?,
         // An outright rejection usually means the race is already over —

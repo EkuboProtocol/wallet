@@ -9,14 +9,17 @@
 //! `SQLCipher` database precisely because an agent must not be able to retarget
 //! an alias by editing a plain file outside this process.
 
-use crate::policy_store::PolicyStore;
+use crate::{
+    policy_store::PolicyStore,
+    sql::{self, Blob, Millis, RowExt},
+};
 use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::{fs, path::Path, str::FromStr};
+use std::{fs, path::Path};
 
 /// Plain-SQLite file used before the table moved into the encrypted
 /// database. Never trusted or imported: deleted on sight.
@@ -24,6 +27,11 @@ const LEGACY_DATABASE_FILE: &str = "address_book.db";
 pub const MAX_NOTE_LEN: usize = 256;
 
 /// One stored alias, the address rendered checksummed.
+///
+/// The address is `String` rather than `Address` because this is what the MCP
+/// and CLI surfaces render, and what they render is the EIP-55 checksummed
+/// form — a pure function of the 20 stored bytes, derived here rather than
+/// stored, so the two can never disagree.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct AddressBookEntry {
     pub chain_id: String,
@@ -31,8 +39,8 @@ pub struct AddressBookEntry {
     pub address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
-    pub added_at: String,
-    pub updated_at: String,
+    pub added_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 pub struct AddressBookStore {
@@ -69,7 +77,7 @@ impl AddressBookStore {
             .map(sanitize_note)
             .transpose()?
             .filter(|note| !note.is_empty());
-        let now = Utc::now().to_rfc3339();
+        let now = sql::now();
         self.database.connection.execute(
             "INSERT INTO address_book(chain_id, alias, address, note, added_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)
@@ -80,9 +88,9 @@ impl AddressBookStore {
             params![
                 i64::try_from(chain_id).context("chain ID out of range")?,
                 alias,
-                format!("{address:#x}"),
+                Blob(address),
                 note,
-                now,
+                Millis(now),
             ],
         )?;
         self.get(chain_id, alias)?
@@ -226,17 +234,16 @@ fn sanitize_note(note: &str) -> Result<String> {
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AddressBookEntry> {
     let chain_id: i64 = row.get(0)?;
-    let address: String = row.get(2)?;
-    let checksummed = Address::from_str(&address)
-        .map(|address| address.to_checksum(None))
-        .unwrap_or(address);
+    // No fallback for an unparseable address: the column holds 20 bytes or the
+    // row does not exist, so checksumming cannot fail.
+    let address: Address = row.blob(2)?;
     Ok(AddressBookEntry {
         chain_id: chain_id.to_string(),
         alias: row.get(1)?,
-        address: checksummed,
+        address: address.to_checksum(None),
         note: row.get(3)?,
-        added_at: row.get(4)?,
-        updated_at: row.get(5)?,
+        added_at: row.time(4)?,
+        updated_at: row.time(5)?,
     })
 }
 

@@ -67,7 +67,8 @@ fn a_real_signature_over_the_digest_recovers_to_the_signer() {
     // The digest this module builds is exactly what a `personal_sign`
     // signer produces for the same bytes.
     assert_eq!(signer.sign_message_sync(b"gm").unwrap(), signature);
-    validate_signature_hex(&format!("0x{}", hex::encode(signature.as_bytes()))).unwrap();
+    crate::signature_requests::parse_signature(&format!("0x{}", hex::encode(signature.as_bytes())))
+        .unwrap();
 }
 
 #[test]
@@ -320,7 +321,7 @@ fn lifecycle_persists_exact_bytes_and_signature() {
 
     let signature = format!("0x{}", "11".repeat(65));
     let signed = store
-        .store_signature(request.request_id, &request.digest, &signature)
+        .store_signature(request.request_id, message_digest(b"gm"), &signature)
         .unwrap();
     assert_eq!(signed.status, MessageStatus::Signed);
     assert_eq!(signed.signature.as_deref(), Some(signature.as_str()));
@@ -330,7 +331,7 @@ fn lifecycle_persists_exact_bytes_and_signature() {
     // A signed request cannot be re-signed or rejected.
     assert!(
         store
-            .store_signature(request.request_id, &request.digest, &signature)
+            .store_signature(request.request_id, message_digest(b"gm"), &signature)
             .is_err()
     );
     assert!(store.reject(request.request_id).is_err());
@@ -366,7 +367,7 @@ fn rejection_is_terminal_and_digest_is_bound() {
         store
             .store_signature(
                 request.request_id,
-                &format!("{:#x}", B256::repeat_byte(0xEE)),
+                B256::repeat_byte(0xEE),
                 &format!("0x{}", "22".repeat(65)),
             )
             .is_err()
@@ -388,11 +389,8 @@ fn a_tampered_message_row_never_binds_a_signature_to_other_bytes() {
         .database
         .connection
         .execute(
-            "UPDATE pending_messages SET message_hex = ?2 WHERE request_id = ?1",
-            params![
-                request.request_id.to_string(),
-                encode_message_hex(b"send everything")
-            ],
+            "UPDATE pending_messages SET message = ?2 WHERE request_id = ?1",
+            params![request.request_id, b"send everything".as_slice()],
         )
         .unwrap();
     assert!(store.get(request.request_id).is_err());

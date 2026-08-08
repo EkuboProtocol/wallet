@@ -11,7 +11,8 @@
 
 use crate::{
     policy_store::PolicyStore,
-    signature_requests::{SignatureQueue, parse_time, validate_signature_hex},
+    signature_requests::{SignatureQueue, encode_signature},
+    sql::{Blob, Millis, RowExt},
 };
 use alloy::primitives::{Address, B256, U256, address};
 use alloy_dyn_abi::TypedData;
@@ -563,12 +564,12 @@ impl TypedDataStore {
         typed_data: &serde_json::Value,
         digest: B256,
     ) -> Result<PendingTypedData> {
-        let digest = format!("{digest:#x}");
+        let stored_chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
         let request_id = QUEUE.create_or_reuse(
             &mut self.database.connection,
             wallet_id,
-            &chain_id.to_string(),
-            &digest,
+            chain_id,
+            digest,
             |transaction, request_id, now| {
                 transaction.execute(
                     "INSERT INTO pending_typed_data(
@@ -576,12 +577,12 @@ impl TypedDataStore {
                         status, created_at, updated_at
                      ) VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting_approval', ?6, ?6)",
                     params![
-                        request_id.to_string(),
+                        request_id,
                         wallet_id,
-                        chain_id.to_string(),
+                        stored_chain_id,
                         serde_json::to_string(typed_data)?,
-                        digest,
-                        now,
+                        Blob(digest),
+                        Millis(now),
                     ],
                 )?;
                 Ok(())
@@ -609,7 +610,7 @@ impl TypedDataStore {
     pub fn store_signature(
         &mut self,
         request_id: Uuid,
-        expected_digest: &str,
+        expected_digest: B256,
         signature: &str,
     ) -> Result<PendingTypedData> {
         QUEUE.store_signature(
@@ -647,19 +648,19 @@ impl TypedDataStore {
                         created_at, updated_at, approved_at, rejected_at,
                         signature
                  FROM pending_typed_data WHERE request_id = ?1",
-                [request_id.to_string()],
+                [request_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
+                        row.blob::<B256>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                        row.get::<_, Option<String>>(9)?,
+                        row.time(5)?,
+                        row.time(6)?,
+                        row.time_opt(7)?,
+                        row.time_opt(8)?,
+                        row.blob_opt::<[u8; 65]>(9)?,
                     ))
                 },
             )
@@ -682,29 +683,23 @@ impl TypedDataStore {
         // Re-derive the digest so a corrupted or edited row can never present
         // one payload while binding a signature to another.
         let (_, stored_chain_id, actual_digest) = parse_typed_data(&typed_data)?;
+        ensure!(actual_digest == digest, "stored typed-data digest mismatch");
         ensure!(
-            format!("{actual_digest:#x}") == digest,
-            "stored typed-data digest mismatch"
-        );
-        ensure!(
-            stored_chain_id.to_string() == chain_id,
+            i64::try_from(stored_chain_id).is_ok_and(|declared| declared == chain_id),
             "stored typed-data chain mismatch"
         );
-        if let Some(signature) = &signature {
-            validate_signature_hex(signature)?;
-        }
         Ok(PendingTypedData {
             request_id,
             wallet_id,
-            chain_id,
+            chain_id: chain_id.to_string(),
             typed_data,
-            digest,
+            digest: format!("{digest:#x}"),
             status: TypedDataStatus::parse(&status)?,
-            created_at: parse_time(&created_at)?,
-            updated_at: parse_time(&updated_at)?,
-            approved_at: approved_at.as_deref().map(parse_time).transpose()?,
-            rejected_at: rejected_at.as_deref().map(parse_time).transpose()?,
-            signature,
+            created_at,
+            updated_at,
+            approved_at,
+            rejected_at,
+            signature: signature.map(encode_signature),
         })
     }
 }

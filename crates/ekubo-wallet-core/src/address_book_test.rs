@@ -26,9 +26,8 @@ fn an_alias_that_would_be_refused_today_can_still_be_deleted() {
         .connection
         .execute(
             "INSERT INTO address_book(chain_id, alias, address, note, added_at, updated_at)
-                 VALUES (1, 'not a valid alias!', '0x1111111111111111111111111111111111111111',
-                         NULL, 't0', 't0')",
-            [],
+                 VALUES (1, 'not a valid alias!', ?1, NULL, 0, 0)",
+            rusqlite::params![crate::sql::Blob(Address::repeat_byte(0x11))],
         )
         .unwrap();
 

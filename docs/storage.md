@@ -37,6 +37,19 @@ entry and `Esc` also leaves the browser. Every reporting command prints exact JS
 `--json` is passed or when stdout is not a terminal, so scripts and agents
 always receive machine-readable output.
 
+Values are stored as what they are rather than as text that describes them.
+Every hash, address, signature, signed envelope, and request ID is a `BLOB` of
+its exact width, and every moment is an `INTEGER` count of milliseconds since
+the Unix epoch. Both choices are about what the schema can enforce rather than
+about size: a fixed-width blob column *is* the thing it holds — there is no
+20-byte string that is not an address — where the hex-text column it replaced
+could only check a length and a lowercase spelling, and admitted values no
+address ever takes. Integer timestamps compare and sort as themselves, where
+RFC 3339 text ordered correctly only while every writer spelled UTC the same
+way. `crates/ekubo-wallet-core/src/sql.rs` holds every one of these encodings,
+so no call site restates one. The hex and RFC 3339 spellings are still what the
+CLI and MCP surfaces emit; they are rendered on the way out.
+
 The random 256-bit database key is stored separately under credential-service
 name `org.ekubo.wallet.db` — named for the database rather than for policies,
 since the same file holds the pending signing queues, the address book, and

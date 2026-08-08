@@ -14,8 +14,8 @@ fn entry(alias: &str, chain_id: &str, note: Option<&str>) -> AddressBookEntry {
         alias: alias.to_owned(),
         address: Address::repeat_byte(0xab).to_checksum(None),
         note: note.map(str::to_owned),
-        added_at: chrono::Utc::now().to_rfc3339(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
+        added_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
 }
 

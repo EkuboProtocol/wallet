@@ -1383,15 +1383,16 @@ async fn run_token_review(config: &ConfigStore, mode: OutputMode) -> Result<()> 
     // released and the screen waits on a person. A decision reached about this
     // reading must not consume a different one made under the same key while
     // the owner was reading.
-    let proposed_at: std::collections::BTreeMap<(u64, Address), String> = proposals
-        .iter()
-        .map(|proposal| {
-            (
-                (proposal.token.chain_id, proposal.token.address),
-                proposal.proposed_at.clone(),
-            )
-        })
-        .collect();
+    let proposed_at: std::collections::BTreeMap<(u64, Address), chrono::DateTime<chrono::Utc>> =
+        proposals
+            .iter()
+            .map(|proposal| {
+                (
+                    (proposal.token.chain_id, proposal.token.address),
+                    proposal.proposed_at,
+                )
+            })
+            .collect();
 
     // Group by the list that vouched for them: that is the unit the owner
     // actually decides, and it keeps a hundred suggestions to a few choices.
@@ -1415,7 +1416,7 @@ async fn confirm_and_store(
     config: &ConfigStore,
     groups: Vec<(String, Vec<crate::token_store::ListedToken>)>,
     mode: OutputMode,
-    clear_proposals: &std::collections::BTreeMap<(u64, Address), String>,
+    clear_proposals: &std::collections::BTreeMap<(u64, Address), chrono::DateTime<chrono::Utc>>,
 ) -> Result<()> {
     let sources: std::collections::BTreeMap<(u64, Address), String> = groups
         .iter()
@@ -1439,14 +1440,14 @@ async fn confirm_and_store(
     // thing left is to stop asking.
     let mut store = crate::token_store::TokenStore::production(config.data_dir())?;
     if !decision.rejected.is_empty() {
-        let keys: Vec<(u64, Address, String)> = decision
+        let keys: Vec<(u64, Address, chrono::DateTime<chrono::Utc>)> = decision
             .rejected
             .iter()
             .filter_map(|token| {
                 let key = (token.chain_id, token.address);
                 clear_proposals
                     .get(&key)
-                    .map(|proposed_at| (key.0, key.1, proposed_at.clone()))
+                    .map(|proposed_at| (key.0, key.1, *proposed_at))
             })
             .collect();
         let removed = store.discard_proposals(&keys)?;
@@ -1500,12 +1501,12 @@ async fn confirm_and_store(
         decided.push(key);
     }
     if !clear_proposals.is_empty() {
-        let clear: Vec<(u64, Address, String)> = decided
+        let clear: Vec<(u64, Address, chrono::DateTime<chrono::Utc>)> = decided
             .into_iter()
             .filter_map(|key| {
                 clear_proposals
                     .get(&key)
-                    .map(|proposed_at| (key.0, key.1, proposed_at.clone()))
+                    .map(|proposed_at| (key.0, key.1, *proposed_at))
             })
             .collect();
         store.discard_proposals(&clear)?;
@@ -2863,7 +2864,7 @@ async fn approve_typed_data(
         .context("failed to sign typed data")?;
     let stored = store.store_signature(
         request.request_id,
-        &request.digest,
+        digest,
         &format!("0x{}", hex::encode(signature.as_bytes())),
     )?;
     eprintln!(
@@ -3061,7 +3062,7 @@ async fn approve_message(
         .context("failed to sign the message")?;
     let stored = store.store_signature(
         request.request_id,
-        &request.digest,
+        digest,
         &format!("0x{}", hex::encode(signature.as_bytes())),
     )?;
     eprintln!(
