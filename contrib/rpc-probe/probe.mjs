@@ -334,8 +334,22 @@ async function probe(job) {
   record.methods.gasPrice = gasPrice.ok;
   record.methods.maxPriorityFeePerGas = priorityFee.ok;
   record.methods.estimateGas = estimateGas.ok;
-  record.methods.sendRawTransaction =
-    sendRaw.ok || !(sendRaw.rpcError?.code === -32601 || /method not found/i.test(sendRaw.rpcError?.message ?? ""));
+  // Support has to be something the node asserted, not something no one
+  // denied. A JSON-RPC error object is the node answering: it read the
+  // request, reached the method, and refused the payload — which is the
+  // "invalid RLP" this deliberately malformed call is fishing for. A timeout,
+  // a refused connection, an HTTP 500, and a body that is not JSON all arrive
+  // with no `rpcError` at all, and reading those as support is how an
+  // endpoint that cannot broadcast — or cannot be reached — collects the
+  // largest bonus the selector awards, and leads the failover list a
+  // cancellation depends on.
+  const sendRawAnswered =
+    sendRaw.rpcError !== undefined &&
+    !(
+      sendRaw.rpcError.code === -32601 ||
+      /method not found/i.test(sendRaw.rpcError.message ?? "")
+    );
+  record.methods.sendRawTransaction = sendRaw.ok || sendRawAnswered;
 
   if (record.multicall3) {
     const call = await rpcPatient(job.url, "eth_call", [
