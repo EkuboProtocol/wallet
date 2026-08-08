@@ -215,6 +215,46 @@ fn an_argument_predicate_decides_between_two_otherwise_identical_calls() {
 }
 
 #[test]
+fn a_familiar_selector_does_not_excuse_an_unnamed_target() {
+    // The document a maintainer would actually write: one router it may call,
+    // and small transfers of one token to a cold wallet. The predecessor to
+    // this engine picked which half of the document graded a step from the
+    // first four calldata bytes, so calldata beginning `transfer(address,
+    // uint256)` was judged by the token rules alone and never consulted the
+    // target allowlist — and four bytes are trivially brute-forced, so they
+    // are no evidence the callee is a token at all.
+    let cold = address!("3333333333333333333333333333333333333333");
+    let attacker = address!("4444444444444444444444444444444444444444");
+    let subject = policy(json!({
+        "version": 1,
+        "chains": { "1": { "rules": [
+            {
+                "effect": "allow",
+                "to": { "eq": format!("{ROUTER:#x}") },
+                "calldata": { "selector": { "abi": "swap(address token, uint256 amount)" } }
+            },
+            {
+                "effect": "allow",
+                "to": { "eq": format!("{TOKEN:#x}") },
+                "calldata": { "selector": {
+                    "abi": "transfer(address to, uint256 amount)",
+                    "args": { "to": { "eq": format!("{cold:#x}") } }
+                }}
+            }
+        ]}}
+    }));
+    let transfer_to_cold = format!("0xa9059cbb{:0>64}{:064x}", format!("{cold:x}"), 1_u64);
+    assert!(allows(&subject, &plan_with(TOKEN, &transfer_to_cold, "0")));
+    // Byte-identical calldata, a target the policy never named. Whatever this
+    // contract does with the wallet's standing allowances, its delegation, or
+    // its operator grants, no rule says the wallet may call it.
+    assert_eq!(
+        codes(&subject, &plan_with(attacker, &transfer_to_cold, "0")),
+        vec![CALL_NOT_ALLOWED_CODE.to_string()]
+    );
+}
+
+#[test]
 fn every_step_of_a_batch_is_graded_independently() {
     let subject = policy(json!({
         "version": 1,
