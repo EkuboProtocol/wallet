@@ -264,8 +264,9 @@ struct TransfersInput {
     /// Ordered transfers, which may mix the native token with any number of
     /// ERC-20 contracts.
     transfers: Vec<Transfer>,
-    /// What to do when the plan's simulation fails. Has no effect on a plan
-    /// the policy denies: that always queues for human approval.
+    /// What to do when the plan's simulation fails. It says nothing about
+    /// policy: a plan no rule covers always queues for human approval, and a
+    /// plan a `deny` rule matched always fails outright.
     #[serde(default)]
     on_simulation_failure: OnSimulationFailure,
 }
@@ -297,8 +298,9 @@ struct SendExecutionPlanInput {
     /// can never become a different transaction.
     #[serde(default)]
     request_id: Option<uuid::Uuid>,
-    /// What to do when the plan's simulation fails. Has no effect on a plan
-    /// the policy denies: that always queues for human approval.
+    /// What to do when the plan's simulation fails. It says nothing about
+    /// policy: a plan no rule covers always queues for human approval, and a
+    /// plan a `deny` rule matched always fails outright.
     #[serde(default)]
     on_simulation_failure: OnSimulationFailure,
 }
@@ -308,12 +310,15 @@ struct SendExecutionPlanInput {
 /// Distinct from `SimulationFailureAction`, which is the action a failure
 /// recommends; this is the one the caller chose in advance.
 ///
-/// A failed simulation and a policy denial are different problems with the
-/// same old answer: queue for a human. But only the policy denial is a
-/// question a human can answer — a plan that reverts needs new calldata from
+/// A failed simulation and a plan no policy rule covers are different problems
+/// with the same old answer: queue for a human. But only the uncovered plan is
+/// a question a human can answer — a plan that reverts needs new calldata from
 /// whoever produced it, and sending the user to a review prompt for it costs
 /// them an interruption to approve something that will fail anyway. Callers
 /// that can act on the failure themselves say so here.
+///
+/// A plan a `deny` rule matched is neither: it never queues whatever this
+/// says, because no approval prompt can override the owner's own rule.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum OnSimulationFailure {
@@ -509,7 +514,7 @@ struct ProposeTokensInput {
     /// it overrides whatever name the referenced list declares.
     #[serde(default)]
     list_name: Option<String>,
-    /// Entries written out one by one, at most 1000 of them. Provide exactly
+    /// Entries written out one by one, at most 10000 of them. Provide exactly
     /// one of `tokens` and `reference`; prefer `reference` for anything
     /// beyond a handful, since restating a list here costs an output token
     /// per field.
@@ -522,7 +527,7 @@ struct ProposeTokensInput {
     /// actually fetched. This changes only who carries the bytes — the
     /// entries still reach the owner as suggestions and are still named
     /// nothing until they accept them in `ekubo-wallet token review`. The
-    /// same 1000-entry cap applies: a longer list is refused rather than
+    /// same 10000-entry cap applies: a longer list is refused rather than
     /// truncated.
     #[serde(default)]
     reference: Option<ArtifactReference>,
@@ -539,6 +544,59 @@ struct ProposeTokensOutput {
     /// multi-ecosystem list, typically. Dropped rather than proposed, and
     /// reported so a shorter proposal than expected explains itself.
     skipped_non_evm: usize,
+    next_step: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ImportTokenListInput {
+    /// The `https` URL the list is published at, such as
+    /// `https://tokens.uniswap.org`. Must be the token-list JSON itself, not
+    /// the tokenlists.org page describing it. No credentials, no fragment, no
+    /// port, and redirects are not followed, so give the URL the curator
+    /// publishes rather than a shortener or a mirror.
+    url: String,
+    /// Which chains to take entries for, as decimal chain IDs. Omit this to
+    /// take the chains this wallet has networks configured for, which is
+    /// usually what you want: a published list spans chains the owner does
+    /// not use, and names for those are suggestions they would have to read
+    /// past. Pass an explicit set to narrow it further. Entries on every
+    /// other chain are skipped and counted, never imported silently.
+    #[serde(default)]
+    chain_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ImportTokenListOutput {
+    #[serde(flatten)]
+    summary: crate::token_store::ProposalSummary,
+    /// What the owner will see these suggestions grouped under. Built from
+    /// the host that served the list and the name the list gives itself, in
+    /// that order; it is not something the caller can set.
+    list_name: String,
+    /// The host that actually served the bytes, as TLS proved it.
+    host: String,
+    /// The list's own `version`, when it declares one. Compare it across
+    /// imports to tell a list that changed from one that did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_version: Option<String>,
+    /// The list's own `timestamp`, verbatim, when it declares one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_timestamp: Option<String>,
+    /// Every suggestion now waiting for the owner, this call's included.
+    awaiting_review: u64,
+    /// The chains entries were taken for, decimal, in the order applied.
+    /// Echoed because omitting `chain_ids` lets the wallet choose them.
+    chains_selected: Vec<String>,
+    /// Entries the list carried that this wallet cannot act on, because their
+    /// address is not 20 bytes — the Starknet rows in a multi-ecosystem list,
+    /// typically. Dropped rather than proposed, and reported so a shorter
+    /// import than expected explains itself.
+    skipped_non_evm: usize,
+    /// Entries dropped for naming a chain outside `chains_selected`. Large on
+    /// a multi-chain list, and reported so taking 396 rows from a 1685-row
+    /// list reads as a selection rather than a half-empty list.
+    skipped_other_chain: usize,
     next_step: String,
 }
 
@@ -583,10 +641,10 @@ struct GetBalancesInput {
     /// addresses. Only the addresses are used: this reads balances and never
     /// consults or records what the list calls anything. Entries on other
     /// chains are ignored, so one canonical multi-chain list can be pointed
-    /// at any chain — but the cap is on the list, not on the chain: a
-    /// referenced list is refused outright above 1000 entries across every
-    /// chain it names, so a larger list has to be split before it is
-    /// referenced here.
+    /// at any chain. Two different caps apply: the referenced list itself is
+    /// refused outright above 10000 entries across every chain it names, and
+    /// what survives the chain filter must still be at most 1000 addresses,
+    /// which is what one balance request will carry.
     #[serde(default)]
     reference: Option<ArtifactReference>,
     /// Read this temporary simulation fork's hypothetical balances instead of
@@ -988,7 +1046,7 @@ impl WalletMcpServer {
     // in-process, short-lived, and invisible at approval time.
     #[tool(
         name = "wallet_simulate_execution_plan",
-        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result still goes to wallet_send_execution_plan, which queues it for human approval.",
+        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1405,6 +1463,91 @@ impl WalletMcpServer {
     }
 
     #[tool(
+        name = "wallet_import_token_list",
+        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 10000 entries after that selection, which fits the published lists people actually name, and an overflowing selection is refused rather than truncated — narrow the chains, or point at a more specific list. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the separate CLI with `ekubo-wallet token review`, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            // Re-importing the same list re-files the same suggestions rather
+            // than stacking them: a repeated proposal for an address replaces
+            // the earlier one.
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_import_token_list(
+        &self,
+        Parameters(input): Parameters<ImportTokenListInput>,
+    ) -> Result<Json<ImportTokenListOutput>, ErrorData> {
+        // An omitted selection means the chains this wallet is set up for.
+        // A published list spans chains the owner does not use, and every row
+        // for one of those is a decision added to a review screen that only
+        // works while it is short enough to read.
+        let chain_ids = if input.chain_ids.is_empty() {
+            self.config
+                .load()
+                .map_err(|error| tool_error(&error))?
+                .networks
+                .iter()
+                .map(|network| network.chain_id)
+                .collect::<Vec<_>>()
+        } else {
+            input
+                .chain_ids
+                .iter()
+                .map(|chain_id| {
+                    self.config
+                        .network_by_chain_id(chain_id)
+                        .map(|network| network.chain_id)
+                        .map_err(|error| tool_error(&error))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let (parsed, host) = crate::plan_fetch::fetch_token_list_url(
+            &input.url,
+            &chain_ids,
+            FetchPolicy::production(),
+        )
+        .await
+        .map_err(|error| tool_error(&error))?;
+        // The host leads because it is the one part of this the caller could
+        // not choose: TLS proved it, while the declared name is a string the
+        // same bytes carried. An owner deciding whether to trust a list is
+        // deciding about a publisher, so the publisher is what they read
+        // first, and a list that names itself something it is not cannot push
+        // that off the label.
+        let list_name = match &parsed.declared_name {
+            Some(declared) => format!("{host} — {declared}"),
+            None => host.clone(),
+        };
+        let mut store = self
+            .tokens
+            .lock()
+            .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
+        let summary = store
+            .propose(&parsed.tokens, &list_name)
+            .map_err(|error| tool_error(&error))?;
+        let awaiting_review = store
+            .count_proposals()
+            .map_err(|error| tool_error(&error))?;
+        Ok(Json(ImportTokenListOutput {
+            summary,
+            list_name,
+            host,
+            declared_version: parsed.declared_version,
+            declared_timestamp: parsed.declared_timestamp,
+            chains_selected: chain_ids.iter().map(u64::to_string).collect(),
+            awaiting_review,
+            skipped_non_evm: parsed.skipped_non_evm,
+            skipped_other_chain: parsed.skipped_other_chain,
+            next_step: "The owner reviews these with `ekubo-wallet token review`, where they \
+                        accept or reject the whole list at once. Until they accept one, the \
+                        wallet keeps showing that token by address alone."
+                .into(),
+        }))
+    }
+
+    #[tool(
         name = "wallet_get_portfolio",
         description = "Read the native balance and every token-database balance for one address on one chain, pinned to a reported block, through the same path as wallet_get_balances: the Ekubo TokenDataFetcher lens where deployed, otherwise Multicall3 balanceOf reads. Accepts a wallet_id or any EVM address. Only nonzero token balances are returned. At most 8000 known tokens are checked; a database holding more reports the remainder as tokens_skipped rather than reading them.",
         annotations(read_only_hint = true, open_world_hint = true)
@@ -1545,7 +1688,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; policy denials queue for approval either way. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan no policy rule covers queues for approval either way, and a plan a deny rule matched fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2437,9 +2580,11 @@ impl WalletMcpServer {
 
         // A caller that asked to hear about a failed simulation hears about
         // it, and nothing is written: no pending row, no expiry to wait out,
-        // no review prompt for a plan that does not execute. A policy denial
-        // is deliberately not covered — overriding policy is exactly the
-        // decision only the user can make, so it still queues below.
+        // no review prompt for a plan that does not execute. A plan no policy
+        // rule covers is deliberately not covered here — whether to allow it
+        // once is exactly the decision only the user can make, so it still
+        // queues below. A plan a `deny` rule matched never gets that far: it
+        // fails outright in `execute_automatic`, whatever was passed here.
         if !simulation.simulation.success && on_simulation_failure == OnSimulationFailure::Fail {
             // Attributed, because this sentence was written by whoever produced
             // the plan and travels outside the plan digest. It is advice about
@@ -2904,10 +3049,9 @@ fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<Messag
     })
 }
 
-/// The next step for an agent holding a sendable simulation the policy
-/// denied. A denial routes the plan to a human review; it is not a failure,
-/// and widening the policy is never a precondition for the action in hand.
-/// What to do next when the policy did not allow a plan outright.
+/// What to do next when the policy did not allow a plan outright: the
+/// instruction an agent gets alongside a sendable simulation with
+/// `allowed=false`.
 ///
 /// The two negative outcomes need opposite advice, which is why this takes the
 /// outcome rather than assuming. Telling an agent to queue a plan the policy

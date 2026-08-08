@@ -9,6 +9,10 @@ use super::*;
 use crate::approval::ApprovalKind;
 use crossterm::event::KeyModifiers;
 
+/// A terminal wide enough that no legend has to shed anything, so a test
+/// about *whether* a key is advertised is not also a test about layout.
+const WIDE: usize = 200;
+
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -321,15 +325,15 @@ fn the_wait_reports_elapsed_seconds() {
 fn the_refresh_key_is_advertised_only_where_it_works() {
     let mut review = screen();
     assert!(
-        !review.hints().contains("re-simulate"),
+        !review.hints(WIDE).contains("re-simulate"),
         "a review with no simulation must not offer one: {}",
-        review.hints()
+        review.hints(WIDE)
     );
     review.refreshable = true;
     assert!(
-        review.hints().contains("r re-simulate"),
+        review.hints(WIDE).contains("r re-simulate"),
         "the key has to be discoverable: {}",
-        review.hints()
+        review.hints(WIDE)
     );
 }
 
@@ -369,4 +373,304 @@ fn a_decision_taken_without_the_screen_still_shows_the_document() {
     }
     // The request id is what a reviewer quotes when something goes wrong.
     assert!(text.contains(&request.id.to_string()), "{text}");
+}
+
+fn switchable_screen() -> ReviewScreen {
+    let mut review = ReviewScreen::new(document("primary review"));
+    review.choices = vec![
+        document("primary review"),
+        document("cold review"),
+        document("hot review"),
+    ];
+    review.choice_labels = vec!["primary".to_owned(), "cold".to_owned(), "hot".to_owned()];
+    review
+}
+
+#[test]
+fn switching_accounts_is_offered_only_where_there_is_a_choice() {
+    // One account is not a choice, and a key that silently does nothing is
+    // worse than one that was never advertised.
+    let mut only_one = ReviewScreen::new(document("summary"));
+    only_one.choices = vec![document("summary")];
+    only_one.choice_labels = vec!["primary".to_owned()];
+    assert!(!only_one.switchable());
+    assert_eq!(only_one.handle_key(press(KeyCode::Char('a'))), None);
+    assert_eq!(only_one.choice, 0);
+    assert!(
+        !only_one.hints(WIDE).contains("Tab account"),
+        "{}",
+        only_one.hints(WIDE)
+    );
+
+    let mut several = switchable_screen();
+    assert!(several.switchable());
+    assert_eq!(several.handle_key(press(KeyCode::Char('a'))), None);
+    assert_eq!(several.choice, 1);
+    assert!(
+        several.hints(WIDE).contains("Tab account"),
+        "{}",
+        several.hints(WIDE)
+    );
+}
+
+#[test]
+fn switching_cycles_through_every_account_and_wraps() {
+    let mut review = switchable_screen();
+    for expected in [1, 2, 0, 1] {
+        review.handle_key(press(KeyCode::Char('a')));
+        assert_eq!(review.choice, expected);
+    }
+}
+
+#[test]
+fn the_document_on_screen_is_the_selected_accounts_own() {
+    let mut review = switchable_screen();
+    review.handle_key(press(KeyCode::Char('a')));
+    assert_eq!(review.document, document("cold review"));
+    review.handle_key(press(KeyCode::Char('a')));
+    assert_eq!(review.document, document("hot review"));
+}
+
+/// The same property a changed re-simulation has, for the same reason:
+/// scrolling one account's review to the end is not having read another's.
+/// Without this, reading `primary` to the end and then switching would leave
+/// Approve live over a document nobody had looked at.
+#[test]
+fn switching_accounts_withdraws_the_right_to_approve() {
+    let mut review = switchable_screen();
+    review.reached_end = true;
+    review.on_approve = true;
+    review.offset = 42;
+
+    review.handle_key(press(KeyCode::Char('a')));
+
+    assert!(!review.reached_end, "the new account's review is unseen");
+    assert!(!review.on_approve, "the cursor returns to Reject");
+    assert_eq!(review.offset, 0, "the new review starts at the top");
+    assert_eq!(
+        review.handle_key(press(KeyCode::Enter)),
+        Some(ReviewAction::Decide(ApprovalDecision::Rejected)),
+        "Enter on Reject still rejects"
+    );
+}
+
+#[test]
+fn the_footer_and_the_notice_name_the_account_now_selected() {
+    // A legend saying only that a switch is possible does not say which
+    // account is about to be connected, and that is the fact being decided.
+    let mut review = switchable_screen();
+    review.handle_key(press(KeyCode::Char('a')));
+    let hints = review.hints(WIDE);
+    assert!(hints.contains("cold"), "{hints}");
+    assert!(hints.contains("2/3"), "{hints}");
+    let notice = review.notice.clone().expect("a switch says what it did");
+    assert!(notice.contains("cold"), "{notice}");
+}
+
+#[test]
+fn tab_moves_through_the_accounts_when_there_are_accounts_to_move_through() {
+    let mut review = switchable_screen();
+    review.handle_key(press(KeyCode::Tab));
+    assert_eq!(review.choice, 1);
+    assert_eq!(review.document, document("cold review"));
+
+    // And backwards, wrapping.
+    review.handle_key(press(KeyCode::BackTab));
+    assert_eq!(review.choice, 0);
+    review.handle_key(press(KeyCode::BackTab));
+    assert_eq!(review.choice, 2);
+}
+
+#[test]
+fn the_decision_cursor_keeps_the_arrow_keys_while_tab_drives_the_list() {
+    let mut review = switchable_screen();
+    assert!(!review.on_approve);
+    review.handle_key(press(KeyCode::Right));
+    assert!(review.on_approve, "→ must still reach Approve");
+    assert_eq!(review.choice, 0, "→ must not change the account");
+    review.handle_key(press(KeyCode::Left));
+    assert!(!review.on_approve);
+
+    // The legend has to teach that split rather than the usual one.
+    let hints = review.hints(WIDE);
+    assert!(hints.contains("Tab account"), "{hints}");
+    assert!(hints.contains("←→"), "{hints}");
+}
+
+#[test]
+fn tab_still_toggles_the_decision_on_a_review_with_no_list() {
+    // Every other review in the program keeps the binding it always had.
+    let mut review = screen();
+    review.handle_key(press(KeyCode::Tab));
+    assert!(review.on_approve, "Tab must still reach Approve here");
+    assert!(
+        review.hints(WIDE).contains("Tab switch"),
+        "{}",
+        review.hints(WIDE)
+    );
+}
+
+/// The reason giving Tab to the list is safe: on this screen Tab can only
+/// move *away* from approving. A Tab and an Enter buffered before the screen
+/// was drawn cannot approve anything, which is the case the drain and the
+/// scroll-to-the-end rule both exist for.
+#[test]
+fn tab_can_never_carry_a_review_towards_approval() {
+    let mut review = switchable_screen();
+    review.reached_end = true;
+    review.on_approve = true;
+
+    review.handle_key(press(KeyCode::Tab));
+
+    assert!(!review.on_approve, "the cursor returned to Reject");
+    assert!(!review.reached_end, "the new review is unread");
+    assert_eq!(
+        review.handle_key(press(KeyCode::Enter)),
+        Some(ReviewAction::Decide(ApprovalDecision::Rejected))
+    );
+}
+
+/// The footer is one line and the renderer cuts whatever does not fit. What
+/// gets cut is the *end* of the legend — which is where the way out of this
+/// screen used to sit — so the legend has to shed segments deliberately.
+#[test]
+fn the_key_legend_fits_the_terminal_it_is_drawn_in() {
+    let mut review = switchable_screen();
+    review.refreshable = true;
+    for width in [200, 120, 80, 60, 40, 30, 20, 12, 5, 1] {
+        let hints = review.hints(width);
+        assert!(
+            crate::render::display_width(&hints) <= width.max(3),
+            "at width {width} the legend was {} columns: {hints}",
+            crate::render::display_width(&hints)
+        );
+    }
+}
+
+#[test]
+fn the_way_out_survives_the_narrowest_terminal() {
+    // Esc is the escape hatch. A reviewer who cannot see any other key must
+    // still be able to see that one, so it is the last thing dropped.
+    let mut review = switchable_screen();
+    review.refreshable = true;
+    for width in [200, 80, 40, 20, 12] {
+        let hints = review.hints(width);
+        assert!(hints.contains("Esc"), "width {width} lost Esc: {hints}");
+    }
+}
+
+#[test]
+fn a_narrow_terminal_keeps_the_account_indicator_readable() {
+    // Which account is about to be connected is the fact this screen exists
+    // to decide, so its counter outlives the prose around it.
+    let mut review = switchable_screen();
+    review.handle_key(press(KeyCode::Tab));
+    let hints = review.hints(45);
+    assert!(hints.contains("2/3"), "{hints}");
+}
+
+#[test]
+fn a_decision_label_is_shortened_rather_than_left_to_be_cut() {
+    // "Approve — scroll to the end of the document first" cut to "Approve"
+    // reads as an invitation to press it. Every phrasing must stay whole.
+    let phrasings = [
+        "Approve — scroll to the end of the document first",
+        "Approve — read it all first",
+    ];
+    assert_eq!(fitting(80, &phrasings), phrasings[0]);
+    assert_eq!(fitting(30, &phrasings), phrasings[1]);
+    // Narrower than every phrasing: the shortest complete one, never a
+    // fragment of a longer one.
+    assert_eq!(
+        fitting(
+            3,
+            &["Approve — sign this exact action", "Approve — sign this"]
+        ),
+        "Approve — sign this"
+    );
+}
+
+/// Render a whole review screen at a given size, as text.
+fn rendered(request: &ApprovalRequest, width: u16, height: u16) -> String {
+    let mut review = ReviewScreen::new(review_document(request, Vec::new()));
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| draw(frame, "Approve a dapp connection", &mut review))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..buffer.area.height)
+        .map(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The facts a connection turns on have to be legible without scrolling on a
+/// small terminal, because a screen that requires scrolling to see the site
+/// and the account is a screen most people approve without seeing them.
+#[test]
+fn the_deciding_facts_are_on_the_first_screen_of_a_small_terminal() {
+    let request = ApprovalRequest::new(
+        ApprovalKind::PolicyException,
+        "Approve a dapp connection",
+        "Let this dapp propose transactions and signatures from this account.",
+    )
+    .fact("Site", "app.example.com")
+    .fact("Name", "Example Exchange")
+    .fact("Account", "primary")
+    .fact("Address", "0x1111111111111111111111111111111111111111")
+    .section("What this session will allow")
+    .fact("Chain", "Ethereum (eip155:1)")
+    .fact("Can call", "eth_sendTransaction");
+
+    // 40x20 is a split pane on a laptop, and narrower than any default.
+    let screen = rendered(&request, 40, 20);
+    for expected in ["app.example.com", "primary", "Ethereum"] {
+        assert!(
+            screen.contains(expected),
+            "{expected} not on screen:\n{screen}"
+        );
+    }
+    for line in screen.lines() {
+        assert!(
+            crate::render::display_width(line) <= 40,
+            "line wider than the terminal: {line:?}"
+        );
+    }
+    assert!(screen.contains("Esc"), "no way out shown:\n{screen}");
+}
+
+#[test]
+fn the_connection_review_shows_every_account_with_a_cursor_on_one() {
+    let request = ApprovalRequest::new(
+        ApprovalKind::PolicyException,
+        "Approve a dapp connection",
+        "Let this dapp propose transactions and signatures from this account.",
+    )
+    .fact("Site", "app.example.com")
+    .fact("Name", "Example Exchange")
+    .fact("Account", "primary")
+    .fact("Address", "0x1111111111111111111111111111111111111111")
+    .section("Connect as")
+    .fact("▸ primary", "0x1111111111111111111111111111111111111111")
+    .fact("  cold", "0x2222222222222222222222222222222222222222")
+    .fact("  hot", "0x3333333333333333333333333333333333333333")
+    .fact("", "Tab moves between them; ← and → choose reject/approve.")
+    .section("What this session will allow")
+    .fact("Chain", "Ethereum (eip155:1)");
+
+    let screen = rendered(&request, 64, 28);
+    for account in ["primary", "cold", "hot"] {
+        assert!(screen.contains(account), "{account} missing:\n{screen}");
+    }
+    assert!(screen.contains('▸'), "no cursor on the list:\n{screen}");
+    for row in screen.lines() {
+        assert!(crate::render::display_width(row) <= 64, "{row:?}");
+    }
 }

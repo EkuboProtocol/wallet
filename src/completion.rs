@@ -91,7 +91,7 @@ enum Source {
 /// for something that already exists.
 fn source_of(command_path: &str, argument: &str) -> Option<Source> {
     Some(match (command_path, argument) {
-        ("portfolio" | "transaction list", "account")
+        ("portfolio" | "transaction list" | "connect", "account")
         | (
             "account export"
             | "account remove"

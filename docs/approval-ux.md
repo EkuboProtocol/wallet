@@ -26,14 +26,17 @@ before.
 
 The choice controls only whether the user is asked, never whether the failure
 is enforced. `"fail"` means "return the error without queuing" — there is no
-value that signs a plan whose simulation failed, and a policy denial queues for
-approval regardless of what is passed here.
+value that signs a plan whose simulation failed. It says nothing about policy: a
+plan no rule covers queues for approval regardless of what is passed here, and a
+plan a `deny` rule matched fails outright regardless of it too.
 
 ## What the agent does while the user reviews
 
-A policy denial is the ordinary way a user gets asked about something, so an
-agent that treats `allowed: false` as a blocker breaks the flow the policy
-exists to produce. The findings from `wallet_simulate_execution_plan` describe
+A plan no policy rule covers is the ordinary way a user gets asked about
+something, so an agent that treats `allowed: false` as a blocker breaks the flow
+the policy exists to produce. (The exception is `policy_outcome: rejected`, a
+`deny` rule matching, which never queues and cannot be approved — there the
+agent should stop and report.) The findings from `wallet_simulate_execution_plan` describe
 what the review will say; they are not a reason to stop and report, and they are
 not a reason to send the user off to widen their policy before the action they
 just asked for can proceed. Send the `simulation_id`, let the wallet queue the

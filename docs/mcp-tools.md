@@ -9,7 +9,8 @@
 | `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. Accepts a `fork_id` to read simulated state. |
 | `wallet_list_tokens` | Page through the tokens the owner has confirmed, optionally per chain. |
 | `wallet_search_tokens` | Find confirmed tokens by symbol, name, or exact address, optionally within one chain. |
-| `wallet_propose_tokens` | Suggest up to 1000 tokens, with the list's own symbol/name/decimals, for the owner to confirm in the CLI. Inline or by `token_list_reference`. Writes no names. |
+| `wallet_propose_tokens` | Suggest up to 10000 tokens, with the list's own symbol/name/decimals, for the owner to confirm in the CLI. Inline or by `token_list_reference`. Writes no names. |
+| `wallet_import_token_list` | Import a token list from the `https` URL it is published at (tokenlists.org, `https://tokens.uniswap.org`) in the standard token-list schema. Takes only the chains the wallet is configured for unless `chain_ids` narrows it, caps the selection at 10000, and groups the suggestions under the serving host. No integrity envelope; writes no names. |
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, over the same lens-or-Multicall3 path as `wallet_get_balances`, pinned to a reported block. At most 8000 known tokens are checked; the rest are reported as `tokens_skipped`. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
@@ -17,7 +18,7 @@
 | `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
 | `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
 | `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. Takes the same `on_simulation_failure` choice as `wallet_send_execution_plan`. |
-| `wallet_send_execution_plan` | Resolve a plan from a producer `reference` envelope, then validate, simulate, policy-check, sign, and broadcast it; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. Policy denials queue for approval either way — only the user can grant a policy exception. |
+| `wallet_send_execution_plan` | Resolve a plan from a producer `reference` envelope, then validate, simulate, policy-check, sign, and broadcast it; send a `simulation_id` already produced against real chain state without simulating it again; or submit an already-approved request ID. Exactly one of the three. `on_simulation_failure` chooses what a failed simulation does: `request_approval` (the default) queues it for the user to override, `fail` returns the error and queues nothing. It says nothing about policy: a plan no rule covers queues for approval either way, since only the user can grant a policy exception, and a plan a `deny` rule matched fails outright either way, since no approval can override one. |
 | `wallet_wait_for_approval` | Poll one pending request for up to 55 seconds; the agent repeats it after each timeout until the CLI approves or rejects. The only tool that blocks through the human pause. Cannot approve or submit anything itself. |
 | `wallet_get_execution_status` | Reconcile a submitted request against the chain. |
 | `wallet_attempt_cancel` | Outbid a broadcast-but-unmined transaction with a 0-value self-send at its own nonce. The one signing path that consults no policy: every field derives from the stored envelope and the chain — target is the wallet itself, calldata empty, no authorization list, fees from the incumbent envelope plus a bounded market bump — so it can only narrow an in-flight authorization to nothing, at the cost of gas. Fails if the transaction already mined; repeating the call reprices a cancellation that is itself stuck. |
@@ -250,7 +251,7 @@ largest. A producer returns a `token_list_reference` envelope whose stored
 body is a curated token list; the agent passes it verbatim as the `reference`
 argument of `wallet_propose_tokens` or `wallet_get_balances`, with no inline
 `tokens`. The same admission policy, integrity verification, and size cap
-apply, plus a 4 MiB list-specific cap and the existing 1000-entry limit.
+apply, plus a 4 MiB list-specific cap and the existing 10000-entry limit.
 
 The parser is deliberately more tolerant than the read-call one, because a
 token list is a published document rather than an exact argument object:
@@ -258,7 +259,61 @@ token list is a published document rather than an exact argument object:
 decimal string, or `0x`-hex, and unknown fields are ignored so a curator
 adding a logo URL does not break the import. Entries whose address is not a
 20-byte EVM address — the Starknet rows in a multi-ecosystem list — are
-skipped and counted in `skipped_non_evm` rather than failing the list.
+skipped and counted in `skipped_non_evm` rather than failing the list. The
+standard schema's `name`, `version`, and `timestamp` are read and reported so
+the owner can see which revision of a list they are accepting.
+
+### Importing a published list by URL
+
+`wallet_import_token_list` is the one artifact fetched without an envelope. It
+takes the bare `https` URL a curator publishes a list at, which is how
+tokenlists.org distributes them and the only way an owner can set up a list
+nobody wrapped for them: the curator updates it in place, so there is no
+digest anyone could quote for what it says today.
+
+That exception is affordable because of what a list can do. A plan reference
+names bytes that get simulated and signed, so its digest is the only thing
+tying what was reviewed to what executes. A list names nothing — every entry
+becomes a suggestion waiting in `ekubo-wallet token review`, and that review
+is the check the digest would otherwise stand in for. A digest would also
+answer the wrong question: it proves the bytes are the ones the *caller*
+described, while what the owner is deciding is whether the curator is worth
+trusting.
+
+Nothing else is relaxed. Admission is the same — `https` on the default port,
+a public resolvable host, no credentials, fragments, redirects, or private
+addresses — so what is reachable this way is reachable from anywhere on the
+internet, and errors never echo the response body. The caller cannot label the
+import either: suggestions are grouped under the host TLS proved, then the
+list's own declared name, so a list served by anyone cannot present itself as
+someone else's on the screen where names are granted.
+
+Published lists span chains the owner does not run, so entries are taken only
+for the chains the wallet has networks configured for unless `chain_ids`
+narrows it further; the rest are counted in `skipped_other_chain`. Filtering
+before the import cap is charged is what keeps names for chains the owner does
+not use off the review screen — Uniswap Labs Default carried 1685 rows across
+nine chains and a non-EVM ecosystem when this was written, of which 396 were
+Ethereum mainnet. A selection still over the 10000-entry cap is refused rather
+than trimmed, and the error names the fix that applies — fewer chains when
+several are selected, a more specific list when one is.
+
+That cap is deliberately loose, because the decision it bounds is not per-row.
+`token review` groups suggestions by the list that vouched for them and the
+owner accepts or rejects a whole list at once: what they are judging is
+whether the curator is trustworthy, and that reads the same at ten entries as
+at ten thousand. A tighter cap bought no extra scrutiny while refusing
+ordinary published lists — CoinGecko's is about 5100 tokens on mainnet alone.
+What still bounds it is that an import is a queue of suggestions no display
+path reads until the owner confirms the list.
+
+One number does not scale with it. A portfolio read still checks at most 8000
+known tokens per chain, because `FETCHER_CHUNK` is sized so a whole portfolio
+is one call: a second chunk must be read at the block the first reported, and
+archive-less public endpoints routinely cannot serve that — the failure that
+broke this on Arbitrum and Base. An owner who confirms more than that on one
+chain gets a complete-as-far-as-it-went read with the remainder in
+`tokens_skipped`, rather than a silent second chunk at a stale block.
 
 Tolerance here costs nothing, because a token list authorizes nothing. It
 carries display names that reach a proposals table no display path reads, and

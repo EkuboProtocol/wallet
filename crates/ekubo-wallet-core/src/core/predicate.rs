@@ -13,9 +13,9 @@
 //!
 //! * **A predicate never errors at match time.** Anything that would be an
 //!   error — calldata too short, a decode that fails, a literal that does not
-//!   parse as the value's type — is a non-match. Combined with the rule set's
-//!   default-deny, an unanswerable question therefore denies rather than
-//!   admits.
+//!   parse as the value's type — is a non-match. Since only a definite match
+//!   satisfies an `allow`, an unanswerable question never signs automatically:
+//!   at worst the call falls through to human approval.
 //! * **A matched call is canonically encoded.** `abi_decode_input` alone
 //!   ignores trailing bytes and accepts dirty address padding, so
 //!   [`Predicate::Selector`] re-encodes what it decoded and requires the bytes
@@ -262,7 +262,13 @@ fn canonical_signature(function: &Function) -> String {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SelectorPredicateWire {
+    /// The function's full signature with every parameter named, such as
+    /// `approve(address spender, uint256 amount)`. The four-byte selector is
+    /// derived from it, so a policy can never allowlist bytes whose meaning it
+    /// does not know.
     abi: String,
+    /// Constraints on parameters, by the names `abi` gives them. A parameter
+    /// left out is unconstrained.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     args: BTreeMap<String, Predicate>,
 }
@@ -304,19 +310,27 @@ pub enum Predicate {
     /// Matches every value, including one this policy cannot decode. The only
     /// way to write an unconstrained slot explicitly.
     AnyValue,
-    /// Equal to one literal, which may be the `$self` variable standing for
-    /// this wallet's own address.
+    /// Equal to one literal, written as 0x-prefixed hex or unprefixed decimal
+    /// — never bare hex — and read as the type of the value it is compared
+    /// against. May be the `$self` variable standing for this wallet's own
+    /// address.
     Eq(String),
     /// Equal to one of a set of literals, any of which may be `$self`.
     In(BTreeSet<String>),
+    /// The `bytes` value is a canonically encoded call to this exact function
+    /// whose named arguments satisfy their own predicates. Applies only to a
+    /// `bytes` value: a rule's `calldata` slot, or a `bytes` argument reached
+    /// through `each`.
     Selector(Box<SelectorPredicate>),
-    /// Every element of an array satisfies the inner predicate. An empty array
-    /// satisfies it vacuously.
+    /// Every element of an array satisfies the inner predicate. Applies only
+    /// to an array value; an empty array satisfies it vacuously.
     Each(Box<Predicate>),
     /// At least one of these predicates matches. An empty list never matches.
     Any(Vec<Predicate>),
     /// All of these predicates match. An empty list matches vacuously.
     All(Vec<Predicate>),
+    /// The inner predicate does not match. A value the inner predicate cannot
+    /// decode stays undecided rather than inverting into a match.
     Not(Box<Predicate>),
     /// The element count of an array, or the byte length of a `bytes` or
     /// `string`, satisfies the inner predicate as a `uint256`.
@@ -368,8 +382,8 @@ impl Predicate {
     }
 
     /// How `value` answers this predicate. Never errors: an unanswerable
-    /// question is [`Match::No`] or [`Match::Unreadable`], and the rule set
-    /// denies by default, so uncertainty never admits.
+    /// question is [`Match::No`] or [`Match::Unreadable`], neither of which
+    /// satisfies an `allow`, so uncertainty never signs automatically.
     ///
     /// The two differ in what else they do. `No` says the predicate's subject
     /// is not here; `Unreadable` says it is here in a form that cannot be

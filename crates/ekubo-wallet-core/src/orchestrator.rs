@@ -135,7 +135,9 @@ pub fn validate_send(
 
 /// The automatic path: from a plan simulated exactly once to either a signed,
 /// persisted envelope or a queued approval request. No human is consulted and
-/// no override exists — a policy denial or failed simulation always queues.
+/// no override exists here — a plan no rule covers, and a failed simulation,
+/// both queue. A plan a `deny` rule matched is the one thing that does
+/// neither: it fails outright, below.
 ///
 /// After [`validate_send`], in order: policy and simulation verdicts; the
 /// wallet+chain in-flight slot settled against the chain; and, after signing,

@@ -175,8 +175,11 @@ impl SigningOverrides {
         }
     }
 
-    /// Both human overrides — signing past a policy denial and past a failed
-    /// simulation. Mintable only with proof of an interactive terminal, so a
+    /// Both human overrides — signing a plan no policy rule covers, and one
+    /// whose simulation failed. Neither reaches a `deny` rule, which is
+    /// refused below whatever these say.
+    ///
+    /// Mintable only with proof of an interactive terminal, so a
     /// headless process cannot construct it: the fields are private and this
     /// is the only constructor that sets either.
     #[must_use]

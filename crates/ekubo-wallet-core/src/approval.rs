@@ -123,7 +123,8 @@ pub enum ApprovalDecision {
 /// This is a capability, not a flag: it cannot be cloned, has no default,
 /// and its only production constructor requires stdin, stdout, and stderr to
 /// all be terminals. [`crate::execution::SigningOverrides::human`] — the only
-/// way to sign past a policy denial or a failed simulation — demands one, so
+/// way to sign a plan no policy rule covers, or one whose simulation failed —
+/// demands one, so
 /// no headless caller (the MCP server runs over stdio pipes) can mint the
 /// overrides at all. Grep for `from_terminal` to enumerate every place a
 /// human override can originate.

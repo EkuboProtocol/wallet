@@ -5,9 +5,14 @@
 //! present are `AND`ed. There is no ordering and no precedence between rules of
 //! the same effect, because the decision is a fold rather than a scan:
 //!
-//! * any matching `deny` rule denies,
-//! * otherwise any matching `allow` rule allows,
-//! * otherwise the call is denied.
+//! * any matching `deny` rule rejects the call outright,
+//! * otherwise any matching `allow` rule signs it automatically,
+//! * otherwise nothing signs automatically and the call queues for a human.
+//!
+//! Those three lines are the three [`PolicyOutcome`]s, and the two negative
+//! ones are not interchangeable: a `deny` forecloses — nothing signs it and
+//! nothing queues — while matching no rule only withholds automatic signing
+//! and leaves the question for the terminal.
 //!
 //! Deny beating allow unconditionally is what lets the rule set stay a *set*.
 //! A first-match-wins list would make a rule's meaning depend on its position,
@@ -46,15 +51,24 @@ use std::{collections::BTreeMap, str::FromStr};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Effect {
+    /// A matching call signs automatically, with no prompt.
     Allow,
+    /// A matching call is refused outright: nothing signs, nothing queues, and
+    /// no approval can override it. Use it to foreclose something, not to gate
+    /// it — a call no rule covers already queues for human approval.
     Deny,
 }
 
 /// One rule: a conjunction of predicate slots and the effect of matching them.
+/// Every slot is optional and an absent slot constrains nothing, so a rule
+/// naming only `to` covers every function that contract has, including any
+/// batching entry point that forwards elsewhere.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     pub effect: Effect,
+    /// 1-160 characters, shown verbatim in the permission diff the owner
+    /// reviews. Say what the rule is for, not what it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// The contract or recipient being called.
@@ -214,16 +228,23 @@ impl Rule {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChainPolicy {
+    /// 1-160 characters, shown to the owner reviewing this chain's authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// How many calls one atomic batch may carry, 1 to 4096. A plan with more
+    /// queues for human approval; it is not rejected.
     #[serde(default = "default_max_calls")]
+    #[schemars(range(min = 1, max = 4096))]
     pub max_calls_per_batch: u32,
     /// Applied to every call independently, on top of whichever rule matched.
-    /// A guard rather than a grant: no rule can widen it. Omitted, it is
-    /// `{"eq": "0"}`, so a document that never mentions native value never
-    /// sends any.
+    /// A guard rather than a grant: no rule can widen it, and a call it
+    /// refuses queues for human approval rather than being rejected. Omitted,
+    /// it is `{"eq": "0"}`, so a document that never mentions native value
+    /// never sends any. It is a `uint256` in wei.
     #[serde(default = "no_native_value")]
     pub native_value: Predicate,
+    /// An unordered set. Order carries no meaning and deny always beats allow,
+    /// so a rule can be read without reading the rules around it.
     #[serde(default)]
     pub rules: Vec<Rule>,
 }
@@ -254,10 +275,19 @@ impl ChainPolicy {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WalletPolicy {
+    /// Optional URL of this schema, for editor completion only. Nothing is
+    /// fetched from it.
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    /// The document format version. Must be 1.
     #[serde(default = "policy_version")]
+    #[schemars(range(min = 1, max = 1))]
     pub version: u8,
+    /// Canonical decimal chain ID (no leading zeros), or `"*"` for every
+    /// chain. An exact entry replaces `"*"` for that chain outright rather
+    /// than extending it, so a permission on one chain never reaches another.
+    /// A chain with neither entry is ungoverned: its plans queue for human
+    /// approval.
     pub chains: BTreeMap<String, ChainPolicy>,
 }
 
@@ -579,9 +609,13 @@ pub fn json_schema() -> Value {
         object.insert(
             "description".into(),
             Value::String(
-                "Stateless per-call signing policy. Each chain holds an unordered set of rules: \
-                 any matching deny rule denies, otherwise any matching allow rule allows, \
-                 otherwise the call is denied. There are no amount limits, budgets, or spend \
+                "Stateless per-call signing policy. Every call in a plan is graded on its own \
+                 against one chain's unordered rule set: any matching deny rule rejects the plan \
+                 outright — nothing signs, nothing queues, and no approval overrides it — \
+                 otherwise any matching allow rule signs it automatically, otherwise the plan \
+                 queues for explicit human approval in the CLI. Every other refusal (no rule, the \
+                 native_value guard, max_calls_per_batch, an ungoverned chain) queues the same \
+                 way; only a deny rule forecloses. There are no amount limits, budgets, or spend \
                  counters — a rule bounds which calls may be made, not how much they move."
                     .into(),
             ),

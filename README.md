@@ -77,6 +77,10 @@ and registering the server by hand.
   messages alike, permits included. No policy authorizes a signature, because a
   per-transaction limit cannot bound something its holder redeems whenever it
   likes.
+- A WalletConnect v2 session, from a pasted link, that lets a dapp propose
+  transactions and signatures under exactly the privileges an agent has — the
+  same plan, the same policy, the same review — and under a scope fixed when
+  you approve the connection.
 - SQLCipher-backed policy and pending-transaction storage.
 - Deterministic ABI return/error decoding, bounded batch reads, native/ERC-20
   transfer helpers, pending approval, receipt reconciliation, and exact-byte
@@ -103,6 +107,8 @@ Using it:
   forks, local read decoding
 - [Approval flow](docs/approval-ux.md) — reviewing and resolving an exceptional
   request in the terminal
+- [WalletConnect](docs/walletconnect.md) — connecting to a dapp from a pasted
+  link, what a dapp may propose, the relay project id
 - [Batching](docs/batching.md) — how multi-call plans execute atomically through
   EIP-7702
 
