@@ -247,3 +247,35 @@ fn answering_a_request_does_not_release_the_session_screen() {
          screen on each answer. Suspend inside the path that draws instead."
     );
 }
+
+/// A batch's status has to be read from the chain, not from storage.
+///
+/// A broadcast record is written as `Broadcast` and nothing moves it to
+/// `Confirmed` except a reconciliation against the chain. Answering
+/// `wallet_getCallsStatus` from the stored row alone therefore reports 100,
+/// "not completed", for a batch that mined long ago — and keeps reporting it
+/// for as long as the dapp polls, because polling is not what settles a
+/// record.
+///
+/// `eth_sendTransaction` hides this: it hands back a transaction hash and the
+/// dapp watches the chain itself, so the wallet is never asked. Only the batch
+/// path routes status through this wallet, which is why only the batch path
+/// can be wrong about it.
+#[test]
+fn a_batch_status_is_reconciled_against_the_chain_before_it_is_reported() {
+    let source = include_str!("connect.rs");
+    let start = source
+        .find("async fn calls_status")
+        .expect("calls_status is gone");
+    let body = &source[start..];
+    let end = body[1..]
+        .find("\n    fn ")
+        .or_else(|| body[1..].find("\n    async fn "))
+        .expect("calls_status has no successor")
+        + 1;
+    assert!(
+        body[..end].contains("reconcile_record("),
+        "calls_status answers from the stored record without reconciling, so a mined batch \
+         reports as pending for as long as the dapp asks"
+    );
+}

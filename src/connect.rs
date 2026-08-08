@@ -999,6 +999,22 @@ impl DappSession<'_> {
             return Ok(unknown());
         }
 
+        // Read the chain before answering. A broadcast record is written as
+        // `Broadcast` and stays that way until something reconciles it against
+        // the chain — so answering from storage alone reports 100, "not
+        // completed", for a batch that mined minutes ago, and goes on doing so
+        // for as long as the dapp polls. This is the same reconciliation
+        // `wallet_get_execution_status` performs, and the reason that tool
+        // exists.
+        //
+        // `false` for the stale-submission lease: recovering one belongs to
+        // the owner's own tooling, not to a dapp asking how its batch went.
+        let network = self.config.network(&record.network_name)?;
+        let record = {
+            let pending = Mutex::new(PendingStore::production(&self.data_dir)?);
+            crate::reconcile::reconcile_record(&pending, &network, record, false).await?
+        };
+
         let receipts = match record.broadcast_transaction_hash.as_deref() {
             Some(hash)
                 if matches!(
@@ -1006,7 +1022,6 @@ impl DappSession<'_> {
                     PendingStatus::Confirmed | PendingStatus::Reverted
                 ) =>
             {
-                let network = self.config.network(&record.network_name)?;
                 crate::rpc::transaction_receipt_details(&network, hash)
                     .await
                     .ok()
