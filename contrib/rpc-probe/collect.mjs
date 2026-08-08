@@ -10,12 +10,31 @@
 // Writes <out-dir>/candidates.json. Network access required.
 
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CHAINS_URL = "https://chainid.network/chains.json";
-const EXTRA_RPCS_URL =
-  "https://raw.githubusercontent.com/DefiLlama/chainlist/main/constants/extraRpcs.js";
+
+// chainlist's extras are a JavaScript module, and reading it means running it:
+// the map is built by the module body, so there is no way to get the data out
+// without executing whatever else is in the file, with this maintainer's own
+// privileges. It used to be fetched from `main`, which is a branch — anyone
+// who could push to it, or who compromised an account that could, chose what
+// ran on the machine of whoever regenerated the registry, and that machine is
+// the one that also holds the signing material.
+//
+// So the fetch is pinned to a commit, which cannot change under us, and the
+// bytes are checked against the digest recorded beside it. Updating the pin is
+// then a deliberate act with a reviewable diff: a new sha and a new digest,
+// both visible, rather than a silent change in what runs.
+//
+// This does not make the file trusted. It makes it *fixed*, so that trusting
+// it is a decision someone made once and can be pointed at, instead of one
+// being retaken silently on every run.
+const EXTRA_RPCS_COMMIT = "58e9056cc1548eae3f8f3738874d6db9cfbbf7a3";
+const EXTRA_RPCS_SHA256 = "a02f43f61f68f577d72bb1dedb9e387617811fa5d2c302adc73db998d570f12e";
+const EXTRA_RPCS_URL = `https://raw.githubusercontent.com/DefiLlama/chainlist/${EXTRA_RPCS_COMMIT}/constants/extraRpcs.js`;
 
 const outDir = process.argv[2] ?? ".";
 mkdirSync(outDir, { recursive: true });
@@ -76,10 +95,21 @@ async function fetchExtraRpcs() {
   });
   if (!response.ok) throw new Error(`${EXTRA_RPCS_URL} responded ${response.status}`);
   const source = await response.text();
+  // Checked before the bytes touch the disk, let alone the module loader: a
+  // mismatch here means the pin no longer describes what is being served, and
+  // the only safe reading of that is to stop.
+  const digest = createHash("sha256").update(source).digest("hex");
+  if (digest !== EXTRA_RPCS_SHA256) {
+    throw new Error(
+      `${EXTRA_RPCS_URL} hashes to ${digest}, not the pinned ${EXTRA_RPCS_SHA256}; ` +
+        "refusing to run it. If the pin is being updated deliberately, change " +
+        "EXTRA_RPCS_COMMIT and EXTRA_RPCS_SHA256 together after reading the diff.",
+    );
+  }
   // The file is an ES module whose default export is the map. Importing the
   // real thing keeps the parse honest without vendoring a JS parser; it goes
   // through a scratch file because the module is far too large to import as a
-  // data: URL.
+  // data: URL. Importing it runs it — see the note on the pin above.
   const scratch = join(outDir, ".extra-rpcs.mjs");
   writeFileSync(scratch, source);
   const module = await import(pathToFileURL(scratch).href);

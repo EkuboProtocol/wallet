@@ -20,7 +20,29 @@ identity="Developer ID Application: Ekubo, Inc. (25NDUU3KKC)"
 key_id="B4PZFL5V6Z"
 issuer_id="5a547f85-021c-4fca-a753-9caedb9a19b3"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve this script's own path before deriving the repository from it. The
+# name it was invoked by decides which tree gets built below, and building a
+# tree runs its `build.rs` and every build script under it — with the signing
+# vault already located and about to be unlocked. A symlink into somebody
+# else's checkout would have made that somebody else's code, so the link is
+# followed to the file that actually holds these lines.
+script_path="${BASH_SOURCE[0]}"
+while [ -L "$script_path" ]; do
+  link_target="$(readlink "$script_path")"
+  case "$link_target" in
+    /*) script_path="$link_target" ;;
+    *) script_path="$(dirname "$script_path")/$link_target" ;;
+  esac
+done
+repo_root="$(cd "$(dirname "$script_path")/.." && pwd -P)"
+
+# And having resolved it, say what it must be. A build is only safe here
+# because it is this repository's build.
+if ! grep -q '^name = "ekubo-wallet"$' "$repo_root/Cargo.toml" 2>/dev/null; then
+  echo "$repo_root is not the ekubo-wallet repository; refusing to build in it" >&2
+  exit 1
+fi
+
 intermediate="$repo_root/.github/apple/DeveloperIDG2CA.cer"
 expected_digest=f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
 

@@ -324,6 +324,15 @@ bun contrib/rpc-probe/select.mjs  /tmp/probe \
   --out crates/ekubo-wallet-core/networks.json        # rank and write
 ```
 
+`collect.mjs` reads chainlist's extras, which are a JavaScript module rather
+than data: getting the map out means running the file, with the privileges of
+whoever is regenerating the registry — the same machine that holds the signing
+material. So the fetch is pinned to a commit and the bytes are checked against
+a digest recorded beside it, and the script refuses to run anything else.
+Updating that pin is a deliberate change with a reviewable diff, and it means
+reading the upstream diff first; it is not something to do because the script
+asked.
+
 `curated.json` holds the hand-written names, aliases, gas ceilings, and pinned
 first endpoints for the chains that ship as defaults; `alchemy-chains.json`
 holds the chain IDs that decide which chains are defaults. Regenerating changes
