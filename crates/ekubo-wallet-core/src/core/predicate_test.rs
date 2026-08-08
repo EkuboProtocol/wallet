@@ -953,3 +953,82 @@ fn doubt_survives_negation_and_composition() {
     ]}));
     assert_eq!(certain.evaluate(&bytes(data), &ctx), Match::Yes);
 }
+
+#[test]
+fn a_word_wider_than_its_type_is_unreadable_rather_than_canonical() {
+    // Run 6251, findings 189943 and 186981. The re-encode check was standing
+    // in for "canonically encoded" and could not: alloy decodes a narrow type
+    // by keeping the whole 32-byte word and noting the declared width beside
+    // it, then writes that same word back. Both halves of the comparison carry
+    // the same dirty bits, so they agree.
+    let function = alloy::json_abi::Function::parse("act(uint8 mode, bytes4 tag)").unwrap();
+    let body = |mode_word: [u8; 32], tag_word: [u8; 32]| {
+        let mut data = function.selector().to_vec();
+        data.extend_from_slice(&mode_word);
+        data.extend_from_slice(&tag_word);
+        data
+    };
+    let mut clean_mode = [0_u8; 32];
+    clean_mode[31] = 1;
+    let mut clean_tag = [0_u8; 32];
+    clean_tag[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    // A rule that denies mode 1, which is what a masking target reads out of
+    // either word below.
+    let predicate = Predicate::Selector(Box::new(
+        SelectorPredicate::new(
+            "act(uint8 mode, bytes4 tag)",
+            BTreeMap::from([("mode".to_owned(), Predicate::Eq("1".to_owned()))]),
+        )
+        .unwrap(),
+    ));
+    let context = PolicyContext::default();
+    let answer = |data: &[u8]| predicate.evaluate(&DynSolValue::Bytes(data.to_vec()), &context);
+
+    assert_eq!(answer(&body(clean_mode, clean_tag)), Match::Yes);
+
+    // The same call with the byte above the declared width set. It decodes to
+    // 65281, so the rule naming 1 does not match it — and the deny that a
+    // reviewer wrote to stop mode 1 stops firing. The word is not a `uint8`,
+    // so the answer is doubt, which a deny still acts on.
+    let mut dirty_mode = clean_mode;
+    dirty_mode[30] = 0xff;
+    assert_eq!(answer(&body(dirty_mode, clean_tag)), Match::Unreadable);
+
+    // A `bytes4` renders as its declared four bytes, so trailing padding was
+    // invisible to every rule while riding along into what gets signed.
+    let mut dirty_tag = clean_tag;
+    dirty_tag[31] = 0x99;
+    assert_eq!(answer(&body(clean_mode, dirty_tag)), Match::Unreadable);
+}
+
+#[test]
+fn a_literal_outside_its_declared_width_is_refused_where_it_is_written() {
+    // Run 6251, finding 186981. `uint8` cannot carry 256, so a rule naming it
+    // can never fire — which for a `deny` is an absence nobody would notice.
+    let build = |literal: &str, signature: &str, parameter: &str| {
+        SelectorPredicate::new(
+            signature,
+            BTreeMap::from([(parameter.to_owned(), Predicate::Eq(literal.to_owned()))]),
+        )
+    };
+    assert!(build("255", "act(uint8 mode)", "mode").is_ok());
+    let refused = build("256", "act(uint8 mode)", "mode").unwrap_err();
+    assert!(format!("{refused:#}").contains("uint8"), "{refused:#}");
+
+    // Signed types are asymmetric, and both ends are checked.
+    assert!(build("127", "act(int8 delta)", "delta").is_ok());
+    assert!(build("-128", "act(int8 delta)", "delta").is_ok());
+    assert!(build("128", "act(int8 delta)", "delta").is_err());
+    assert!(build("-129", "act(int8 delta)", "delta").is_err());
+
+    // The full-width types keep taking their full range.
+    assert!(
+        build(
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+            "act(uint256 amount)",
+            "amount"
+        )
+        .is_ok()
+    );
+}

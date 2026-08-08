@@ -217,6 +217,13 @@ impl SelectorPredicate {
         if reencoded != body {
             return Match::Unreadable;
         }
+        // Round-tripping is not the whole of being canonical. A narrow type
+        // keeps its entire 32-byte word through decode and encode alike, so
+        // both halves of the comparison above carry the same dirty bits and
+        // agree — see [`within_declared_width`] for what that lets through.
+        if !values.iter().all(within_declared_width) {
+            return Match::Unreadable;
+        }
         self.args
             .iter()
             .fold(Match::Yes, |answer, (name, predicate)| {
@@ -605,6 +612,55 @@ fn length_of(value: &DynSolValue) -> Option<usize> {
     }
 }
 
+/// Whether every word in a decoded value carries only the bits its declared
+/// width can hold.
+///
+/// The re-encode in [`SelectorPredicate::evaluate`] was doing this job and
+/// could not: a narrow type is decoded by taking the whole 32-byte word and
+/// remembering the declared width beside it, and encoding writes that same
+/// word back. `uint8` given `0x…ff01` decodes to 65281 and re-encodes to the
+/// bytes it came from, and `bytes4` keeps whatever 28 bytes follow it. Both
+/// pass a comparison that reads as "this is canonically encoded".
+///
+/// What the target sees is not that. solc's decoder reverts on a `uintN` whose
+/// word does not fit and masks a `bytesN` down to its width, so those bits
+/// reach nothing — while the policy reasons about them, and in the direction
+/// that matters: [`render`] prints the full integer, so `deny amount == 1`
+/// does not fire on the word a masking target reads as exactly 1. The padding
+/// on a `bytesN` is worse still for being invisible, since `render` truncates
+/// it away and the rule matches while 28 attacker-chosen bytes ride along into
+/// what gets signed.
+///
+/// So the width is checked directly, and a value that fails is `Unreadable`
+/// like every other unanswerable question here: refused for an `allow`,
+/// suspected for a `deny`.
+fn within_declared_width(value: &DynSolValue) -> bool {
+    match value {
+        DynSolValue::Uint(word, bits) => *bits >= 256 || *word < (U256::from(1) << *bits),
+        // Two's complement, so the range is asymmetric. Whether the codec
+        // sign-extended a short word or reinterpreted it whole, a word that is
+        // not a valid `intN` lands outside this and is caught either way.
+        DynSolValue::Int(word, bits) => {
+            *bits >= 256 || (*word >= min_int(*bits) && *word <= max_int(*bits))
+        }
+        DynSolValue::FixedBytes(word, size) => word[*size..].iter().all(|byte| *byte == 0),
+        DynSolValue::Array(items) | DynSolValue::FixedArray(items) | DynSolValue::Tuple(items) => {
+            items.iter().all(within_declared_width)
+        }
+        _ => true,
+    }
+}
+
+/// The largest `intN`, as an [`I256`].
+fn max_int(bits: usize) -> I256 {
+    I256::try_from((U256::from(1) << (bits - 1)) - U256::from(1)).unwrap_or(I256::MAX)
+}
+
+/// The smallest `intN`, as an [`I256`].
+fn min_int(bits: usize) -> I256 {
+    max_int(bits).wrapping_neg().wrapping_sub(I256::ONE)
+}
+
 /// The canonical text of a value: lowercase `0x` hex for anything byte-shaped,
 /// decimal for integers. Both sides of a comparison go through this, so a
 /// literal spelled `0xABC…` and a decoded address compare equal.
@@ -758,7 +814,15 @@ fn parse_literal(literal: &str, ty: &DynSolType) -> Result<String> {
             "true" | "false" => Ok(literal.to_string()),
             _ => bail!("{literal:?} is not a boolean"),
         },
-        DynSolType::Uint(_) => {
+        // The declared width is part of the type, so a literal outside it is
+        // not a narrow rule but an unsatisfiable one: no canonical `uint8`
+        // call can carry 256. Left unchecked it installed quietly and then
+        // never fired, which is a silently absent `deny` — and while dirty
+        // words could still round-trip past the canonical-form check, it was
+        // a `deny` that failed to fire on calldata a masking target read as
+        // the value the rule named. Refused here, where the number is written
+        // and the author can still see what they meant.
+        DynSolType::Uint(bits) => {
             let value = if literal.starts_with("0x") {
                 U256::from_be_slice(&decode_hex_literal(literal)?)
             } else {
@@ -769,9 +833,13 @@ fn parse_literal(literal: &str, ty: &DynSolType) -> Result<String> {
                 U256::from_str(literal)
                     .with_context(|| format!("{literal:?} does not fit an unsigned integer"))?
             };
+            ensure!(
+                *bits >= 256 || value < (U256::from(1) << *bits),
+                "{literal:?} does not fit uint{bits}"
+            );
             Ok(value.to_string())
         }
-        DynSolType::Int(_) => {
+        DynSolType::Int(bits) => {
             let (sign, digits) = literal
                 .strip_prefix('-')
                 .map_or(("", literal), |rest| ("-", rest));
@@ -781,6 +849,10 @@ fn parse_literal(literal: &str, ty: &DynSolType) -> Result<String> {
             );
             let value = I256::from_str(&format!("{sign}{digits}"))
                 .with_context(|| format!("{literal:?} does not fit a signed integer"))?;
+            ensure!(
+                *bits >= 256 || (value >= min_int(*bits) && value <= max_int(*bits)),
+                "{literal:?} does not fit int{bits}"
+            );
             Ok(value.to_string())
         }
         DynSolType::Bytes => Ok(format!("0x{}", hex::encode(decode_hex_literal(literal)?))),
