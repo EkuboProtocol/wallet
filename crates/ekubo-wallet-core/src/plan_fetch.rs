@@ -41,6 +41,14 @@
 //! redirects, or private/internal addresses; a hard response-size cap; and
 //! errors that describe the failure without echoing a byte of the response
 //! body.
+//!
+//! One transport takes no envelope at all: [`fetch_token_list_url`] imports a
+//! curated token list from the bare `https` URL its curator publishes it at,
+//! which is how tokenlists.org lists are distributed and the only way an owner
+//! can set up a list nobody wrapped for them. It is the single exception to
+//! the digest rule, it is confined to token lists, and it runs through the
+//! identical admission policy — the reasoning for why a list can afford it,
+//! and what it does and does not widen, is on that function.
 
 use crate::core::execution_plan::{ExecutionPlan, MAX_SERIALIZED_PLAN_BYTES};
 use alloy::primitives::keccak256;
@@ -274,6 +282,61 @@ pub async fn resolve_token_list_reference(
     Ok((list, fetched.source))
 }
 
+/// Fetch and parse a curated token list published at a plain `https` URL, and
+/// report the host that served it.
+///
+/// This is how tokenlists.org lists are actually distributed: a list lives at
+/// a well-known URL its curator updates in place — `https://tokens.uniswap.org`
+/// is the canonical example — and whoever points a wallet at one holds no
+/// digest for what it says today. Requiring an envelope here would mean the
+/// only importable lists are the ones some producer had already wrapped, which
+/// is precisely the set an owner setting up their own lists is not choosing
+/// from. So this is the one artifact fetched without an integrity block, and
+/// it is confined to token lists.
+///
+/// What makes the missing digest affordable is what a token list can do. A
+/// plan reference names bytes that get simulated and signed, so its digest is
+/// the only thing tying what the owner reviewed to what executes. A list names
+/// nothing: every entry becomes a suggestion that waits for the owner in
+/// `ekubo-wallet token review`, and their review is the check the digest would
+/// otherwise stand in for. A digest would also be answering the wrong
+/// question — it proves the bytes are the ones the *caller* described, while
+/// what the owner is deciding is whether the curator is worth trusting, which
+/// no hash can tell them.
+///
+/// The host is returned with the entries because it is the only fact about
+/// the list that was proved rather than asserted. TLS establishes it, the
+/// caller cannot choose it without controlling the name, and it is what the
+/// owner is shown at review time in place of a label the agent picked.
+///
+/// The exposure this does add is that a caller can make this process fetch a
+/// public URL it chose and hear back what parsed. Admission is unchanged and
+/// does the containing: `https` only, default port, no credentials, no
+/// redirects, and no host resolving to a private or reserved address — so what
+/// is reachable this way is reachable from anywhere on the internet, and the
+/// wallet's network position buys the caller nothing. The reply is entry
+/// counts and token rows, never the response body.
+/// Only the entries on `chain_ids` are kept, or every entry when it is empty.
+/// The filter belongs here rather than at the call site because a published
+/// multi-chain list is routinely larger than the review budget for any one
+/// import of it, and selecting before that budget is charged is what lets an
+/// owner take the part of such a list they actually wanted.
+pub async fn fetch_token_list_url(
+    url: &str,
+    chain_ids: &[u64],
+    policy: FetchPolicy,
+) -> Result<(crate::token_list::ParsedTokenList, String)> {
+    let (body, host) = fetch_remote(
+        url,
+        policy,
+        ArtifactType::TokenList,
+        crate::token_list::MAX_TOKEN_LIST_BYTES,
+    )
+    .await?;
+    let list = crate::token_list::parse_token_list_for_chains(&body, chain_ids)?;
+    Ok((list, host))
+}
+
 /// Fetch one referenced body — remote `https` or local `data:` URI — and
 /// verify it against the digest and byte count its producer published,
 /// without interpreting the bytes. Callers parse and validate the result
@@ -343,7 +406,13 @@ pub async fn fetch_reference(
         // A body that travels over the network must be verifiable: the
         // silent skip-verification path of the old optional digest is gone.
         require_verifiable(reference, noun, "fetched over the network", "")?;
-        let (bytes, host) = fetch_remote(&reference.url, policy, expected_type).await?;
+        let (bytes, host) = fetch_remote(
+            &reference.url,
+            policy,
+            expected_type,
+            MAX_SERIALIZED_PLAN_BYTES,
+        )
+        .await?;
         (bytes, ArtifactSource::Https { host })
     };
 
@@ -549,6 +618,7 @@ async fn fetch_remote(
     url: &str,
     policy: FetchPolicy,
     artifact_type: ArtifactType,
+    max_bytes: usize,
 ) -> Result<(Vec<u8>, String)> {
     let noun = artifact_type.noun();
     let parsed = Url::parse(url).with_context(|| format!("{noun} URL is not a valid URL"))?;
@@ -621,8 +691,8 @@ async fn fetch_remote(
     ensure!(status.is_success(), "{noun} fetch returned HTTP {status}");
     if let Some(length) = response.content_length() {
         ensure!(
-            length <= MAX_SERIALIZED_PLAN_BYTES as u64,
-            "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+            length <= max_bytes as u64,
+            "{noun} body exceeds {max_bytes} bytes"
         );
     }
     let mut body = Vec::new();
@@ -633,8 +703,8 @@ async fn fetch_remote(
         .with_context(|| format!("{noun} fetch failed mid-body"))?
     {
         ensure!(
-            body.len() + chunk.len() <= MAX_SERIALIZED_PLAN_BYTES,
-            "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+            body.len() + chunk.len() <= max_bytes,
+            "{noun} body exceeds {max_bytes} bytes"
         );
         body.extend_from_slice(&chunk);
     }

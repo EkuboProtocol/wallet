@@ -387,6 +387,7 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_get_portfolio",
             "wallet_get_status",
             "wallet_get_execution_status",
+            "wallet_import_token_list",
             "wallet_list",
             "wallet_list_tokens",
             "wallet_propose_policy",
@@ -470,23 +471,32 @@ fn every_tool_that_resolves_a_reference_is_annotated_open_world() {
     // an open world whether or not the tool also reaches a chain, which is
     // what wallet_propose_tokens — the one tool here that touches no RPC at
     // all — got wrong.
+    //
+    // `url` is the same fact spelled differently: wallet_import_token_list
+    // takes a bare published URL rather than an envelope, and fetches it
+    // through that identical admission policy. Whether the caller names the
+    // URL directly or inside a reference changes nothing about whether the
+    // call leaves this machine, so both spellings are collected here.
     let router = WalletMcpServer::tool_router();
-    let accepts_reference = router
+    let names_a_url = router
         .list_all()
         .into_iter()
         .filter(|tool| {
             tool.input_schema
                 .get("properties")
                 .and_then(serde_json::Value::as_object)
-                .is_some_and(|properties| properties.contains_key("reference"))
+                .is_some_and(|properties| {
+                    properties.contains_key("reference") || properties.contains_key("url")
+                })
         })
         .map(|tool| tool.name.into_owned())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        accepts_reference,
+        names_a_url,
         [
             "wallet_batch_eth_call",
             "wallet_get_balances",
+            "wallet_import_token_list",
             "wallet_propose_tokens",
             "wallet_send_execution_plan",
             "wallet_simulate_execution_plan",
@@ -495,14 +505,43 @@ fn every_tool_that_resolves_a_reference_is_annotated_open_world() {
         .map(str::to_owned)
         .collect::<std::collections::BTreeSet<_>>(),
     );
-    for name in accepts_reference {
+    for name in names_a_url {
         let tool = router.get(&name).unwrap();
         assert_eq!(
             tool.annotations.as_ref().unwrap().open_world_hint,
             Some(true),
-            "{name} resolves a caller-named reference and must be open-world"
+            "{name} fetches a caller-named URL and must be open-world"
         );
     }
+}
+
+#[test]
+fn importing_a_list_by_url_takes_no_caller_chosen_label() {
+    // The review screen groups suggestions by their source string, so that
+    // string is the whole of what the owner reads when deciding whether a
+    // publisher is worth trusting. On this path the wallet builds it from the
+    // TLS-proved host, and a caller that could pass a name could write
+    // "Uniswap Labs Default" over a list served by anyone — which is the one
+    // claim the token database exists to keep an agent from making. The
+    // schema is where that is enforced: `deny_unknown_fields` rejects the
+    // field rather than ignoring it, so there is no spelling that slips one
+    // through.
+    let router = WalletMcpServer::tool_router();
+    let tool = router.get("wallet_import_token_list").unwrap();
+    let properties = tool
+        .input_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    assert!(properties.contains_key("url"));
+    assert!(!properties.contains_key("list_name"));
+    assert!(!properties.contains_key("source"));
+    assert!(!properties.contains_key("name"));
+    // Nothing is named by importing; the owner still accepts the list.
+    let annotations = tool.annotations.as_ref().unwrap();
+    assert_eq!(annotations.read_only_hint, Some(false));
+    assert_eq!(annotations.destructive_hint, Some(false));
+    assert_eq!(annotations.idempotent_hint, Some(true));
 }
 
 #[test]

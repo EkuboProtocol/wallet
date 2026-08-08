@@ -10,6 +10,7 @@
 | `wallet_list_tokens` | Page through the tokens the owner has confirmed, optionally per chain. |
 | `wallet_search_tokens` | Find confirmed tokens by symbol, name, or exact address, optionally within one chain. |
 | `wallet_propose_tokens` | Suggest up to 1000 tokens, with the list's own symbol/name/decimals, for the owner to confirm in the CLI. Inline or by `token_list_reference`. Writes no names. |
+| `wallet_import_token_list` | Import a token list from the `https` URL it is published at (tokenlists.org, `https://tokens.uniswap.org`) in the standard token-list schema. Takes only the chains the wallet is configured for unless `chain_ids` narrows it, caps the selection at 1000, and groups the suggestions under the serving host. No integrity envelope; writes no names. |
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, over the same lens-or-Multicall3 path as `wallet_get_balances`, pinned to a reported block. At most 8000 known tokens are checked; the rest are reported as `tokens_skipped`. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
@@ -258,7 +259,44 @@ token list is a published document rather than an exact argument object:
 decimal string, or `0x`-hex, and unknown fields are ignored so a curator
 adding a logo URL does not break the import. Entries whose address is not a
 20-byte EVM address — the Starknet rows in a multi-ecosystem list — are
-skipped and counted in `skipped_non_evm` rather than failing the list.
+skipped and counted in `skipped_non_evm` rather than failing the list. The
+standard schema's `name`, `version`, and `timestamp` are read and reported so
+the owner can see which revision of a list they are accepting.
+
+### Importing a published list by URL
+
+`wallet_import_token_list` is the one artifact fetched without an envelope. It
+takes the bare `https` URL a curator publishes a list at, which is how
+tokenlists.org distributes them and the only way an owner can set up a list
+nobody wrapped for them: the curator updates it in place, so there is no
+digest anyone could quote for what it says today.
+
+That exception is affordable because of what a list can do. A plan reference
+names bytes that get simulated and signed, so its digest is the only thing
+tying what was reviewed to what executes. A list names nothing — every entry
+becomes a suggestion waiting in `ekubo-wallet token review`, and that review
+is the check the digest would otherwise stand in for. A digest would also
+answer the wrong question: it proves the bytes are the ones the *caller*
+described, while what the owner is deciding is whether the curator is worth
+trusting.
+
+Nothing else is relaxed. Admission is the same — `https` on the default port,
+a public resolvable host, no credentials, fragments, redirects, or private
+addresses — so what is reachable this way is reachable from anywhere on the
+internet, and errors never echo the response body. The caller cannot label the
+import either: suggestions are grouped under the host TLS proved, then the
+list's own declared name, so a list served by anyone cannot present itself as
+someone else's on the screen where names are granted.
+
+Published lists span chains the owner does not run, so entries are taken only
+for the chains the wallet has networks configured for unless `chain_ids`
+narrows it further; the rest are counted in `skipped_other_chain`. The
+1000-entry review budget is charged against that selection rather than the
+whole list, which is what makes a large list usable: Uniswap Labs Default
+carried 1685 rows across nine chains and a non-EVM ecosystem when this was
+written, of which 396 were Ethereum mainnet. A selection still over the budget
+is refused rather than trimmed, and the error names the fix that applies —
+fewer chains when several are selected, a more specific list when one is.
 
 Tolerance here costs nothing, because a token list authorizes nothing. It
 carries display names that reach a proposals table no display path reads, and

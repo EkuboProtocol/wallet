@@ -549,6 +549,59 @@ struct ProposeTokensOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ImportTokenListInput {
+    /// The `https` URL the list is published at, such as
+    /// `https://tokens.uniswap.org`. Must be the token-list JSON itself, not
+    /// the tokenlists.org page describing it. No credentials, no fragment, no
+    /// port, and redirects are not followed, so give the URL the curator
+    /// publishes rather than a shortener or a mirror.
+    url: String,
+    /// Which chains to take entries for, as decimal chain IDs. Omit this to
+    /// take the chains this wallet has networks configured for, which is
+    /// usually what you want: a published list spans chains the owner does
+    /// not use, and names for those are suggestions they would have to read
+    /// past. Pass an explicit set to narrow it further. Entries on every
+    /// other chain are skipped and counted, never imported silently.
+    #[serde(default)]
+    chain_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct ImportTokenListOutput {
+    #[serde(flatten)]
+    summary: crate::token_store::ProposalSummary,
+    /// What the owner will see these suggestions grouped under. Built from
+    /// the host that served the list and the name the list gives itself, in
+    /// that order; it is not something the caller can set.
+    list_name: String,
+    /// The host that actually served the bytes, as TLS proved it.
+    host: String,
+    /// The list's own `version`, when it declares one. Compare it across
+    /// imports to tell a list that changed from one that did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_version: Option<String>,
+    /// The list's own `timestamp`, verbatim, when it declares one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declared_timestamp: Option<String>,
+    /// Every suggestion now waiting for the owner, this call's included.
+    awaiting_review: u64,
+    /// The chains entries were taken for, decimal, in the order applied.
+    /// Echoed because omitting `chain_ids` lets the wallet choose them.
+    chains_selected: Vec<String>,
+    /// Entries the list carried that this wallet cannot act on, because their
+    /// address is not 20 bytes — the Starknet rows in a multi-ecosystem list,
+    /// typically. Dropped rather than proposed, and reported so a shorter
+    /// import than expected explains itself.
+    skipped_non_evm: usize,
+    /// Entries dropped for naming a chain outside `chains_selected`. Large on
+    /// a multi-chain list, and reported so taking 396 rows from a 1685-row
+    /// list reads as a selection rather than a half-empty list.
+    skipped_other_chain: usize,
+    next_step: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PortfolioInput {
     chain_id: String,
     /// A configured wallet. Provide exactly one of `wallet_id` or `address`.
@@ -1405,6 +1458,91 @@ impl WalletMcpServer {
             next_step: "The owner reviews these with `ekubo-wallet token review`. \
                         Until they accept one, the wallet keeps showing that token by \
                         address alone."
+                .into(),
+        }))
+    }
+
+    #[tool(
+        name = "wallet_import_token_list",
+        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 1000 entries after that selection — Uniswap's default list carries about 1700 across nine chains — and an overflowing selection is refused rather than truncated, with the fix being fewer chains. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the separate CLI with `ekubo-wallet token review`, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            // Re-importing the same list re-files the same suggestions rather
+            // than stacking them: a repeated proposal for an address replaces
+            // the earlier one.
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_import_token_list(
+        &self,
+        Parameters(input): Parameters<ImportTokenListInput>,
+    ) -> Result<Json<ImportTokenListOutput>, ErrorData> {
+        // An omitted selection means the chains this wallet is set up for.
+        // A published list spans chains the owner does not use, and every row
+        // for one of those is a decision added to a review screen that only
+        // works while it is short enough to read.
+        let chain_ids = if input.chain_ids.is_empty() {
+            self.config
+                .load()
+                .map_err(|error| tool_error(&error))?
+                .networks
+                .iter()
+                .map(|network| network.chain_id)
+                .collect::<Vec<_>>()
+        } else {
+            input
+                .chain_ids
+                .iter()
+                .map(|chain_id| {
+                    self.config
+                        .network_by_chain_id(chain_id)
+                        .map(|network| network.chain_id)
+                        .map_err(|error| tool_error(&error))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let (parsed, host) = crate::plan_fetch::fetch_token_list_url(
+            &input.url,
+            &chain_ids,
+            FetchPolicy::production(),
+        )
+        .await
+        .map_err(|error| tool_error(&error))?;
+        // The host leads because it is the one part of this the caller could
+        // not choose: TLS proved it, while the declared name is a string the
+        // same bytes carried. An owner deciding whether to trust a list is
+        // deciding about a publisher, so the publisher is what they read
+        // first, and a list that names itself something it is not cannot push
+        // that off the label.
+        let list_name = match &parsed.declared_name {
+            Some(declared) => format!("{host} — {declared}"),
+            None => host.clone(),
+        };
+        let mut store = self
+            .tokens
+            .lock()
+            .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
+        let summary = store
+            .propose(&parsed.tokens, &list_name)
+            .map_err(|error| tool_error(&error))?;
+        let awaiting_review = store
+            .count_proposals()
+            .map_err(|error| tool_error(&error))?;
+        Ok(Json(ImportTokenListOutput {
+            summary,
+            list_name,
+            host,
+            declared_version: parsed.declared_version,
+            declared_timestamp: parsed.declared_timestamp,
+            chains_selected: chain_ids.iter().map(u64::to_string).collect(),
+            awaiting_review,
+            skipped_non_evm: parsed.skipped_non_evm,
+            skipped_other_chain: parsed.skipped_other_chain,
+            next_step: "The owner reviews these with `ekubo-wallet token review`, where they \
+                        accept or reject the whole list at once. Until they accept one, the \
+                        wallet keeps showing that token by address alone."
                 .into(),
         }))
     }

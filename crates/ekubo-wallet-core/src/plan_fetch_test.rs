@@ -740,6 +740,60 @@ mod token_list_references {
         assert!(error.contains("execution_plan"), "{error}");
     }
 
+    /// The tokenlists.org distribution model: a bare published URL, no
+    /// envelope and no digest, because the curator updates the list in place
+    /// and nobody pointing a wallet at it holds a hash for what it says today.
+    /// The host comes back with the entries because it is the one fact the
+    /// caller could not choose.
+    #[tokio::test]
+    async fn imports_a_published_list_from_a_bare_url() {
+        let url = serve_once("HTTP/1.1 200 OK", list_json()).await;
+        let (list, host) = fetch_token_list_url(&url, &[], FetchPolicy::insecure_for_tests())
+            .await
+            .unwrap();
+        assert_eq!(list.declared_name.as_deref(), Some("Ekubo canonical list"));
+        assert_eq!(list.tokens.len(), 1);
+        assert_eq!(list.tokens[0].symbol, "USDC");
+        assert_eq!(host, "127.0.0.1");
+    }
+
+    /// Dropping the digest requirement drops nothing else. Admission is the
+    /// containment on this path, so the production policy must still refuse
+    /// the loopback host that the test policy above admits — otherwise a
+    /// caller could aim the wallet at whatever this machine can reach and the
+    /// missing digest would be the least of it.
+    #[tokio::test]
+    async fn a_bare_url_is_still_held_to_the_admission_policy() {
+        for url in [
+            "http://tokens.example.com/list.json",
+            "https://127.0.0.1/list.json",
+            "https://user:pass@tokens.example.com/list.json",
+            "https://tokens.example.com:8443/list.json",
+            "file:///tmp/list.json",
+        ] {
+            let error = fetch_token_list_url(url, &[], FetchPolicy::production())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("token list"), "{url}: {error}");
+        }
+    }
+
+    /// A URL that answers with something else is a failed import, not a
+    /// mystery: the error names the token list and never echoes the body it
+    /// got back.
+    #[tokio::test]
+    async fn a_url_serving_something_other_than_a_list_is_refused() {
+        let secret = "s3cret-intranet-contents";
+        let url = serve_once("HTTP/1.1 200 OK", format!(r#"{{"page":"{secret}"}}"#)).await;
+        let error = fetch_token_list_url(&url, &[], FetchPolicy::insecure_for_tests())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a token list"), "{error}");
+        assert!(!error.contains(secret), "{error}");
+    }
+
     /// Errors name the artifact that failed, so an agent relaying three kinds
     /// of reference is told which one to re-request.
     #[tokio::test]
