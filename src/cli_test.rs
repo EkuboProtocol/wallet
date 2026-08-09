@@ -97,6 +97,7 @@ fn transaction_lines_render_offline() {
     // the chain rather than numbering it.
     let now = chrono::Utc::now();
     let typed = PendingTypedData {
+        requester: None,
         request_id: Uuid::from_u128(2),
         wallet_id: "primary".into(),
         chain_id: "1".into(),
@@ -110,6 +111,7 @@ fn transaction_lines_render_offline() {
         signature: None,
     };
     let message = PendingMessage {
+        requester: None,
         request_id: Uuid::from_u128(3),
         wallet_id: "primary".into(),
         chain_id: None,

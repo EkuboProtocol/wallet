@@ -2245,7 +2245,7 @@ impl WalletMcpServer {
             .typed_data
             .lock()
             .map_err(|_| ErrorData::internal_error("typed-data database lock was poisoned", None))?
-            .create(&wallet.id, chain_id, &input.typed_data, digest)
+            .create(&wallet.id, chain_id, &input.typed_data, digest, None)
             .map_err(|error| tool_error(&error))?;
         let mut output = typed_data_output(record);
         output.permit_approvals = permit_approvals;
@@ -2333,7 +2333,13 @@ impl WalletMcpServer {
             .messages
             .lock()
             .map_err(|_| ErrorData::internal_error("message database lock was poisoned", None))?
-            .create(&wallet.id, input.chain_id.as_deref(), &message, encoding)
+            .create(
+                &wallet.id,
+                input.chain_id.as_deref(),
+                &message,
+                encoding,
+                None,
+            )
             .map_err(|error| tool_error(&error))?;
         Ok(Json(
             message_output(record, &self.config).map_err(|error| tool_error(&error))?,

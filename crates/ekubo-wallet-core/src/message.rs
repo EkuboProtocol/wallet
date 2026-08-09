@@ -109,6 +109,12 @@ pub struct PendingMessage {
     /// The 65-byte r||s||v signature, present only once signed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Who asked for this signature, when the caller knew: a dapp reached
+    /// over `WalletConnect` names itself, an MCP agent does not. Recorded when
+    /// the row is created rather than supplied to the review afterwards, so
+    /// the name the reviewer reads belongs to whoever queued the bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
 }
 
 impl PendingMessage {
@@ -504,6 +510,7 @@ impl MessageStore {
         chain_id: Option<&str>,
         message: &[u8],
         encoding: MessageEncoding,
+        requester: Option<&str>,
     ) -> Result<PendingMessage> {
         validate_message_length(message)?;
         let digest = message_digest(message);
@@ -516,17 +523,19 @@ impl MessageStore {
             .transpose()?
             .unwrap_or_default();
         let stored_chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
+        let requester = requester.unwrap_or_default();
         let request_id = QUEUE.create_or_reuse(
             &mut self.database.connection,
             wallet_id,
             chain_id,
             digest,
+            requester,
             |transaction, request_id, now| {
                 transaction.execute(
                     "INSERT INTO pending_messages(
                         request_id, wallet_id, chain_id, message, message_encoding, digest,
-                        status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?7)",
+                        requester, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'awaiting_approval', ?8, ?8)",
                     params![
                         request_id,
                         wallet_id,
@@ -534,6 +543,7 @@ impl MessageStore {
                         message,
                         encoding.as_str(),
                         Blob(digest),
+                        requester,
                         Millis(now),
                     ],
                 )?;
@@ -595,7 +605,7 @@ impl MessageStore {
             .connection
             .query_row(
                 "SELECT wallet_id, chain_id, message, message_encoding, digest, status,
-                        created_at, updated_at, decided_at, signature
+                        created_at, updated_at, decided_at, signature, requester
                  FROM pending_messages WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -610,6 +620,7 @@ impl MessageStore {
                         row.time(7)?,
                         row.time_opt(8)?,
                         row.blob_opt::<[u8; 65]>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
@@ -625,6 +636,7 @@ impl MessageStore {
             updated_at,
             decided_at,
             signature,
+            requester,
         ) = row;
         crate::config::validate_wallet_id(&wallet_id)?;
         // Re-derive the digest from the stored bytes so a corrupted or edited
@@ -650,6 +662,7 @@ impl MessageStore {
             approved_at,
             rejected_at,
             signature: signature.map(encode_signature),
+            requester: (!requester.is_empty()).then_some(requester),
         })
     }
 }

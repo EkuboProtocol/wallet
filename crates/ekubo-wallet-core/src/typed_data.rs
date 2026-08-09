@@ -82,6 +82,12 @@ pub struct PendingTypedData {
     /// The 65-byte r||s||v signature, present only once signed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Who asked for this signature, when the caller knew: a dapp reached
+    /// over `WalletConnect` names itself, an MCP agent does not. Recorded when
+    /// the row is created rather than supplied to the review afterwards, so
+    /// the name the reviewer reads belongs to whoever queued the bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
 }
 
 /// Parse and canonicalize an EIP-712 payload, returning the parsed typed data
@@ -573,25 +579,29 @@ impl TypedDataStore {
         chain_id: u64,
         typed_data: &serde_json::Value,
         digest: B256,
+        requester: Option<&str>,
     ) -> Result<PendingTypedData> {
         let stored_chain_id = i64::try_from(chain_id).context("chain ID out of range")?;
+        let requester = requester.unwrap_or_default();
         let request_id = QUEUE.create_or_reuse(
             &mut self.database.connection,
             wallet_id,
             chain_id,
             digest,
+            requester,
             |transaction, request_id, now| {
                 transaction.execute(
                     "INSERT INTO pending_typed_data(
                         request_id, wallet_id, chain_id, typed_data_json, digest,
-                        status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'awaiting_approval', ?6, ?6)",
+                        requester, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'awaiting_approval', ?7, ?7)",
                     params![
                         request_id,
                         wallet_id,
                         stored_chain_id,
                         serde_json::to_string(typed_data)?,
                         Blob(digest),
+                        requester,
                         Millis(now),
                     ],
                 )?;
@@ -657,7 +667,7 @@ impl TypedDataStore {
             .connection
             .query_row(
                 "SELECT wallet_id, chain_id, typed_data_json, digest, status,
-                        created_at, updated_at, decided_at, signature
+                        created_at, updated_at, decided_at, signature, requester
                  FROM pending_typed_data WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -671,6 +681,7 @@ impl TypedDataStore {
                         row.time(6)?,
                         row.time_opt(7)?,
                         row.blob_opt::<[u8; 65]>(8)?,
+                        row.get::<_, String>(9)?,
                     ))
                 },
             )
@@ -685,6 +696,7 @@ impl TypedDataStore {
             updated_at,
             decided_at,
             signature,
+            requester,
         ) = row;
         crate::config::validate_wallet_id(&wallet_id)?;
         let typed_data: serde_json::Value =
@@ -712,6 +724,7 @@ impl TypedDataStore {
             approved_at,
             rejected_at,
             signature: signature.map(encode_signature),
+            requester: (!requester.is_empty()).then_some(requester),
         })
     }
 }

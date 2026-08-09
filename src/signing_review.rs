@@ -58,12 +58,13 @@ pub enum TypedDataDecision {
 
 /// Review one queued EIP-191 message and resolve it, either way.
 ///
-/// `requester` names who asked, when the caller knows: a dapp reached over
-/// `WalletConnect` does, and `ekubo-wallet review` does not, because a request
-/// queued by an MCP agent carries no record of which agent. A signature is the
-/// one thing here that authorizes something without naming a counterparty in
-/// its own bytes, so "who asked for this" is a fact the reviewer otherwise has
-/// to supply from memory.
+/// Who asked is read from the row rather than passed in. A dapp reached over
+/// `WalletConnect` names itself when it queues the request; an MCP agent
+/// carries no record of which agent. A signature is the one thing here that
+/// authorizes something without naming a counterparty in its own bytes, so
+/// "who asked for this" is a fact the reviewer otherwise has to supply from
+/// memory — and taking it from whichever caller happens to be drawing the
+/// review named the wrong dapp for a row another one had queued.
 ///
 /// `no_confirm` skips only the interactive review. Owner authentication still
 /// follows, and the transcript is still printed, so the reviewer sees the
@@ -72,7 +73,6 @@ pub async fn decide_message(
     config: &ConfigStore,
     mut store: MessageStore,
     request: PendingMessage,
-    requester: Option<&str>,
     no_confirm: bool,
 ) -> Result<MessageDecision> {
     ensure!(
@@ -113,7 +113,10 @@ pub async fn decide_message(
     .fact("Signer", wallet.address.to_checksum(None))
     .fact(
         "Asked by",
-        requester.unwrap_or("an MCP agent; this queue does not record which"),
+        request
+            .requester
+            .as_deref()
+            .unwrap_or("an MCP agent; this queue does not record which"),
     )
     .fact(
         "Chain",
@@ -232,12 +235,11 @@ pub async fn decide_message(
 
 /// Review one queued EIP-712 payload and resolve it, either way.
 ///
-/// `requester` names who asked, on the same terms as [`decide_message`].
+/// Who asked is read from the row, on the same terms as [`decide_message`].
 pub async fn decide_typed_data(
     config: &ConfigStore,
     mut store: TypedDataStore,
     request: PendingTypedData,
-    requester: Option<&str>,
     no_confirm: bool,
 ) -> Result<TypedDataDecision> {
     ensure!(
@@ -267,7 +269,10 @@ pub async fn decide_typed_data(
     .fact("Signer", wallet.address.to_checksum(None))
     .fact(
         "Asked by",
-        requester.unwrap_or("an MCP agent; this queue does not record which"),
+        request
+            .requester
+            .as_deref()
+            .unwrap_or("an MCP agent; this queue does not record which"),
     )
     .fact("Chain ID", &request.chain_id)
     .fact("Primary type", &typed.primary_type)

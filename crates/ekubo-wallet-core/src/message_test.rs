@@ -305,7 +305,7 @@ fn lifecycle_persists_exact_bytes_and_signature() {
     let (_directory, mut store) = store();
     let message = b"gm".to_vec();
     let request = store
-        .create("primary", Some("1"), &message, MessageEncoding::Text)
+        .create("primary", Some("1"), &message, MessageEncoding::Text, None)
         .unwrap();
     assert_eq!(request.status, MessageStatus::AwaitingApproval);
     assert_eq!(request.message_bytes().unwrap(), message);
@@ -314,7 +314,7 @@ fn lifecycle_persists_exact_bytes_and_signature() {
 
     // The identical message reuses the pending request.
     let duplicate = store
-        .create("primary", Some("1"), &message, MessageEncoding::Text)
+        .create("primary", Some("1"), &message, MessageEncoding::Text, None)
         .unwrap();
     assert_eq!(duplicate.request_id, request.request_id);
     assert_eq!(store.awaiting_approval(None).unwrap().len(), 1);
@@ -352,16 +352,16 @@ fn chainless_requests_deduplicate_and_stay_distinct_from_chained_ones() {
     let (_directory, mut store) = store();
     let message = b"gm".to_vec();
     let first = store
-        .create("primary", None, &message, MessageEncoding::Text)
+        .create("primary", None, &message, MessageEncoding::Text, None)
         .unwrap();
     assert!(first.chain_id.is_none());
     let repeated = store
-        .create("primary", None, &message, MessageEncoding::Text)
+        .create("primary", None, &message, MessageEncoding::Text, None)
         .unwrap();
     assert_eq!(first.request_id, repeated.request_id);
 
     let chained = store
-        .create("primary", Some("1"), &message, MessageEncoding::Text)
+        .create("primary", Some("1"), &message, MessageEncoding::Text, None)
         .unwrap();
     assert_ne!(first.request_id, chained.request_id);
     assert_eq!(store.awaiting_approval(None).unwrap().len(), 2);
@@ -371,7 +371,7 @@ fn chainless_requests_deduplicate_and_stay_distinct_from_chained_ones() {
 fn rejection_is_terminal_and_digest_is_bound() {
     let (_directory, mut store) = store();
     let request = store
-        .create("primary", None, b"gm", MessageEncoding::Text)
+        .create("primary", None, b"gm", MessageEncoding::Text, None)
         .unwrap();
     assert!(
         store
@@ -397,7 +397,7 @@ fn a_signature_cannot_be_written_into_another_wallets_row() {
     // would leave the database claiming an approval that wallet never gave.
     let (_directory, mut store) = store();
     let request = store
-        .create("primary", None, b"gm", MessageEncoding::Text)
+        .create("primary", None, b"gm", MessageEncoding::Text, None)
         .unwrap();
     assert!(
         store
@@ -419,7 +419,7 @@ fn a_signature_cannot_be_written_into_another_wallets_row() {
 fn a_tampered_message_row_never_binds_a_signature_to_other_bytes() {
     let (_directory, mut store) = store();
     let request = store
-        .create("primary", None, b"gm", MessageEncoding::Text)
+        .create("primary", None, b"gm", MessageEncoding::Text, None)
         .unwrap();
     store
         .database
@@ -430,4 +430,60 @@ fn a_tampered_message_row_never_binds_a_signature_to_other_bytes() {
         )
         .unwrap();
     assert!(store.get(request.request_id).is_err());
+}
+
+#[test]
+fn two_dapps_asking_for_the_same_bytes_get_two_decisions() {
+    // Deduplication exists so an agent re-asking does not queue twice. Keyed
+    // on wallet, chain, and digest alone, it also merged two *different*
+    // dapps' identical requests into one row -- so one approval served both,
+    // whichever was in front of the person named the row, and either could
+    // reject or consume the other's request.
+    let (_directory, mut store) = store();
+    let first = store
+        .create(
+            "primary",
+            Some("1"),
+            b"gm",
+            MessageEncoding::Text,
+            Some("app.example"),
+        )
+        .unwrap();
+    let repeat = store
+        .create(
+            "primary",
+            Some("1"),
+            b"gm",
+            MessageEncoding::Text,
+            Some("app.example"),
+        )
+        .unwrap();
+    assert_eq!(first.request_id, repeat.request_id, "one dapp, one row");
+    assert_eq!(first.requester.as_deref(), Some("app.example"));
+
+    let other = store
+        .create(
+            "primary",
+            Some("1"),
+            b"gm",
+            MessageEncoding::Text,
+            Some("evil.example"),
+        )
+        .unwrap();
+    assert_ne!(first.request_id, other.request_id);
+    assert_eq!(other.requester.as_deref(), Some("evil.example"));
+    assert_eq!(store.awaiting_approval(None).unwrap().len(), 2);
+
+    // An unnamed asker is still deduplicated against another unnamed one: two
+    // MCP agents are indistinguishable, and the queue is a list of decisions a
+    // person has to make.
+    let agent = store
+        .create("primary", Some("1"), b"gm", MessageEncoding::Text, None)
+        .unwrap();
+    let again = store
+        .create("primary", Some("1"), b"gm", MessageEncoding::Text, None)
+        .unwrap();
+    assert_eq!(agent.request_id, again.request_id);
+    assert!(agent.requester.is_none());
+    assert_eq!(store.awaiting_approval(None).unwrap().len(), 3);
 }

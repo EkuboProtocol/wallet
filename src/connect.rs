@@ -166,6 +166,7 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
         data_dir: config.data_dir().to_path_buf(),
         state: Arc::clone(&state),
         idle: RefCell::new(None),
+        submitted_batches: RefCell::new(std::collections::BTreeSet::new()),
     };
     let session = Session::new(relay, pairing, &handler);
     let outcome = session
@@ -240,6 +241,20 @@ struct DappSession<'a> {
     /// Exactly one of them ever reads a keystroke, and the handover is the
     /// `suspend_idle`/`enter_idle` pair rather than anything implicit.
     idle: RefCell<Option<IdleView>>,
+    /// Batch ids this session minted, so `wallet_getCallsStatus` answers about
+    /// the dapp's own batches and nothing else.
+    ///
+    /// A batch id is a pending record's UUID, and the wallet hands one out in
+    /// an in-flight conflict diagnostic, so a same-wallet id is not a secret.
+    /// Ownership by wallet was therefore the whole of the check, and any
+    /// record the account owns — a CLI transfer, another dapp's batch, a plain
+    /// `eth_sendTransaction` — answered as this dapp's batch, complete with
+    /// its receipt and an `atomic: true` that was not true of it.
+    ///
+    /// Session-scoped rather than durable on purpose: EIP-5792 status is about
+    /// a batch this connection submitted, and a connection does not outlive
+    /// `connect`.
+    submitted_batches: RefCell<std::collections::BTreeSet<uuid::Uuid>>,
 }
 
 impl DappSession<'_> {
@@ -785,11 +800,12 @@ impl DappSession<'_> {
             Some(&request.chain_id.to_string()),
             &message,
             encoding,
+            Some(&requester),
         )?;
         let store = MessageStore::production(&self.data_dir)?;
         // Every message is reviewed by a person, so this one always draws.
         self.suspend_idle().await;
-        match decide_message(self.config, store, record, Some(&requester), false).await? {
+        match decide_message(self.config, store, record, false).await? {
             MessageDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this message.",
             )),
@@ -826,12 +842,13 @@ impl DappSession<'_> {
             chain_id,
             &payload,
             digest,
+            Some(&requester),
         )?;
         let store = TypedDataStore::production(&self.data_dir)?;
         // Every typed-data payload is reviewed by a person, so this one always
         // draws.
         self.suspend_idle().await;
-        match decide_typed_data(self.config, store, record, Some(&requester), false).await? {
+        match decide_typed_data(self.config, store, record, false).await? {
             TypedDataDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this payload.",
             )),
@@ -972,18 +989,26 @@ impl DappSession<'_> {
             .execute_plan(batch.chain_id, &plan, &describe_plan_source(request.dapp))
             .await?
         {
-            Ok(record) => Ok(RequestOutcome::Result(
-                json!({ "id": batch_id(record.request_id) }),
-            )),
+            Ok(record) => {
+                self.submitted_batches
+                    .borrow_mut()
+                    .insert(record.request_id);
+                Ok(RequestOutcome::Result(
+                    json!({ "id": batch_id(record.request_id) }),
+                ))
+            }
             Err(refusal) => Ok(refusal),
         }
     }
 
     /// EIP-5792 `wallet_getCallsStatus`.
     ///
-    /// Answers only for records this session's own account owns. A batch id is
-    /// a record id, and a dapp that guessed one belonging to another wallet on
-    /// this machine would otherwise read its history.
+    /// Answers only for batches this session itself submitted. A batch id is a
+    /// record id and the wallet prints one in an in-flight conflict
+    /// diagnostic, so "a record this account owns" was not a boundary: any
+    /// record — a CLI transfer, another dapp's batch — read back as this
+    /// dapp's, with its receipt and an `atomic: true` that described a
+    /// different thing.
     async fn calls_status(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
         let id = dapp_request::parse_get_calls_status(&request.params)?;
         let unknown = || RequestOutcome::Error {
@@ -993,11 +1018,18 @@ impl DappSession<'_> {
         let Some(request_id) = parse_batch_id(&id) else {
             return Ok(unknown());
         };
+        if !self.submitted_batches.borrow().contains(&request_id) {
+            return Ok(unknown());
+        }
         let store = PendingStore::production(&self.data_dir)?;
         let Ok(record) = store.get(request_id) else {
             return Ok(unknown());
         };
         drop(store);
+        // Kept as well as the check above: the account a session signs for can
+        // stop being the account that wallet id names, and a batch this
+        // session submitted before that happened is not this session's to
+        // report on afterwards.
         if record.wallet_id != self.wallet().id {
             return Ok(unknown());
         }

@@ -164,12 +164,16 @@ fn lifecycle_persists_exact_payload_and_signature() {
     let (_directory, mut store) = store();
     let payload = permit_payload();
     let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
-    let request = store.create("primary", chain_id, &payload, digest).unwrap();
+    let request = store
+        .create("primary", chain_id, &payload, digest, None)
+        .unwrap();
     assert_eq!(request.status, TypedDataStatus::AwaitingApproval);
     assert_eq!(request.typed_data, payload);
 
     // The identical payload reuses the pending request.
-    let duplicate = store.create("primary", chain_id, &payload, digest).unwrap();
+    let duplicate = store
+        .create("primary", chain_id, &payload, digest, None)
+        .unwrap();
     assert_eq!(duplicate.request_id, request.request_id);
     assert_eq!(store.awaiting_approval(None).unwrap().len(), 1);
 
@@ -304,7 +308,9 @@ fn a_signature_can_only_come_from_an_approved_request() {
     let (_directory, mut store) = store();
     let payload = permit_payload();
     let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
-    let request = store.create("primary", chain_id, &payload, digest).unwrap();
+    let request = store
+        .create("primary", chain_id, &payload, digest, None)
+        .unwrap();
     store.reject(request.request_id).unwrap();
     assert!(
         store
@@ -326,7 +332,9 @@ fn a_signature_cannot_be_written_into_another_wallets_row() {
     let (_directory, mut store) = store();
     let payload = permit_payload();
     let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
-    let request = store.create("primary", chain_id, &payload, digest).unwrap();
+    let request = store
+        .create("primary", chain_id, &payload, digest, None)
+        .unwrap();
     assert!(
         store
             .store_signature(
@@ -348,7 +356,9 @@ fn rejection_is_terminal_and_digest_is_bound() {
     let (_directory, mut store) = store();
     let payload = permit_payload();
     let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
-    let request = store.create("primary", chain_id, &payload, digest).unwrap();
+    let request = store
+        .create("primary", chain_id, &payload, digest, None)
+        .unwrap();
     assert!(
         store
             .store_signature(

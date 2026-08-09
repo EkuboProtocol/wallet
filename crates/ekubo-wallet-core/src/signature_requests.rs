@@ -36,12 +36,20 @@ impl SignatureQueue {
     /// `personal_sign` does. NULL would read better and would silently break
     /// the deduplication below, because `SQLite` counts NULLs as distinct in a
     /// unique index.
+    ///
+    /// `requester` is part of the key, empty when nobody named one. Without it
+    /// two dapps asking for identical bytes shared one row and therefore one
+    /// decision: whichever was served first got the approval, the other
+    /// received the same signature or found its request already consumed, and
+    /// the review named only the dapp that happened to be in front of the
+    /// person. Two askers are two decisions.
     pub fn create_or_reuse(
         &self,
         connection: &mut Connection,
         wallet_id: &str,
         chain_key: u64,
         digest: B256,
+        requester: &str,
         insert: impl FnOnce(&rusqlite::Transaction<'_>, Uuid, DateTime<Utc>) -> Result<()>,
     ) -> Result<Uuid> {
         crate::config::validate_wallet_id(wallet_id)?;
@@ -51,10 +59,10 @@ impl SignatureQueue {
             .query_row(
                 &format!(
                     "SELECT request_id FROM {} WHERE wallet_id = ?1 AND chain_id = ?2 \
-                     AND digest = ?3 AND status = 'awaiting_approval'",
+                     AND digest = ?3 AND requester = ?4 AND status = 'awaiting_approval'",
                     self.table
                 ),
-                params![wallet_id, chain_key, Blob(digest)],
+                params![wallet_id, chain_key, Blob(digest), requester],
                 |row| row.get(0),
             )
             .optional()?;

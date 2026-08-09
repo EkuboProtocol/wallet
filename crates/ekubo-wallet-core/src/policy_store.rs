@@ -46,7 +46,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // So the number climbs past everything ever written instead. What it costs is
 // the cosmetic point it was reset for; what it buys is that no marker in this
 // file has ever meant anything but the shape it means now.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 /// The retired ladder wrote 1 through 10, and the equality check on open is
 /// the only thing standing between one of those files and this build reading
 /// its TEXT hashes as `BLOB`s. Reusing a number is a compile error, not a
@@ -1009,6 +1009,22 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed'
                  )),
+                 -- Who asked, when the caller knows: a dapp reached over
+                 -- WalletConnect names itself, an MCP agent does not and
+                 -- stores the empty string. Stored rather than passed to the
+                 -- review, because the review used to be told by whichever
+                 -- caller was handling the row at the time -- which for a row
+                 -- two dapps both asked for named the wrong one. It is also
+                 -- part of the deduplication key below, so two dapps asking
+                 -- for identical bytes get two decisions rather than sharing
+                 -- one.
+                 --
+                 -- Empty rather than NULL because it is in a unique index, and
+                 -- SQLite counts NULLs as distinct: nullable, two unnamed
+                 -- agents' identical requests would each get their own row and
+                 -- the deduplication that exists to keep the review short
+                 -- would quietly stop working.
+                 requester TEXT NOT NULL DEFAULT '',
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
                  policy_revision INTEGER
@@ -1029,7 +1045,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  CHECK (approval_required = 1 OR policy_revision IS NOT NULL)
              ) STRICT",
             "CREATE UNIQUE INDEX pending_typed_data_unique_awaiting
-                 ON pending_typed_data(wallet_id, chain_id, digest)
+                 ON pending_typed_data(wallet_id, chain_id, digest, requester)
                  WHERE status = 'awaiting_approval'",
             "CREATE INDEX pending_typed_data_wallet_created
                  ON pending_typed_data(wallet_id, created_at DESC)",
@@ -1053,6 +1069,22 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed'
                  )),
+                 -- Who asked, when the caller knows: a dapp reached over
+                 -- WalletConnect names itself, an MCP agent does not and
+                 -- stores the empty string. Stored rather than passed to the
+                 -- review, because the review used to be told by whichever
+                 -- caller was handling the row at the time -- which for a row
+                 -- two dapps both asked for named the wrong one. It is also
+                 -- part of the deduplication key below, so two dapps asking
+                 -- for identical bytes get two decisions rather than sharing
+                 -- one.
+                 --
+                 -- Empty rather than NULL because it is in a unique index, and
+                 -- SQLite counts NULLs as distinct: nullable, two unnamed
+                 -- agents' identical requests would each get their own row and
+                 -- the deduplication that exists to keep the review short
+                 -- would quietly stop working.
+                 requester TEXT NOT NULL DEFAULT '',
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
                  -- One decision per request; `status` names which one it was.
@@ -1065,7 +1097,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  CHECK ((status = 'signed') = (signature IS NOT NULL))
              ) STRICT",
             "CREATE UNIQUE INDEX pending_messages_unique_awaiting
-                 ON pending_messages(wallet_id, chain_id, digest)
+                 ON pending_messages(wallet_id, chain_id, digest, requester)
                  WHERE status = 'awaiting_approval'",
             "CREATE INDEX pending_messages_wallet_created
                  ON pending_messages(wallet_id, created_at DESC)",
