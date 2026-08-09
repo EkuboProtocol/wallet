@@ -357,4 +357,15 @@ fn the_gas_ceiling_falls_back_to_the_block_when_nothing_is_configured() {
 
     network.max_gas_limit = Some("not a number".into());
     assert!(usable_gas_ceiling(&network, 30_000_000).is_err());
+
+    // A ceiling below what every transaction costs before it does anything is
+    // not a bound, it is a refusal to sign at all -- and `block_maximum` comes
+    // from whichever endpoint answered, so a small enough answer would
+    // otherwise disqualify the plain self-send a cancellation is while looking
+    // like an ordinary limit.
+    network.max_gas_limit = None;
+    assert!(usable_gas_ceiling(&network, 20_999).is_err());
+    assert_eq!(usable_gas_ceiling(&network, 21_000).unwrap(), 21_000);
+    network.max_gas_limit = Some("20999".into());
+    assert!(usable_gas_ceiling(&network, 30_000_000).is_err());
 }

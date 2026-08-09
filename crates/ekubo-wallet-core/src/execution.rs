@@ -27,6 +27,10 @@ use std::{str::FromStr, time::Duration};
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const EIP7702_AUTHORIZATION_INTRINSIC_COST: u64 = 25_000;
+/// What every transaction is charged before it does anything at all. A gas
+/// ceiling under this cannot admit even a bare value transfer, which is what a
+/// cancellation is.
+const INTRINSIC_TRANSACTION_GAS: u64 = 21_000;
 const SIMULATION_GAS_MULTIPLIER: u64 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,7 +389,18 @@ fn usable_gas_ceiling(network: &NetworkConfig, block_maximum: u64) -> Result<u64
         .transpose()
         .context("configured maximum gas limit does not fit uint64")?
         .unwrap_or(block_maximum);
-    Ok(configured.min(block_maximum))
+    let ceiling = configured.min(block_maximum);
+    // A ceiling below the intrinsic cost of the simplest possible transaction
+    // is not a ceiling, it is a refusal to sign anything. `block_maximum`
+    // comes from whichever endpoint answered, and a small enough answer would
+    // otherwise disqualify a plain value transfer — including the self-send a
+    // cancellation is — while looking like an ordinary bound.
+    ensure!(
+        ceiling >= INTRINSIC_TRANSACTION_GAS,
+        "the usable gas ceiling {ceiling} is below the {INTRINSIC_TRANSACTION_GAS} gas every \
+         transaction costs before it does anything"
+    );
+    Ok(ceiling)
 }
 
 fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> Result<u64> {
@@ -727,7 +742,16 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
         data: alloy::primitives::Bytes::new(),
         value: U256::ZERO,
     };
-    let (_chain_id, market, estimated_gas, block_maximum) =
+    // The ceiling check lives inside the closure, so an endpoint whose numbers
+    // do not survive it is an endpoint that failed and the next one is tried.
+    // It used to run after `try_endpoints` returned, which made an inflated
+    // estimate or a shrunken block limit fatal to the whole call rather than
+    // to the endpoint that gave it — and the ordered strategy asks the same
+    // endpoint first every time, so the answer never changed. A cancellation
+    // is what an owner reaches for when a transaction they want stopped is
+    // still live, which is the worst moment to have one endpoint decide the
+    // envelope cannot be built.
+    let (_chain_id, market, gas_limit) =
         crate::rpc::try_endpoints(network, |provider| async move {
             let estimate_request = alloy::rpc::types::TransactionRequest::default()
                 .from(wallet.address)
@@ -757,7 +781,24 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
                 .context("cancellation preparation could not read the chain head")?
                 .header
                 .gas_limit;
-            Ok((chain_id, market, estimated_gas, block_maximum))
+            // The same ceiling `signing_gas_limit` computes, and for the same
+            // reason. This bound used to exist only when the network carried a
+            // configured maximum, which most shipped profiles do not — so on
+            // an ordinary network an endpoint's `estimate_gas` was the whole
+            // of what decided the signed gas limit. A cancellation cannot be
+            // simulated, so an endpoint that returns an absurd estimate
+            // produces an envelope every honest peer rejects while spending
+            // one of the eight attempts this wallet will ever make.
+            let maximum = usable_gas_ceiling(network, block_maximum)?;
+            ensure!(
+                estimated_gas <= maximum,
+                "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas \
+                 limit {maximum}"
+            );
+            let gas_limit = estimated_gas
+                .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
+                .min(maximum);
+            Ok((chain_id, market, gas_limit))
         })
         .await?;
     let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(
@@ -765,22 +806,6 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
         market.max_fee_per_gas,
         market.max_priority_fee_per_gas,
     )?;
-    // The same ceiling `signing_gas_limit` computes, and for the same reason.
-    // This bound used to exist only when the network carried a configured
-    // maximum, which most shipped profiles do not — so on an ordinary network
-    // an endpoint's `estimate_gas` was the whole of what decided the signed
-    // gas limit. A cancellation cannot be simulated, and it is asked for
-    // exactly when something is already stuck, so an endpoint that returns an
-    // absurd estimate produces an envelope every honest peer rejects while
-    // spending one of the eight attempts this wallet will ever make.
-    let maximum = usable_gas_ceiling(network, block_maximum)?;
-    ensure!(
-        estimated_gas <= maximum,
-        "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas limit {maximum}"
-    );
-    let gas_limit = estimated_gas
-        .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
-        .min(maximum);
 
     // All RPC preparation completed before this function loads key material.
     let local_signer = load_matching_signer(keys, wallet)?;
