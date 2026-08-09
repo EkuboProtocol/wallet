@@ -113,7 +113,7 @@ fn lifecycle_persists_exact_payload_and_signature() {
 
     let signature = format!("0x{}", "11".repeat(65));
     let signed = store
-        .store_signature(request.request_id, digest, &signature)
+        .store_signature(request.request_id, "primary", digest, &signature)
         .unwrap();
     assert_eq!(signed.status, TypedDataStatus::Signed);
     assert_eq!(signed.signature.as_deref(), Some(signature.as_str()));
@@ -123,7 +123,7 @@ fn lifecycle_persists_exact_payload_and_signature() {
     // A signed request cannot be re-signed or rejected.
     assert!(
         store
-            .store_signature(request.request_id, digest, &signature)
+            .store_signature(request.request_id, "primary", digest, &signature)
             .is_err()
     );
     assert!(store.reject(request.request_id).is_err());
@@ -248,10 +248,36 @@ fn a_signature_can_only_come_from_an_approved_request() {
         store
             .store_signature(
                 request.request_id,
+                "primary",
                 digest,
                 &format!("0x{}", "33".repeat(65)),
             )
             .is_err()
+    );
+}
+
+#[test]
+fn a_signature_cannot_be_written_into_another_wallets_row() {
+    // See the message queue's twin of this test: an EIP-712 signature from
+    // one wallet's key must not be recorded as another wallet's approval,
+    // where the payload may be a permit whose owner is the signer.
+    let (_directory, mut store) = store();
+    let payload = permit_payload();
+    let (_, chain_id, digest) = parse_typed_data(&payload).unwrap();
+    let request = store.create("primary", chain_id, &payload, digest).unwrap();
+    assert!(
+        store
+            .store_signature(
+                request.request_id,
+                "secondary",
+                digest,
+                &format!("0x{}", "11".repeat(65)),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store.get(request.request_id).unwrap().status,
+        TypedDataStatus::AwaitingApproval
     );
 }
 
@@ -265,6 +291,7 @@ fn rejection_is_terminal_and_digest_is_bound() {
         store
             .store_signature(
                 request.request_id,
+                "primary",
                 B256::repeat_byte(0xEE),
                 &format!("0x{}", "22".repeat(65)),
             )

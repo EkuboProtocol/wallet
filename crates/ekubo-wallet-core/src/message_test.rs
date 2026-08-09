@@ -321,7 +321,12 @@ fn lifecycle_persists_exact_bytes_and_signature() {
 
     let signature = format!("0x{}", "11".repeat(65));
     let signed = store
-        .store_signature(request.request_id, message_digest(b"gm"), &signature)
+        .store_signature(
+            request.request_id,
+            "primary",
+            message_digest(b"gm"),
+            &signature,
+        )
         .unwrap();
     assert_eq!(signed.status, MessageStatus::Signed);
     assert_eq!(signed.signature.as_deref(), Some(signature.as_str()));
@@ -331,7 +336,12 @@ fn lifecycle_persists_exact_bytes_and_signature() {
     // A signed request cannot be re-signed or rejected.
     assert!(
         store
-            .store_signature(request.request_id, message_digest(b"gm"), &signature)
+            .store_signature(
+                request.request_id,
+                "primary",
+                message_digest(b"gm"),
+                &signature
+            )
             .is_err()
     );
     assert!(store.reject(request.request_id).is_err());
@@ -367,6 +377,7 @@ fn rejection_is_terminal_and_digest_is_bound() {
         store
             .store_signature(
                 request.request_id,
+                "primary",
                 B256::repeat_byte(0xEE),
                 &format!("0x{}", "22".repeat(65)),
             )
@@ -377,6 +388,31 @@ fn rejection_is_terminal_and_digest_is_bound() {
         MessageStatus::Rejected
     );
     assert!(store.reject(request.request_id).is_err());
+}
+
+#[test]
+fn a_signature_cannot_be_written_into_another_wallets_row() {
+    // The caller names the wallet whose key signed, and the row names the
+    // wallet that asked. A signature from one written into the other's row
+    // would leave the database claiming an approval that wallet never gave.
+    let (_directory, mut store) = store();
+    let request = store
+        .create("primary", None, b"gm", MessageEncoding::Text)
+        .unwrap();
+    assert!(
+        store
+            .store_signature(
+                request.request_id,
+                "secondary",
+                message_digest(b"gm"),
+                &format!("0x{}", "11".repeat(65)),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store.get(request.request_id).unwrap().status,
+        MessageStatus::AwaitingApproval
+    );
 }
 
 #[test]

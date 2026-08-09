@@ -610,12 +610,14 @@ impl TypedDataStore {
     pub fn store_signature(
         &mut self,
         request_id: Uuid,
+        signer_wallet_id: &str,
         expected_digest: B256,
         signature: &str,
     ) -> Result<PendingTypedData> {
         QUEUE.store_signature(
             &mut self.database.connection,
             request_id,
+            signer_wallet_id,
             expected_digest,
             signature,
         )?;

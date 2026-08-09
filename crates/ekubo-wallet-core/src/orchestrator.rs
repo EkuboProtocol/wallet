@@ -728,8 +728,13 @@ pub async fn sign_reviewed_message(
     ensure!(
         current.status == MessageStatus::AwaitingApproval
             && current.digest == request.digest
-            && current.message_hex == request.message_hex,
+            && current.message_hex == request.message_hex
+            && current.wallet_id == request.wallet_id,
         "message request changed during approval"
+    );
+    ensure!(
+        current.wallet_id == wallet.id,
+        "message request belongs to another wallet"
     );
     ensure!(
         config.wallet(&request.wallet_id)? == *wallet,
@@ -742,6 +747,7 @@ pub async fn sign_reviewed_message(
         .context("failed to sign the message")?;
     store.store_signature(
         request.request_id,
+        &wallet.id,
         digest,
         &format!("0x{}", hex::encode(signature.as_bytes())),
     )
@@ -768,8 +774,15 @@ pub async fn sign_reviewed_typed_data(
 
     let current = store.get(request.request_id)?;
     ensure!(
-        current.status == TypedDataStatus::AwaitingApproval && current.digest == request.digest,
+        current.status == TypedDataStatus::AwaitingApproval
+            && current.digest == request.digest
+            && current.typed_data == request.typed_data
+            && current.wallet_id == request.wallet_id,
         "typed-data request changed during approval"
+    );
+    ensure!(
+        current.wallet_id == wallet.id,
+        "typed-data request belongs to another wallet"
     );
     ensure!(
         config.wallet(&request.wallet_id)? == *wallet,
@@ -782,6 +795,7 @@ pub async fn sign_reviewed_typed_data(
         .context("failed to sign typed data")?;
     store.store_signature(
         request.request_id,
+        &wallet.id,
         digest,
         &format!("0x{}", hex::encode(signature.as_bytes())),
     )

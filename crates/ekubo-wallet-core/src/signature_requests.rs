@@ -96,27 +96,41 @@ impl SignatureQueue {
     }
 
     /// Atomically records approval and the exact signature. Inside one
-    /// transaction: the stored digest must still match what the approver
-    /// reviewed, and the row must still be awaiting approval.
+    /// transaction: the stored row must still name the wallet whose key
+    /// produced `signature`, the stored digest must still match what the
+    /// approver reviewed, and the row must still be awaiting approval.
+    ///
+    /// `signer_wallet_id` is the wallet the caller actually loaded a key for,
+    /// not the one the caller's in-memory request struct claims. Those are the
+    /// same value in every honest call and differ in exactly the attack this
+    /// check exists for: a signature from one wallet's key written into
+    /// another wallet's row, which would leave durable state attributing an
+    /// approval to a wallet that never gave one.
     pub fn store_signature(
         &self,
         connection: &mut Connection,
         request_id: Uuid,
+        signer_wallet_id: &str,
         expected_digest: B256,
         signature: &str,
     ) -> Result<()> {
         let signature = parse_signature(signature)?;
         let transaction = connection.transaction()?;
-        let (digest, status): (Blob<B256>, String) = transaction
+        let (wallet_id, digest, status): (String, Blob<B256>, String) = transaction
             .query_row(
                 &format!(
-                    "SELECT digest, status FROM {} WHERE request_id = ?1",
+                    "SELECT wallet_id, digest, status FROM {} WHERE request_id = ?1",
                     self.table
                 ),
                 [request_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .with_context(|| format!("unknown {} {request_id}", self.noun))?;
+        ensure!(
+            wallet_id == signer_wallet_id,
+            "{} belongs to another wallet",
+            self.noun
+        );
         ensure!(digest.0 == expected_digest, "{} digest mismatch", self.noun);
         ensure!(
             status == "awaiting_approval",
