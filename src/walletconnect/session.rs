@@ -30,6 +30,13 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Request ids remembered for replay protection at once.
+///
+/// Generous against any real dapp — a busy session answers a handful of
+/// requests a minute — and a hard ceiling against one that is not trying to be
+/// real.
+const MAX_ANSWERED_IDS: usize = 4_096;
+
 /// The CAIP-2 namespace this wallet implements. Anything else is somebody
 /// else's chain family.
 pub const EIP155: &str = "eip155";
@@ -265,6 +272,36 @@ enum Origin {
     Session,
 }
 
+/// Every method this wallet acts on when it arrives on the settled session
+/// topic. The `_ => Ok(false)` arm below covers everything else, and this is
+/// what keeps such a method from being recorded as answered on the way to
+/// being ignored.
+const SESSION_METHODS: [&str; 6] = [
+    method::SESSION_REQUEST,
+    method::SESSION_PING,
+    method::SESSION_DELETE,
+    method::SESSION_EXTEND,
+    method::SESSION_UPDATE,
+    method::SESSION_EVENT,
+];
+
+/// Record `id` as answered, reporting whether it is new.
+///
+/// The oldest ids go when the set is full. Protocol ids are microsecond-scale
+/// timestamps, so the lowest is the oldest, and the bound is far above any
+/// burst a dapp legitimately produces while being well under what a peer could
+/// spend this process's memory on deliberately. A relay's redelivery window is
+/// minutes; nothing evicted at this depth is still eligible to arrive again.
+fn remember(answered: &mut BTreeSet<u64>, id: u64) -> bool {
+    if !answered.insert(id) {
+        return false;
+    }
+    while answered.len() > MAX_ANSWERED_IDS {
+        answered.pop_first();
+    }
+    true
+}
+
 /// Whether a method may be answered when it arrived on `origin`.
 ///
 /// The pairing key and the session key are separate credentials with separate
@@ -283,7 +320,7 @@ enum Origin {
 fn answerable_from(rpc_method: &str, origin: Origin) -> bool {
     match origin {
         Origin::Pairing => rpc_method == method::SESSION_PROPOSE,
-        Origin::Session => rpc_method != method::SESSION_PROPOSE,
+        Origin::Session => SESSION_METHODS.contains(&rpc_method),
     }
 }
 
@@ -316,6 +353,13 @@ pub struct Session<'a> {
     /// Ids answered already, so a relay redelivery cannot run a transaction
     /// twice. The relay redelivers anything it was not acknowledged for, and
     /// acknowledgement happens before the request is carried out.
+    ///
+    /// Bounded, and populated only for methods this wallet actually dispatches.
+    /// It used to take an id from every authenticated request, including ones
+    /// the match below ignores, and never gave one back — so a dapp sending
+    /// tiny envelopes with a method nobody handles grew this set for as long
+    /// as `connect` ran, without ever opening a review or doing anything the
+    /// wallet would notice.
     answered: BTreeSet<u64>,
     salt: u16,
 }
@@ -461,7 +505,7 @@ impl<'a> Session<'a> {
             .await?;
             return Ok(false);
         }
-        if !self.answered.insert(message.id) {
+        if !remember(&mut self.answered, message.id) {
             // Already handled; this is a relay redelivery.
             return Ok(false);
         }

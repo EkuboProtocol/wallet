@@ -322,6 +322,14 @@ fn the_pairing_key_stops_being_an_authority_once_a_session_settles() {
     // And the session key does not get to propose: one `connect` run serves
     // one session, and `on_propose` is the pairing's business.
     assert!(!answerable_from(method::SESSION_PROPOSE, Origin::Session));
+
+    // A method nobody dispatches is not answerable from anywhere. It used to
+    // reach the replay set on its way to being ignored, which is a peer
+    // spending this process's memory for the cost of a tiny envelope.
+    for origin in [Origin::Pairing, Origin::Session] {
+        assert!(!answerable_from("wc_somethingElse", origin));
+        assert!(!answerable_from("", origin));
+    }
 }
 
 #[test]
@@ -362,4 +370,28 @@ fn a_pairings_own_deadline_outlives_the_moment_the_uri_was_pasted() {
     // The deadline itself is past it, matching how a settled session's own
     // deadline is read.
     assert!(pairing_refusal(Some(now), now).is_some());
+}
+
+#[test]
+fn the_replay_set_forgets_the_oldest_rather_than_growing() {
+    // Protocol ids are microsecond-scale timestamps, so the lowest is the
+    // oldest, and a relay's redelivery window is minutes -- nothing evicted at
+    // this depth is still eligible to arrive again.
+    let mut answered = BTreeSet::new();
+    for id in 0..u64::try_from(MAX_ANSWERED_IDS).unwrap() * 2 {
+        assert!(remember(&mut answered, id), "every id here is new");
+    }
+    assert_eq!(answered.len(), MAX_ANSWERED_IDS);
+    assert_eq!(
+        *answered.first().unwrap(),
+        u64::try_from(MAX_ANSWERED_IDS).unwrap(),
+        "the oldest half went, not the newest"
+    );
+
+    // A redelivery inside the window is still caught, which is the whole
+    // point of keeping any of this.
+    assert!(!remember(
+        &mut answered,
+        u64::try_from(MAX_ANSWERED_IDS).unwrap() * 2 - 1
+    ));
 }
