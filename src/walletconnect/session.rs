@@ -224,6 +224,20 @@ enum Woke {
     Delivered(Option<super::relay::RelayMessage>),
 }
 
+/// What both refusals say, because they are the same refusal: whatever the
+/// dapp asked for, the answer is that this session is over.
+const EXPIRED_REFUSAL: &str = "This session has expired. Reconnect to continue.";
+
+/// Whether a session whose deadline is `expiry` has reached it at `now`.
+///
+/// One rule, used by the per-request scope check and by the gate that keeps
+/// every other session method out. Splitting the two is what let
+/// `wc_sessionExtend` through after the deadline and turned expiry into
+/// something a dapp could undo by itself.
+const fn lapsed(expiry: i64, now: i64) -> bool {
+    now >= expiry
+}
+
 /// Which of the two topics an envelope authenticated on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Origin {
@@ -395,6 +409,27 @@ impl<'a> Session<'a> {
         if !answerable_from(rpc_method, origin) {
             // Decided before the id is consumed, so a message on the wrong
             // topic cannot burn an id the other topic will legitimately use.
+            return Ok(false);
+        }
+        // Expiry ends the session's authority over everything, not only over
+        // the requests `check_in_scope` measures. It used to be checked there
+        // alone, which left `wc_sessionExtend` reachable after the deadline —
+        // and `extend` sets a new one seven days out, so a dapp could wait for
+        // its session to lapse, extend it, and go on signing under a scope
+        // whose stated lifetime had ended, repeating that forever without the
+        // person ever seeing another connection review.
+        if origin == Origin::Session && self.expired() {
+            let refusal = EXPIRED_REFUSAL;
+            self.handler.notify(&SessionEvent::RequestRefused {
+                method: rpc_method,
+                reason: refusal,
+            });
+            let id = message.id;
+            self.respond_on_session(
+                OutgoingResponse::error(id, error_code::USER_DISCONNECTED, refusal),
+                tag::SESSION_REQUEST_RESPONSE,
+            )
+            .await?;
             return Ok(false);
         }
         if !self.answered.insert(message.id) {
@@ -728,6 +763,18 @@ impl<'a> Session<'a> {
             .await
     }
 
+    /// Whether the settled session's deadline has passed. An unsettled session
+    /// has no deadline to have passed, and nothing on the session topic can
+    /// reach it anyway.
+    fn expired(&self) -> bool {
+        self.settled
+            .as_ref()
+            .is_some_and(|settled| lapsed(settled.expiry, Utc::now().timestamp()))
+    }
+
+    /// Push the deadline out. Only reachable on a session that has not already
+    /// reached it — see the check in [`Self::receive`], which is what keeps
+    /// this from being a way to revive one.
     fn extend(&mut self) {
         if let Some(settled) = self.settled.as_mut() {
             settled.expiry = Utc::now().timestamp() + SESSION_TTL_SECONDS;
@@ -775,11 +822,8 @@ fn check_in_scope(
     expiry: i64,
 ) -> std::result::Result<(), (i64, String)> {
     let now = Utc::now().timestamp();
-    if now >= expiry {
-        return Err((
-            error_code::USER_DISCONNECTED,
-            "This session has expired. Reconnect to continue.".to_owned(),
-        ));
+    if lapsed(expiry, now) {
+        return Err((error_code::USER_DISCONNECTED, EXPIRED_REFUSAL.to_owned()));
     }
     if let Some(request_expiry) = request.request.expiry_timestamp
         && request_expiry <= now

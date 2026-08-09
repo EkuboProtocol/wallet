@@ -323,3 +323,22 @@ fn the_pairing_key_stops_being_an_authority_once_a_session_settles() {
     // one session, and `on_propose` is the pairing's business.
     assert!(!answerable_from(method::SESSION_PROPOSE, Origin::Session));
 }
+
+#[test]
+fn the_deadline_is_the_same_deadline_for_every_method() {
+    // `wc_sessionExtend` sets a new deadline seven days out. If expiry were
+    // only an admission check on `wc_sessionRequest`, a dapp could let its
+    // session lapse, extend it, and go on signing under a scope whose stated
+    // lifetime had ended -- forever, and without the person ever seeing
+    // another connection review. Both gates read this one rule.
+    assert!(lapsed(100, 100), "the deadline itself is past it");
+    assert!(lapsed(100, 101));
+    assert!(!lapsed(100, 99));
+
+    // And the scope check agrees, at the same boundary.
+    let expired = Utc::now().timestamp();
+    let (code, message) = check_in_scope(&scope(), &request("personal_sign", "eip155:1"), expired)
+        .expect_err("a session at its deadline still served a request");
+    assert_eq!(code, error_code::USER_DISCONNECTED);
+    assert_eq!(message, EXPIRED_REFUSAL);
+}
