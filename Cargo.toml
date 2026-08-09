@@ -30,6 +30,9 @@ futures = "0.3.31"
 hex = "0.4.3"
 num-bigint = "0.5.1"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+# Same feature set as the core crate's, so the release check adds a call site
+# rather than a build.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
 rmcp = { version = "3.1.0", features = ["transport-io"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }

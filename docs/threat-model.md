@@ -20,7 +20,9 @@ privileged daemon or custom IPC. CLI management commands are local, interactive
 processes and expose no generic signing primitive.
 
 Execution plans arrive by caller-named URL, which adds one outbound request
-that is not a configured chain RPC and one SSRF-shaped surface. The fetch
+that is not a configured chain RPC and the only SSRF-shaped surface here: the
+other non-RPC requests, the WalletConnect relay and the release check, go to
+endpoints compiled into the release that no caller can influence. The fetch
 admits only public `https` on the default port — no credentials, fragments,
 redirects, or private/reserved addresses, with every resolved address vetted
 and pinned for the connection — caps the response at 16 MiB, verifies the

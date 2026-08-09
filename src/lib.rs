@@ -18,6 +18,7 @@ pub mod connect_screen;
 pub mod fullscreen;
 pub mod mcp;
 pub mod pager;
+pub mod release_check;
 pub mod render;
 pub mod signing_review;
 pub mod token_picker;

@@ -20,6 +20,7 @@ use crate::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     plan_fetch::{ArtifactReference, FetchPolicy, resolve_execution_plan_reference},
     policy_store::PolicyStore,
+    release_check::{self, ReleaseCheck},
     rpc::{WalletStatus, transaction_known, wallet_status},
     simulation::{SimulationResult, simulate_execution},
     simulation_store::SimulationStore,
@@ -974,6 +975,29 @@ impl WalletMcpServer {
                 })
                 .collect(),
         }))
+    }
+
+    // Read-only in the strongest sense available: it installs nothing, and no
+    // tool here does. The upgrade it may name is a shell command for the agent
+    // to offer the user, run by the agent's own host under whatever approval
+    // that host asks for — which is the point. Replacing the wallet binary is
+    // the one action whose confirmation cannot live inside the wallet, because
+    // the approval surface is part of what gets replaced.
+    #[tool(
+        name = "wallet_check_for_updates",
+        description = "Report whether a newer ekubo-wallet release has been published than the one this server is running, and, when there is one, the exact command that installs it. Reads a release listing and nothing else: no wallet, key, address, policy, or transaction is involved, and this tool never installs, downloads, or modifies anything. The wallet cannot update itself and offers no tool that does — installing is a shell command the user runs, or that you run for them only if they ask, and their agent host is what approves it. The command replaces the binary this server was launched from; the running process keeps the version it started with, so after a successful install tell the user to restart the wallet MCP server for the new version to take effect. Follow the returned instruction. An answer with update_available false, whether because this build is current or because the release listing could not be reached, is never a reason to suggest upgrading or to call this again.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_check_for_updates(&self) -> Result<Json<ReleaseCheck>, ErrorData> {
+        // Deliberately not gated on legal acceptance, unlike every tool that
+        // touches a wallet: "you are running a stale build" is exactly the
+        // kind of thing someone still setting the wallet up should hear.
+        Ok(Json(release_check::check(self.config.data_dir()).await))
     }
 
     #[tool(

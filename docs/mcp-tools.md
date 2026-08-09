@@ -28,7 +28,8 @@
 | `wallet_sign_message` | Sign an exact EIP-191 `personal_sign` message — dapp logins (ERC-4361), ownership proofs, off-chain attestations. Always queues for CLI approval; no policy path. Raw `eth_sign` over a bare 32-byte digest is refused. |
 | `wallet_wait_for_message` | Poll a pending message request; returns the signature once the CLI approves and signs. Cannot approve or sign itself. |
 | `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only and confirmed in the terminal. |
-| `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. The only tool available before acceptance. |
+| `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. One of the two tools available before acceptance. |
+| `wallet_check_for_updates` | Whether a newer release than the running one has been published, and the command that installs it. Touches no wallet, key, or policy, and is the other tool available before acceptance — being told the build is stale should not require accepting anything. Installs nothing: the wallet has no tool that does, because replacing the binary would replace the approval surface that would have confirmed it. The command is the user's to run, or the agent's if the user asks; the running server keeps its version until it is restarted. |
 | `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
 
 MCP operations select networks only with canonical decimal `chain_id` strings

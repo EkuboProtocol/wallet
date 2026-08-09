@@ -374,6 +374,7 @@ fn tool_inventory_exposes_implemented_parity_surface() {
     assert_eq!(
         names,
         [
+            "wallet_check_for_updates",
             "wallet_propose_network",
             "wallet_address_book",
             "wallet_attempt_cancel",

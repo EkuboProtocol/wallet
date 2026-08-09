@@ -142,8 +142,9 @@ developer's control. The developer is not responsible for data those
 endpoints collect.
 
 Apart from these RPC endpoints, the referenced-artifact fetches described in
-section 4, and the WalletConnect relay described in section 5, this software
-makes no network requests. If you add or replace a network, requests for that
+section 4, the WalletConnect relay described in section 5, and the release
+check described in section 6, this software makes no network requests. If you
+add or replace a network, requests for that
 network go to the endpoints you configure. Each release keeps the following
 list current with its built-in defaults.
 
@@ -166,8 +167,9 @@ other tool — hands the wallet an execution plan, or a bundle of read-only
 calls, as a reference rather than as inline text: a URL where the exact body
 is stored, plus a digest of those bytes. When you or your agent passes such a
 reference to a wallet tool, this process fetches the body from that URL
-itself. These fetches are the only network requests this software makes that
-do not go to a configured RPC endpoint.
+itself. Apart from the WalletConnect relay in section 5 and the release check
+in section 6, these fetches are the only network requests this software makes
+that do not go to a configured RPC endpoint.
 
 The request is an unauthenticated HTTPS GET for exactly the URL given. It
 carries no wallet address, key, credential, cookie, policy, or other data of
@@ -222,7 +224,35 @@ developer is not responsible for data the relay operator or the dapp collects.
 Running no `connect` session means this software opens no relay connection at
 all.
 
-## 6. Data exposed through agents and tooling
+## 6. The release check
+
+To tell you when the copy you are running is out of date, this software asks
+GitHub which release is newest. It sends an unauthenticated HTTPS GET to
+`https://api.github.com/repos/EkuboProtocol/wallet-mcp-server/releases/latest`,
+which is the same listing the installer reads, and uses only the version tag
+in the answer. Nothing of yours is sent: no wallet address, key, credential,
+cookie, balance, policy, or transaction, and no identifier of your machine or
+your installation. The request carries a user agent naming this software and
+its version, which every copy of a given release shares.
+
+The check runs when you run `ekubo-wallet version` or `ekubo-wallet status`,
+and when an agent calls the `wallet_check_for_updates` tool. It runs at no
+other time: this software does not poll in the background, and a wallet you
+are not using makes no such request. The answer is cached in your wallet data
+directory for a day, so repeated commands within that window ask nothing.
+Setting `EKUBO_WALLET_SKIP_UPDATE_CHECK=1` disables the check entirely, and
+nothing else about the software changes when you do.
+
+GitHub is an independent third party outside the developer's control. It can
+observe your IP address and the time of the request, and may log or retain
+that under its own policy. The developer receives nothing from this check and
+operates no service involved in it.
+
+Installing an update is never done by this software. When a newer release
+exists, the check reports the command that installs it; running that command
+is yours to do, or your agent's to do if you ask it to.
+
+## 7. Data exposed through agents and tooling
 
 Any MCP client, agent, or other tooling you connect to this wallet can read
 what its tools return: wallet addresses, balances, token holdings,
@@ -232,7 +262,7 @@ determined by your agent stack, not by this software. THE DEVELOPER IS NOT
 RESPONSIBLE FOR ANY DATA DISCLOSED OR LEAKED THROUGH THE AGENT OR ASSOCIATED
 TOOLING.
 
-## 7. Local data
+## 8. Local data
 
 Keys stay in the operating system credential store. Policies, transaction
 lifecycle records, token metadata, the address book, legal acceptance
@@ -244,9 +274,11 @@ configure, are stored unencrypted in the wallet data directory. A dapp session
 is not recorded: the pairing keys live only in memory and are gone when the
 command exits, though the transactions and signatures it produced are kept
 like any others. Nothing in this section leaves your machine except as
-described in sections 2, 4, 5, and 6.
+described in sections 2, 4, 5, 6, and 7. The release check in section 6 reads
+a cache in this directory and writes the version tag it learned; that file
+holds nothing about you and is never sent anywhere.
 
-## 8. Acknowledgment
+## 9. Acknowledgment
 
 Acknowledgment is recorded locally against the exact text of this document,
 including the endpoint list above. A release that changes the default

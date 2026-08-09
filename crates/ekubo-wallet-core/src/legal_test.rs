@@ -58,7 +58,36 @@ fn privacy_policy_discloses_the_walletconnect_relay() {
     assert!(policy.contains("the size and timing of every message"));
     // Section 2's "nothing else leaves this machine" claim has to account for
     // it, or the disclosure contradicts the section that promises exhaustion.
-    assert!(policy.contains("and the WalletConnect relay described in section 5, this software\nmakes no network requests."));
+    assert!(policy.contains(
+        "the WalletConnect relay described in section 5, and the release\ncheck described in \
+section 6, this software makes no network requests."
+    ));
+}
+
+/// The release check reaches a host that is neither a configured RPC endpoint,
+/// nor a producer named by a reference, nor a relay — the three the policy
+/// used to enumerate as exhaustive. It has to name the endpoint, say what
+/// triggers a request, say nothing of the owner's is sent, and say it can be
+/// turned off.
+#[test]
+fn privacy_policy_discloses_the_release_check() {
+    let policy = privacy_policy();
+    assert!(policy.contains("## 6. The release check"));
+    assert!(
+        policy.contains(
+            "https://api.github.com/repos/EkuboProtocol/wallet-mcp-server/releases/latest"
+        )
+    );
+    assert!(policy.contains("EKUBO_WALLET_SKIP_UPDATE_CHECK=1"));
+    // What triggers it, because "when you run a command" is the difference
+    // between this and the background telemetry section 1 promises is absent.
+    assert!(policy.contains("does not poll in the background"));
+    assert!(policy.contains("Installing an update is never done by this software."));
+    // Section 4's exhaustive claim has to account for it too, not just
+    // section 2's.
+    assert!(policy.contains(
+        "Apart from the WalletConnect relay in section 5 and the release check\nin section 6,"
+    ));
 }
 
 #[test]

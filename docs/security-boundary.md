@@ -7,8 +7,11 @@ evaluates the active encrypted policy, resolves nonce/fees, loads the key,
 signs locally, validates the recovered sender and complete envelope, and
 durably stores the bytes and hash before broadcasting.
 
-Resolving a plan by URL is the one outbound request that is not a configured
-chain RPC, and the URL is caller-controlled, so its admission is narrow:
+Resolving a plan by URL is the one outbound request that is neither a
+configured chain RPC nor a fixed endpoint compiled into the release — the
+WalletConnect relay and the release check in `release_check` are the fixed
+ones, and neither takes a URL from a caller — and this URL is
+caller-controlled, so its admission is narrow:
 `https` on the default port to a public host; no credentials, fragments, or
 redirects; every resolved address must be globally routable and the connection
 is pinned to the vetted set, so a rebinding resolver cannot swap targets

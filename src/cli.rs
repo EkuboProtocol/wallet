@@ -696,9 +696,19 @@ impl Cli {
             Command::Server => crate::mcp::serve(config).await,
             Command::Version => {
                 println!("ekubo-wallet {BUILD_VERSION}");
+                crate::release_check::print_notice(config.data_dir()).await;
                 Ok(())
             }
-            Command::Status => run_status(&config, mode),
+            Command::Status => {
+                let status = run_status(&config, mode);
+                // Only after the command itself succeeded, and only on the two
+                // commands someone runs to ask what they have. A wallet that
+                // mentions a release during `account list` gets muted.
+                if status.is_ok() {
+                    crate::release_check::print_notice(config.data_dir()).await;
+                }
+                status
+            }
             Command::Portfolio(args) => run_portfolio(&config, &args, mode).await,
             Command::Account(args) => run_account(config, args.command, mode).await,
             Command::Network(args) => run_network(&config, args.command, mode).await,
