@@ -311,42 +311,63 @@ impl TokenStore {
     /// sanitized again at render time because this is not the only way a row
     /// can reach the database.
     pub fn insert_if_absent(&mut self, token: &ListedToken, source: &str) -> Result<bool> {
-        ensure!(token.chain_id > 0, "chain ID must be positive");
-        let symbol = sanitize(&token.symbol);
-        ensure!(
-            !symbol.is_empty(),
-            "token {} on chain {} has an empty symbol once sanitized",
-            token.address.to_checksum(None),
-            token.chain_id
-        );
-        let changed = self.database.connection.execute(
-            "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(chain_id, address) DO NOTHING",
-            params![
-                i64::try_from(token.chain_id).context("chain ID out of range")?,
-                Blob(token.address),
-                symbol,
-                token.name.as_deref().map(sanitize),
-                token.decimals,
-                source,
-                Millis(sql::now()),
-            ],
-        )?;
-        // A confirmed address has nothing left to decide, so any suggestion
-        // for it is consumed here rather than left to be filtered out of every
-        // later read. Unconditional: the row is meaningless whether this call
-        // inserted the token or found it already there, and the exact-
-        // generation delete the review path uses misses a suggestion whose
-        // content changed while the owner was looking at it.
-        self.database.connection.execute(
-            "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
-            params![
-                i64::try_from(token.chain_id).context("chain ID out of range")?,
-                Blob(token.address)
-            ],
-        )?;
-        Ok(changed == 1)
+        Ok(self.insert_all_absent(std::slice::from_ref(&(token.clone(), source.to_owned())))? == 1)
+    }
+
+    /// Confirm a whole review's worth of tokens in one transaction.
+    ///
+    /// One transaction, not one per row, because the review path is where an
+    /// agent's numbers meet an owner's single decision: an import may carry
+    /// [`MAX_IMPORT_TOKENS`] entries and the queue may hold
+    /// [`MAX_PENDING_TOKEN_PROPOSALS`]. The database journals in DELETE mode
+    /// at FULL synchronization, so every autocommit is several filesystem
+    /// syncs — accepting a large list a row at a time froze the terminal for
+    /// minutes and left half of it applied if anyone gave up. `propose` has
+    /// always been one transaction for the same reason.
+    ///
+    /// Returns how many rows were genuinely new.
+    pub fn insert_all_absent(&mut self, tokens: &[(ListedToken, String)]) -> Result<u64> {
+        let now = Millis(sql::now());
+        let transaction = self.database.connection.transaction()?;
+        let mut inserted = 0_u64;
+        for (token, source) in tokens {
+            ensure!(token.chain_id > 0, "chain ID must be positive");
+            let symbol = sanitize(&token.symbol);
+            ensure!(
+                !symbol.is_empty(),
+                "token {} on chain {} has an empty symbol once sanitized",
+                token.address.to_checksum(None),
+                token.chain_id
+            );
+            let chain_id = i64::try_from(token.chain_id).context("chain ID out of range")?;
+            let changed = transaction.execute(
+                "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(chain_id, address) DO NOTHING",
+                params![
+                    chain_id,
+                    Blob(token.address),
+                    symbol,
+                    token.name.as_deref().map(sanitize),
+                    token.decimals,
+                    source,
+                    now,
+                ],
+            )?;
+            // A confirmed address has nothing left to decide, so any suggestion
+            // for it is consumed here rather than left to be filtered out of every
+            // later read. Unconditional: the row is meaningless whether this call
+            // inserted the token or found it already there, and the exact-
+            // generation delete the review path uses misses a suggestion whose
+            // content changed while the owner was looking at it.
+            transaction.execute(
+                "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+                params![chain_id, Blob(token.address)],
+            )?;
+            inserted += u64::from(changed == 1);
+        }
+        transaction.commit()?;
+        Ok(inserted)
     }
 
     /// Forget one confirmed token. Returns whether a row was removed.
@@ -605,9 +626,14 @@ impl TokenStore {
     /// and the owner was never shown the row that disappeared. A row whose
     /// timestamp has moved is left in place to be reviewed on its own terms.
     pub fn discard_proposals(&mut self, tokens: &[(u64, Address, DateTime<Utc>)]) -> Result<u64> {
+        // One transaction, as [`Self::insert_all_absent`] is and for the same
+        // reason: a rejection covers as many rows as an acceptance does, and
+        // the per-row autocommit made the owner wait through a filesystem sync
+        // for each of them.
+        let transaction = self.database.connection.transaction()?;
         let mut removed = 0;
         for (chain_id, address, proposed_at) in tokens {
-            removed += self.database.connection.execute(
+            removed += transaction.execute(
                 "DELETE FROM token_proposals
                  WHERE chain_id = ?1 AND address = ?2 AND proposed_at = ?3",
                 params![
@@ -617,6 +643,7 @@ impl TokenStore {
                 ],
             )?;
         }
+        transaction.commit()?;
         Ok(u64::try_from(removed).unwrap_or_default())
     }
 

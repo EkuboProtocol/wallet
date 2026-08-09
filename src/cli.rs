@@ -1600,16 +1600,27 @@ async fn confirm_and_store(
     // This is also why accepting needs no network. A name for a chain the
     // owner has not configured is not a name they cannot have; it simply
     // waits for the chain.
-    let mut confirmed = 0_u64;
-    let mut decided: Vec<(u64, Address)> = Vec::new();
-    for token in decision.accepted {
-        let key = (token.chain_id, token.address);
-        let source = sources.get(&key).cloned().unwrap_or_else(|| "list".into());
-        if store.insert_if_absent(&token, &source)? {
-            confirmed += 1;
-        }
-        decided.push(key);
-    }
+    let decided: Vec<(u64, Address)> = decision
+        .accepted
+        .iter()
+        .map(|token| (token.chain_id, token.address))
+        .collect();
+    let accepted: Vec<(crate::token_store::ListedToken, String)> = decision
+        .accepted
+        .into_iter()
+        .map(|token| {
+            let source = sources
+                .get(&(token.chain_id, token.address))
+                .cloned()
+                .unwrap_or_else(|| "list".into());
+            (token, source)
+        })
+        .collect();
+    // One transaction for the whole decision. A row at a time meant a
+    // filesystem sync each, and an accepted import can carry ten thousand of
+    // them -- minutes of frozen terminal, and half of it applied if the owner
+    // gave up waiting.
+    let confirmed = store.insert_all_absent(&accepted)?;
     if !clear_proposals.is_empty() {
         let clear: Vec<(u64, Address, chrono::DateTime<chrono::Utc>)> = decided
             .into_iter()

@@ -673,3 +673,27 @@ fn a_shadowed_suggestion_cannot_fill_the_queue_it_is_invisible_in() {
     assert!(store.proposals().unwrap().is_empty());
     assert_eq!(store.count_proposals().unwrap(), 0);
 }
+
+#[test]
+fn a_whole_review_is_confirmed_as_one_decision() {
+    // The database journals in DELETE mode at FULL synchronization, so every
+    // autocommit is several filesystem syncs. Accepting an import a row at a
+    // time made one owner decision into ten thousand durable transactions.
+    let (_directory, mut store) = store();
+    let listed: Vec<(ListedToken, String)> = (0..64_u8)
+        .map(|index| (usdc(1, Address::repeat_byte(index)), "list-a".to_owned()))
+        .collect();
+    let tokens: Vec<ListedToken> = listed.iter().map(|(token, _)| token.clone()).collect();
+    store
+        .propose(&tokens, &ProposalSource::Claimed("list-a"))
+        .unwrap();
+    assert_eq!(store.count_proposals().unwrap(), 64);
+
+    assert_eq!(store.insert_all_absent(&listed).unwrap(), 64);
+    // And the suggestions they shadow go with them, in the same transaction.
+    assert_eq!(store.count_proposals().unwrap(), 0);
+
+    // Re-confirming the same list adds nothing and still succeeds, so a
+    // repeated review is not an error the owner has to interpret.
+    assert_eq!(store.insert_all_absent(&listed).unwrap(), 0);
+}
