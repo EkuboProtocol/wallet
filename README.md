@@ -33,8 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/mai
 Read [`install.sh`](install.sh) before piping it to a shell. It verifies a
 Sigstore signature over `SHA256SUMS` and the archive's SHA-256 checksum against
 it before extracting anything, installs `ekubo-wallet`, registers it with every
-agent CLI it finds (Claude Code, Codex, Gemini CLI, Cursor), and installs shell
-completion. Replace `main` with a release tag for a reproducible install.
+agent it finds (Claude Code, Codex, Gemini CLI, Cursor, opencode), and installs
+shell completion. Replace `main` with a release tag for a reproducible install.
 
 `cosign` is required. See [installation](docs/installation.md) to install
 without it, to use a release archive directly, or to register the MCP server by

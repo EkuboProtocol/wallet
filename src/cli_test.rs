@@ -684,6 +684,262 @@ fn removing_the_wallet_from_cursor_leaves_the_companion_in_place() {
 }
 
 #[test]
+fn opencode_configuration_is_private_and_preserves_everything_else() {
+    let config = tempfile::tempdir().unwrap();
+    fs::write(
+        config.path().join("opencode.json"),
+        br#"{"$schema":"https://opencode.ai/config.json","mcp":{"other":{"type":"local","command":["other"]}},"model":"anthropic/claude-opus-4"}"#,
+    )
+    .unwrap();
+
+    let file = configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    // Nothing this wallet does not understand may be lost on the way through.
+    assert_eq!(document["$schema"], "https://opencode.ai/config.json");
+    assert_eq!(document["model"], "anthropic/claude-opus-4");
+    assert_eq!(
+        document["mcp"]["other"]["command"],
+        serde_json::json!(["other"])
+    );
+    // opencode's local form is a tagged union with an argv array, not Cursor's
+    // command string beside an `args` list.
+    let wallet = &document["mcp"][LOCAL_SERVER_NAME];
+    assert_eq!(wallet["type"], "local");
+    assert_eq!(
+        wallet["command"],
+        serde_json::json!(["/usr/local/bin/ekubo-wallet", "server"])
+    );
+    assert_eq!(wallet["enabled"], true);
+    assert!(wallet.get("args").is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn opencode_gets_the_companion_as_a_remote_entry_beside_the_wallet() {
+    // Writing the local shape for a remote endpoint would have opencode try to
+    // execute the URL as a command, so the discriminant is the thing to pin.
+    let config = tempfile::tempdir().unwrap();
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let file = configure_opencode_mcp_at(
+        config.path(),
+        COMPANION_SERVER_NAME,
+        &ServerTransport::Http(COMPANION_SERVER_URL),
+    )
+    .unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let companion = &document["mcp"][COMPANION_SERVER_NAME];
+    assert_eq!(companion["type"], "remote");
+    assert_eq!(companion["url"], COMPANION_SERVER_URL);
+    assert!(companion.get("command").is_none());
+    // Registering the second must not have displaced the first.
+    assert_eq!(document["mcp"][LOCAL_SERVER_NAME]["type"], "local");
+    // `opencode.json` is the file written even on a machine that has none,
+    // because it is the one a plain-JSON serializer can own outright.
+    assert_eq!(file, config.path().join("opencode.json"));
+}
+
+#[test]
+fn removing_the_wallet_from_opencode_leaves_the_companion_in_place() {
+    // `ekubo` is a prefix of `ekubo-wallet`, so a removal keyed on anything
+    // looser than an exact name would take both.
+    let config = tempfile::tempdir().unwrap();
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let file = configure_opencode_mcp_at(
+        config.path(),
+        COMPANION_SERVER_NAME,
+        &ServerTransport::Http(COMPANION_SERVER_URL),
+    )
+    .unwrap();
+
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert!(document["mcp"].get(LOCAL_SERVER_NAME).is_none());
+    assert_eq!(
+        document["mcp"][COMPANION_SERVER_NAME]["url"],
+        COMPANION_SERVER_URL
+    );
+}
+
+#[test]
+fn unregistering_opencode_without_a_configuration_is_not_an_error() {
+    // `meta-agent remove` with no agent named walks everything detected, so a
+    // machine where opencode was never configured must not fail the sweep.
+    let config = tempfile::tempdir().unwrap();
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+    remove_opencode_mcp_at(config.path(), COMPANION_SERVER_NAME).unwrap();
+}
+
+#[test]
+fn removing_from_opencode_sweeps_every_file_it_merges() {
+    // opencode merges all three of its global files, later ones winning, so an
+    // entry left behind in the legacy `config.json` would go on being the
+    // registration this command just said it had taken away.
+    let config = tempfile::tempdir().unwrap();
+    fs::write(
+        config.path().join("config.json"),
+        serde_json::json!({"mcp": {LOCAL_SERVER_NAME: {"type": "local", "command": ["/old/path", "server"]}}})
+            .to_string(),
+    )
+    .unwrap();
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+
+    for candidate in OPENCODE_CONFIG_FILES {
+        let file = config.path().join(candidate);
+        if !file.exists() {
+            continue;
+        }
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert!(
+            document["mcp"].get(LOCAL_SERVER_NAME).is_none(),
+            "{candidate} still registers the wallet"
+        );
+    }
+}
+
+#[test]
+fn a_commented_opencode_file_is_passed_over_unless_it_names_the_server() {
+    // `.jsonc` is a format this wallet can read only by accident, and
+    // rewriting one through a plain-JSON serializer would delete the comments
+    // that are the only reason to keep a file in it. So one that says nothing
+    // about these servers is left alone, and one that does is reported rather
+    // than quietly skipped.
+    let config = tempfile::tempdir().unwrap();
+    let jsonc = config.path().join("opencode.jsonc");
+    let untouched = "{\n  // my own notes\n  \"model\": \"anthropic/claude-opus-4\",\n}\n";
+    fs::write(&jsonc, untouched).unwrap();
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+    assert_eq!(fs::read_to_string(&jsonc).unwrap(), untouched);
+
+    fs::write(
+        &jsonc,
+        "{\n  // mine, by hand\n  \"mcp\": { \"ekubo-wallet\": { \"type\": \"local\", \"command\": [\"x\"] } },\n}\n",
+    )
+    .unwrap();
+    let error = remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("opencode.jsonc"), "{message}");
+    assert!(message.contains("by hand"), "{message}");
+}
+
+#[test]
+fn a_commented_opencode_json_is_refused_rather_than_replaced() {
+    // opencode parses every one of its files as JSONC, the `.json` included,
+    // so someone's settings may be commented under either name. Starting from
+    // an empty document there would silently reduce a whole configuration to
+    // one MCP entry, which is why this fails and says what to do instead.
+    let config = tempfile::tempdir().unwrap();
+    let file = config.path().join("opencode.json");
+    let original =
+        "{\n  // the model I actually want\n  \"model\": \"anthropic/claude-opus-4\"\n}\n";
+    fs::write(&file, original).unwrap();
+
+    let error = configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("by hand"), "{message}");
+    assert!(message.contains("opencode.json"), "{message}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+}
+
+#[test]
+fn opencode_detection_reads_every_file_and_tells_the_two_servers_apart() {
+    let config = tempfile::tempdir().unwrap();
+    // Nothing configured at all is a definite no, not an unanswerable
+    // question: `meta-agent list` has to be able to say "not registered".
+    let empty = opencode_registration_at(config.path()).unwrap();
+    assert!(!empty.wallet);
+    assert!(!empty.companion);
+
+    // The wallet alone must not read as the companion too — `ekubo` is a
+    // prefix of `ekubo-wallet`, which is the bug this shape is chosen against.
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let wallet_only = opencode_registration_at(config.path()).unwrap();
+    assert!(wallet_only.wallet);
+    assert!(!wallet_only.companion);
+
+    // A registration in any file opencode merges counts, including one this
+    // wallet would never have written itself.
+    fs::write(
+        config.path().join("config.json"),
+        serde_json::json!({"mcp": {COMPANION_SERVER_NAME: {"type": "remote", "url": COMPANION_SERVER_URL}}})
+            .to_string(),
+    )
+    .unwrap();
+    let both = opencode_registration_at(config.path()).unwrap();
+    assert!(both.wallet);
+    assert!(both.companion);
+
+    // A file that will not parse and might be holding the answer makes the
+    // question unanswerable rather than answered wrongly.
+    fs::write(
+        config.path().join("opencode.jsonc"),
+        "{ // note\n  \"mcp\": { \"ekubo-wallet\": { \"type\": \"local\", \"command\": [\"x\"] } },\n}\n",
+    )
+    .unwrap();
+    assert!(opencode_registration_at(config.path()).is_none());
+}
+
+#[test]
+fn opencode_config_lives_under_xdg_rather_than_the_platform_convention() {
+    // opencode resolves this with `xdg-basedir`, so it is `~/.config/opencode`
+    // on macOS and Windows too. Reaching for the native config directory would
+    // write to `~/Library/Application Support` on macOS, where opencode would
+    // never look.
+    let directory = opencode_config_dir().unwrap();
+    assert!(directory.ends_with("opencode"));
+    if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+        assert!(
+            directory.ends_with(Path::new(".config").join("opencode")),
+            "{}",
+            directory.display()
+        );
+    }
+}
+
+#[test]
 fn a_registered_wallet_alone_does_not_read_as_a_registered_companion() {
     // The bug this exists for: `ekubo` is a prefix of `ekubo-wallet`, so the
     // obvious substring test reports both servers present when only the
@@ -730,9 +986,11 @@ fn every_agent_has_a_distinct_key_and_label() {
         assert!(keys.insert(agent.key()), "{agent:?} duplicates a key");
         assert!(!agent.label().is_empty());
     }
-    // Cursor is the one this wallet configures by writing the file itself,
-    // because it has no CLI that owns its MCP configuration.
+    // Cursor and opencode are the two this wallet configures by writing the
+    // file itself, because neither has a CLI that owns both halves of its MCP
+    // configuration — opencode can add a server and cannot remove one.
     assert!(AgentName::Cursor.binary().is_none());
+    assert!(AgentName::Opencode.binary().is_none());
     assert!(AgentName::Codex.binary().is_some());
 }
 
