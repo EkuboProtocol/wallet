@@ -98,11 +98,26 @@ Add more at any time with `ekubo-wallet meta-tokens import`, and confirm what
 an agent suggests with `ekubo-wallet meta-tokens review` — an agent's suggestion is
 never a name until you accept it.
 
-On Linux, install the polkit action shipped in the archive before signing:
+On Linux, install the polkit action shipped in the archive before signing.
+`install.sh` already does this — it stages the file read-only and prints a
+`sudo` command that verifies a digest computed from its own private copy
+before installing, so run that printed command rather than the snippet below
+if you used it.
+
+Installing manually, run this immediately after extracting the archive,
+before anything else touches the extraction directory — not later, and not
+copied out of order. A plain `sudo install` from that directory trusts
+whatever bytes are at the path when root reads them, with no check at all;
+this confirms the bytes handed to `sha256sum` are the exact bytes handed to
+`install`, and refuses anything that is not a regular file, so a device or a
+FIFO is never read at all (a symlink to a regular file still passes — it is
+the digest check after it, not this, that would catch a symlink pointed
+somewhere unexpected). It cannot protect a copy you already let sit around —
+only the file you extract and check in the same breath:
 
 ```sh
-sudo install -m 0644 contrib/polkit/com.ekubo.wallet.policy \
-  /usr/share/polkit-1/actions/com.ekubo.wallet.policy
+POLKIT_DIGEST=$(sha256sum contrib/polkit/com.ekubo.wallet.policy | cut -d' ' -f1)
+sudo sh -c '[ -f "$2" ] || { echo "not a regular file: $2" >&2; exit 1; }; t=$(mktemp) || exit 1; head -c 65536 "$2" > "$t" && printf "%s  %s\n" "$1" "$t" | sha256sum -c >/dev/null && install -m 0644 "$t" /usr/share/polkit-1/actions/com.ekubo.wallet.policy; status=$?; rm -f "$t"; exit $status' sh "$POLKIT_DIGEST" contrib/polkit/com.ekubo.wallet.policy
 ```
 
 Linux also needs a working Secret Service provider for credential storage. If
