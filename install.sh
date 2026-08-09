@@ -429,6 +429,20 @@ if [ "$OS" = Linux ] && [ -f "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.
   elif command -v shasum >/dev/null 2>&1; then
     POLKIT_DIGEST=$(shasum -a 256 "$POLKIT_SOURCE" | cut -d' ' -f1)
   fi
+  # Both of those are pipelines, and a pipeline reports the exit status of its
+  # last command: `cut` succeeds on empty input, so a hasher that could not
+  # read the file left an empty digest and looked like a hasher that was not
+  # installed. That took the branch below that printed an unverified `sudo
+  # install` from the staged path — the one branch with no digest, no
+  # regular-file check, and no bounded copy, reached by a failure rather than
+  # by a choice. So the digest has to look like one.
+  if [ "${#POLKIT_DIGEST}" -ne 64 ]; then
+    POLKIT_DIGEST=""
+  else
+    case "$POLKIT_DIGEST" in
+      *[!0-9a-f]*) POLKIT_DIGEST="" ;;
+    esac
+  fi
   mkdir -p "$POLKIT_STAGE"
   install -m 0444 "$POLKIT_SOURCE" "$POLKIT_FILE"
   log "owner authentication needs the polkit action installed once:"
@@ -458,9 +472,19 @@ if [ "$OS" = Linux ] && [ -f "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.
     log "that copies, verifies, and installs one set of bytes, so a file \
 replaced after the check cannot be the one that lands"
   else
-    log "  sudo install -m 0644 $(shell_quote "$POLKIT_FILE") /usr/share/polkit-1/actions/"
-    warn "no sha256sum or shasum available, so the command above cannot verify \
-the staged file; check it before running it"
+    # No command at all rather than an unchecked one. A `sudo install` from
+    # this path reads a name any process running as the user can replace
+    # between now and whenever the operator gets to it, as root, with no
+    # digest to catch the swap, no `-f` to refuse a FIFO or a device, and no
+    # bound on what gets copied — and a symlink to a root-readable file would
+    # be published into a mode-0644 directory. Printing that with a warning
+    # attached asks the operator to be the check, which nobody is.
+    warn "neither sha256sum nor shasum could measure the polkit action, so no \
+privileged command is offered for it: an unverified one installs whatever is at \
+the staged path when it runs"
+    log "the action is staged read-only at $(shell_quote "$POLKIT_FILE")"
+    log "compare it against contrib/polkit/com.ekubo.wallet.policy and install it \
+yourself, or install a sha256 tool and re-run this script"
   fi
 fi
 
