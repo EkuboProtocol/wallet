@@ -543,6 +543,23 @@ pub const CALL_DENIED_CODE: &str = "call_denied";
 /// No rule matched this call at all.
 pub const CALL_NOT_ALLOWED_CODE: &str = "call_not_allowed";
 
+/// This plan's EIP-7702 authorization would replace a delegation the account
+/// already has to some other implementation.
+///
+/// Not a rule the owner wrote, and not a rule they can write: the policy
+/// language speaks about calls, and this is the one thing a plan does that is
+/// not one of its calls. A batch carries an authorization as a property of the
+/// transaction envelope, so an allowlist covering every call in the batch says
+/// nothing about it, and the account's code is what a batch changes most
+/// durably — it outlives the batch whether or not the batch succeeds.
+///
+/// So it is an error finding, which makes the outcome `RequiresApproval` and
+/// sends the plan to the person with the replacement named in the review. It
+/// is deliberately not `CALL_DENIED_CODE`: replacing a delegation is a
+/// legitimate thing to want, it is just not a thing that happens because two
+/// transfers were allowlisted.
+pub const DELEGATION_REPLACED_CODE: &str = "delegation_replaced";
+
 /// What the policy decided, and therefore what happens next.
 ///
 /// The distinction between the two negative outcomes is the whole point. A

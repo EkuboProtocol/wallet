@@ -765,3 +765,24 @@ fn a_chain_taking_its_own_rules_is_diffed_against_the_fallback_it_leaves() {
     );
     assert!(granted[0].contains("router"), "{diff:?}");
 }
+
+#[test]
+fn replacing_a_delegation_asks_a_person_rather_than_being_denied_or_allowed() {
+    // The three outcomes mean three different things, and this finding has to
+    // land on the middle one. `Allowed` would sign the authorization with
+    // nobody told; `Rejected` would need the owner to edit a policy that has
+    // no way to speak about delegations at all, and would refuse a
+    // replacement they may well want.
+    let finding = PolicyFinding {
+        severity: FindingSeverity::Error,
+        code: DELEGATION_REPLACED_CODE.into(),
+        message: "would replace the delegation".into(),
+        step: None,
+    };
+    assert!(!policy_allows(std::slice::from_ref(&finding)));
+    assert_eq!(
+        policy_outcome(std::slice::from_ref(&finding)),
+        PolicyOutcome::RequiresApproval
+    );
+    assert!(denial_reasons(std::slice::from_ref(&finding)).is_empty());
+}

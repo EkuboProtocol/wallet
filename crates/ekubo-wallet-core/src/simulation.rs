@@ -21,8 +21,8 @@ use crate::{
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{
-            FindingSeverity, PolicyFinding, PolicyOutcome, SIMULATION_FAILED_CODE, evaluate_policy,
-            policy_allows, policy_outcome,
+            DELEGATION_REPLACED_CODE, FindingSeverity, PolicyFinding, PolicyOutcome,
+            SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
     },
@@ -911,6 +911,23 @@ async fn simulate_execution_through(
             severity: FindingSeverity::Error,
             code: SIMULATION_FAILED_CODE.into(),
             message: "eth_simulateV1 execution did not succeed".into(),
+            step: None,
+        });
+    }
+    // Replacing the account's delegation is not one of the plan's calls, so no
+    // allowlist covering those calls has anything to say about it. Without
+    // this the replacement was a sentence in the review document only, and the
+    // automatic path never draws a review document.
+    if let Some(replaced) = &replaces {
+        findings.push(PolicyFinding {
+            severity: FindingSeverity::Error,
+            code: DELEGATION_REPLACED_CODE.into(),
+            message: format!(
+                "this batch would replace the account's EIP-7702 delegation to {replaced} with \
+                 {CANONICAL_CALIBUR:#x}, which persists whether or not the batch succeeds and \
+                 may leave the previous implementation's storage under one that reads it \
+                 differently"
+            ),
             step: None,
         });
     }
