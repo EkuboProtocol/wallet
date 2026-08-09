@@ -701,6 +701,9 @@ impl DappSession<'_> {
     }
 
     async fn dispatch(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
+        if let Some(refusal) = self.refuse_replaced_account() {
+            return Ok(refusal);
+        }
         match request.method.as_str() {
             "eth_accounts" => Ok(RequestOutcome::Result(json!([self
                 .wallet()
@@ -1232,6 +1235,48 @@ impl DappSession<'_> {
         record
             .signed_transaction_hash
             .context("the broadcast transaction has no hash")
+    }
+
+    /// Refuse everything if the account this session settled on is no longer
+    /// the account that wallet id names.
+    ///
+    /// The session holds the `WalletMetadata` the person picked during the
+    /// connection review, and its address is what the dapp was told and what
+    /// `refuse_foreign_signer` measures every request against. Storing and
+    /// signing, though, go by wallet id: the request row keeps `wallet_id`,
+    /// and the signer is whatever key the credential store holds under it
+    /// today. A wallet id is reusable — `account remove` then `account create`
+    /// under the same name gives it a different key and a different address —
+    /// so those two bindings can come apart while the session is up.
+    ///
+    /// When they do, the session's checks all measure the old address and the
+    /// signing measures the new one. A typed-data payload could name the old
+    /// address as its RPC signer, pass this session's scope, and carry a
+    /// permit whose owner is the *new* address, which is the key that would
+    /// then sign it. A session approved for one account would have produced an
+    /// asset-authorizing signature from another.
+    ///
+    /// So the session ends its usefulness where its account ended. Refusing
+    /// rather than following the id is the only answer that keeps the address
+    /// the dapp was told and the key that signs as the same thing.
+    fn refuse_replaced_account(&self) -> Option<RequestOutcome> {
+        let settled = self.wallet();
+        if self
+            .config
+            .wallet(&settled.id)
+            .is_ok_and(|current| current == *settled)
+        {
+            return None;
+        }
+        Some(RequestOutcome::Error {
+            code: error_code::UNSUPPORTED_ACCOUNTS,
+            message: format!(
+                "The account this session connected with ({}) is no longer configured under {}. \
+                 Disconnect and reconnect to use the account that is.",
+                settled.address.to_checksum(None),
+                settled.id
+            ),
+        })
     }
 
     /// Refuse a request that names an address this session does not control.

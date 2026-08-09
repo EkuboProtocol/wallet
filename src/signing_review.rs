@@ -260,6 +260,11 @@ pub async fn decide_typed_data(
          shown at the end of this review.",
     )
     .fact("Wallet", &request.wallet_id)
+    // As the message review already does. A wallet id is a reusable name;
+    // the address is what a permit's `owner` field has to be read against,
+    // and it is the only way the reviewer can tell that this payload
+    // authorizes the account they think it does.
+    .fact("Signer", wallet.address.to_checksum(None))
     .fact(
         "Asked by",
         requester.unwrap_or("an MCP agent; this queue does not record which"),
