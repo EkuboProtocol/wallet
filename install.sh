@@ -411,16 +411,26 @@ fi
 # therefore read-only, and the printed command verifies a digest computed here
 # rather than trusting whatever is at the path when it finally runs.
 if [ "$OS" = Linux ] && [ -f "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.policy" ]; then
+  POLKIT_SOURCE="$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.policy"
   POLKIT_STAGE="${XDG_DATA_HOME:-$HOME/.local/share}/ekubo-wallet/polkit"
   POLKIT_FILE="$POLKIT_STAGE/com.ekubo.wallet.policy"
-  mkdir -p "$POLKIT_STAGE"
-  install -m 0444 "$SOURCE_DIRECTORY/contrib/polkit/com.ekubo.wallet.policy" "$POLKIT_FILE"
+  # Measured from the packaged file, in the 0700 temporary this script created
+  # and removes on exit — never from the staged copy. Digesting the staged
+  # pathname read a name anything running as the user can replace, so a file
+  # swapped between `install` and `sha256sum` was measured as itself: the
+  # digest then said the two attacker-controlled reads agreed, which is true
+  # of any file and proves nothing about which file it is. Root would verify
+  # the malicious bytes against the malicious bytes' digest and install them
+  # as the system policy, and the policy in question is the one that decides
+  # whether signing prompts for the owner at all.
   POLKIT_DIGEST=""
   if command -v sha256sum >/dev/null 2>&1; then
-    POLKIT_DIGEST=$(sha256sum "$POLKIT_FILE" | cut -d' ' -f1)
+    POLKIT_DIGEST=$(sha256sum "$POLKIT_SOURCE" | cut -d' ' -f1)
   elif command -v shasum >/dev/null 2>&1; then
-    POLKIT_DIGEST=$(shasum -a 256 "$POLKIT_FILE" | cut -d' ' -f1)
+    POLKIT_DIGEST=$(shasum -a 256 "$POLKIT_SOURCE" | cut -d' ' -f1)
   fi
+  mkdir -p "$POLKIT_STAGE"
+  install -m 0444 "$POLKIT_SOURCE" "$POLKIT_FILE"
   log "owner authentication needs the polkit action installed once:"
   if [ -n "$POLKIT_DIGEST" ]; then
     # Checking the digest and then installing names the path twice, and the
