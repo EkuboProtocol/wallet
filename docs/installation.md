@@ -89,18 +89,6 @@ produced by the binary itself: `ekubo-wallet shell-completion bash|zsh|fish` wri
 the completion script, and `ekubo-wallet policy schema` writes the policy JSON
 Schema. Registration is `ekubo-wallet meta-agent add`.
 
-For a short name, alias it in your shell rather than copying the executable:
-
-```sh
-alias ew=ekubo-wallet
-```
-
-A copy would be a second client identity to the OS credential store and would
-need its own keychain grant; an alias resolves to the same executable, so one
-grant still covers it. Shell completion follows the real name, so complete
-against `ekubo-wallet` (in Bash, `complete -F _ekubo_wallet ew` after sourcing
-the script extends it to the alias).
-
 macOS archives are `.zip` rather than `.tar.gz`. If a release is published
 without Apple signing — its notes say so explicitly — Gatekeeper blocks the
 first run until you verify the download and then clear the quarantine
