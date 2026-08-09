@@ -209,18 +209,12 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
         "a token that already has a name is not a decision left to make"
     );
 
-    // The stored row is still named by the timestamp it was read at, so a
-    // suggestion replaced since the owner looked is left for its own review
-    // rather than silently consumed.
-    assert_eq!(
-        store
-            .discard_proposals(&[(1, token, chrono::DateTime::UNIX_EPOCH)])
-            .unwrap(),
-        0,
-        "a stale reading must not consume the current row"
-    );
-    assert_eq!(store.discard_proposals(&[(1, token, reviewed)]).unwrap(), 1);
+    // Consumed rather than merely hidden. A row nothing can display and
+    // nothing can decide still occupied the capacity every later proposal is
+    // charged against, so enough of them refused every suggestion while
+    // telling the owner to run a review that had nothing on it.
     assert_eq!(store.count_proposals().unwrap(), 0);
+    assert_eq!(store.discard_proposals(&[(1, token, reviewed)]).unwrap(), 0);
     let repeat = store
         .propose(&[usdc(1, token)], &ProposalSource::Claimed("another-list"))
         .unwrap();
@@ -643,4 +637,39 @@ fn an_impostor_cannot_be_proposed_into_a_served_lists_group() {
         2,
         "the two proposals landed in one review group: {sources:?}"
     );
+}
+
+#[test]
+fn a_shadowed_suggestion_cannot_fill_the_queue_it_is_invisible_in() {
+    // Capacity, review visibility, and the existence of a row all have to mean
+    // the same thing. When they did not, an agent could import a list, have it
+    // confirmed, and leave rows that no review could show and no decision
+    // could release -- and enough of those refused every later suggestion with
+    // a message telling the owner to review a screen that was empty.
+    let (_directory, mut store) = store();
+    let token = Address::repeat_byte(0x42);
+    store
+        .propose(&[usdc(1, token)], &ProposalSource::Claimed("list-a"))
+        .unwrap();
+    assert_eq!(store.count_proposals().unwrap(), 1);
+
+    // Confirming by a path that carries no proposal generation -- the CLI's
+    // file and stdin import is one -- still consumes the suggestion.
+    store.add(&usdc(1, token), "list-a").unwrap();
+    assert!(store.proposals().unwrap().is_empty());
+    assert_eq!(store.count_proposals().unwrap(), 0);
+
+    // And a row that somehow survives confirmation is not counted either, so
+    // the two can never disagree about how full the queue is.
+    store
+        .database
+        .connection
+        .execute(
+            "INSERT INTO token_proposals(chain_id, address, symbol, name, decimals, source, \
+             proposed_at) VALUES (1, ?1, 'USDC', 'USD Coin', 6, 'list-a', 0)",
+            rusqlite::params![Blob(token)],
+        )
+        .unwrap();
+    assert!(store.proposals().unwrap().is_empty());
+    assert_eq!(store.count_proposals().unwrap(), 0);
 }

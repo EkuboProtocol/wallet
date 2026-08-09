@@ -333,6 +333,19 @@ impl TokenStore {
                 Millis(sql::now()),
             ],
         )?;
+        // A confirmed address has nothing left to decide, so any suggestion
+        // for it is consumed here rather than left to be filtered out of every
+        // later read. Unconditional: the row is meaningless whether this call
+        // inserted the token or found it already there, and the exact-
+        // generation delete the review path uses misses a suggestion whose
+        // content changed while the owner was looking at it.
+        self.database.connection.execute(
+            "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+            params![
+                i64::try_from(token.chain_id).context("chain ID out of range")?,
+                Blob(token.address)
+            ],
+        )?;
         Ok(changed == 1)
     }
 
@@ -426,6 +439,16 @@ impl TokenStore {
                 )
                 .optional()?;
             if confirmed.is_some() {
+                // And any suggestion left over for it goes, in this same
+                // transaction. Otherwise the row survives every read that
+                // filters it out and every review that cannot show it.
+                transaction.execute(
+                    "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+                    params![
+                        i64::try_from(token.chain_id).context("chain ID out of range")?,
+                        Blob(token.address)
+                    ],
+                )?;
                 summary.already_confirmed += 1;
                 continue;
             }
@@ -544,9 +567,25 @@ impl TokenStore {
         Ok(rows)
     }
 
+    /// Suggestions the owner can actually act on, which is the same set
+    /// [`Self::proposals`] renders and the same set capacity is charged
+    /// against.
+    ///
+    /// The `NOT EXISTS` is what makes those three agree. Review has always
+    /// hidden a proposal whose address is already confirmed -- there is no
+    /// decision left to take about it -- while the count included it, so a
+    /// hidden row went on occupying capacity that no amount of reviewing could
+    /// release. Filling the queue with rows the owner is then told to review,
+    /// on a screen that shows none of them, denies the whole naming pipeline
+    /// until someone edits the database.
     pub fn count_proposals(&self) -> Result<u64> {
         let count: i64 = self.database.connection.query_row(
-            "SELECT COUNT(*) FROM token_proposals",
+            "SELECT COUNT(*) FROM token_proposals AS proposal
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM tokens
+                 WHERE tokens.chain_id = proposal.chain_id
+                   AND tokens.address = proposal.address
+             )",
             [],
             |row| row.get(0),
         )?;
