@@ -74,7 +74,7 @@ impl AddressBookStore {
         validate_alias(alias)?;
         ensure!(chain_id > 0, "chain ID must be positive");
         let note = note
-            .map(sanitize_note)
+            .map(validate_note)
             .transpose()?
             .filter(|note| !note.is_empty());
         let now = sql::now();
@@ -213,7 +213,10 @@ pub fn validate_alias(alias: &str) -> Result<()> {
     Ok(())
 }
 
-fn sanitize_note(note: &str) -> Result<String> {
+/// Rejects a note outright rather than cleaning it, unlike the crate's
+/// `sanitize` module: an owner-typed label should fail visibly while they are
+/// still typing it, not get silently stripped and stored as something else.
+fn validate_note(note: &str) -> Result<String> {
     // The shared predicate, not `char::is_control`. A note is stored text that
     // labels an address at review time, so it is refused for the same reasons
     // every other displayed string is: a bidirectional control reorders what
