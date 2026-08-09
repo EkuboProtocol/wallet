@@ -73,6 +73,14 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+# Cargo turns overflow checks off in `release` and leaves them on in `dev`, so
+# without this line every test in this repository runs against arithmetic that
+# traps and the one build anybody installs runs against arithmetic that wraps.
+# A wallet that wraps does not fail — it produces a number, and a wrong amount,
+# fee cap, deadline, or index is indistinguishable downstream from a right one.
+# Ship what the tests were written against. This is the workspace root manifest,
+# so it covers the kernel crate and every dependency in the same build.
+overflow-checks = true
 
 [lints]
 workspace = true
