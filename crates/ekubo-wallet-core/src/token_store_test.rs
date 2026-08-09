@@ -568,7 +568,11 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
         .propose(&[renamed], &ProposalSource::Claimed("list-a"))
         .unwrap();
     let second = store.proposals().unwrap()[0].proposed_at;
-    assert_ne!(first, second);
+    // Strictly later, not merely "now". These two calls land inside the same
+    // millisecond every time this test runs, and `sql::now` truncates to
+    // milliseconds -- so taking the current moment left the rotated row
+    // wearing the name the owner's decision was about to reach for.
+    assert!(second > first, "{first} -> {second}");
     assert_eq!(store.discard_proposals(&[(1, address, first)]).unwrap(), 0);
 }
 

@@ -521,7 +521,16 @@ impl TokenStore {
                      name = excluded.name,
                      decimals = excluded.decimals,
                      source = excluded.source,
-                     proposed_at = excluded.proposed_at
+                     -- Strictly later than the value being replaced, rather
+                     -- than simply the current moment. sql::now is truncated
+                     -- to milliseconds, so a suggestion rewritten inside the
+                     -- same millisecond as the one it replaces would keep the
+                     -- old name -- and that name is what a decision reaches
+                     -- back for, so a reject taken against the text the owner
+                     -- read would consume text they never saw. One
+                     -- millisecond is enough: this only has to be a value
+                     -- that is not the one it just was.
+                     proposed_at = max(excluded.proposed_at, proposed_at + 1)
                  WHERE symbol IS NOT excluded.symbol
                     OR name IS NOT excluded.name
                     OR decimals IS NOT excluded.decimals
