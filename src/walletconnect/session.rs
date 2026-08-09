@@ -228,6 +228,26 @@ enum Woke {
 /// dapp asked for, the answer is that this session is over.
 const EXPIRED_REFUSAL: &str = "This session has expired. Reconnect to continue.";
 
+/// The refusal to send for a pairing whose deadline is `expiry`, at `now`, or
+/// `None` when it has not passed or the dapp never named one.
+///
+/// Checked when a proposal arrives *and* again after the review it triggers,
+/// because a review takes as long as a person takes and settling grants a
+/// fresh seven days. A deadline tested only on the way in bounds nothing: it
+/// would let a pairing that lapsed an hour earlier become a week-long session.
+fn pairing_refusal(
+    expiry: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> Option<String> {
+    let expiry = expiry?;
+    (now >= expiry).then(|| {
+        format!(
+            "This pairing expired at {expiry}. Pairing URIs are short-lived: ask the dapp to \
+             connect again and paste the new link."
+        )
+    })
+}
+
 /// Whether a session whose deadline is `expiry` has reached it at `now`.
 ///
 /// One rule, used by the per-request scope check and by the gate that keeps
@@ -282,6 +302,14 @@ pub struct Session<'a> {
     handler: &'a dyn SessionHandler,
     pairing_topic: String,
     pairing_key: SymKey,
+    /// When the dapp said this pairing stops being valid, if it said.
+    ///
+    /// Carried rather than discarded after parsing. A pairing URI is a secret
+    /// that travels through a clipboard and a terminal's scrollback, and its
+    /// deadline is the dapp's statement about how long a copy is worth
+    /// anything. Checking it once when the string is pasted and then waiting
+    /// on the topic indefinitely made that statement decorative.
+    pairing_expiry: Option<chrono::DateTime<Utc>>,
     relay_protocol: String,
     relay_data: Option<String>,
     settled: Option<Settled>,
@@ -304,6 +332,7 @@ impl<'a> Session<'a> {
             handler,
             pairing_topic: pairing.topic,
             pairing_key: pairing.sym_key,
+            pairing_expiry: pairing.expiry,
             relay_protocol: pairing.relay_protocol,
             relay_data: pairing.relay_data,
             settled: None,
@@ -540,6 +569,11 @@ impl<'a> Session<'a> {
                     .await;
             }
         };
+        if let Some(refusal) = self.stale_pairing() {
+            return self
+                .reject_proposal(id, error_code::INVALID_METHOD, refusal)
+                .await;
+        }
         if let Some(expiry) = proposal.expiry_timestamp
             && expiry <= Utc::now().timestamp()
         {
@@ -560,6 +594,29 @@ impl<'a> Session<'a> {
             }
             ProposalDecision::Approve(scope) => scope,
         };
+
+        // Both deadlines again, because the review took as long as a person
+        // takes and either may have passed while it was on screen. Settling
+        // grants a fresh seven days, so a deadline checked only on the way in
+        // bounds nothing: it would let a pairing that expired an hour ago, or
+        // a proposal that did, become a week-long session.
+        if let Some(refusal) = self.stale_pairing() {
+            return self
+                .reject_proposal(id, error_code::INVALID_METHOD, refusal)
+                .await;
+        }
+        if let Some(expiry) = proposal.expiry_timestamp
+            && expiry <= Utc::now().timestamp()
+        {
+            return self
+                .reject_proposal(
+                    id,
+                    error_code::INVALID_METHOD,
+                    "The session proposal expired while it was being reviewed. Ask the dapp to \
+                     connect again.",
+                )
+                .await;
+        }
 
         // Key agreement, then settle, then answer the proposal — in that order.
         // The dapp starts listening on the session topic the moment it reads
@@ -761,6 +818,11 @@ impl<'a> Session<'a> {
         self.relay
             .publish(topic, &envelope, publish_tag, publish_ttl)
             .await
+    }
+
+    /// The refusal to send when the pairing's own deadline has passed.
+    fn stale_pairing(&self) -> Option<String> {
+        pairing_refusal(self.pairing_expiry, Utc::now())
     }
 
     /// Whether the settled session's deadline has passed. An unsettled session

@@ -342,3 +342,24 @@ fn the_deadline_is_the_same_deadline_for_every_method() {
     assert_eq!(code, error_code::USER_DISCONNECTED);
     assert_eq!(message, EXPIRED_REFUSAL);
 }
+
+#[test]
+fn a_pairings_own_deadline_outlives_the_moment_the_uri_was_pasted() {
+    // A pairing URI is a secret that travels through a clipboard and a
+    // terminal's scrollback, and its expiry is the dapp's statement about how
+    // long a copy is worth anything. Parsing used to be the only place that
+    // read it, after which the session waited on the topic indefinitely and
+    // settled a fresh seven days whenever a proposal turned up.
+    let now = Utc::now();
+    assert!(pairing_refusal(None, now).is_none(), "no deadline to pass");
+    assert!(pairing_refusal(Some(now + chrono::TimeDelta::seconds(60)), now).is_none());
+
+    let lapsed = pairing_refusal(Some(now - chrono::TimeDelta::seconds(1)), now)
+        .expect("a pairing past its deadline must be refused");
+    assert!(lapsed.contains("expired"), "{lapsed}");
+    assert!(lapsed.contains("connect again"), "{lapsed}");
+
+    // The deadline itself is past it, matching how a settled session's own
+    // deadline is read.
+    assert!(pairing_refusal(Some(now), now).is_some());
+}
