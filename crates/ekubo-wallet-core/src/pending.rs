@@ -111,6 +111,15 @@ pub struct PendingTransaction {
     /// recognizes all of them as "cancelled by this wallet".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cancel_transaction_hashes: Vec<String>,
+    /// Which lease this row is on. Incremented by every lifecycle write, and
+    /// the name the compare-and-set transitions match on.
+    ///
+    /// Internal to the lifecycle, so it is not part of what a caller reads: an
+    /// agent has no use for it, and a number that only means "how many times
+    /// has this row moved" invites being read as something it is not.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub generation: i64,
 }
 
 pub struct PendingStore {
@@ -313,7 +322,7 @@ impl PendingStore {
     /// outright — cancel that on chain instead.
     pub fn discard_unsent(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
-            "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2
+            "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2, generation = generation + 1
              WHERE request_id = ?1 AND status = 'signed'",
             params![request_id, Millis(sql::now())],
         )?;
@@ -348,7 +357,7 @@ impl PendingStore {
         );
         transaction.execute(
             "UPDATE pending_transactions
-             SET status = 'rejected', decided_at = ?2, updated_at = ?2
+             SET status = 'rejected', decided_at = ?2, updated_at = ?2, generation = generation + 1
              WHERE request_id = ?1 AND status = 'awaiting_approval'",
             params![request_id, Millis(sql::now())],
         )?;
@@ -424,7 +433,7 @@ impl PendingStore {
                 "UPDATE pending_transactions SET
                 status = 'signed', decided_at = ?2, updated_at = ?2,
                 serialized_transaction = ?3, signed_transaction_hash = ?4,
-                review_digest = ?5
+                review_digest = ?5, generation = generation + 1
              WHERE request_id = ?1 AND status = 'awaiting_approval'",
                 params![
                     request_id,
@@ -464,7 +473,7 @@ impl PendingStore {
             .optional()?;
         if active_revision != Some(policy_revision) {
             transaction.execute(
-                "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2
+                "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?2, generation = generation + 1
                  WHERE request_id = ?1 AND status = 'signed'",
                 params![request_id, Millis(sql::now())],
             )?;
@@ -472,7 +481,7 @@ impl PendingStore {
             anyhow::bail!("active policy changed after this transaction was signed");
         }
         transaction.execute(
-            "UPDATE pending_transactions SET status = 'submitting', updated_at = ?2
+            "UPDATE pending_transactions SET status = 'submitting', updated_at = ?2, generation = generation + 1
              WHERE request_id = ?1 AND status = 'signed'",
             params![request_id, Millis(sql::now())],
         )?;
@@ -480,7 +489,8 @@ impl PendingStore {
         self.get(request_id)
     }
 
-    /// Hand the submission lease back, but only the lease `leased_at` names.
+    /// Hand the submission lease back, but only the lease `leased_generation`
+    /// names.
     ///
     /// `status = 'submitting'` is not enough to identify a lease. Recovery
     /// observes a record outside any lock, decides its lease has expired, and
@@ -495,12 +505,12 @@ impl PendingStore {
     pub fn release_submission(
         &mut self,
         request_id: Uuid,
-        leased_at: DateTime<Utc>,
+        leased_generation: i64,
     ) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
-            "UPDATE pending_transactions SET status = 'signed', updated_at = ?2
-             WHERE request_id = ?1 AND status = 'submitting' AND updated_at = ?3",
-            params![request_id, Millis(sql::now()), Millis(leased_at)],
+            "UPDATE pending_transactions SET status = 'signed', updated_at = ?2, generation = generation + 1
+             WHERE request_id = ?1 AND status = 'submitting' AND generation = ?3",
+            params![request_id, Millis(sql::now()), leased_generation],
         )?;
         ensure!(
             changed == 1,
@@ -509,7 +519,8 @@ impl PendingStore {
         self.get(request_id)
     }
 
-    /// Record that the lease `leased_at` names put this envelope on the wire.
+    /// Record that the lease `leased_generation` names put this envelope on
+    /// the wire.
     ///
     /// Leased for the same reason as `release_submission`: the hash guard
     /// cannot tell two leases apart, because a rebroadcast is the same bytes
@@ -521,19 +532,19 @@ impl PendingStore {
         &mut self,
         request_id: Uuid,
         transaction_hash: &str,
-        leased_at: DateTime<Utc>,
+        leased_generation: i64,
     ) -> Result<PendingTransaction> {
         let transaction_hash = parse_hash(transaction_hash)?;
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET
-                status = 'broadcast', broadcast_transaction_hash = ?2, updated_at = ?3
+                status = 'broadcast', broadcast_transaction_hash = ?2, updated_at = ?3, generation = generation + 1
              WHERE request_id = ?1 AND status = 'submitting'
-               AND signed_transaction_hash = ?2 AND updated_at = ?4",
+               AND signed_transaction_hash = ?2 AND generation = ?4",
             params![
                 request_id,
                 Blob(transaction_hash),
                 Millis(sql::now()),
-                Millis(leased_at)
+                leased_generation
             ],
         )?;
         ensure!(
@@ -549,7 +560,7 @@ impl PendingStore {
     /// signed envelope cannot expand what was already authorized.
     pub fn claim_broadcast_retry(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
-            "UPDATE pending_transactions SET status = 'submitting', updated_at = ?2
+            "UPDATE pending_transactions SET status = 'submitting', updated_at = ?2, generation = generation + 1
              WHERE request_id = ?1 AND status = 'broadcast'
                AND serialized_transaction IS NOT NULL
                AND signed_transaction_hash IS NOT NULL
@@ -627,7 +638,7 @@ impl PendingStore {
         transaction.execute(
             "UPDATE pending_transactions SET
                 status = 'cancelling', cancel_serialized_transaction = ?2,
-                cancel_transaction_hashes = ?3, updated_at = ?4
+                cancel_transaction_hashes = ?3, updated_at = ?4, generation = generation + 1
              WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
             params![
                 request_id,
@@ -653,7 +664,7 @@ impl PendingStore {
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET
                 status = 'cancelled', block_number = ?2, updated_at = ?3,
-                gas_used = ?4, effective_gas_price = ?5
+                gas_used = ?4, effective_gas_price = ?5, generation = generation + 1
              WHERE request_id = ?1 AND status IN ('cancelling', 'replaced')",
             params![
                 request_id,
@@ -680,7 +691,8 @@ impl PendingStore {
     /// that did mine. So `replaced` is reachable in error, and `finalize` and
     /// `mark_cancelled` both accept it as an origin: a receipt that turns up
     /// later corrects the verdict rather than being ignored by it.
-    /// Retire the envelope the caller observed at `observed_at`.
+    /// Retire the envelope the caller observed at generation
+    /// `observed_generation`.
     ///
     /// Leased for the same reason as `release_submission` and `mark_broadcast`:
     /// a replacement verdict is reached from a snapshot read outside the lock,
@@ -693,13 +705,13 @@ impl PendingStore {
     pub fn mark_replaced(
         &mut self,
         request_id: Uuid,
-        observed_at: DateTime<Utc>,
+        observed_generation: i64,
     ) -> Result<PendingTransaction> {
         let changed = self.database.connection.execute(
-            "UPDATE pending_transactions SET status = 'replaced', updated_at = ?2
+            "UPDATE pending_transactions SET status = 'replaced', updated_at = ?2, generation = generation + 1
              WHERE request_id = ?1 AND status IN ('submitting', 'broadcast', 'cancelling')
-               AND updated_at = ?3",
-            params![request_id, Millis(sql::now()), Millis(observed_at)],
+               AND generation = ?3",
+            params![request_id, Millis(sql::now()), observed_generation],
         )?;
         ensure!(
             changed == 1,
@@ -723,7 +735,7 @@ impl PendingStore {
         let status = if succeeded { "confirmed" } else { "reverted" };
         let changed = self.database.connection.execute(
             "UPDATE pending_transactions SET status = ?2, block_number = ?3, updated_at = ?4,
-                gas_used = ?5, effective_gas_price = ?6
+                gas_used = ?5, effective_gas_price = ?6, generation = generation + 1
              WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling', 'replaced')",
             params![
                 request_id,
@@ -817,7 +829,8 @@ impl PendingStore {
                         decided_at, serialized_transaction,
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
                         approval_required, review_digest, cancel_serialized_transaction,
-                        cancel_transaction_hashes, gas_used, effective_gas_price, plan_source
+                        cancel_transaction_hashes, gas_used, effective_gas_price, plan_source,
+                        generation
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id],
                 |row| {
@@ -843,6 +856,7 @@ impl PendingStore {
                         gas_used: row.get(18)?,
                         effective_gas_price: row.blob_opt(19)?,
                         plan_source: row.get(20)?,
+                        generation: row.get(21)?,
                     })
                 },
             )
@@ -876,6 +890,7 @@ struct PendingRow {
     gas_used: Option<i64>,
     effective_gas_price: Option<u128>,
     plan_source: Option<String>,
+    generation: i64,
 }
 
 impl PendingRow {
@@ -976,6 +991,7 @@ impl PendingRow {
             .transpose()?;
         Ok(PendingTransaction {
             request_id,
+            generation: self.generation,
             wallet_id: self.wallet_id,
             network_name: self.network_name,
             chain_id: self.chain_id.to_string(),

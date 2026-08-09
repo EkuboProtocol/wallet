@@ -144,7 +144,7 @@ pub async fn reconcile_record(
                 record = pending.mark_broadcast(
                     record.request_id,
                     &transaction_hash,
-                    record.updated_at,
+                    record.generation,
                 )?;
             }
             pending.finalize(
@@ -163,7 +163,7 @@ pub async fn reconcile_record(
             {
                 return Ok(record);
             }
-            lock(pending)?.mark_replaced(record.request_id, record.updated_at)
+            lock(pending)?.mark_replaced(record.request_id, record.generation)
         }
         ChainObservation::StillPending => {
             if record.status == PendingStatus::Submitting
@@ -176,12 +176,12 @@ pub async fn reconcile_record(
                     pending.mark_broadcast(
                         record.request_id,
                         &transaction_hash,
-                        record.updated_at,
+                        record.generation,
                     )?
                 } else {
                     // The lease this pass observed, not whichever one the row
                     // holds now: recovery decided outside the lock.
-                    pending.release_submission(record.request_id, record.updated_at)?
+                    pending.release_submission(record.request_id, record.generation)?
                 };
             }
             Ok(record)
@@ -294,7 +294,7 @@ async fn reconcile_cancelling(
             Some(&receipt.mined_fee()),
         );
     }
-    lock(pending)?.mark_replaced(record.request_id, record.updated_at)
+    lock(pending)?.mark_replaced(record.request_id, record.generation)
 }
 
 /// Broadcast a claimed submission's exact persisted bytes and persist what
@@ -327,7 +327,7 @@ pub async fn submit_claimed(
             Ok(broadcast) => broadcast,
             Err(error) => {
                 lock(pending)?
-                    .release_submission(claimed.request_id, claimed.updated_at)
+                    .release_submission(claimed.request_id, claimed.generation)
                     .context("failed to release transaction submission lease")?;
                 return Err(error);
             }
@@ -337,7 +337,7 @@ pub async fn submit_claimed(
         let broadcast_record = pending.mark_broadcast(
             claimed.request_id,
             &broadcast.transaction_hash,
-            claimed.updated_at,
+            claimed.generation,
         )?;
         match broadcast.receipt_status {
             BroadcastReceiptStatus::Success | BroadcastReceiptStatus::Reverted => pending

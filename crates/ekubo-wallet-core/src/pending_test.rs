@@ -67,7 +67,7 @@ fn persists_exact_plan_and_lifecycle_without_spend_state() {
     assert_eq!(claimed.status, PendingStatus::Submitting);
     assert_eq!(
         store
-            .mark_broadcast(request.request_id, hash, claimed.updated_at)
+            .mark_broadcast(request.request_id, hash, claimed.generation)
             .unwrap()
             .status,
         PendingStatus::Broadcast
@@ -142,7 +142,7 @@ fn only_one_signed_transaction_can_be_in_flight_per_wallet_and_chain() {
 
     let leased = store.claim_for_submission(first.request_id).unwrap();
     store
-        .mark_broadcast(first.request_id, first_hash, leased.updated_at)
+        .mark_broadcast(first.request_id, first_hash, leased.generation)
         .unwrap();
     store.finalize(first.request_id, true, 123, None).unwrap();
     assert!(
@@ -224,7 +224,7 @@ fn a_stale_observer_cannot_release_a_lease_that_was_reclaimed() {
     // by someone else. The row is `submitting` either way, so status alone
     // cannot tell the two leases apart.
     store
-        .release_submission(signed.request_id, observed.updated_at)
+        .release_submission(signed.request_id, observed.generation)
         .unwrap();
     let live = store.claim_for_submission(signed.request_id).unwrap();
     assert_ne!(live.updated_at, observed.updated_at);
@@ -233,12 +233,12 @@ fn a_stale_observer_cannot_release_a_lease_that_was_reclaimed() {
     // steal the broadcast either.
     assert!(
         store
-            .release_submission(signed.request_id, observed.updated_at)
+            .release_submission(signed.request_id, observed.generation)
             .is_err()
     );
     assert!(
         store
-            .mark_broadcast(signed.request_id, hash, observed.updated_at)
+            .mark_broadcast(signed.request_id, hash, observed.generation)
             .is_err()
     );
     assert_eq!(
@@ -249,7 +249,7 @@ fn a_stale_observer_cannot_release_a_lease_that_was_reclaimed() {
     // The holder of the live lease still gets its envelope on the wire.
     assert_eq!(
         store
-            .mark_broadcast(signed.request_id, hash, live.updated_at)
+            .mark_broadcast(signed.request_id, hash, live.generation)
             .unwrap()
             .status,
         PendingStatus::Broadcast
@@ -275,7 +275,7 @@ fn settlement_records_what_the_transaction_actually_cost() {
     assert!(signed.mined_fee.is_none());
     let leased = store.claim_for_submission(signed.request_id).unwrap();
     store
-        .mark_broadcast(signed.request_id, hash, leased.updated_at)
+        .mark_broadcast(signed.request_id, hash, leased.generation)
         .unwrap();
     let fee = MinedFee {
         gas_used: "447730".into(),
@@ -308,7 +308,7 @@ fn ambiguous_broadcast_can_only_reclaim_the_same_signed_bytes() {
         .unwrap();
     let leased = store.claim_for_submission(signed.request_id).unwrap();
     store
-        .mark_broadcast(signed.request_id, hash, leased.updated_at)
+        .mark_broadcast(signed.request_id, hash, leased.generation)
         .unwrap();
 
     let current = store.database.get("primary").unwrap().unwrap();
@@ -346,23 +346,23 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
     // been replaced on chain.
     assert!(
         store
-            .mark_replaced(first.request_id, first.updated_at)
+            .mark_replaced(first.request_id, first.generation)
             .is_err()
     );
 
     let leased = store.claim_for_submission(first.request_id).unwrap();
     let broadcast = store
-        .mark_broadcast(first.request_id, first_hash, leased.updated_at)
+        .mark_broadcast(first.request_id, first_hash, leased.generation)
         .unwrap();
     // A verdict reached from a snapshot older than the row does not apply.
     assert!(
         store
-            .mark_replaced(first.request_id, leased.updated_at)
+            .mark_replaced(first.request_id, leased.generation)
             .is_err(),
         "a stale observation must not retire a row that has moved since"
     );
     let replaced = store
-        .mark_replaced(first.request_id, broadcast.updated_at)
+        .mark_replaced(first.request_id, broadcast.generation)
         .unwrap();
     assert_eq!(replaced.status, PendingStatus::Replaced);
 
@@ -371,7 +371,7 @@ fn replacement_is_terminal_and_frees_the_in_flight_slot() {
     assert!(store.claim_broadcast_retry(first.request_id).is_err());
     assert!(
         store
-            .mark_replaced(first.request_id, replaced.updated_at)
+            .mark_replaced(first.request_id, replaced.generation)
             .is_err()
     );
 
@@ -435,7 +435,7 @@ fn broadcast_original(store: &mut PendingStore) -> Uuid {
         .mark_broadcast(
             signed.request_id,
             hash_of(ORIGINAL_BYTES).as_str(),
-            leased.updated_at,
+            leased.generation,
         )
         .unwrap();
     signed.request_id
@@ -472,7 +472,7 @@ fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
         .mark_broadcast(
             signed.request_id,
             hash_of(ORIGINAL_BYTES).as_str(),
-            leased.updated_at,
+            leased.generation,
         )
         .unwrap();
     let request_id = signed.request_id;
@@ -614,7 +614,7 @@ fn foreign_replacement_can_win_the_race_against_a_cancellation() {
         .unwrap();
     assert_eq!(
         store
-            .mark_replaced(request_id, store.get(request_id).unwrap().updated_at)
+            .mark_replaced(request_id, store.get(request_id).unwrap().generation)
             .unwrap()
             .status,
         PendingStatus::Replaced
@@ -829,4 +829,48 @@ fn a_plan_source_separates_what_was_proved_from_what_was_claimed() {
     // The cap is on bytes, because that is what the column holds.
     let long = format!("WalletConnect: {}", "e".repeat(MAX_PLAN_SOURCE_BYTES));
     assert!(validate_plan_source(Some(&long)).is_err());
+}
+
+#[test]
+fn a_reclaim_within_one_millisecond_still_invalidates_a_replacement_verdict() {
+    // The reconciler reads a row outside the lock, decides from a node's
+    // answer that the envelope was replaced, and writes that verdict some
+    // moments later. In between, `claim_broadcast_retry` can take the row back
+    // for an exact-byte rebroadcast. `mark_replaced` accepts both `broadcast`
+    // and `submitting`, so only the lease name keeps the stale verdict off the
+    // new lease -- and `updated_at` at millisecond resolution is not a name,
+    // because both writes can land inside the same millisecond.
+    let (_directory, mut store) = store();
+    let hash = hash_of(ORIGINAL_BYTES);
+    let hash = hash.as_str();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash,
+        )
+        .unwrap();
+    let leased = store.claim_for_submission(signed.request_id).unwrap();
+    let observed = store
+        .mark_broadcast(signed.request_id, hash, leased.generation)
+        .unwrap();
+
+    let reclaimed = store.claim_broadcast_retry(signed.request_id).unwrap();
+    assert_eq!(reclaimed.status, PendingStatus::Submitting);
+    assert_ne!(reclaimed.generation, observed.generation);
+
+    assert!(
+        store
+            .mark_replaced(signed.request_id, observed.generation)
+            .is_err(),
+        "a verdict from before the reclaim retired a live submission"
+    );
+    assert_eq!(
+        store.get(signed.request_id).unwrap().status,
+        PendingStatus::Submitting
+    );
 }

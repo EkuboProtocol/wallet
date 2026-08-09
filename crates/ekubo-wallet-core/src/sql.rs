@@ -152,15 +152,18 @@ impl FromSql for Millis {
 ///
 /// Every stored timestamp goes through here rather than through `Utc::now`
 /// directly, so a value held in memory equals the value that comes back out.
-/// Several writes depend on that: a submission lease is released by matching
-/// the `updated_at` that claimed it, and a reviewed proposal is consumed by
-/// matching the moment it was proposed. Truncating at this boundary, rather
-/// than silently inside the column, keeps those comparisons exact.
+/// A reviewed proposal is consumed by matching the moment it was proposed, and
+/// truncating at this boundary rather than silently inside the column keeps
+/// that comparison exact.
 ///
-/// The cost is that two events within one millisecond share a name. Nothing
-/// here is a deadline — no status is time-derived, by design — and both
-/// compare-and-set sites that use a timestamp as a lease name also match on
-/// state that a same-millisecond collision would have to reproduce as well.
+/// The cost is that two events within one millisecond share a name, so a
+/// moment from here is not usable as a generation. The pending-transaction
+/// lifecycle used to name its leases with `updated_at` and does not any more:
+/// it has a `generation` column, incremented by every write, precisely because
+/// a name that can repeat let a stale replacement verdict land on a lease
+/// taken since. Nothing else here is a deadline — no status is time-derived,
+/// by design — and the proposal comparison is guarded by the review's own
+/// state as well.
 #[must_use]
 pub fn now() -> DateTime<Utc> {
     Utc::now().trunc_subsecs(3)

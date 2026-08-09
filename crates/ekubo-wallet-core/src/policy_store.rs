@@ -46,7 +46,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // So the number climbs past everything ever written instead. What it costs is
 // the cosmetic point it was reset for; what it buys is that no marker in this
 // file has ever meant anything but the shape it means now.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 /// The retired ladder wrote 1 through 10, and the equality check on open is
 /// the only thing standing between one of those files and this build reading
 /// its TEXT hashes as `BLOB`s. Reusing a number is a compile error, not a
@@ -910,6 +910,12 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  )),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
+                 -- The lease generation. Every lifecycle write increments it,
+                 -- and the compare-and-set transitions match on it rather than
+                 -- on `updated_at`: a wall clock at millisecond resolution
+                 -- gives two writes in the same millisecond the same name, and
+                 -- a lease whose name repeats is not a lease.
+                 generation INTEGER NOT NULL DEFAULT 0,
                  -- When a human decided, whichever way they decided. One
                  -- column because a request gets one decision: two nullable
                  -- timestamps could say a row was both approved and rejected,

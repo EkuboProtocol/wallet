@@ -58,6 +58,7 @@ fn transaction_lines_render_offline() {
     .unwrap();
     let now = chrono::Utc::now();
     let record = PendingTransaction {
+        generation: 0,
         plan_source: None,
         request_id: Uuid::nil(),
         wallet_id: "primary".into(),

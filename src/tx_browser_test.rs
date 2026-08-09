@@ -31,6 +31,7 @@ fn record() -> PendingTransaction {
     .unwrap();
     let now = chrono::Utc::now();
     PendingTransaction {
+        generation: 0,
         plan_source: None,
         request_id: uuid::Uuid::nil(),
         wallet_id: "primary".into(),
