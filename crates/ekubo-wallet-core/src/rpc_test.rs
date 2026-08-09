@@ -296,3 +296,20 @@ async fn a_single_answer_strategy_pins_nothing() {
     network.rpc_strategy = crate::config::RpcStrategy::MOfN { agree: 2 };
     assert!(median_head(&network).await.is_err());
 }
+
+#[test]
+fn a_receipt_the_lifecycle_cannot_store_is_the_endpoints_failure() {
+    // Both fields arrive as u64 and land in signed INTEGER columns. The
+    // conversion used to fail at the far end, inside `PendingStore::finalize`,
+    // after this answer had already been accepted as the truth about the
+    // chain: the row stayed `broadcast`, held the wallet's one in-flight slot
+    // for that chain, and asking again reached the same endpoint.
+    assert!(storable_receipt_fields(21_000_000, 21_000).is_ok());
+    assert!(storable_receipt_fields(u64::MAX, 21_000).is_err());
+    assert!(storable_receipt_fields(21_000_000, u64::MAX).is_err());
+
+    // The boundary itself is storable; one past it is not.
+    let highest = u64::try_from(i64::MAX).unwrap();
+    assert!(storable_receipt_fields(highest, highest).is_ok());
+    assert!(storable_receipt_fields(highest + 1, 0).is_err());
+}

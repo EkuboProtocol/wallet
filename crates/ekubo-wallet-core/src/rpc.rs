@@ -494,12 +494,37 @@ async fn fork_wallet_status(
     })
 }
 
+/// Refuse a receipt whose values the lifecycle cannot store.
+///
+/// `block_number` and `gas_used` arrive as `u64` and end up in `INTEGER`
+/// columns, which are signed. A value above `i64::MAX` is not a plausible
+/// block height or gas figure on any chain — it is an endpoint answering
+/// nonsense — and the conversion used to fail at the far end, inside
+/// `PendingStore::finalize`, after this answer had already been accepted as
+/// the truth about the chain. The row then stayed `broadcast` forever, holding
+/// the wallet's one in-flight slot for that chain, and asking again reached
+/// the same endpoint and got the same answer.
+///
+/// Checked here instead, inside the failover closure, so an endpoint that
+/// answers this way has failed and the next one gets its turn.
+fn storable_receipt_fields(block_number: u64, gas_used: u64) -> Result<()> {
+    ensure!(
+        i64::try_from(block_number).is_ok(),
+        "RPC reported a receipt at block {block_number}, which is not a block height"
+    );
+    ensure!(
+        i64::try_from(gas_used).is_ok(),
+        "RPC reported a receipt burning {gas_used} gas, which no block could hold"
+    );
+    Ok(())
+}
+
 pub async fn transaction_receipt(
     network: &NetworkConfig,
     transaction_hash: &str,
 ) -> Result<Option<ReceiptStatus>> {
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
-    let receipt = try_endpoints(network, |provider| async move {
+    try_endpoints(network, |provider| async move {
         let (chain_id, receipt) = tokio::try_join!(
             with_timeout(provider.get_chain_id()),
             with_timeout(provider.get_transaction_receipt(hash)),
@@ -509,21 +534,24 @@ pub async fn transaction_receipt(
             "RPC reports chain {chain_id}, not {}",
             network.chain_id
         );
-        Ok(receipt)
-    })
-    .await?;
-    receipt
-        .map(|receipt| {
-            Ok(ReceiptStatus {
-                succeeded: receipt.status(),
-                block_number: receipt
+        // Inside the closure, so an unusable receipt is this endpoint failing
+        // rather than the whole lookup failing on its word.
+        receipt
+            .map(|receipt| {
+                let block_number = receipt
                     .block_number
-                    .context("RPC returned a receipt without a block number")?,
-                gas_used: receipt.gas_used,
-                effective_gas_price: receipt.effective_gas_price,
+                    .context("RPC returned a receipt without a block number")?;
+                storable_receipt_fields(block_number, receipt.gas_used)?;
+                Ok(ReceiptStatus {
+                    succeeded: receipt.status(),
+                    block_number,
+                    gas_used: receipt.gas_used,
+                    effective_gas_price: receipt.effective_gas_price,
+                })
             })
-        })
-        .transpose()
+            .transpose()
+    })
+    .await
 }
 
 /// One receipt log, reduced to the fields transfer decoding needs.
@@ -564,6 +592,14 @@ pub async fn transaction_receipt_details(
             "RPC reports chain {chain_id}, not {}",
             network.chain_id
         );
+        // The same check as its twin above, and for the same reason: this
+        // receipt settles a lifecycle row too.
+        if let Some(receipt) = &receipt {
+            let block_number = receipt
+                .block_number
+                .context("RPC returned a receipt without a block number")?;
+            storable_receipt_fields(block_number, receipt.gas_used)?;
+        }
         Ok(receipt)
     })
     .await?;
