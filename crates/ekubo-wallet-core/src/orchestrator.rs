@@ -327,7 +327,25 @@ pub async fn approve_transaction(
         overrides,
         latest: Mutex::new(None),
     };
-    let (approval, simulation) = review.author().await?;
+    // Authoring can fail on a request that is still perfectly rejectable.
+    // Under `m_of_n` a quorum that does not form is reported as a setup
+    // failure carrying no gas figures — deliberately, so nothing downstream
+    // signs against numbers one endpoint chose — and `prepare_execution` needs
+    // gas. The rejection write below happens only after the presenter answers,
+    // so the row stayed `awaiting_approval` with no way through this command
+    // at all, and whatever queued it waited on a decision nobody could give.
+    //
+    // The row is not the problem and must not be thrown away: an endpoint that
+    // is down comes back, and auto-rejecting here would refuse a request the
+    // owner may well want. So the error names the request and the one command
+    // that resolves it without needing any of this.
+    let (approval, simulation) = review.author().await.with_context(|| {
+        format!(
+            "this request could not be prepared for review, so it is still awaiting a decision; \
+             reject it with `ekubo-wallet review {} --decision reject` if it should not proceed",
+            request.request_id
+        )
+    })?;
     // Rejecting here is a decision, not an abort: it is recorded, so the
     // agent waiting on this request learns the answer.
     let decision = presenter
