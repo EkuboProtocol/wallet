@@ -149,6 +149,29 @@ fn simulation_with_native_delta(delta: &str) -> SimulationResult {
     }
 }
 
+/// `n` distinct, equally-unsubstantiated token changes — no queried balance,
+/// so `render_balance_changes`'s substantiation sort leaves them in address
+/// order and none is picked over another when only the count at the
+/// [`MAX_DISPLAYED_BALANCE_CHANGES`] boundary is under test.
+fn simulation_with_n_token_changes(n: u8) -> SimulationResult {
+    use crate::simulation::TokenBalanceChange;
+    let mut simulation = simulation_with_native_delta("0");
+    let changes = &mut simulation.balance_changes.as_mut().unwrap().tokens;
+    for index in 0..n {
+        changes.insert(
+            format!("{:#x}", Address::repeat_byte(index)),
+            TokenBalanceChange {
+                before: None,
+                after: None,
+                delta: None,
+                incoming_transfers: "1".into(),
+                outgoing_transfers: "0".into(),
+            },
+        );
+    }
+    simulation
+}
+
 fn usdc_metadata(token: Address) -> TokenMetadataMap {
     TokenMetadataMap::from([(
         token,
@@ -528,5 +551,35 @@ fn a_real_outflow_survives_a_flood_of_forged_transfer_logs() {
     assert!(
         rendered.contains("not shown"),
         "the truncation notice must still appear: {rendered}"
+    );
+}
+
+#[test]
+fn exactly_at_the_cap_shows_every_change_with_no_truncation_notice() {
+    let simulation =
+        simulation_with_n_token_changes(u8::try_from(MAX_DISPLAYED_BALANCE_CHANGES).unwrap());
+    let network = crate::config::default_networks().remove(0);
+    let lines = render_balance_changes(&simulation, &network, &TokenMetadataMap::new());
+
+    assert!(
+        !lines.iter().any(|(label, _)| label == "…"),
+        "a list exactly at the cap must not claim anything is unshown: {lines:?}"
+    );
+}
+
+#[test]
+fn one_past_the_cap_reports_exactly_one_unshown() {
+    let simulation =
+        simulation_with_n_token_changes(u8::try_from(MAX_DISPLAYED_BALANCE_CHANGES).unwrap() + 1);
+    let network = crate::config::default_networks().remove(0);
+    let lines = render_balance_changes(&simulation, &network, &TokenMetadataMap::new());
+
+    let (_, footer) = lines
+        .iter()
+        .find(|(label, _)| label == "…")
+        .expect("one entry past the cap must produce a truncation notice");
+    assert!(
+        footer.contains("and 1 further token(s)"),
+        "exactly one entry is past the cap, not more or fewer: {footer}"
     );
 }
