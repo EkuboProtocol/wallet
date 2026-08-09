@@ -1223,6 +1223,23 @@ fn verify_integrity(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Forces `keyring`'s one-time, process-wide credential-store backend
+/// selection before any async runtime exists to conflict with it.
+///
+/// On Linux, that selection connects to D-Bus through `zbus`'s *blocking*
+/// API, which starts its own Tokio runtime on first use. If that first use
+/// happens on a thread already inside a Tokio runtime -- which every
+/// credential-store access here does, since the whole CLI runs under
+/// `#[tokio::main]` -- Tokio panics ("Cannot start a runtime from within a
+/// runtime") rather than nesting runtimes; it does this unconditionally, so
+/// the panic fires regardless of whether a Secret Service is actually
+/// reachable. `main` must call this before building its own runtime. The
+/// backend it selects is cached process-wide, so every later `Entry::new`
+/// reuses it without touching D-Bus, or Tokio, again.
+pub fn warm_up_credential_store() {
+    let _ = Entry::new("org.ekubo.wallet.credential-store-warmup", "warmup");
+}
+
 fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result<DatabaseKey> {
     // An ephemeral session keeps its key beside its database and never reaches
     // the credential store. Absent from a release build, where neither this
