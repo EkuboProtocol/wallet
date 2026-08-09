@@ -60,21 +60,46 @@ def metadata():
     return json.loads(result.stdout)
 
 
-def license_file_for(package):
+def license_files_for(package):
     manifest_dir = Path(package["manifest_path"]).parent
-    if package.get("license_file"):
-        candidate = manifest_dir / package["license_file"]
-        if candidate.is_file():
-            return candidate
+
     candidates = []
+    declared = None
+    if package.get("license_file"):
+        declared = manifest_dir / package["license_file"]
+        if declared.is_file():
+            candidates.append(declared)
     for pattern in LICENSE_FILE_PATTERNS:
         candidates.extend(manifest_dir.glob(pattern))
-    # Prefer MIT/Apache-specific names deterministically, then shortest name.
-    candidates = sorted(set(candidates), key=lambda path: (len(path.name), path.name))
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
+    # Deterministic order: shortest name first, then alphabetical. A
+    # declared file that the glob also matched only appears once -- `set`
+    # first -- so it does not get a tiebreak advantage from being listed
+    # twice.
+    candidates = sorted(
+        (path for path in set(candidates) if path.is_file()),
+        key=lambda path: (len(path.name), path.name),
+    )
+    if not candidates:
+        return []
+    # `OR` in the expression means any one text satisfies it (a dual-licensed
+    # crate needs only its shorter file), but `AND` means every named license
+    # is a separate, independent obligation -- `ring`'s `Apache-2.0 AND ISC`
+    # and `unicode-ident`'s `... AND Unicode-3.0` each ship one file per
+    # family. Picking only one file for those silently drops a required
+    # text, so `AND` takes every file the crate ships instead of one. That
+    # can include a file which is not itself license text -- ring's
+    # shortest, `LICENSE`, only points at the other two -- but shipping an
+    # extra paragraph is a far smaller fault than omitting a required one,
+    # and the alternative is guessing which files are "real" from their
+    # contents, which is itself as likely to guess wrong.
+    if " AND " in normalized_expression(package):
+        return candidates
+    # No `AND`: one file is enough. Prefer the crate's own declared file --
+    # it is the crate's own claim about which text applies -- over whichever
+    # the glob's shortest-name tiebreak happened to find.
+    if declared is not None and declared in candidates:
+        return [declared]
+    return candidates[:1]
 
 
 def normalized_expression(package):
@@ -124,24 +149,20 @@ def main():
     lines.append("")
 
     seen_texts = {}
+    missing = []
     for package in packages:
-        path = license_file_for(package)
-        if path is None:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            continue
-        key = re.sub(r"\s+", " ", text)
-        seen_texts.setdefault(key, (text, []))[1].append(
-            f"{package['name']} {package['version']}"
-        )
-
-    missing = [
-        package
-        for package in packages
-        if license_file_for(package) is None
-    ]
+        files = license_files_for(package)
+        if not files:
+            missing.append(package)
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            key = re.sub(r"\s+", " ", text)
+            seen_texts.setdefault(key, (text, []))[1].append(
+                f"{package['name']} {package['version']}"
+            )
     if missing:
         lines.append("## Packages without a shipped license file")
         lines.append("")
