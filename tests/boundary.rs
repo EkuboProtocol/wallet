@@ -471,3 +471,62 @@ fn naming_a_token_asks_no_contract_for_permission() {
         );
     }
 }
+
+/// The profile people actually install keeps its arithmetic checked.
+///
+/// Cargo's defaults put `overflow-checks` on in `dev` and off in `release`, so
+/// the setting decides whether the tested binary and the shipped binary compute
+/// the same thing. Without it, every test in this repository — and every
+/// property test in the kernel — runs against arithmetic that traps, while the
+/// build a user installs runs against arithmetic that silently wraps. An
+/// overflow there is not a crash to be diagnosed: it is a fee cap, an amount, a
+/// deadline, or an index that came out wrong and that nothing downstream can
+/// tell apart from a right one.
+///
+/// This is pinned rather than left to the manifest because deleting it is a
+/// one-line diff that makes the binary marginally smaller and faster, arrives
+/// with a plausible rationale, and changes nothing any other test can see: the
+/// gate builds `dev`, so the release profile has no other tripwire on it.
+#[test]
+fn the_shipped_profile_keeps_overflow_checks_on() {
+    let manifest = fs::read_to_string(repository_root().join("Cargo.toml")).unwrap();
+    // One `key = value` out of a manifest line, with the comment dropped
+    // first. Dropping it is the point: the setting is worth a sentence
+    // explaining it, and a test matching the raw text would be satisfied by
+    // the explanation that survives commenting the setting out.
+    let setting = |line: &str| -> Option<(String, String)> {
+        let (key, value) = line.split('#').next()?.split_once('=')?;
+        Some((
+            key.trim().trim_matches('"').to_owned(),
+            value.trim().to_owned(),
+        ))
+    };
+
+    let release = manifest
+        .split("[profile.release]")
+        .nth(1)
+        .expect("Cargo.toml must declare a [profile.release] section");
+    assert!(
+        release
+            .split("\n[")
+            .next()
+            .unwrap()
+            .lines()
+            .filter_map(setting)
+            .any(|(key, value)| key == "overflow-checks" && value == "true"),
+        "[profile.release] no longer sets `overflow-checks = true`; the shipped binary would wrap \
+         where every test in this repository traps, and a wrapped amount is a wrong number rather \
+         than a failure"
+    );
+
+    // And nothing anywhere takes it back. A per-package override, or a profile
+    // inheriting from `release` for a distribution build, would ship wrapping
+    // arithmetic with the section above still reading correctly.
+    for (key, value) in manifest.lines().filter_map(setting) {
+        assert!(
+            key != "overflow-checks" || value == "true",
+            "Cargo.toml sets `overflow-checks = {value}` somewhere; whichever profile or package \
+             that covers, it ships arithmetic that wraps where the tests trap"
+        );
+    }
+}
