@@ -89,17 +89,25 @@ produced by the binary itself: `ekubo-wallet shell-completion bash|zsh|fish` wri
 the completion script, and `ekubo-wallet policy schema` writes the policy JSON
 Schema. Registration is `ekubo-wallet meta-agent add`.
 
-For a short name, alias it in your shell rather than copying the executable:
+For a short name, symlink it in your shell rather than copying the executable:
 
 ```sh
-alias ew=ekubo-wallet
+ln -s "$(command -v ekubo-wallet)" ~/.local/bin/ew
 ```
 
 A copy would be a second client identity to the OS credential store and would
-need its own keychain grant; an alias resolves to the same executable, so one
-grant still covers it. Shell completion follows the real name, so complete
-against `ekubo-wallet` (in Bash, `complete -F _ekubo_wallet ew` after sourcing
-the script extends it to the alias).
+need its own keychain grant; a symlink resolves to the same executable, so one
+grant still covers it — the same reasoning that makes a plain `alias
+ew=ekubo-wallet` tempting, except that does not get completion. The packaged
+scripts re-run whatever word you typed to ask for their own candidates
+(`__complete ...`), and an alias is substituted for that word by the parser
+before it is ever looked up, not after — `ew<TAB>` runs `ew __complete ...`,
+finds no program named `ew`, and (since the packaged scripts discard that
+error) completes to nothing rather than falling back to `ekubo-wallet`. A
+symlink is a real entry on `PATH`, so the same lookup finds it. Register
+completion for the new name once it exists: in Bash, `complete -F
+_ekubo_wallet ew` after sourcing the script; the packaged Zsh script already
+answers to `ew` via its `#compdef ekubo-wallet ew` line.
 
 macOS archives are `.zip` rather than `.tar.gz`. If a release is published
 without Apple signing — its notes say so explicitly — Gatekeeper blocks the
