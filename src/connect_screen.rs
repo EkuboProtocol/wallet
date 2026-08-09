@@ -91,6 +91,11 @@ pub struct IdleView {
 
 impl IdleView {
     /// Take the terminal and start drawing.
+    ///
+    /// Discarding the returned handle does not stop the loop — see the
+    /// struct doc — so a dropped return value is a screen with nobody left
+    /// to hand it back.
+    #[must_use]
     pub fn start(state: Arc<Mutex<SessionState>>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let quit = Arc::new(AtomicBool::new(false));
