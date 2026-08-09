@@ -146,37 +146,47 @@ account operations need an ordinary session, so drop --ephemeral"
 }
 
 impl KeyStore for OsKeyStore {
+    // `block_in_place` in every method below, not a direct call: see
+    // `policy_store::load_or_create_database_key`'s doc comment for why a
+    // synchronous credential-store touch from inside our own Tokio runtime
+    // needs it -- `keyring`'s Linux backend starts a second, nested runtime
+    // on first use, which Tokio otherwise refuses unconditionally.
+
     fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
-        let entry = Self::entry(wallet_id)?;
-        match entry.get_secret() {
-            Ok(mut existing) => {
-                existing.zeroize();
-                bail!("credential store already contains wallet {wallet_id}");
+        tokio::task::block_in_place(|| {
+            let entry = Self::entry(wallet_id)?;
+            match entry.get_secret() {
+                Ok(mut existing) => {
+                    existing.zeroize();
+                    bail!("credential store already contains wallet {wallet_id}");
+                }
+                Err(KeyringError::NoEntry) => {}
+                Err(error) => {
+                    return Err(error).context("failed to inspect platform credential store");
+                }
             }
-            Err(KeyringError::NoEntry) => {}
-            Err(error) => {
-                return Err(error).context("failed to inspect platform credential store");
-            }
-        }
-        entry
-            .set_secret(key.as_bytes())
-            .context("failed to save private key in platform credential store")
+            entry
+                .set_secret(key.as_bytes())
+                .context("failed to save private key in platform credential store")
+        })
     }
 
     fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial> {
-        let mut bytes = Self::entry(wallet_id)?
-            .get_secret()
-            .with_context(|| format!("failed to load private key for wallet {wallet_id}"))?;
-        let result = PrivateKeyMaterial::from_bytes(&bytes);
-        bytes.zeroize();
-        result
+        tokio::task::block_in_place(|| {
+            let mut bytes = Self::entry(wallet_id)?
+                .get_secret()
+                .with_context(|| format!("failed to load private key for wallet {wallet_id}"))?;
+            let result = PrivateKeyMaterial::from_bytes(&bytes);
+            bytes.zeroize();
+            result
+        })
     }
 
     fn delete(&self, wallet_id: &str) -> Result<()> {
-        match Self::entry(wallet_id)?.delete_credential() {
+        tokio::task::block_in_place(|| match Self::entry(wallet_id)?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(error) => Err(error).context("failed to delete private key from credential store"),
-        }
+        })
     }
 }
 

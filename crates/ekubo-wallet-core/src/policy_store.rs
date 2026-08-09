@@ -1223,23 +1223,6 @@ fn verify_integrity(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Forces `keyring`'s one-time, process-wide credential-store backend
-/// selection before any async runtime exists to conflict with it.
-///
-/// On Linux, that selection connects to D-Bus through `zbus`'s *blocking*
-/// API, which starts its own Tokio runtime on first use. If that first use
-/// happens on a thread already inside a Tokio runtime -- which every
-/// credential-store access here does, since the whole CLI runs under
-/// `#[tokio::main]` -- Tokio panics ("Cannot start a runtime from within a
-/// runtime") rather than nesting runtimes; it does this unconditionally, so
-/// the panic fires regardless of whether a Secret Service is actually
-/// reachable. `main` must call this before building its own runtime. The
-/// backend it selects is cached process-wide, so every later `Entry::new`
-/// reuses it without touching D-Bus, or Tokio, again.
-pub fn warm_up_credential_store() {
-    let _ = Entry::new("org.ekubo.wallet.credential-store-warmup", "warmup");
-}
-
 fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result<DatabaseKey> {
     // An ephemeral session keeps its key beside its database and never reaches
     // the credential store. Absent from a release build, where neither this
@@ -1251,47 +1234,58 @@ fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result
     #[cfg(not(debug_assertions))]
     let _ = data_dir;
 
-    let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .context("platform credential store is unavailable")?;
-    match entry.get_secret() {
-        Ok(mut bytes) => {
-            let result = DatabaseKey::from_slice(&bytes);
-            bytes.zeroize();
-            result.context("policy database credential is invalid")
+    // `block_in_place`, not a direct call: on Linux, `keyring`'s backend
+    // connects to D-Bus through `zbus`'s *blocking* API, which starts its
+    // own Tokio runtime on first use. Every caller of this function runs
+    // inside our own Tokio runtime already, and Tokio panics rather than
+    // nest one runtime inside another ("Cannot start a runtime from within a
+    // runtime") -- unconditionally, before ever checking whether a Secret
+    // Service is even reachable. `block_in_place` marks this thread as
+    // blocking for the rest of this call, which is exactly what lets the
+    // nested runtime inside `keyring` run without Tokio refusing.
+    tokio::task::block_in_place(|| {
+        let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
+            .context("platform credential store is unavailable")?;
+        match entry.get_secret() {
+            Ok(mut bytes) => {
+                let result = DatabaseKey::from_slice(&bytes);
+                bytes.zeroize();
+                result.context("policy database credential is invalid")
+            }
+            Err(KeyringError::NoEntry) => {
+                ensure!(
+                    !database_exists,
+                    "policy database exists but its credential-store key is missing"
+                );
+                let mut bytes = [0_u8; 32];
+                // ThreadRng's error type is Infallible, so Ok is irrefutable.
+                let Ok(()) = rand::rng().try_fill_bytes(&mut bytes);
+                entry
+                    .set_secret(&bytes)
+                    .context("failed to save policy database key")?;
+                // Read it back before trusting it. `policies.lock` is locked by
+                // pathname, and the filesystem is untrusted — so two processes can
+                // hold locks on different inodes, both see no database, and both
+                // generate a key. The second `set_secret` wins, and the first
+                // process then creates a database encrypted under a key the
+                // credential store no longer holds, which nothing can open.
+                //
+                // The readback makes the credential store itself the arbiter,
+                // which does not depend on the lock file's identity.
+                let mut stored = entry
+                    .get_secret()
+                    .context("failed to confirm the saved policy database key")?;
+                let matches = stored == bytes;
+                stored.zeroize();
+                ensure!(
+                    matches,
+                    "another process initialized the policy database key at the same time; run this command again"
+                );
+                Ok(DatabaseKey::new(bytes))
+            }
+            Err(error) => Err(error).context("failed to load policy database key"),
         }
-        Err(KeyringError::NoEntry) => {
-            ensure!(
-                !database_exists,
-                "policy database exists but its credential-store key is missing"
-            );
-            let mut bytes = [0_u8; 32];
-            // ThreadRng's error type is Infallible, so Ok is irrefutable.
-            let Ok(()) = rand::rng().try_fill_bytes(&mut bytes);
-            entry
-                .set_secret(&bytes)
-                .context("failed to save policy database key")?;
-            // Read it back before trusting it. `policies.lock` is locked by
-            // pathname, and the filesystem is untrusted — so two processes can
-            // hold locks on different inodes, both see no database, and both
-            // generate a key. The second `set_secret` wins, and the first
-            // process then creates a database encrypted under a key the
-            // credential store no longer holds, which nothing can open.
-            //
-            // The readback makes the credential store itself the arbiter,
-            // which does not depend on the lock file's identity.
-            let mut stored = entry
-                .get_secret()
-                .context("failed to confirm the saved policy database key")?;
-            let matches = stored == bytes;
-            stored.zeroize();
-            ensure!(
-                matches,
-                "another process initialized the policy database key at the same time; run this command again"
-            );
-            Ok(DatabaseKey::new(bytes))
-        }
-        Err(error) => Err(error).context("failed to load policy database key"),
-    }
+    })
 }
 
 #[cfg(test)]

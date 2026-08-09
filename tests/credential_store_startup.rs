@@ -1,12 +1,14 @@
-//! `main` must warm up the credential-store backend before the Tokio runtime
-//! exists (see `ekubo_wallet_core::policy_store::warm_up_credential_store`'s
-//! doc comment): the Linux backend connects to D-Bus through a *blocking*
-//! API that starts its own runtime on first use, and Tokio panics rather
-//! than nest one runtime inside another. That panic used to fire on every
-//! credential-store-touching command, unconditionally -- before this
-//! environment's own D-Bus reachability was ever checked. This test can't
-//! assert *success*, since a Secret Service may genuinely be unavailable
-//! wherever it runs; it asserts the wallet never crashes finding that out.
+//! Every credential-store touch in `crates/ekubo-wallet-core` (the database
+//! key in `policy_store.rs`, private keys in `custody.rs`) must run inside
+//! `tokio::task::block_in_place` -- see `load_or_create_database_key`'s doc
+//! comment. Without it, `keyring`'s Linux backend connects to D-Bus through
+//! a *blocking* API that starts its own runtime on first use, and Tokio
+//! panics rather than nest one runtime inside another. That panic used to
+//! fire on every credential-store-touching command, unconditionally --
+//! before this environment's own D-Bus reachability was ever checked. This
+//! test can't assert *success*, since a Secret Service may genuinely be
+//! unavailable wherever it runs; it asserts the wallet never crashes finding
+//! that out.
 
 use assert_cmd::Command;
 
