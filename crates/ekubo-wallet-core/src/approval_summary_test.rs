@@ -343,6 +343,165 @@ async fn summarizes_nested_multicall_selectors() {
 }
 
 #[tokio::test]
+async fn an_unlimited_allowance_nested_in_a_multicall_still_warns() {
+    // The same grant a standalone `approve` makes, packed as the second of
+    // two nested calls inside a `multicall(bytes[])` wrapper — the shape a
+    // router batches an approval alongside an unrelated action in.
+    let spender = Address::repeat_byte(0x44);
+    let inner = DynSolValue::Array(vec![
+        DynSolValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]),
+        DynSolValue::Bytes(approve_calldata(spender, U256::MAX)),
+    ]);
+    let mut calldata = MULTICALL_SELECTOR.to_vec();
+    calldata.extend_from_slice(&inner.abi_encode_params());
+    let token = Address::repeat_byte(0x33);
+    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    assert!(
+        interpretation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unlimited") && warning.contains("0x4444")),
+        "multicall wrapper silenced the allowance warning: {:?}",
+        interpretation.warnings
+    );
+}
+
+#[tokio::test]
+async fn an_operator_grant_nested_in_a_multicall_still_warns() {
+    let operator = Address::repeat_byte(0x55);
+    let inner = DynSolValue::Array(vec![DynSolValue::Bytes(set_approval_for_all_calldata(
+        operator, true,
+    ))]);
+    let mut calldata = MULTICALL_SELECTOR.to_vec();
+    calldata.extend_from_slice(&inner.abi_encode_params());
+    let token = Address::repeat_byte(0x33);
+    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    assert!(
+        interpretation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("blanket operator control")),
+        "multicall wrapper silenced the operator-grant warning: {:?}",
+        interpretation.warnings
+    );
+}
+
+/// Wrap `innermost` in `layers` nested `multicall(bytes[])` calls, each
+/// carrying the previous as its one entry — `layers == 1` is a single
+/// `multicall([innermost])`.
+fn wrap_in_multicalls(innermost: Vec<u8>, layers: u8) -> Vec<u8> {
+    let mut calldata = innermost;
+    for _ in 0..layers {
+        let wrapped = DynSolValue::Array(vec![DynSolValue::Bytes(calldata)]);
+        let mut next = MULTICALL_SELECTOR.to_vec();
+        next.extend_from_slice(&wrapped.abi_encode_params());
+        calldata = next;
+    }
+    calldata
+}
+
+#[tokio::test]
+async fn a_grant_at_the_maximum_scanned_multicall_depth_still_warns() {
+    let spender = Address::repeat_byte(0x44);
+    let calldata = wrap_in_multicalls(approve_calldata(spender, U256::MAX), MAX_WARNING_SCAN_DEPTH);
+    let token = Address::repeat_byte(0x33);
+    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    assert!(
+        interpretation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unlimited") && warning.contains("0x4444")),
+        "a grant at the maximum scanned depth went unwarned: {:?}",
+        interpretation.warnings
+    );
+}
+
+#[tokio::test]
+async fn a_multicall_nested_past_the_maximum_scanned_depth_does_not_warn() {
+    // One layer deeper than the previous test's maximum: the scan is bounded
+    // on purpose (see `MAX_WARNING_SCAN_DEPTH`'s doc comment) rather than a
+    // recursion that walks as deep as a plan cares to nest, so a grant this
+    // far down is invisible to it. Documented behavior, not a regression.
+    let approve = approve_calldata(Address::repeat_byte(0x44), U256::MAX);
+    let calldata = wrap_in_multicalls(approve, MAX_WARNING_SCAN_DEPTH + 1);
+    let token = Address::repeat_byte(0x33);
+    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    assert!(
+        interpretation.warnings.is_empty(),
+        "{:?}",
+        interpretation.warnings
+    );
+}
+
+#[tokio::test]
+async fn grant_warnings_beyond_the_cap_are_summarized_not_flooded() {
+    // A `multicall` packing far more grants than `MAX_GRANT_WARNINGS` must
+    // not turn into one warning line per grant: that would bury the first
+    // warning under a wall of near-identical text just as surely as no
+    // warning at all would hide it.
+    let extra = 5;
+    let calls: Vec<DynSolValue> = (0..MAX_GRANT_WARNINGS + extra)
+        .map(|index| {
+            DynSolValue::Bytes(approve_calldata(
+                Address::repeat_byte(u8::try_from(index).unwrap()),
+                U256::MAX,
+            ))
+        })
+        .collect();
+    let inner = DynSolValue::Array(calls);
+    let mut calldata = MULTICALL_SELECTOR.to_vec();
+    calldata.extend_from_slice(&inner.abi_encode_params());
+    let token = Address::repeat_byte(0x33);
+    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    assert_eq!(
+        interpretation.warnings.len(),
+        MAX_GRANT_WARNINGS + 1,
+        "expected the cap plus one summary line: {:?}",
+        interpretation.warnings
+    );
+    assert!(
+        interpretation
+            .warnings
+            .last()
+            .unwrap()
+            .contains(&format!("{extra} further grant")),
+        "{:?}",
+        interpretation.warnings
+    );
+}
+
+#[tokio::test]
+async fn a_grant_past_the_displayed_nested_call_count_still_warns() {
+    // `MAX_DISPLAYED_NESTED_CALLS` (16) bounds how many nested calls the
+    // description prints, not how many are checked for a grant: every
+    // nested call executes regardless of whether its selector is shown, so
+    // a malicious approve placed after the sixteenth harmless call must
+    // still warn even though the description text never names it.
+    let mut nested =
+        vec![DynSolValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]); MAX_DISPLAYED_NESTED_CALLS];
+    let spender = Address::repeat_byte(0x66);
+    nested.push(DynSolValue::Bytes(approve_calldata(spender, U256::MAX)));
+    let inner = DynSolValue::Array(nested);
+    let mut calldata = MULTICALL_SELECTOR.to_vec();
+    calldata.extend_from_slice(&inner.abi_encode_params());
+    let token = Address::repeat_byte(0x33);
+    let interpretation = interpret_step(&step(1, token, calldata), &TokenMetadataMap::new()).await;
+    let description = interpretation.description.clone().unwrap_or_default();
+    assert!(
+        description.contains("further calls not shown"),
+        "test setup: expected the display cap to actually be exceeded: {description}"
+    );
+    assert!(
+        interpretation
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unlimited") && warning.contains("0x6666")),
+        "a grant past the display cap went unwarned: {:?}",
+        interpretation.warnings
+    );
+}
+
+#[tokio::test]
 async fn token_targets_only_include_standard_token_calls() {
     let token = Address::repeat_byte(0x33);
     let other = Address::repeat_byte(0x66);
@@ -354,6 +513,23 @@ async fn token_targets_only_include_standard_token_calls() {
         ),
         step(2, other, vec![0xde, 0xad, 0xbe, 0xef]),
     ];
+    assert_eq!(plan_token_targets(&steps).await, vec![token]);
+}
+
+#[tokio::test]
+async fn token_targets_see_through_a_multicall_wrapper() {
+    // A token named only inside a nested multicall call must still resolve:
+    // otherwise the warning `standard_call_warnings` now emits for it (see
+    // `an_unlimited_allowance_nested_in_a_multicall_still_warns`) renders
+    // the token as unlisted even when the local database names it.
+    let token = Address::repeat_byte(0x33);
+    let inner = DynSolValue::Array(vec![DynSolValue::Bytes(approve_calldata(
+        Address::repeat_byte(0x44),
+        U256::from(1_u8),
+    ))]);
+    let mut calldata = MULTICALL_SELECTOR.to_vec();
+    calldata.extend_from_slice(&inner.abi_encode_params());
+    let steps = vec![step(1, token, calldata)];
     assert_eq!(plan_token_targets(&steps).await, vec![token]);
 }
 
