@@ -3179,19 +3179,27 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
 }
 
 impl WalletMcpServer {
-    /// The per-call legal gate: every tool except `wallet_get_legal` requires
+    /// The per-call legal gate: every tool except the two below requires
     /// current acceptance of the terms of service and privacy policy. Before
     /// either, every tool re-checks the database schema version, so a database
     /// migrated underneath this process (for example by a newer build) refuses
     /// all requests with a restart instruction instead of being written to
     /// through a stale understanding of its shape.
+    ///
+    /// `wallet_get_legal` is exempt because it is how the documents are read
+    /// in order to be accepted. `wallet_check_for_updates` is exempt because
+    /// it reads a release listing and touches no wallet, key, or policy, and
+    /// because the moment it is most worth hearing from is exactly this one: a
+    /// release that revises the documents un-accepts everyone, so gating it
+    /// would tell a user their wallet is disabled without letting the agent
+    /// mention that a newer build is what they are being asked to accept.
     fn tool_gate(&self, tool_name: &str) -> Result<(), ErrorData> {
         self.policies
             .lock()
             .map_err(|_| anyhow::anyhow!("policy store lock was poisoned"))
             .and_then(|store| store.assert_schema_current())
             .map_err(|error| tool_error(&error))?;
-        if tool_name == "wallet_get_legal" {
+        if matches!(tool_name, "wallet_get_legal" | "wallet_check_for_updates") {
             return Ok(());
         }
         self.require_legal_acceptance()

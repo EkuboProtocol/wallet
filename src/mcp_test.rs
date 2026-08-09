@@ -794,14 +794,20 @@ fn permit_payload() -> serde_json::Value {
     })
 }
 
+/// The exemptions, by name. `wallet_get_legal` is how the documents are read
+/// in order to be accepted; `wallet_check_for_updates` reads a release listing
+/// and touches no wallet, key, or policy. Enumerated over the whole router, so
+/// a new tool is gated unless someone adds it here on purpose.
+const UNGATED_TOOLS: [&str; 2] = ["wallet_get_legal", "wallet_check_for_updates"];
+
 #[test]
-fn every_tool_except_legal_is_gated_on_acceptance() {
+fn every_tool_except_legal_and_the_release_check_is_gated_on_acceptance() {
     let (_directory, server) = server();
     for tool in WalletMcpServer::sanitized_tool_router().list_all() {
         let gated = server.tool_gate(&tool.name).is_err();
         assert_eq!(
             gated,
-            tool.name != "wallet_get_legal",
+            !UNGATED_TOOLS.contains(&tool.name.as_ref()),
             "unexpected gate state for {}",
             tool.name
         );

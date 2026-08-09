@@ -130,6 +130,17 @@ impl crate::sealed::SealedKeyStore for OsKeyStore {}
 impl OsKeyStore {
     fn entry(wallet_id: &str) -> Result<Entry> {
         validate_wallet_id(wallet_id)?;
+        // The credential store is machine-wide, so an account created in a
+        // scratch directory would outlive the `rm -rf` that discards it — a
+        // private key with no wallet left to name it. Refusing is honest about
+        // what an ephemeral session is for: starting the server and exercising
+        // the read paths, not holding keys.
+        #[cfg(debug_assertions)]
+        ensure!(
+            !crate::ephemeral::is_enabled(),
+            "this is an ephemeral session, which never touches the platform credential store; \
+account operations need an ordinary session, so drop --ephemeral"
+        );
         Entry::new(KEYRING_SERVICE, wallet_id).context("platform credential store is unavailable")
     }
 }

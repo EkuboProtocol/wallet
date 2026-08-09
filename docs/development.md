@@ -40,6 +40,34 @@ Or point an MCP client directly at `target/release/ekubo-wallet server`. Regener
 with `cargo run --bin ekubo-wallet -- policy schema > schemas/policy.schema.json`;
 a test fails if it is stale.
 
+## Scratch sessions
+
+`--data-dir` alone does not give an isolated wallet. The database key lives in
+the platform credential store under one machine-wide entry, not per directory,
+so a scratch directory still reaches for the real wallet's credential — and on
+a locked keychain that blocks on a dialog, which a non-interactive shell never
+gets to answer. That is why `ekubo-wallet --data-dir /tmp/scratch server`
+appears to hang rather than start.
+
+`--ephemeral` keeps the key in `--data-dir` instead:
+
+```sh
+cargo run -- --data-dir /tmp/scratch --ephemeral server
+rm -rf /tmp/scratch   # and nothing is left behind
+```
+
+It requires `--data-dir`, so it can never fall back to the real wallet's
+directory, and it refuses every account operation, since private keys live in
+the credential store and this session does not touch it — an account created
+in a scratch directory would otherwise outlive the `rm -rf` as a key with no
+wallet left to name it. Read paths, the server, and every tool that does not
+need a key all work.
+
+The flag does not exist in a release build: the module behind it is
+`#[cfg(debug_assertions)]`, so `cargo run` and `cargo build` have it and
+`--release` does not. A key beside the database it decrypts is not protection,
+which is exactly why it may only ever protect a directory holding nothing.
+
 ## Vendored data
 
 Two data sets are compiled into the binary rather than fetched: the

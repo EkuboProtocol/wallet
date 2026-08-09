@@ -171,7 +171,7 @@ impl PolicyStore {
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
         let path = data_dir.join(DATABASE_FILE);
-        let key = load_or_create_database_key(path.exists())?;
+        let key = load_or_create_database_key(data_dir, path.exists())?;
         let result = Self::open_with(&path, &key, SeedDefaults::Yes);
         // The work's own error is the one worth reporting. Unlocking after a
         // failure and propagating *that* replaces "the database key is wrong"
@@ -1169,7 +1169,17 @@ fn verify_integrity(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn load_or_create_database_key(database_exists: bool) -> Result<DatabaseKey> {
+fn load_or_create_database_key(data_dir: &Path, database_exists: bool) -> Result<DatabaseKey> {
+    // An ephemeral session keeps its key beside its database and never reaches
+    // the credential store. Absent from a release build, where neither this
+    // call nor the module behind it exists.
+    #[cfg(debug_assertions)]
+    if let Some(key) = crate::ephemeral::database_key(data_dir, database_exists)? {
+        return Ok(key);
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = data_dir;
+
     let entry = Entry::new(KEYRING_SERVICE, KEYRING_USER)
         .context("platform credential store is unavailable")?;
     match entry.get_secret() {

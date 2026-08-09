@@ -55,6 +55,16 @@ pub struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Keep this session's database key in --data-dir instead of the platform
+    /// credential store, for a scratch wallet that leaves nothing behind.
+    ///
+    /// Requires --data-dir. Refuses every account operation, since private
+    /// keys live in the credential store and this session does not touch it.
+    /// Absent from release builds.
+    #[cfg(debug_assertions)]
+    #[arg(long, global = true, requires = "data_dir")]
+    ephemeral: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -687,6 +697,18 @@ enum TransactionCommand {
 
 impl Cli {
     pub async fn run(self) -> Result<()> {
+        // Before anything opens a store, since this decides where the database
+        // key is read from. `requires = "data_dir"` already guarantees the
+        // directory was named by the caller rather than defaulted to the real
+        // wallet's.
+        #[cfg(debug_assertions)]
+        if self.ephemeral {
+            ekubo_wallet_core::ephemeral::enable();
+            eprintln!(
+                "ephemeral session: the database key is in --data-dir, not the credential store, \
+and account operations are refused"
+            );
+        }
         let config = match self.data_dir {
             Some(path) => ConfigStore::new(path),
             None => ConfigStore::production()?,

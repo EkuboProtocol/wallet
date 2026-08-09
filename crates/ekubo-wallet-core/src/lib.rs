@@ -19,6 +19,9 @@ pub mod config;
 pub mod core;
 pub mod custody;
 pub mod default_tokens;
+/// Debug-build-only scratch sessions. Never compiled into a release binary.
+#[cfg(debug_assertions)]
+pub mod ephemeral;
 pub mod execution;
 pub mod fork;
 pub mod human_presence;
