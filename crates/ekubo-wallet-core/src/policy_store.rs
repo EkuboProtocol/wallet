@@ -27,16 +27,31 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 /// databases nobody outside development ever held, so carrying upgrade steps
 /// for them would have been machinery for a population of zero — and it would
 /// have told a first-time owner that their brand-new database had a history.
-// The version was reset to 1 on 2026-08-08, when every value with a byte
-// representation of its own — hashes, addresses, signatures, signed envelopes,
-// request IDs — moved from hex text to `BLOB`, every moment moved from RFC 3339
-// text to epoch milliseconds, and `chain_id` became `INTEGER` in the three
-// tables that still spelled it as text. That rewrites the type of most columns
-// in the file, so no database written by an earlier build can be read by this
-// one, and none of them held anything a pre-1.0 owner cannot recreate. Numbering
-// restarts rather than climbing, because this is the first shape of the database
-// that ships.
-const SCHEMA_VERSION: i64 = 1;
+// The shape changed on 2026-08-08, when every value with a byte representation
+// of its own — hashes, addresses, signatures, signed envelopes, request IDs —
+// moved from hex text to `BLOB`, every moment moved from RFC 3339 text to epoch
+// milliseconds, and `chain_id` became `INTEGER` in the three tables that still
+// spelled it as text. That rewrites the type of most columns in the file, so no
+// database written by an earlier build can be read by this one.
+//
+// The marker for it was briefly reset to 1, on the reasoning that this is the
+// first shape that ships and a first-time owner should not be told their new
+// database has a history. That was wrong, and dangerously so: the retired
+// pre-release ladder had already written 1 through 10, and a database carrying
+// the *old* schema 1 would have passed the equality check below and been read as
+// though its TEXT hashes were `BLOB`s and its RFC 3339 timestamps were epoch
+// milliseconds. Refusal is the whole safety property of this number, and it does
+// not work if the same value can mean two different shapes.
+//
+// So the number climbs past everything ever written instead. What it costs is
+// the cosmetic point it was reset for; what it buys is that no marker in this
+// file has ever meant anything but the shape it means now.
+const SCHEMA_VERSION: i64 = 11;
+/// The retired ladder wrote 1 through 10, and the equality check on open is
+/// the only thing standing between one of those files and this build reading
+/// its TEXT hashes as `BLOB`s. Reusing a number is a compile error, not a
+/// review comment.
+const _: () = assert!(SCHEMA_VERSION > 10);
 const DATABASE_FILE: &str = "policies.db";
 const DATABASE_LOCK_FILE: &str = "policies.lock";
 /// The credential-store entry holding this database's key.
@@ -242,10 +257,11 @@ impl PolicyStore {
         // first, so a database this build refuses is left byte-identical.
         //
         // The pre-release upgrade ladder (schemas 1 through 10) was retired
-        // after v0.3.0-rc.0. A database predating the current schema is
-        // refused with upgrade guidance rather than carried forever; future
-        // migrations append below and run on every open, so a schema change
-        // upgrades the database at the next startup.
+        // after v0.3.0-rc.0, and the current schema numbers above all of them
+        // so no retired marker can be mistaken for it. A database predating
+        // the current schema is refused with upgrade guidance rather than
+        // carried forever; future migrations append below and run on every
+        // open, so a schema change upgrades the database at the next startup.
         let version = match schema_version(&connection)? {
             None => {
                 let objects: i64 =

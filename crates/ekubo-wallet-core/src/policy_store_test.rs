@@ -17,16 +17,18 @@ fn key(byte: u8) -> DatabaseKey {
 
 /// Build a database in the shape schema 9 left behind: every queue still
 /// carries `expires_at`, and some rows are already terminally `expired`.
-fn write_schema_9_database(path: &Path, key: &DatabaseKey) {
+fn write_legacy_database(path: &Path, key: &DatabaseKey, version: i64) {
     let connection = Connection::open(path).unwrap();
     key.with_sqlcipher_literal(|literal| connection.pragma_update(None, "key", literal))
         .unwrap();
+    let insert_version =
+        format!("INSERT INTO schema_metadata(singleton, version) VALUES (1, {version})");
     let statements = [
         "CREATE TABLE schema_metadata (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  version INTEGER NOT NULL
              ) STRICT",
-        "INSERT INTO schema_metadata(singleton, version) VALUES (1, 9)",
+        insert_version.as_str(),
         "CREATE TABLE pending_transactions (
                  request_id TEXT PRIMARY KEY NOT NULL,
                  wallet_id TEXT NOT NULL,
@@ -262,7 +264,7 @@ fn any_other_schema_is_refused_and_left_untouched() {
     // so whatever wrote the file still has it byte for byte.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
-    write_schema_9_database(&path, &key(11));
+    write_legacy_database(&path, &key(11), 9);
     let before = std::fs::read(&path).unwrap();
 
     let error = PolicyStore::open(&path, &key(11))
@@ -600,4 +602,22 @@ fn committed_state_does_not_depend_on_a_persistent_wal() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn a_legacy_database_claiming_schema_one_is_refused() {
+    // The marker was briefly reset to 1 while databases carrying the retired
+    // schema 1 still existed. Both wore the same number and only one of them
+    // could be read; this pins that the number no longer collides.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    write_legacy_database(&path, &key(13), 1);
+    let before = std::fs::read(&path).unwrap();
+
+    let error = PolicyStore::open(&path, &key(13))
+        .err()
+        .expect("a legacy schema 1 database must be refused")
+        .to_string();
+    assert!(error.contains("schema 1 is not the schema"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
