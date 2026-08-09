@@ -293,3 +293,33 @@ fn a_proposal_naming_nothing_recognizable_still_settles_a_usable_session() {
     assert_eq!(entry.accounts.len(), 2);
     assert_eq!(entry.methods, scope().methods);
 }
+
+#[test]
+fn the_pairing_key_stops_being_an_authority_once_a_session_settles() {
+    // The URI a person pastes is a credential that goes on existing: in a
+    // dapp's local storage, in a screenshot, in a terminal's scrollback. Only
+    // the proposal it exists to deliver may be answered with it, so a copy of
+    // that URI cannot act as the settled session afterwards.
+    assert!(answerable_from(method::SESSION_PROPOSE, Origin::Pairing));
+    for method in [
+        method::SESSION_REQUEST,
+        method::SESSION_DELETE,
+        method::SESSION_EXTEND,
+        method::SESSION_UPDATE,
+        method::SESSION_EVENT,
+        method::SESSION_PING,
+    ] {
+        assert!(
+            !answerable_from(method, Origin::Pairing),
+            "{method} was answerable on the pairing topic"
+        );
+        assert!(
+            answerable_from(method, Origin::Session),
+            "{method} was refused on the session topic"
+        );
+    }
+
+    // And the session key does not get to propose: one `connect` run serves
+    // one session, and `on_propose` is the pairing's business.
+    assert!(!answerable_from(method::SESSION_PROPOSE, Origin::Session));
+}

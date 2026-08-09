@@ -224,6 +224,35 @@ enum Woke {
     Delivered(Option<super::relay::RelayMessage>),
 }
 
+/// Which of the two topics an envelope authenticated on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Origin {
+    Pairing,
+    Session,
+}
+
+/// Whether a method may be answered when it arrived on `origin`.
+///
+/// The pairing key and the session key are separate credentials with separate
+/// lifetimes. The pairing key is in a URI the person pasted and a dapp stored;
+/// the session key is derived at settlement and never travels. Without this
+/// split, the topic chose only which key had to verify, and every method was
+/// then dispatched identically — so anyone who kept the URI still held a
+/// working credential after settlement, could send `wc_sessionRequest` under
+/// the settled dapp's approved scope and metadata, and could delete or extend
+/// the session. A policy-allowed transfer would have been signed and broadcast
+/// automatically.
+///
+/// The pairing carries exactly one method, the proposal it exists to deliver.
+/// Everything else belongs to the session that was settled and is answered
+/// only there.
+fn answerable_from(rpc_method: &str, origin: Origin) -> bool {
+    match origin {
+        Origin::Pairing => rpc_method == method::SESSION_PROPOSE,
+        Origin::Session => rpc_method != method::SESSION_PROPOSE,
+    }
+}
+
 /// A settled session's live state.
 struct Settled {
     topic: String,
@@ -319,18 +348,28 @@ impl<'a> Session<'a> {
     }
 
     /// Handle one delivered envelope. Returns whether the session is over.
+    ///
+    /// Two credentials reach this wallet, and they are not the same authority.
+    /// The pairing key travels in a URI — pasted, screenshotted, kept in a
+    /// dapp's storage — and its one job is carrying a proposal. The session
+    /// key is derived at settlement from a fresh key agreement and never
+    /// leaves either side. See [`answerable_from`] for why the difference has
+    /// to survive past settlement.
     async fn receive(&mut self, topic: &str, envelope: &str) -> Result<bool> {
         // Which key opens this is decided by which topic it arrived on, so a
         // message cannot be replayed from the pairing onto the session or the
         // other way round: the wrong key simply fails to authenticate.
-        let key = if topic == self.pairing_topic {
-            &self.pairing_key
+        let (origin, key) = if topic == self.pairing_topic {
+            (Origin::Pairing, &self.pairing_key)
         } else if self
             .settled
             .as_ref()
             .is_some_and(|settled| settled.topic == topic)
         {
-            &self.settled.as_ref().expect("checked just above").key
+            (
+                Origin::Session,
+                &self.settled.as_ref().expect("checked just above").key,
+            )
         } else {
             // A topic nothing is subscribed to under this session. Not an
             // error worth ending on; just not ours.
@@ -353,6 +392,11 @@ impl<'a> Session<'a> {
             // finds out about the next time it tries to publish.
             return Ok(false);
         };
+        if !answerable_from(rpc_method, origin) {
+            // Decided before the id is consumed, so a message on the wrong
+            // topic cannot burn an id the other topic will legitimately use.
+            return Ok(false);
+        }
         if !self.answered.insert(message.id) {
             // Already handled; this is a relay redelivery.
             return Ok(false);
