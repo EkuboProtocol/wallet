@@ -810,3 +810,39 @@ mod token_list_references {
         assert!(!error.contains("execution plan"), "{error}");
     }
 }
+
+#[test]
+fn a_token_list_reference_gets_the_token_list_budget() {
+    // The reference path used to apply the execution plan's cap to whatever it
+    // fetched, so an identical list got four times the pre-parse budget purely
+    // by arriving in an envelope -- and `parse_token_list`'s own check runs
+    // after the whole body is already held.
+    assert_eq!(
+        ArtifactType::TokenList.max_body_bytes(),
+        crate::token_list::MAX_TOKEN_LIST_BYTES
+    );
+    assert!(ArtifactType::TokenList.max_body_bytes() < MAX_SERIALIZED_PLAN_BYTES);
+    assert_eq!(
+        ArtifactType::ExecutionPlan.max_body_bytes(),
+        MAX_SERIALIZED_PLAN_BYTES
+    );
+    assert_eq!(
+        ArtifactType::ReadCalls.max_body_bytes(),
+        MAX_SERIALIZED_PLAN_BYTES
+    );
+
+    // And a `data:` list is measured against the same number before it is
+    // decoded, so nothing allocates a buffer for bytes the check would refuse.
+    let oversized =
+        "A".repeat(max_data_uri_payload_bytes(ArtifactType::TokenList.max_body_bytes()) + 4);
+    let error = decode_data_uri(
+        &format!("data:application/json;base64,{oversized}"),
+        ArtifactType::TokenList,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains(&crate::token_list::MAX_TOKEN_LIST_BYTES.to_string()),
+        "{error}"
+    );
+}

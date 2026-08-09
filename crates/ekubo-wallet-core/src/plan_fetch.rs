@@ -65,14 +65,19 @@ use url::{Host, Url};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The longest `data:` payload worth decoding at all.
+/// The longest `data:` payload that could decode to a body of `max_body`.
 ///
 /// Base64 packs three bytes into four characters and percent-encoding never
-/// contracts, so nothing longer than this can decode to a body within
-/// `MAX_SERIALIZED_PLAN_BYTES`. Expressed against that limit rather than as
-/// its own number, because it is the same limit — just measured before the
-/// decode instead of after it.
-const MAX_DATA_URI_PAYLOAD_BYTES: usize = MAX_SERIALIZED_PLAN_BYTES / 3 * 4 + 4;
+/// contracts, so nothing longer than this can decode to something the
+/// after-the-decode check would accept. The same limit, measured before the
+/// decode instead of after it, so no buffer is allocated for bytes the next
+/// statement throws away.
+const fn max_data_uri_payload_bytes(max_body: usize) -> usize {
+    max_body / 3 * 4 + 4
+}
+
+/// The largest of those, for the longest artifact this wallet fetches.
+const MAX_DATA_URI_PAYLOAD_BYTES: usize = max_data_uri_payload_bytes(MAX_SERIALIZED_PLAN_BYTES);
 
 /// The longest a reference locator may be, checked before it is parsed.
 ///
@@ -142,6 +147,21 @@ impl ArtifactType {
             Self::ExecutionPlan => "execution plan",
             Self::ReadCalls => "read-call bundle",
             Self::TokenList => "token list",
+        }
+    }
+
+    /// The largest body worth holding for this kind of artifact.
+    ///
+    /// Per type, because the reference path used to apply the execution
+    /// plan's cap to everything it fetched. A token list carries its own,
+    /// four times smaller, and the plain-URL import already passed it — so
+    /// the identical list got a fourfold larger pre-parse budget purely by
+    /// arriving in an envelope, and the parser's own check came after the
+    /// whole body was already held.
+    const fn max_body_bytes(self) -> usize {
+        match self {
+            Self::ExecutionPlan | Self::ReadCalls => MAX_SERIALIZED_PLAN_BYTES,
+            Self::TokenList => crate::token_list::MAX_TOKEN_LIST_BYTES,
         }
     }
 
@@ -374,11 +394,12 @@ pub async fn fetch_reference(
             integrity.algorithm
         );
     }
+    let max_bytes = expected_type.max_body_bytes();
     if let Some(bytes) = reference.bytes {
         // Refuse before allocating or fetching anything oversized.
         ensure!(
-            bytes <= MAX_SERIALIZED_PLAN_BYTES as u64,
-            "{noun} reference promises a body over {MAX_SERIALIZED_PLAN_BYTES} bytes"
+            bytes <= max_bytes as u64,
+            "{noun} reference promises a body over {max_bytes} bytes"
         );
     }
 
@@ -406,13 +427,7 @@ pub async fn fetch_reference(
         // A body that travels over the network must be verifiable: the
         // silent skip-verification path of the old optional digest is gone.
         require_verifiable(reference, noun, "fetched over the network", "")?;
-        let (bytes, host) = fetch_remote(
-            &reference.url,
-            policy,
-            expected_type,
-            MAX_SERIALIZED_PLAN_BYTES,
-        )
-        .await?;
+        let (bytes, host) = fetch_remote(&reference.url, policy, expected_type, max_bytes).await?;
         (bytes, ArtifactSource::Https { host })
     };
 
@@ -543,21 +558,22 @@ fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
         "{noun} file {} is not a regular file",
         path.display()
     );
+    let max_bytes = artifact_type.max_body_bytes();
     let measured = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
     ensure!(
-        measured <= MAX_SERIALIZED_PLAN_BYTES,
-        "{noun} file exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+        measured <= max_bytes,
+        "{noun} file exceeds {max_bytes} bytes"
     );
-    let mut body = Vec::with_capacity(measured.min(MAX_SERIALIZED_PLAN_BYTES));
+    let mut body = Vec::with_capacity(measured.min(max_bytes));
     // Read one byte past the cap rather than trusting the size just measured:
     // the file may have grown between the two calls, and the limit is on what
     // this process holds, not on what it expected to.
-    file.take(MAX_SERIALIZED_PLAN_BYTES as u64 + 1)
+    file.take(max_bytes as u64 + 1)
         .read_to_end(&mut body)
         .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
     ensure!(
-        body.len() <= MAX_SERIALIZED_PLAN_BYTES,
-        "{noun} file exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+        body.len() <= max_bytes,
+        "{noun} file exceeds {max_bytes} bytes"
     );
     Ok(body)
 }
@@ -587,6 +603,7 @@ fn decode_data_uri(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
         }
     }
     let noun = artifact_type.noun();
+    let max_bytes = artifact_type.max_body_bytes();
     // Checked before the decode, not after it. Neither encoding can contract:
     // base64 packs three bytes into four characters and percent-encoding only
     // ever expands, so a payload longer than this cannot decode to anything
@@ -594,8 +611,8 @@ fn decode_data_uri(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
     // process from allocating a buffer for bytes the next statement throws
     // away.
     ensure!(
-        payload.len() <= MAX_DATA_URI_PAYLOAD_BYTES,
-        "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+        payload.len() <= max_data_uri_payload_bytes(max_bytes),
+        "{noun} body exceeds {max_bytes} bytes"
     );
     let bytes = if base64_payload {
         base64::engine::general_purpose::STANDARD
@@ -605,8 +622,8 @@ fn decode_data_uri(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
         percent_decode_str(payload).collect()
     };
     ensure!(
-        bytes.len() <= MAX_SERIALIZED_PLAN_BYTES,
-        "{noun} body exceeds {MAX_SERIALIZED_PLAN_BYTES} bytes"
+        bytes.len() <= max_bytes,
+        "{noun} body exceeds {max_bytes} bytes"
     );
     Ok(bytes)
 }
