@@ -120,11 +120,21 @@ pub fn parse_send_transaction(params: &Value) -> Result<TransactionRequest> {
 /// Parse `personal_sign`.
 ///
 /// The parameter order is `[message, address]`, and enough dapps send
-/// `[address, message]` that every production wallet accepts both. Detecting
-/// which is which is unambiguous — one of them parses as a 20-byte address and
-/// a message that also does is a 20-byte message, which `personal_sign` is
-/// never used for — so this accepts both rather than failing on half the
-/// ecosystem.
+/// `[address, message]` that every production wallet accepts both. Usually
+/// exactly one of the two parses as a 20-byte address, which settles it.
+///
+/// Not always, though: a 20-byte message is a perfectly good EIP-191 input,
+/// and one that happens to be address-shaped makes both parameters parse.
+/// This used to claim that could not happen and take the second as the signer
+/// regardless, so `[wallet, address_shaped_message]` — a legitimate request in
+/// the order half the ecosystem sends — read the *message* as the signer, and
+/// the foreign-signer check then refused it. Deterministically, every time.
+///
+/// `controlled` breaks the tie, because the tie has an answer: the signer is
+/// an account this session signs for and the message is not. When neither
+/// parameter is that account the ambiguity does not matter — the request is
+/// refused either way — so the old reading stands and the refusal names the
+/// second one.
 ///
 /// The message itself is hex when it is `0x`-prefixed and validly hex, and
 /// literal UTF-8 otherwise. That is the de-facto rule every wallet implements.
@@ -133,7 +143,10 @@ pub fn parse_send_transaction(params: &Value) -> Result<TransactionRequest> {
 /// what was displayed.
 /// Returns the bytes, the signer, and whether the dapp sent the message as hex
 /// — the last only so the review can say how it arrived.
-pub fn parse_personal_sign(params: &Value) -> Result<(Vec<u8>, Address, bool)> {
+pub fn parse_personal_sign(
+    params: &Value,
+    controlled: Address,
+) -> Result<(Vec<u8>, Address, bool)> {
     let array = params
         .as_array()
         .context("personal_sign takes an array of two parameters")?;
@@ -145,6 +158,11 @@ pub fn parse_personal_sign(params: &Value) -> Result<(Vec<u8>, Address, bool)> {
     let second = array[1].as_str().unwrap_or_default();
 
     let (message, address) = match (address_of(first), address_of(second)) {
+        // Both address-shaped: the one this session controls is the signer,
+        // and if neither is, either reading is refused downstream.
+        (Some(leading), Some(trailing)) if leading == controlled && trailing != controlled => {
+            (second, leading)
+        }
         (_, Some(address)) => (first, address),
         (Some(address), None) => (second, address),
         (None, None) => bail!("neither personal_sign parameter is a 20-byte address"),

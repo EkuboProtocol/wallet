@@ -4,6 +4,12 @@ use super::*;
 use serde_json::json;
 
 const WALLET: &str = "0x1111111111111111111111111111111111111111";
+
+/// The account the session signs for, which is what settles the parameter
+/// order when both parameters are address-shaped.
+fn wallet() -> Address {
+    WALLET.parse().expect("the fixture address parses")
+}
 const TARGET: &str = "0x2222222222222222222222222222222222222222";
 
 #[test]
@@ -134,13 +140,15 @@ fn personal_sign_accepts_both_parameter_orders() {
     let expected = WALLET.parse::<Address>().unwrap();
     let hex_message = format!("0x{}", hex::encode("hello"));
 
-    let (message, address, was_hex) = parse_personal_sign(&json!([hex_message, WALLET])).unwrap();
+    let (message, address, was_hex) =
+        parse_personal_sign(&json!([hex_message, WALLET]), wallet()).unwrap();
     assert_eq!(message, b"hello");
     assert_eq!(address, expected);
     assert!(was_hex);
 
     // Reversed, as several dapps send it.
-    let (message, address, _) = parse_personal_sign(&json!([WALLET, hex_message])).unwrap();
+    let (message, address, _) =
+        parse_personal_sign(&json!([WALLET, hex_message]), wallet()).unwrap();
     assert_eq!(message, b"hello");
     assert_eq!(address, expected);
 }
@@ -148,29 +156,30 @@ fn personal_sign_accepts_both_parameter_orders() {
 #[test]
 fn a_personal_sign_message_that_is_not_hex_is_taken_literally() {
     let (message, _, was_hex) =
-        parse_personal_sign(&json!(["Sign in to Example", WALLET])).unwrap();
+        parse_personal_sign(&json!(["Sign in to Example", WALLET]), wallet()).unwrap();
     assert_eq!(message, b"Sign in to Example");
     assert!(!was_hex);
 
     // A message that starts with 0x but is not valid hex is text that happens
     // to start with those two characters, not malformed hex.
-    let (message, _, was_hex) = parse_personal_sign(&json!(["0xZZ not hex", WALLET])).unwrap();
+    let (message, _, was_hex) =
+        parse_personal_sign(&json!(["0xZZ not hex", WALLET]), wallet()).unwrap();
     assert_eq!(message, b"0xZZ not hex");
     assert!(!was_hex);
 
     // Odd digit count is likewise not hex.
-    let (message, _, was_hex) = parse_personal_sign(&json!(["0xabc", WALLET])).unwrap();
+    let (message, _, was_hex) = parse_personal_sign(&json!(["0xabc", WALLET]), wallet()).unwrap();
     assert_eq!(message, b"0xabc");
     assert!(!was_hex);
 }
 
 #[test]
 fn personal_sign_without_an_address_is_refused() {
-    let error = parse_personal_sign(&json!(["hello", "world"]))
+    let error = parse_personal_sign(&json!(["hello", "world"]), wallet())
         .expect_err("a signer-less request was accepted");
     assert!(format!("{error}").contains("address"), "{error}");
-    assert!(parse_personal_sign(&json!(["hello"])).is_err());
-    assert!(parse_personal_sign(&json!({})).is_err());
+    assert!(parse_personal_sign(&json!(["hello"]), wallet()).is_err());
+    assert!(parse_personal_sign(&json!({}), wallet()).is_err());
 }
 
 #[test]
@@ -352,4 +361,41 @@ fn a_status_query_reads_one_batch_id() {
     assert!(parse_get_calls_status(&json!([])).is_err());
     assert!(parse_get_calls_status(&json!([""])).is_err());
     assert!(parse_get_calls_status(&json!([5])).is_err());
+}
+
+#[test]
+fn an_address_shaped_message_does_not_become_the_signer() {
+    // A 20-byte message is a perfectly good EIP-191 input, and one that is
+    // address-shaped makes both parameters parse as addresses. Taking the
+    // second regardless read the message as the signer for the `[address,
+    // message]` order half the ecosystem sends, and the foreign-signer check
+    // then refused the request every time.
+    let message = "0x2222222222222222222222222222222222222222";
+
+    let (bytes, signer, _) = parse_personal_sign(&json!([WALLET, message]), wallet()).unwrap();
+    assert_eq!(signer, wallet());
+    assert_eq!(
+        bytes,
+        hex::decode(message.trim_start_matches("0x")).unwrap()
+    );
+
+    // The documented order still reads the documented way.
+    let (bytes, signer, _) = parse_personal_sign(&json!([message, WALLET]), wallet()).unwrap();
+    assert_eq!(signer, wallet());
+    assert_eq!(
+        bytes,
+        hex::decode(message.trim_start_matches("0x")).unwrap()
+    );
+
+    // Neither one is this session's account, so the reading does not matter:
+    // whichever is chosen, the request is refused downstream. The second
+    // stands, as it always did.
+    let stranger: Address = "0x3333333333333333333333333333333333333333"
+        .parse()
+        .unwrap();
+    let (_, signer, _) = parse_personal_sign(&json!([WALLET, message]), stranger).unwrap();
+    assert_eq!(
+        signer.to_checksum(None),
+        message.parse::<Address>().unwrap().to_checksum(None)
+    );
 }

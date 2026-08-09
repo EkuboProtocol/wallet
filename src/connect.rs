@@ -772,7 +772,8 @@ impl DappSession<'_> {
     }
 
     async fn personal_sign(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
-        let (message, signer, was_hex) = dapp_request::parse_personal_sign(&request.params)?;
+        let (message, signer, was_hex) =
+            dapp_request::parse_personal_sign(&request.params, self.wallet().address)?;
         if let Some(refusal) = self.refuse_foreign_signer(signer) {
             return Ok(refusal);
         }
