@@ -13,6 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::str::FromStr;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
@@ -21,16 +22,46 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 /// second opinion rather than the answer itself.
 const FEE_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Providers pooled per endpoint URL, the same way [`crate::plan_fetch`]
+/// pools its reference-fetch clients. Bounded and evicted oldest-first so a
+/// configuration with the maximum 192 networks of 8 RPC URLs each — or a
+/// sequence of proposed networks a dapp keeps changing — cannot grow this
+/// without bound. Comfortably above the number of distinct endpoints
+/// `rpc_test.rs` registers against this same process-wide pool over a test
+/// run, so an unrelated test's endpoints do not evict this test's own before
+/// it reads them back.
+static ENDPOINT_PROVIDERS: OnceLock<Mutex<Vec<(url::Url, DynProvider)>>> = OnceLock::new();
+const MAX_POOLED_PROVIDERS: usize = 128;
+
 /// A provider for one configured endpoint.
 ///
 /// Type-erased because failover hands the same closure a different provider
 /// per attempt, and the builder's own type names the filler stack rather than
-/// anything a caller cares about.
+/// anything a caller cares about. Pooled by endpoint: every read in this
+/// module goes through this function, including the once-a-second poll
+/// `wallet_wait_for_execution` runs while a caller waits on confirmation, so
+/// building a fresh provider (and the `reqwest::Client` connection pool
+/// underneath it) on every call meant every one of those reads paid a new TCP
+/// handshake, and a new TLS handshake for an `https` endpoint, instead of
+/// reusing one already open to the same endpoint.
 #[must_use]
 pub fn provider_for(endpoint: &url::Url) -> DynProvider {
-    ProviderBuilder::new()
+    let pool = ENDPOINT_PROVIDERS.get_or_init(|| Mutex::new(Vec::new()));
+    let mut entries = pool.lock().expect("endpoint provider pool lock");
+    if let Some(position) = entries
+        .iter()
+        .position(|(existing, _)| existing == endpoint)
+    {
+        return entries[position].1.clone();
+    }
+    let provider = ProviderBuilder::new()
         .connect_http(endpoint.clone())
-        .erased()
+        .erased();
+    if entries.len() >= MAX_POOLED_PROVIDERS {
+        entries.remove(0);
+    }
+    entries.push((endpoint.clone(), provider.clone()));
+    provider
 }
 
 /// Run one read against the network's endpoints, in configured order, until
