@@ -846,3 +846,31 @@ fn a_token_list_reference_gets_the_token_list_budget() {
         "{error}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_read_does_not_run_on_a_runtime_worker() {
+    // The read is bounded for a regular file on local storage and unbounded
+    // for one on a mount that has stopped answering -- which the caller
+    // chooses. Off the runtime's own threads, a stalled mount costs a blocking
+    // thread rather than the ability to serve anything else.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("plan.json");
+    std::fs::write(&path, b"{}").unwrap();
+    let url = format!("file://{}", path.display());
+
+    let body = read_local_file(&url, ArtifactType::ExecutionPlan)
+        .await
+        .expect("an ordinary file still reads");
+    assert_eq!(body, b"{}");
+
+    // A directory is refused with the same sentence on every platform, which
+    // is the case the non-blocking open exists to keep answering.
+    let error = read_local_file(
+        &format!("file://{}", directory.path().display()),
+        ArtifactType::ExecutionPlan,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("not a regular file"), "{error}");
+}

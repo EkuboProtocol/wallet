@@ -118,6 +118,12 @@ const MAX_REFERENCE_URL_BYTES: usize = MAX_DATA_URI_PAYLOAD_BYTES + 256;
 /// across several nameservers — and holds a blocking-pool thread with it.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a `file:` body may take to read before the caller stops waiting.
+///
+/// Generous for local storage and short against a mount that has stopped
+/// answering. See [`read_local_file`].
+const LOCAL_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What transports `resolve_execution_plan` will accept.
 ///
 /// Production admits only public `https`, `data:`, and `file:` URIs. Debug
@@ -443,7 +449,7 @@ pub async fn fetch_reference(
             "; `ekubo-wallet meta-reference <path>` prints an envelope for a file you just wrote",
         )?;
         (
-            read_local_file(&reference.url, expected_type)?,
+            read_local_file(&reference.url, expected_type).await?,
             ArtifactSource::LocalFile,
         )
     } else {
@@ -503,15 +509,35 @@ fn require_verifiable(
     Ok(())
 }
 
-/// Read a body from the absolute local path a `file:` URL names.
+/// Read a body from the absolute local path a `file:` URL names, off the
+/// runtime's own threads and under a deadline.
 ///
-/// Synchronous inside an async caller on purpose: this is a bounded read of
-/// at most `MAX_SERIALIZED_PLAN_BYTES` from local storage, and the wallet
-/// already does its encrypted-database work the same way. What it must not
-/// do is block indefinitely, which is why what it opens has to be a regular
-/// file — a FIFO would hold the open itself until someone wrote to it, and a
-/// character device would answer the read forever.
-fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
+/// Being a regular file and `O_NONBLOCK` between them stop a FIFO from holding
+/// the open and a character device from answering the read forever. Neither
+/// bounds a regular file on an NFS, SMB, autofs, or FUSE mount that has
+/// stopped responding, and the path comes from the caller. Run inline, that
+/// pins a runtime worker for as long as the mount stays down, and enough of
+/// them stall everything else this process is doing — including a signing
+/// review that has nothing to do with the file.
+///
+/// So the blocking work goes to the blocking pool, which exists to absorb
+/// exactly this, and the wait for it has a deadline. A thread stuck on a dead
+/// mount cannot be cancelled by anyone, but it is a thread the runtime was
+/// never using, and the caller stops waiting on it.
+async fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
+    let url = url.to_owned();
+    let read = tokio::task::spawn_blocking(move || read_local_file_blocking(&url, artifact_type));
+    match tokio::time::timeout(LOCAL_READ_TIMEOUT, read).await {
+        Ok(joined) => joined.context("the local read task did not finish")?,
+        Err(_) => bail!(
+            "{} file did not answer within {LOCAL_READ_TIMEOUT:?}; a path on a mount that has \
+             stopped responding cannot be read from",
+            artifact_type.noun()
+        ),
+    }
+}
+
+fn read_local_file_blocking(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
     use std::io::Read as _;
 
     let noun = artifact_type.noun();
