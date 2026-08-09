@@ -355,7 +355,8 @@ struct AddNetworkInput {
     /// How the network is written out for a human, 1-128 characters.
     display_name: String,
     /// Up to 8 further identifiers for the same network, each in the same
-    /// character set as `name`.
+    /// character set as `name`. Omit for none.
+    #[serde(default)]
     aliases: Vec<String>,
     /// Canonical decimal chain ID, positive and without leading zeros.
     chain_id: String,
@@ -2995,8 +2996,17 @@ const MAX_TOOL_ERROR_CHARS: usize = 1_024;
 fn tool_error(error: &impl std::fmt::Display) -> ErrorData {
     // Stripped as well as capped: the text is untrusted — an RPC or a plan
     // producer chose it — and a transcript is something a person reads.
+    //
+    // The alternate flag, not `{error}`: an `anyhow::Error`'s plain `Display`
+    // prints only the outermost `.context()`, dropping the underlying cause
+    // (an `io::Error`'s "permission denied", say) that names what actually
+    // went wrong. `{:#}` walks the whole chain, matching the convention
+    // already used for user-facing errors elsewhere (tx_browser.rs,
+    // connect.rs, cli.rs). Types that don't special-case the alternate flag —
+    // `String`, the literals most tests pass here — render identically
+    // either way.
     ErrorData::internal_error(
-        crate::sanitize::stripped_capped(&error.to_string(), MAX_TOOL_ERROR_CHARS),
+        crate::sanitize::stripped_capped(&format!("{error:#}"), MAX_TOOL_ERROR_CHARS),
         None,
     )
 }

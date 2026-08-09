@@ -30,6 +30,21 @@ fn tool_errors_are_capped_and_stripped() {
     assert!(error.message.starts_with("upstream said"));
 }
 
+#[test]
+fn tool_errors_keep_the_anyhow_cause_chain() {
+    // anyhow::Error's plain `Display` prints only the outermost context,
+    // silently dropping the cause it was built to explain. An agent that
+    // only sees "failed to open the config file" cannot tell a permission
+    // problem from a missing directory from a stale symlink.
+    let error = anyhow::anyhow!("permission denied").context("failed to open the config file");
+    let message = tool_error(&error).message;
+    assert!(
+        message.contains("failed to open the config file"),
+        "{message}"
+    );
+    assert!(message.contains("permission denied"), "{message}");
+}
+
 fn server() -> (tempfile::TempDir, WalletMcpServer) {
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
@@ -620,6 +635,31 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
         "rejected for the wrong reason: {}",
         error.message
     );
+}
+
+/// Every other optional list on this tool's inputs (`tokens`, `chain_ids`)
+/// tolerates a caller who omits it; `aliases` used to be the one exception,
+/// failing deserialization outright instead of reaching this tool's own
+/// `tool_error` path.
+#[test]
+fn proposing_a_network_tolerates_a_call_that_omits_aliases() {
+    let input = serde_json::json!({
+        "name": "untrusted",
+        "display_name": "Untrusted Test",
+        "chain_id": "999999",
+        "rpc_urls": ["http://127.0.0.1:9"],
+        "max_gas_limit": "30000000",
+        "native_currency": {
+            "name": "Test Ether",
+            "symbol": "TETH",
+            "decimals": 18,
+        },
+        "block_explorer_url": "https://explorer.example.invalid",
+        "documentation_url": "https://docs.example.invalid",
+    });
+    let parsed: AddNetworkInput =
+        serde_json::from_value(input).expect("aliases should be optional");
+    assert!(parsed.aliases.is_empty());
 }
 
 fn add_network_input(rpc_url: &str) -> AddNetworkInput {
