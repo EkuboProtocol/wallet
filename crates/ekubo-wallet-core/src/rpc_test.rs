@@ -297,6 +297,127 @@ async fn a_single_answer_strategy_pins_nothing() {
     assert!(median_head(&network).await.is_err());
 }
 
+/// The happy path `a_single_answer_strategy_pins_nothing` never reaches: real
+/// endpoints answering with different heights, reduced to the height an
+/// honest endpoint actually reported rather than an average nobody did.
+#[tokio::test]
+async fn median_head_pins_to_the_median_of_the_required_endpoints() {
+    let (low, _a) = stub_endpoint(7, 100);
+    let (high, _b) = stub_endpoint(7, 300);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![low, high]);
+    // Lower middle of an even count, same rule as the bare `median()` helper.
+    assert_eq!(median_head(&network).await.unwrap(), Some(100));
+}
+
+/// An endpoint that never answers is a missing witness, not a zero: it must
+/// neither enter the median nor stop the quorum from being reached by the
+/// endpoints that did answer.
+#[tokio::test]
+async fn median_head_excludes_a_dead_endpoint_from_the_median() {
+    let (low, _a) = stub_endpoint(7, 100);
+    let (high, _b) = stub_endpoint(7, 300);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![dead_endpoint(), low, high],
+    );
+    assert_eq!(median_head(&network).await.unwrap(), Some(100));
+}
+
+/// A blocking stub `eth_feeHistory` responder, built the same way as
+/// [`stub_endpoint`] and for the same reason. `median_fee_estimate` never
+/// checks `eth_chainId`, so this answers only the one method it calls.
+///
+/// `base_fee_per_gas` is repeated so [`alloy::providers::Provider::estimate_eip1559_fees`]'s
+/// `latest_block_base_fee` (the second-to-last element) reads it back, and the
+/// single reward bucket is what alloy's default estimator takes as this
+/// endpoint's priority-fee vote.
+fn fee_history_stub(base_fee_per_gas: u128, reward: u128) -> (Url, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stub endpoint");
+    let address = listener.local_addr().expect("stub endpoint address");
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut buffer = [0_u8; 4096];
+            let Ok(_read) = stream.read(&mut buffer) else {
+                continue;
+            };
+            let body = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"baseFeePerGas\":[\"{base_fee_per_gas:#x}\",\"{base_fee_per_gas:#x}\"],\"gasUsedRatio\":[0.5],\"oldestBlock\":\"0x1\",\"reward\":[[\"{reward:#x}\"]]}}}}"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (
+        format!("http://{address}/").parse().expect("stub URL"),
+        handle,
+    )
+}
+
+/// Nothing exercised `median_fee_estimate`'s own loop before this: only its
+/// `median()` helper had a test. Two endpoints reporting the same fee data
+/// must both be counted before an `m_of_n` estimate is returned.
+#[tokio::test]
+async fn median_fee_estimate_requires_quorum_before_returning() {
+    let (first, _a) = fee_history_stub(100, 20);
+    let (second, _b) = fee_history_stub(100, 20);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![first, second]);
+    assert_eq!(
+        median_fee_estimate(&network, 0, 0).await.unwrap(),
+        (220, 20)
+    );
+}
+
+/// One endpoint answering is one witness short under `agree: 2`. Without this
+/// the loop's own `required` bookkeeping — not just `agree_across_endpoints`'s,
+/// which this function does not call — is what has to reject it.
+#[tokio::test]
+async fn median_fee_estimate_refuses_to_answer_on_one_witness() {
+    let (only, _a) = fee_history_stub(100, 20);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![only, dead_endpoint()]);
+    let error = format!(
+        "{:#}",
+        median_fee_estimate(&network, 0, 0).await.unwrap_err()
+    );
+    assert!(
+        error.contains("requires 2 endpoints to agree on the fee but only 1 answered"),
+        "{error}"
+    );
+}
+
+/// The property `m_of_n` fee estimation exists for: a dead endpoint is
+/// skipped rather than counted or waited on, and the two fields are each the
+/// median an honest endpoint actually reported — not the first answer, and
+/// not an average nobody returned.
+#[tokio::test]
+async fn median_fee_estimate_excludes_a_dead_endpoint_and_takes_the_median() {
+    let (low, _a) = fee_history_stub(10, 1); // max_fee 21, priority 1
+    let (mid, _b) = fee_history_stub(20, 2); // max_fee 42, priority 2
+    let (high, _c) = fee_history_stub(30, 3); // max_fee 63, priority 3
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 3 },
+        vec![dead_endpoint(), low, mid, high],
+    );
+    assert_eq!(median_fee_estimate(&network, 0, 0).await.unwrap(), (42, 2));
+}
+
+/// Under `ordered` and `random` there is no quorum to spend requests on: the
+/// endpoint that answered the rest of preparation is trusted as-is, and this
+/// function must return without ever asking the network. A network built from
+/// only a dead endpoint proves it — any RPC attempt here would fail.
+#[tokio::test]
+async fn median_fee_estimate_is_a_no_op_without_m_of_n() {
+    let network = strategy_network(RpcStrategy::Ordered, vec![dead_endpoint()]);
+    assert_eq!(
+        median_fee_estimate(&network, 500, 50).await.unwrap(),
+        (500, 50)
+    );
+}
+
 #[test]
 fn a_receipt_the_lifecycle_cannot_store_is_the_endpoints_failure() {
     // Both fields arrive as u64 and land in signed INTEGER columns. The
