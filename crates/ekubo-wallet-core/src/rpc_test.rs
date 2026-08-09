@@ -280,3 +280,19 @@ fn the_median_fee_is_one_an_endpoint_returned() {
     assert_eq!(median(&mut [100, 110, u128::MAX]), 110);
     assert_eq!(median(&mut [100, 110, 0]), 100);
 }
+
+#[tokio::test]
+async fn a_single_answer_strategy_pins_nothing() {
+    // There is no quorum to protect: the endpoint that runs the simulation
+    // reads its own head, and no other endpoint is held to it.
+    let mut network = network_with(1, vec![dead_endpoint()]);
+    network.rpc_strategy = crate::config::RpcStrategy::Ordered;
+    assert_eq!(median_head(&network).await.unwrap(), None);
+    network.rpc_strategy = crate::config::RpcStrategy::Random;
+    assert_eq!(median_head(&network).await.unwrap(), None);
+
+    // And a quorum whose endpoints cannot be reached fails rather than
+    // falling back to one endpoint's word about the head.
+    network.rpc_strategy = crate::config::RpcStrategy::MOfN { agree: 2 };
+    assert!(median_head(&network).await.is_err());
+}

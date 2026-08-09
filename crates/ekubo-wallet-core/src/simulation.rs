@@ -304,7 +304,15 @@ pub async fn simulate_execution(
     // chain, and asking seven more endpoints returns the same answer more
     // slowly.
     let required = network.rpc_strategy.required_agreement();
-    let mut pin = None;
+    // Under `m_of_n`, where the quorum simulates is decided before any of them
+    // is asked to. Left as `None` under the single-answer strategies, where the
+    // endpoint that runs the simulation reads its own head and there is no
+    // quorum for a stale one to drag backwards.
+    let mut pin = if fork.is_none() {
+        crate::rpc::median_head(network).await?
+    } else {
+        None
+    };
     let mut last: Option<SimulationResult> = None;
     // Successful simulations, grouped by the part of them that has to match.
     let mut agreed: Vec<(SimulationAgreement, Vec<String>, SimulationResult)> = Vec::new();
@@ -326,8 +334,12 @@ pub async fn simulate_execution(
             &mut observed_parent,
         )
         .await?;
-        // The first endpoint that got as far as reading a header fixes the
-        // height every later one is held to.
+        // Under a single-answer strategy the height is still whatever the
+        // first endpoint that read a header reported — there is one answer and
+        // it is that endpoint's, so there is nothing here to protect. Under
+        // `m_of_n` the pin was already set from the median head above, and
+        // this cannot move it. Either way the endpoint has by now been shown
+        // to be on the chain it was asked about.
         if pin.is_none() && fork.is_none() {
             pin = observed_parent.map(|parent| parent.number);
         }
@@ -580,7 +592,6 @@ async fn simulate_execution_through(
                     ));
                 }
             };
-            *observed_parent = Some(parent);
             (chain_id, parent)
         }
         Err(error) => {
@@ -602,6 +613,12 @@ async fn simulate_execution_through(
             &format!("RPC reports chain {chain_id}, not {}", network.chain_id),
         ));
     }
+    // Reported only now, after the endpoint has been shown to be on the chain
+    // it was asked about. The caller promotes this to the height every later
+    // endpoint is held to, so writing it before the check let an endpoint that
+    // was about to be disqualified for serving the wrong chain still choose
+    // where the quorum simulates.
+    *observed_parent = Some(parent);
 
     let block_number = parent.number;
     let gas_limit = match effective_gas_limit(network, parent.gas_limit) {

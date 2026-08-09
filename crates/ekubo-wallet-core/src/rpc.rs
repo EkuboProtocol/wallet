@@ -243,6 +243,49 @@ pub async fn median_fee_estimate(
     Ok((max_fee_per_gas, max_priority_fee_per_gas))
 }
 
+/// The height a quorum simulation pins to, as the median of what `agree`
+/// endpoints say the chain head is.
+///
+/// `None` under `ordered` and `random`, where there is no quorum to protect
+/// and the endpoint that runs the simulation reads its own head.
+///
+/// Under `m_of_n` there is. The pin used to be whichever height the first
+/// endpoint happened to report, and every later endpoint was then held to it —
+/// so an endpoint reporting an old head chose the state the whole quorum
+/// evaluated against, and the others honestly agreed about that height. The
+/// agreement was real and the thing agreed on was the attacker's. A median
+/// with a majority honest is a height an honest endpoint reported, and one
+/// liar moves it by at most a position.
+pub async fn median_head(network: &NetworkConfig) -> Result<Option<u64>> {
+    let required = network.rpc_strategy.required_agreement();
+    if required <= 1 {
+        return Ok(None);
+    }
+    let mut heads = Vec::new();
+    for endpoint in endpoint_order(network) {
+        if heads.len() >= required {
+            break;
+        }
+        if let Ok(Ok(number)) = tokio::time::timeout(
+            FEE_ESTIMATE_TIMEOUT,
+            provider_for(endpoint).get_block_number(),
+        )
+        .await
+        {
+            heads.push(u128::from(number));
+        }
+    }
+    ensure!(
+        heads.len() >= required,
+        "{} requires {required} endpoints to agree but only {} reported a chain head",
+        network.name,
+        heads.len()
+    );
+    Ok(Some(
+        u64::try_from(median(&mut heads)).expect("every element came from a u64"),
+    ))
+}
+
 /// The lower of the two middle values for an even count, so the answer is
 /// always one an endpoint actually returned rather than an average of two
 /// that nobody did.

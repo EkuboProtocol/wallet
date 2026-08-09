@@ -139,6 +139,10 @@ impl StubChain {
     fn dispatch(&self, method: &str, params: &serde_json::Value) -> serde_json::Value {
         match method {
             "eth_chainId" => serde_json::json!(format!("{CHAIN_ID:#x}")),
+            // Asked before a quorum simulation, so the height the quorum pins
+            // to is the median of what the endpoints say rather than whatever
+            // the first one happened to report.
+            "eth_blockNumber" => serde_json::json!(format!("{PARENT_NUMBER:#x}")),
             "eth_getBlockByNumber" => block_json_limited(
                 PARENT_NUMBER,
                 B256::repeat_byte(0xa9),
