@@ -383,3 +383,28 @@ fn the_gas_ceiling_falls_back_to_the_block_when_nothing_is_configured() {
     network.max_gas_limit = Some("20999".into());
     assert!(usable_gas_ceiling(&network, 30_000_000).is_err());
 }
+
+#[test]
+fn a_configured_fee_ceiling_refuses_an_endpoint_that_names_more() {
+    // The one field on the automatic path with nothing behind it: no policy
+    // rule speaks about fees, and nobody reviews an automatic transaction, so
+    // `gas_limit × max_fee_per_gas` used to be whatever one endpoint said.
+    let mut network = network();
+
+    network.max_fee_per_gas = None;
+    assert_eq!(capped_fee(&network, u128::MAX).unwrap(), u128::MAX);
+
+    network.max_fee_per_gas = Some("1000000000".into());
+    assert_eq!(capped_fee(&network, 999_999_999).unwrap(), 999_999_999);
+    assert_eq!(capped_fee(&network, 1_000_000_000).unwrap(), 1_000_000_000);
+
+    // Refused rather than clamped: a clamped fee is an envelope that may never
+    // mine, holding the wallet's one in-flight slot for the chain. The error
+    // says what to change.
+    let error = capped_fee(&network, 1_000_000_001).unwrap_err().to_string();
+    assert!(error.contains("1000000000"), "{error}");
+    assert!(error.contains("max_fee_per_gas"), "{error}");
+
+    network.max_fee_per_gas = Some("not a number".into());
+    assert!(capped_fee(&network, 1).is_err());
+}

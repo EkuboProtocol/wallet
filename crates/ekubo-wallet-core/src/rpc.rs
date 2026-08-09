@@ -16,6 +16,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// Shorter than [`RPC_TIMEOUT`], because this one is paid `agree` times over
+/// on a path a person may be waiting on, and a slow endpoint here costs a
+/// second opinion rather than the answer itself.
+const FEE_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// A provider for one configured endpoint.
 ///
@@ -178,6 +182,73 @@ where
         let _ = write!(message, "\n  {endpoint}: {error:#}");
     }
     Err(anyhow::anyhow!(message))
+}
+
+/// The EIP-1559 fee pair to sign, given what the endpoint that answered the
+/// rest of preparation said.
+///
+/// Under `ordered` and `random` that answer stands: those strategies have
+/// already chosen to trust whichever endpoint is first, and asking more of
+/// them here would spend requests the owner said they did not want to spend.
+///
+/// Under `m_of_n` it does not. A fee estimate cannot go through
+/// [`agree_across_endpoints`], which requires equality and would refuse every
+/// request, because two honest nodes legitimately disagree about what the next
+/// block will cost. What is available instead is a median: draw estimates from
+/// the configured endpoints until `agree` of them have answered, and take the
+/// middle of each field. With a majority honest, the middle value is one no
+/// single operator picked — which is the whole of what `m_of_n` promises and
+/// what these two fields were getting none of.
+///
+/// The two fields are taken independently, so the pair is re-ordered
+/// afterwards rather than assumed consistent.
+pub async fn median_fee_estimate(
+    network: &NetworkConfig,
+    first_max_fee: u128,
+    first_priority_fee: u128,
+) -> Result<(u128, u128)> {
+    let required = network.rpc_strategy.required_agreement();
+    if required <= 1 {
+        return Ok((first_max_fee, first_priority_fee));
+    }
+    let mut failures = Vec::new();
+    let mut max_fees = Vec::new();
+    let mut priority_fees = Vec::new();
+    for endpoint in endpoint_order(network) {
+        if max_fees.len() >= required {
+            break;
+        }
+        match tokio::time::timeout(
+            FEE_ESTIMATE_TIMEOUT,
+            provider_for(endpoint).estimate_eip1559_fees(),
+        )
+        .await
+        {
+            Ok(Ok(estimate)) => {
+                max_fees.push(estimate.max_fee_per_gas);
+                priority_fees.push(estimate.max_priority_fee_per_gas);
+            }
+            Ok(Err(error)) => failures.push((endpoint, rpc_error(&error))),
+            Err(_) => failures.push((endpoint, anyhow::anyhow!("fee estimate timed out"))),
+        }
+    }
+    ensure!(
+        max_fees.len() >= required,
+        "{} requires {required} endpoints to agree on the fee but only {} answered",
+        network.name,
+        max_fees.len()
+    );
+    let max_fee_per_gas = median(&mut max_fees);
+    let max_priority_fee_per_gas = median(&mut priority_fees).min(max_fee_per_gas);
+    Ok((max_fee_per_gas, max_priority_fee_per_gas))
+}
+
+/// The lower of the two middle values for an even count, so the answer is
+/// always one an endpoint actually returned rather than an average of two
+/// that nobody did.
+fn median(values: &mut [u128]) -> u128 {
+    values.sort_unstable();
+    values[(values.len() - 1) / 2]
 }
 
 /// The error raised when every endpoint a network lists has been tried.

@@ -4104,6 +4104,10 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
             .parse()
             .context("RPC strategy is invalid")?,
         max_gas_limit: Some(field("--max-gas-limit")),
+        // Not asked for here. A fee ceiling is a judgement about what the
+        // owner's transactions are worth rather than a property of the chain,
+        // like `rpc_strategy`, and the form asks only for the latter.
+        max_fee_per_gas: None,
         native_currency: Some(NativeCurrency {
             name: field("--native-currency-name"),
             symbol: field("--native-currency-symbol"),

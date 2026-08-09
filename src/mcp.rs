@@ -1852,6 +1852,8 @@ impl WalletMcpServer {
                 .map_err(|error: anyhow::Error| tool_error(&error))?
                 .unwrap_or_default(),
             max_gas_limit: Some(input.max_gas_limit),
+            // An agent does not choose the owner's fee ceiling.
+            max_fee_per_gas: None,
             native_currency: Some(input.native_currency),
             block_explorer_url: Some(input.block_explorer_url),
             documentation_url: Some(input.documentation_url),

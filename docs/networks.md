@@ -311,6 +311,23 @@ score: `native_value` guards what a call *sends*, not what it costs. A
 profile-level ceiling is the one bound on that which does not depend on the
 endpoint being honest.
 
+**Set `max_fee_per_gas` too, in wei, if you run automatic transactions.** A
+gas limit bounds only one of the two factors. The other is the EIP-1559
+`maxFeePerGas`, which comes from `eth_maxPriorityFeePerGas` and the block's
+base fee as one endpoint reports them, and which reached the signature
+unchanged: no policy rule speaks about fees, and an automatic transaction is by
+definition one nobody reviews. With `max_fee_per_gas` set, a preparation whose
+estimate exceeds it is refused rather than signed — refused rather than
+clamped, because a clamped fee is an envelope that may never mine while it
+holds the wallet's one in-flight slot for that chain. It is unset by default,
+since a number that is right for one chain is wrong for most.
+
+Under `m_of_n`, fee estimates are additionally drawn from `agree` endpoints and
+the median of each field is used. They cannot go through the equality-based
+agreement the other reads use — two honest nodes disagree about what the next
+block will cost — but with a majority honest, a median is a value no single
+operator picked.
+
 ## Regenerating the registry
 
 The vendored `crates/ekubo-wallet-core/networks.json` is produced by

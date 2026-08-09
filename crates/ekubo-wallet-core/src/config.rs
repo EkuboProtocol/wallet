@@ -75,6 +75,21 @@ pub struct NetworkConfig {
     pub rpc_strategy: RpcStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas_limit: Option<String>,
+    /// The most this wallet will ever sign as `maxFeePerGas`, in wei.
+    ///
+    /// The fee fields of an automatic transaction come from an RPC and reach
+    /// the signature unchanged: no policy rule speaks about them, and nobody
+    /// reviews them, because the whole point of an automatic transaction is
+    /// that nobody is asked. `gas_limit × max_fee_per_gas` is what the owner
+    /// can lose to a single endpoint that answers dishonestly, and the block
+    /// gas limit already bounds the first factor. This bounds the second.
+    ///
+    /// Unset means unbounded, which is what it was, and is the right default
+    /// only because a number chosen here for every chain would be wrong on
+    /// most of them. An owner running automatic transactions against one
+    /// public endpoint should set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fee_per_gas: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_currency: Option<NativeCurrency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,6 +242,8 @@ struct StoredNetwork {
     #[serde(default)]
     max_gas_limit: Option<String>,
     #[serde(default)]
+    max_fee_per_gas: Option<String>,
+    #[serde(default)]
     native_currency: Option<NativeCurrency>,
     #[serde(default)]
     block_explorer_url: Option<Url>,
@@ -276,6 +293,7 @@ impl TryFrom<StoredNetwork> for NetworkConfig {
             rpc_urls,
             rpc_strategy: stored.rpc_strategy,
             max_gas_limit: stored.max_gas_limit,
+            max_fee_per_gas: stored.max_fee_per_gas,
             native_currency: stored.native_currency,
             block_explorer_url: stored.block_explorer_url,
             documentation_url: stored.documentation_url,

@@ -247,6 +247,23 @@ pub async fn prepare_execution(
         prepared.2.max_fee_per_gas >= prepared.2.max_priority_fee_per_gas,
         "RPC returned invalid EIP-1559 fee fields"
     );
+    // Under `m_of_n` the fee is not whatever the first endpoint said. Fee
+    // estimates are not deterministic across honest nodes, so they cannot go
+    // through `agree_across_endpoints`, which requires equality — but a median
+    // of several answers is a value no single endpoint chooses, which is the
+    // property `m_of_n` was configured for and did not have here.
+    let (max_fee_per_gas, max_priority_fee_per_gas) = crate::rpc::median_fee_estimate(
+        network,
+        prepared.2.max_fee_per_gas,
+        prepared.2.max_priority_fee_per_gas,
+    )
+    .await?;
+    // And the ceiling the owner set, if they set one. Nothing else bounds this
+    // on the automatic path: no policy rule speaks about fees and no reviewer
+    // sees them, so `gas_limit × max_fee_per_gas` was whatever an endpoint
+    // cared to name.
+    let max_fee_per_gas = capped_fee(network, max_fee_per_gas)?;
+    let max_priority_fee_per_gas = max_priority_fee_per_gas.min(max_fee_per_gas);
     if simulation.will_authorize_delegation {
         prepared
             .1
@@ -258,8 +275,8 @@ pub async fn prepare_execution(
         chain_id: network.chain_id,
         nonce: prepared.1,
         gas_limit,
-        max_fee_per_gas: prepared.2.max_fee_per_gas,
-        max_priority_fee_per_gas: prepared.2.max_priority_fee_per_gas,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
         planned,
         authorize_delegation: simulation.will_authorize_delegation,
         plan_digest: simulation.digest.clone(),
@@ -401,6 +418,32 @@ fn usable_gas_ceiling(network: &NetworkConfig, block_maximum: u64) -> Result<u64
          transaction costs before it does anything"
     );
     Ok(ceiling)
+}
+
+/// The owner's absolute ceiling on `maxFeePerGas`, applied to an
+/// endpoint-supplied estimate.
+///
+/// Refusing rather than clamping. A clamped fee is an envelope that may never
+/// mine, signed anyway and occupying the wallet's one in-flight slot for that
+/// chain; the honest answer to "the market is above what you said you would
+/// pay" is to say so and let the owner raise the ceiling or wait. That is the
+/// opposite of the cancellation path's choice, and for the opposite reason:
+/// there, not producing an envelope is the failure.
+fn capped_fee(network: &NetworkConfig, max_fee_per_gas: u128) -> Result<u128> {
+    let Some(ceiling) = network.max_fee_per_gas.as_deref() else {
+        return Ok(max_fee_per_gas);
+    };
+    let ceiling: u128 = ceiling
+        .parse()
+        .context("configured maximum fee per gas does not fit uint128")?;
+    ensure!(
+        max_fee_per_gas <= ceiling,
+        "the RPC's maximum fee of {max_fee_per_gas} wei per gas is above the {ceiling} wei \
+         ceiling configured for {}; raise max_fee_per_gas for this network, or wait for the \
+         market to come down",
+        network.name
+    );
+    Ok(max_fee_per_gas)
 }
 
 fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> Result<u64> {

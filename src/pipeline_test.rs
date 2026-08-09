@@ -329,6 +329,7 @@ fn stub_network(address: SocketAddr) -> NetworkConfig {
         rpc_urls: vec![format!("http://{address}/").parse().unwrap()],
         rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
         max_gas_limit: Some(BLOCK_GAS_LIMIT.to_string()),
+        max_fee_per_gas: None,
         native_currency: None,
         block_explorer_url: None,
         documentation_url: None,

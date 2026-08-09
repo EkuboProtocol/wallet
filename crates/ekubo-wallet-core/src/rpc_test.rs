@@ -91,6 +91,7 @@ fn network_with(chain_id: u64, rpc_urls: Vec<Url>) -> NetworkConfig {
         rpc_urls,
         rpc_strategy: crate::config::RpcStrategy::Ordered,
         max_gas_limit: None,
+        max_fee_per_gas: None,
         native_currency: None,
         block_explorer_url: None,
         documentation_url: None,
@@ -263,4 +264,19 @@ async fn a_single_answer_is_enough_without_m_of_n() {
             "{strategy} took an answer"
         );
     }
+}
+
+#[test]
+fn the_median_fee_is_one_an_endpoint_returned() {
+    // The lower middle for an even count, so the answer is always a value some
+    // endpoint actually named rather than an average of two that nobody did.
+    assert_eq!(median(&mut [7]), 7);
+    assert_eq!(median(&mut [9, 1]), 1);
+    assert_eq!(median(&mut [9, 1, 5]), 5);
+    assert_eq!(median(&mut [1, 2, 3, 4]), 2);
+
+    // The property that matters: with a majority honest, one endpoint naming
+    // an absurd number cannot move the answer past what the honest ones said.
+    assert_eq!(median(&mut [100, 110, u128::MAX]), 110);
+    assert_eq!(median(&mut [100, 110, 0]), 100);
 }

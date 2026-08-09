@@ -138,6 +138,7 @@ fn transaction_lines_render_offline() {
         rpc_urls: vec!["https://example.invalid/rpc".parse().unwrap()],
         rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
         max_gas_limit: None,
+        max_fee_per_gas: None,
         native_currency: None,
         block_explorer_url: None,
         documentation_url: None,
