@@ -7,6 +7,8 @@
 
 use super::*;
 use alloy::primitives::U256;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use url::Url;
 
 #[test]
@@ -73,6 +75,64 @@ fn stub_endpoint(chain_id: u64, block_number: u64) -> (Url, std::thread::JoinHan
         format!("http://{address}/").parse().expect("stub URL"),
         handle,
     )
+}
+
+/// Like [`stub_endpoint`], but never closes the connection and counts how
+/// many distinct ones it accepts — proof, not assumption, that
+/// [`super::provider_for`] pools a connection per endpoint instead of dialing
+/// fresh on every call. Requests are answered one `read` at a time rather
+/// than framed by `Content-Length`, matching [`stub_endpoint`]'s own
+/// simplification: the `eth_chainId`/`eth_blockNumber` bodies this module
+/// sends are a few dozen bytes, well inside one TCP segment on loopback, so
+/// each `read` is one complete request in practice.
+fn keep_alive_stub_endpoint(chain_id: u64, block_number: u64) -> (Url, Arc<AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stub endpoint");
+    let address = listener.local_addr().expect("stub endpoint address");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&connections);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            counter.fetch_add(1, Ordering::SeqCst);
+            // A connection that is kept open must be served on its own
+            // thread: a client that pools connections holds this one open
+            // indefinitely between requests, and a single-threaded accept
+            // loop would block here forever instead of accepting the next
+            // connection a non-pooling client opens.
+            std::thread::spawn(move || serve_keep_alive_connection(stream, chain_id, block_number));
+        }
+    });
+    (
+        format!("http://{address}/").parse().expect("stub URL"),
+        connections,
+    )
+}
+
+fn serve_keep_alive_connection(mut stream: std::net::TcpStream, chain_id: u64, block_number: u64) {
+    use std::io::{Read as _, Write as _};
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let Ok(read) = stream.read(&mut buffer) else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+        let result = if request.contains("eth_chainId") {
+            format!("\"{chain_id:#x}\"")
+        } else {
+            format!("\"{block_number:#x}\"")
+        };
+        let body = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{result}}}");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        if stream.write_all(response.as_bytes()).is_err() {
+            return;
+        }
+    }
 }
 
 /// Port 1 on loopback: nothing listens there, so a connection is refused
@@ -163,6 +223,38 @@ async fn a_successful_endpoint_ends_the_search() {
     let (second, _b) = stub_endpoint(7, 200);
     let network = network_with(7, vec![first, second]);
     assert_eq!(latest_block_number(&network).await.unwrap(), 100);
+}
+
+/// [`provider_for`] pools one provider per endpoint precisely so that
+/// separate top-level reads — separate polls of
+/// `wallet_wait_for_execution`'s once-a-second confirmation loop, in
+/// production — reuse already-open connections instead of paying a fresh TCP
+/// handshake each time. `latest_block_number` opens two connections on its
+/// first call (`get_chain_id` and `get_block_number` run concurrently via
+/// `tokio::try_join!`, both against a pool that starts empty), which is the
+/// floor this test can prove against: without pooling, each of the five
+/// calls below would open its own two, for ten in total — proven by running
+/// this same assertion against the unpooled `provider_for` first and
+/// watching it fail with `left: 10`. With pooling, the second call onward
+/// finds both connections already idle in the pool, so the count stays at
+/// two for all five reads instead of growing with every one of them.
+#[tokio::test]
+async fn repeated_reads_to_one_endpoint_reuse_the_same_two_pooled_connections() {
+    let (endpoint, connections) = keep_alive_stub_endpoint(7, 4242);
+    let network = network_with(7, vec![endpoint]);
+    for _ in 0..5 {
+        assert_eq!(
+            latest_block_number(&network)
+                .await
+                .expect("the stub answered"),
+            4242
+        );
+    }
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        2,
+        "five reads to the same endpoint should reuse the same two pooled connections, not open ten"
+    );
 }
 
 use crate::config::RpcStrategy;
