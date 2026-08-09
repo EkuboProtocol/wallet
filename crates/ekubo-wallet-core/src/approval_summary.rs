@@ -91,6 +91,11 @@ pub struct StepInterpretation {
 ///
 /// The caller resolves these against the token database. Collection contacts
 /// no network: which addresses a plan names is decided by its calldata alone.
+///
+/// A `multicall(bytes[])` wrapper's nested calls are not unwrapped looking
+/// for a token target: see `standard_call_warnings`'s doc comment for why a
+/// multicall's contents are treated as unverified rather than individually
+/// inspected.
 #[must_use]
 pub async fn plan_token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
     let mut targets = BTreeSet::new();
@@ -399,9 +404,6 @@ pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenM
     )
 }
 
-/// A token is named only when the owner's token database names it. Anything
-/// else is rendered by address and marked, so a reviewer can never read the
-/// absence of a name as the presence of a familiar one.
 /// What a call does, stated independently of how it reads.
 ///
 /// These are the two grants that outlive the transaction carrying them: an
@@ -410,6 +412,16 @@ pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenM
 /// derived from the call and attached to whatever description is displayed —
 /// a clear-signing descriptor renders an approval more legibly, which is no
 /// reason for its ceiling to stop being mentioned.
+///
+/// A `multicall(bytes[])` wrapper's nested calls are not unwrapped looking
+/// for a grant hiding inside one: a nested call is arbitrary calldata this
+/// crate has no bounded way to fully account for, and a scan deep enough to
+/// find every grant is also a scan whose cost and coverage a plan's own
+/// nesting gets to choose. Rather than promise a specific finding a bounded
+/// scan cannot actually guarantee, a multicall earns a warning that its
+/// contents were not individually reviewed, so a reviewer treats everything
+/// it might carry as unverified instead of trusting the absence of a
+/// specific warning as the absence of a specific grant.
 fn standard_call_warnings(
     step: u32,
     token: Address,
@@ -417,6 +429,11 @@ fn standard_call_warnings(
     call: Option<&StandardCall>,
 ) -> Vec<String> {
     match call {
+        Some(StandardCall::Multicall { calls }) => vec![format!(
+            "Call {step} is a multicall bundling {} nested call(s); their contents are not \
+             individually reviewed, so treat this call as unverified.",
+            calls.len()
+        )],
         Some(StandardCall::Approve { spender, amount })
             if *amount != U256::ZERO && is_effectively_unlimited(*amount) =>
         {
@@ -437,6 +454,9 @@ fn standard_call_warnings(
     }
 }
 
+/// A token is named only when the owner's token database names it. Anything
+/// else is rendered by address and marked, so a reviewer can never read the
+/// absence of a name as the presence of a familiar one.
 pub(crate) fn token_label(token: Address, display: &TokenMetadata) -> String {
     display
         .symbol
