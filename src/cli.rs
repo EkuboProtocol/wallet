@@ -424,8 +424,15 @@ enum ServerTransport {
 ///
 /// Three of them own their own MCP configuration and expose a CLI for it, so
 /// registration shells out rather than editing their files: their format is
-/// theirs to change. Cursor has no such command, which is why it is the one
-/// whose `mcp.json` this writes directly.
+/// theirs to change. Cursor and opencode have no such command, which is why
+/// they are the two whose configuration files this writes directly.
+///
+/// opencode is the near miss worth recording. It does have an `opencode mcp
+/// add`, but its `mcp` command tree is `add`, `list`, `auth`, `logout`, and
+/// `debug` — there is nothing that takes a server back out. Registering
+/// through a CLI that cannot unregister would leave `meta-agent remove`
+/// editing the file regardless, so both directions go through the file and
+/// there is one mechanism to reason about rather than two that can disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum AgentName {
     Codex,
@@ -434,10 +441,17 @@ enum AgentName {
     #[value(name = "gemini-cli")]
     Gemini,
     Cursor,
+    Opencode,
 }
 
 impl AgentName {
-    const ALL: [Self; 4] = [Self::Codex, Self::ClaudeCode, Self::Gemini, Self::Cursor];
+    const ALL: [Self; 5] = [
+        Self::Codex,
+        Self::ClaudeCode,
+        Self::Gemini,
+        Self::Cursor,
+        Self::Opencode,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -445,6 +459,9 @@ impl AgentName {
             Self::ClaudeCode => "Claude Code",
             Self::Gemini => "Gemini CLI",
             Self::Cursor => "Cursor",
+            // Lowercase deliberately: it is how the project spells itself
+            // everywhere, including its own binary and documentation.
+            Self::Opencode => "opencode",
         }
     }
 
@@ -454,6 +471,7 @@ impl AgentName {
             Self::ClaudeCode => "claude-code",
             Self::Gemini => "gemini-cli",
             Self::Cursor => "cursor",
+            Self::Opencode => "opencode",
         }
     }
 
@@ -463,7 +481,7 @@ impl AgentName {
             Self::Codex => Some("codex"),
             Self::ClaudeCode => Some("claude"),
             Self::Gemini => Some("gemini"),
-            Self::Cursor => None,
+            Self::Cursor | Self::Opencode => None,
         }
     }
 }
@@ -4683,8 +4701,13 @@ fn server_command() -> Result<String> {
 }
 
 fn agent_binary(agent: AgentName) -> Option<PathBuf> {
-    let name = agent.binary()?;
-    // `which` is not available everywhere this runs, so PATH is walked here.
+    binary_on_path(agent.binary()?)
+}
+
+/// The first `name` on `PATH`, if it is there.
+///
+/// `which` is not available everywhere this runs, so PATH is walked here.
+fn binary_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|directory| directory.join(name))
@@ -4699,6 +4722,14 @@ fn agent_installed(agent: AgentName) -> bool {
         // directory is the evidence that it is here.
         AgentName::Cursor => {
             BaseDirs::new().is_some_and(|base| base.home_dir().join(".cursor").is_dir())
+        }
+        // opencode ships a CLI *and* a desktop app, and either one creates the
+        // config directory on first run — it is `mkdir`ed unconditionally at
+        // startup. So the directory answers for both, where looking only for
+        // the binary would report the desktop-only install as absent.
+        AgentName::Opencode => {
+            binary_on_path("opencode").is_some()
+                || opencode_config_dir().is_ok_and(|directory| directory.is_dir())
         }
         _ => agent_binary(agent).is_some(),
     }
@@ -4718,6 +4749,9 @@ fn agent_registered(agent: AgentName) -> Option<Registration> {
             wallet: servers.get(LOCAL_SERVER_NAME).is_some(),
             companion: servers.get(COMPANION_SERVER_NAME).is_some(),
         });
+    }
+    if agent == AgentName::Opencode {
+        return opencode_registration_at(&opencode_config_dir().ok()?);
     }
     let output = std::process::Command::new(agent_binary(agent)?)
         .args(["mcp", "list"])
@@ -4780,6 +4814,10 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
         configure_cursor_mcp(name, transport)?;
         return Ok(());
     }
+    if agent == AgentName::Opencode {
+        configure_opencode_mcp(name, transport)?;
+        return Ok(());
+    }
     let binary =
         agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
     // Removed first so re-registering after moving the binary replaces the old
@@ -4835,7 +4873,9 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
                 "--scope".into(),
                 "user".into(),
             ]),
-            AgentName::Cursor => unreachable!("Cursor is configured by file above"),
+            AgentName::Cursor | AgentName::Opencode => {
+                unreachable!("Cursor and opencode are configured by file above")
+            }
         },
     }
     let status = std::process::Command::new(&binary)
@@ -4864,6 +4904,9 @@ fn unregister_agent(agent: AgentName) -> Result<()> {
 fn unregister_server(agent: AgentName, name: &str) -> Result<()> {
     if agent == AgentName::Cursor {
         return remove_cursor_mcp(name);
+    }
+    if agent == AgentName::Opencode {
+        return remove_opencode_mcp(name);
     }
     let binary =
         agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
@@ -4907,13 +4950,7 @@ fn remove_cursor_mcp_at(home: &Path, name: &str) -> Result<()> {
     };
     servers.remove(name);
     document.insert("mcpServers".into(), servers.into());
-    let directory = file.parent().context("mcp.json has no parent directory")?;
-    let mut temporary = NamedTempFile::new_in(directory)?;
-    set_private_permissions(temporary.path(), false)?;
-    serde_json::to_writer_pretty(&mut temporary, &document)?;
-    std::io::Write::write_all(&mut temporary, b"\n")?;
-    temporary.persist(&file).map_err(|error| error.error)?;
-    Ok(())
+    write_private_json(&file, &document)
 }
 
 fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
@@ -5094,27 +5131,254 @@ fn configure_cursor_mcp_at(
         },
     );
     document.insert("mcpServers".into(), servers.into());
+    write_private_json(&file, &document)?;
+    Ok(file)
+}
 
-    fs::create_dir_all(&directory)
+/// The global configuration files opencode reads, in the order it merges them.
+///
+/// All three are loaded and merged rather than the first one found winning, so
+/// a name defined in a later file shadows the same name in an earlier one.
+/// That ordering is why removal has to consider every one of them and why
+/// detection reads them all.
+const OPENCODE_CONFIG_FILES: [&str; 3] = ["config.json", "opencode.json", "opencode.jsonc"];
+
+/// The one this wallet writes.
+///
+/// opencode's own `mcp add` prefers whichever of `opencode.json` and
+/// `opencode.jsonc` already exists; this always writes the `.json`. The
+/// difference matters for one person — whoever keeps their settings in a
+/// commented `.jsonc` — and for them it is the difference between an entry
+/// added to a file this wallet owns outright and their own file rewritten
+/// through a serializer that would delete every comment in it. opencode merges
+/// all three of these files, so an entry written here is read either way.
+const OPENCODE_WRITTEN_CONFIG: &str = "opencode.json";
+
+/// Where opencode keeps its global configuration.
+///
+/// Deliberately not `BaseDirs::config_dir`. opencode resolves this path with
+/// the `xdg-basedir` package rather than any platform convention, and that
+/// package answers `$XDG_CONFIG_HOME`, or `~/.config` when it is unset, on
+/// every operating system — including macOS and Windows, where the native
+/// config directory is somewhere else entirely and a file written there would
+/// be read by nothing.
+fn opencode_config_dir() -> Result<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(base).join("opencode"));
+    }
+    let base = BaseDirs::new().context("could not determine the user home directory")?;
+    Ok(base.home_dir().join(".config").join("opencode"))
+}
+
+/// One server in the shape opencode's `mcp` map expects.
+///
+/// The two forms are a tagged union rather than Cursor's "whichever key is
+/// present", and `command` is an argv array rather than a string: a local
+/// server written as `"command": "/path/to/ekubo-wallet server"` is rejected
+/// by opencode's schema, and one written with Cursor's `args` key is silently
+/// launched with no arguments at all.
+fn opencode_server_entry(transport: &ServerTransport) -> serde_json::Value {
+    match transport {
+        ServerTransport::Stdio(command) => serde_json::json!({
+            "type": "local",
+            "command": [command, "server"],
+            "enabled": true,
+        }),
+        ServerTransport::Http(url) => serde_json::json!({
+            "type": "remote",
+            "url": url,
+            "enabled": true,
+        }),
+    }
+}
+
+fn configure_opencode_mcp(name: &str, transport: &ServerTransport) -> Result<PathBuf> {
+    if let ServerTransport::Stdio(command) = transport {
+        ensure!(!command.trim().is_empty(), "server command cannot be empty");
+    }
+    configure_opencode_mcp_at(&opencode_config_dir()?, name, transport)
+}
+
+fn configure_opencode_mcp_at(
+    directory: &Path,
+    name: &str,
+    transport: &ServerTransport,
+) -> Result<PathBuf> {
+    let file = directory.join(OPENCODE_WRITTEN_CONFIG);
+    // opencode parses every one of its configuration files as JSONC, the
+    // `.json` included, so an existing file may hold comments this wallet
+    // cannot round-trip. Failing here rather than starting from an empty
+    // document is what keeps a hand-written configuration from being replaced
+    // by one entry; the message has to say what to do instead, because there
+    // is no automatic path out of it.
+    let mut document = read_opencode_config(&file)
+        .with_context(|| {
+            format!(
+                "this wallet writes plain JSON and will not rewrite {}. Add the entry by hand — \
+                 `ekubo-wallet meta-agent list` prints the command and URL it would have used",
+                file.display()
+            )
+        })?
+        .unwrap_or_default();
+    let mut servers = match document.remove("mcp") {
+        Some(value) => value
+            .as_object()
+            .cloned()
+            .context("opencode `mcp` must be a JSON object")?,
+        None => serde_json::Map::new(),
+    };
+    servers.insert(name.into(), opencode_server_entry(transport));
+    document.insert("mcp".into(), servers.into());
+    write_private_json(&file, &document)?;
+    Ok(file)
+}
+
+/// Drop one server from opencode's global configuration, leaving every other
+/// entry and every unrelated key exactly as they were.
+///
+/// Every file opencode merges is considered rather than only the one this
+/// wallet writes: an entry someone added by hand to `opencode.jsonc` shadows
+/// the one in `opencode.json`, so removing only what was written here would
+/// leave the server registered while reporting it removed.
+fn remove_opencode_mcp(name: &str) -> Result<()> {
+    remove_opencode_mcp_at(&opencode_config_dir()?, name)
+}
+
+fn remove_opencode_mcp_at(directory: &Path, name: &str) -> Result<()> {
+    for candidate in OPENCODE_CONFIG_FILES {
+        let file = directory.join(candidate);
+        if !file.exists() {
+            continue;
+        }
+        let mut document = match read_opencode_config(&file) {
+            Ok(Some(document)) => document,
+            Ok(None) => continue,
+            // A `.jsonc` may hold comments and trailing commas that
+            // `serde_json` refuses, and rewriting such a file is not on offer.
+            // One that never mentions the server cannot be registering it, so
+            // it is passed over; one that does is reported, because silently
+            // leaving it would make `meta-agent remove` a lie.
+            Err(error) => {
+                ensure!(
+                    !file_mentions_server(&file, name),
+                    "{} registers `{name}` and this wallet cannot rewrite it — remove that entry \
+                     by hand: {error:#}",
+                    file.display()
+                );
+                continue;
+            }
+        };
+        let Some(mut servers) = document
+            .remove("mcp")
+            .and_then(|value| value.as_object().cloned())
+        else {
+            continue;
+        };
+        if servers.remove(name).is_none() {
+            continue;
+        }
+        document.insert("mcp".into(), servers.into());
+        write_private_json(&file, &document)?;
+    }
+    Ok(())
+}
+
+/// What opencode's merged global configuration says about the two servers.
+///
+/// `None` means the question could not be answered, which is what a file this
+/// wallet cannot parse leaves behind when it might be the file holding the
+/// registration.
+fn opencode_registration_at(directory: &Path) -> Option<Registration> {
+    let mut found = Registration {
+        wallet: false,
+        companion: false,
+    };
+    for candidate in OPENCODE_CONFIG_FILES {
+        let file = directory.join(candidate);
+        if !file.exists() {
+            continue;
+        }
+        let document = match read_opencode_config(&file) {
+            Ok(Some(document)) => document,
+            Ok(None) => continue,
+            Err(_) => {
+                if file_mentions_server(&file, LOCAL_SERVER_NAME)
+                    || file_mentions_server(&file, COMPANION_SERVER_NAME)
+                {
+                    return None;
+                }
+                continue;
+            }
+        };
+        let Some(servers) = document.get("mcp").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        found.wallet |= servers.contains_key(LOCAL_SERVER_NAME);
+        found.companion |= servers.contains_key(COMPANION_SERVER_NAME);
+    }
+    Some(found)
+}
+
+/// Read one of opencode's configuration files.
+///
+/// `Ok(None)` is a file that is not there. A file that is there and will not
+/// parse is an error rather than an absence, because treating it as an absence
+/// would let a registration this wallet cannot see be reported as missing.
+fn read_opencode_config(file: &Path) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
+    if !file.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    Ok(Some(value.as_object().cloned().with_context(|| {
+        format!("{} must hold a JSON object", file.display())
+    })?))
+}
+
+/// Whether a file this wallet could not parse names one of the two servers.
+///
+/// The name is quoted before the search because `ekubo` is a prefix of
+/// `ekubo-wallet`: a bare substring test would find the companion in every
+/// file that holds only the wallet. An unreadable file answers yes, because
+/// the point of the question is whether it is safe to pass over.
+fn file_mentions_server(file: &Path, name: &str) -> bool {
+    fs::read_to_string(file).is_ok_and(|text| text.contains(&format!("\"{name}\"")))
+}
+
+/// Replace a configuration file with `document`, atomically and privately.
+///
+/// Shared by every agent whose file this wallet writes itself, so that one of
+/// them cannot quietly stop being durable or stop being private: the temporary
+/// file is created in the destination directory, given the final permissions
+/// before it holds anything, flushed, and renamed over the target.
+fn write_private_json(
+    file: &Path,
+    document: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let directory = file
+        .parent()
+        .with_context(|| format!("{} has no parent directory", file.display()))?;
+    fs::create_dir_all(directory)
         .with_context(|| format!("failed to create {}", directory.display()))?;
-    set_private_permissions(&directory, true)?;
-    let mut temporary = NamedTempFile::new_in(&directory).with_context(|| {
+    set_private_permissions(directory, true)?;
+    let mut temporary = NamedTempFile::new_in(directory).with_context(|| {
         format!(
             "failed to create a temporary file in {}",
             directory.display()
         )
     })?;
     set_private_permissions(temporary.path(), false)?;
-    serde_json::to_writer_pretty(&mut temporary, &document)?;
+    serde_json::to_writer_pretty(&mut temporary, document)?;
     temporary.write_all(b"\n")?;
     temporary.as_file().sync_all()?;
     temporary
-        .persist(&file)
+        .persist(file)
         .map_err(|error| error.error)
         .with_context(|| format!("failed to replace {}", file.display()))?;
-    set_private_permissions(&file, false)?;
-    sync_directory(&directory)?;
-    Ok(file)
+    set_private_permissions(file, false)?;
+    sync_directory(directory)?;
+    Ok(())
 }
 
 fn set_private_permissions(path: &Path, directory: bool) -> Result<()> {

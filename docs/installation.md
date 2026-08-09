@@ -7,8 +7,9 @@ Sigstore bundles, and GitHub build-provenance attestations.
 The installer downloads the archive for your platform, **verifies the Sigstore
 signature over `SHA256SUMS` and the archive's SHA-256 checksum against it
 before extracting anything**, installs `ekubo-wallet`, registers it and the
-Ekubo protocol server with every agent CLI it detects (Codex, Claude Code,
-Gemini CLI, and Cursor), and installs completion for your login shell:
+Ekubo protocol server with every agent it detects (Codex, Claude Code,
+Gemini CLI, Cursor, and opencode), and installs completion for your login
+shell:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
@@ -121,6 +122,33 @@ differently — `claude mcp add --transport http ekubo https://mcp.ekubo.org/mcp
 `gemini mcp add ekubo https://mcp.ekubo.org/mcp --transport http`, and
 `codex mcp add ekubo --url https://mcp.ekubo.org/mcp` — which is why
 `ekubo-wallet meta-agent add` exists rather than a documented command per agent.
+
+opencode spells it differently again, under an `mcp` key in
+`~/.config/opencode/opencode.json` — that path on every platform, because
+opencode follows the XDG variables rather than the native config directory:
+
+```json
+{
+  "mcp": {
+    "ekubo-wallet": {
+      "type": "local",
+      "command": ["ekubo-wallet", "server"],
+      "enabled": true
+    },
+    "ekubo": {
+      "type": "remote",
+      "url": "https://mcp.ekubo.org/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+`ekubo-wallet meta-agent add opencode` writes exactly that. It writes
+`opencode.json` even when an `opencode.jsonc` is what you keep your settings
+in: opencode merges both, and this wallet will not rewrite a commented file
+through a serializer that would drop the comments. Remove an entry from a
+`.jsonc` by hand — `meta-agent remove` says so rather than passing over it.
 
 Use an absolute path, such as `/home/you/.local/bin/ekubo-wallet`, if the agent
 does not inherit your login shell's `PATH`. Confirm the installed build with
