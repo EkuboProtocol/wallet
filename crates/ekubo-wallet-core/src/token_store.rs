@@ -231,6 +231,52 @@ pub struct TokenStore {
     database: PolicyStore,
 }
 
+/// Where a batch of suggestions came from, and whether anything outside the
+/// call says so.
+///
+/// Review groups suggestions by this string and accepts or rejects a group as
+/// one unit, so the string is the whole of what the owner is deciding about.
+/// Two ways of producing it that can produce the *same* string are therefore
+/// one namespace: an agent that imports a real curator's list and then
+/// proposes its own contract under the identical label gets that contract
+/// confirmed as the curator's, with a symbol and decimals it chose, which then
+/// name and scale amounts on every approval screen afterwards.
+///
+/// So the two are a type, and their renderings cannot collide.
+pub enum ProposalSource<'a> {
+    /// Bytes a TLS-verified `host` served, carrying the name the list gives
+    /// itself when it gives one. The host leads because it is the one part of
+    /// this the caller could not choose.
+    Served {
+        host: &'a str,
+        declared: Option<&'a str>,
+    },
+    /// A label the caller supplied, for a list it fetched or wrote itself.
+    /// Nothing outside the call says the label is true, and the rendering
+    /// says as much rather than letting it sit beside a proved one.
+    Claimed(&'a str),
+}
+
+/// What a caller-supplied label is prefixed with. A DNS host contains no
+/// spaces, so no [`ProposalSource::Served`] rendering can begin this way, and
+/// the prefix leads so capping the length cannot remove it.
+const CLAIMED_PREFIX: &str = "an agent's own list: ";
+
+impl ProposalSource<'_> {
+    /// The exact string a review groups under.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Served {
+                host,
+                declared: Some(declared),
+            } => format!("{} — {}", sanitize(host), sanitize(declared)),
+            Self::Served { host, .. } => sanitize(host),
+            Self::Claimed(name) => format!("{CLAIMED_PREFIX}{}", sanitize(name)),
+        }
+    }
+}
+
 impl TokenStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
         discard_legacy_database(data_dir);
@@ -337,8 +383,12 @@ impl TokenStore {
     /// same address replaces the previous one: the latest claim is the one the
     /// owner will judge, and keeping stale variants around would mean showing
     /// the same token twice under two different names.
-    pub fn propose(&mut self, tokens: &[ListedToken], source: &str) -> Result<ProposalSummary> {
-        let source = sanitize(source);
+    pub fn propose(
+        &mut self,
+        tokens: &[ListedToken],
+        source: &ProposalSource<'_>,
+    ) -> Result<ProposalSummary> {
+        let source = sanitize(&source.label());
         ensure!(!source.is_empty(), "a proposal needs a source list name");
         // The queue is a list of decisions a person has to make. Repeats for
         // the same address are idempotent, but an agent calling with a

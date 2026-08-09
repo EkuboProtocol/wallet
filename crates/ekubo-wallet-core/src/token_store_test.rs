@@ -171,7 +171,7 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
                 symbol: "USDC".into(),
                 ..usdc(1, token)
             }],
-            "ekubo-default",
+            &ProposalSource::Claimed("ekubo-default"),
         )
         .unwrap();
     assert_eq!(summary.pending, 1);
@@ -188,7 +188,10 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
     // Confirming it is what turns it into a name.
     let proposals = store.proposals().unwrap();
     assert_eq!(proposals.len(), 1);
-    assert_eq!(proposals[0].source, "ekubo-default");
+    assert_eq!(
+        proposals[0].source,
+        ProposalSource::Claimed("ekubo-default").label()
+    );
     let reviewed = proposals[0].proposed_at;
     store.add(&proposals[0].token, "ekubo-default").unwrap();
     assert_eq!(
@@ -218,7 +221,9 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
     );
     assert_eq!(store.discard_proposals(&[(1, token, reviewed)]).unwrap(), 1);
     assert_eq!(store.count_proposals().unwrap(), 0);
-    let repeat = store.propose(&[usdc(1, token)], "another-list").unwrap();
+    let repeat = store
+        .propose(&[usdc(1, token)], &ProposalSource::Claimed("another-list"))
+        .unwrap();
     assert_eq!(repeat.already_confirmed, 1);
     assert_eq!(repeat.pending, 0);
 }
@@ -229,20 +234,25 @@ fn a_proposal_names_nothing_until_it_is_confirmed() {
 fn a_repeated_suggestion_replaces_the_earlier_one() {
     let (_directory, mut store) = store();
     let token = Address::repeat_byte(0x88);
-    store.propose(&[usdc(1, token)], "first-list").unwrap();
+    store
+        .propose(&[usdc(1, token)], &ProposalSource::Claimed("first-list"))
+        .unwrap();
     store
         .propose(
             &[ListedToken {
                 symbol: "IMPOSTOR".into(),
                 ..usdc(1, token)
             }],
-            "second-list",
+            &ProposalSource::Claimed("second-list"),
         )
         .unwrap();
     let proposals = store.proposals().unwrap();
     assert_eq!(proposals.len(), 1);
     assert_eq!(proposals[0].token.symbol, "IMPOSTOR");
-    assert_eq!(proposals[0].source, "second-list");
+    assert_eq!(
+        proposals[0].source,
+        ProposalSource::Claimed("second-list").label()
+    );
 }
 
 #[test]
@@ -307,7 +317,10 @@ fn search_wildcards_are_literal() {
 fn search_never_returns_unconfirmed_suggestions() {
     let (_directory, mut store) = store();
     store
-        .propose(&[usdc(1, Address::repeat_byte(0x99))], "some-list")
+        .propose(
+            &[usdc(1, Address::repeat_byte(0x99))],
+            &ProposalSource::Claimed("some-list"),
+        )
         .unwrap();
     assert!(store.search("USDC", None, 10).unwrap().is_empty());
 }
@@ -488,12 +501,16 @@ fn a_batch_cannot_carry_the_review_queue_past_its_cap() {
 
     // Fill to just under a deliberately small notional cap by proposing five,
     // then assert the accounting: repeats cost nothing, new rows cost one.
-    let first = store.propose(&listed[..5], "list-a").unwrap();
+    let first = store
+        .propose(&listed[..5], &ProposalSource::Claimed("list-a"))
+        .unwrap();
     assert_eq!(first.pending, 5);
     assert_eq!(store.count_proposals().unwrap(), 5);
 
     // Re-proposing the same addresses replaces rather than grows.
-    let repeat = store.propose(&listed[..5], "list-b").unwrap();
+    let repeat = store
+        .propose(&listed[..5], &ProposalSource::Claimed("list-b"))
+        .unwrap();
     assert_eq!(repeat.pending, 5);
     assert_eq!(
         store.count_proposals().unwrap(),
@@ -502,7 +519,9 @@ fn a_batch_cannot_carry_the_review_queue_past_its_cap() {
     );
 
     // And genuinely new addresses do grow it.
-    store.propose(&listed[5..], "list-c").unwrap();
+    store
+        .propose(&listed[5..], &ProposalSource::Claimed("list-c"))
+        .unwrap();
     assert_eq!(store.count_proposals().unwrap(), 8);
 }
 
@@ -515,14 +534,18 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
     // authentication that follows it.
     let (_directory, mut store) = store();
     let address = Address::repeat_byte(0x11);
-    store.propose(&[usdc(1, address)], "list-a").unwrap();
+    store
+        .propose(&[usdc(1, address)], &ProposalSource::Claimed("list-a"))
+        .unwrap();
     let queued = store.proposals().unwrap();
     assert_eq!(queued.len(), 1);
     let reviewed = queued[0].proposed_at;
 
     // The same suggestion again, from the same list: nothing the owner reads
     // has changed, so nothing about what they are deciding has changed.
-    store.propose(&[usdc(1, address)], "list-a").unwrap();
+    store
+        .propose(&[usdc(1, address)], &ProposalSource::Claimed("list-a"))
+        .unwrap();
     assert_eq!(
         store.proposals().unwrap()[0].proposed_at,
         reviewed,
@@ -539,14 +562,85 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
     // A suggestion whose content really did change does rotate it: the owner
     // is being asked about something else, and an answer to the old text is
     // not an answer to this one.
-    store.propose(&[usdc(1, address)], "list-a").unwrap();
+    store
+        .propose(&[usdc(1, address)], &ProposalSource::Claimed("list-a"))
+        .unwrap();
     let first = store.proposals().unwrap()[0].proposed_at;
     let renamed = ListedToken {
         symbol: "USDC.e".into(),
         ..usdc(1, address)
     };
-    store.propose(&[renamed], "list-a").unwrap();
+    store
+        .propose(&[renamed], &ProposalSource::Claimed("list-a"))
+        .unwrap();
     let second = store.proposals().unwrap()[0].proposed_at;
     assert_ne!(first, second);
     assert_eq!(store.discard_proposals(&[(1, address, first)]).unwrap(), 0);
+}
+
+#[test]
+fn a_claimed_label_can_never_be_spelled_like_a_served_one() {
+    // Review groups by this exact string and the owner accepts a group as one
+    // unit, so a caller that could reproduce a TLS-proved label would get its
+    // own contract confirmed under a curator the owner trusts -- with a symbol
+    // and decimals it chose, which then name and scale every amount shown for
+    // it afterwards.
+    let served = ProposalSource::Served {
+        host: "tokens.uniswap.org",
+        declared: Some("Uniswap Labs Default"),
+    };
+    assert_eq!(served.label(), "tokens.uniswap.org — Uniswap Labs Default");
+
+    // The obvious impersonation, and the one that tries to undo the prefix.
+    for attempt in [
+        "tokens.uniswap.org — Uniswap Labs Default",
+        "tokens.uniswap.org",
+        "an agent's own list: tokens.uniswap.org",
+    ] {
+        let claimed = ProposalSource::Claimed(attempt).label();
+        assert_ne!(claimed, served.label());
+        assert_ne!(
+            claimed,
+            ProposalSource::Served {
+                host: "tokens.uniswap.org",
+                declared: None
+            }
+            .label()
+        );
+        assert!(claimed.starts_with("an agent's own list: "), "{claimed}");
+    }
+}
+
+#[test]
+fn an_impostor_cannot_be_proposed_into_a_served_lists_group() {
+    let (_directory, mut store) = store();
+    let real = Address::repeat_byte(0x11);
+    let impostor = Address::repeat_byte(0x22);
+    store
+        .propose(
+            &[usdc(1, real)],
+            &ProposalSource::Served {
+                host: "tokens.uniswap.org",
+                declared: Some("Uniswap Labs Default"),
+            },
+        )
+        .unwrap();
+    store
+        .propose(
+            &[usdc(1, impostor)],
+            &ProposalSource::Claimed("tokens.uniswap.org — Uniswap Labs Default"),
+        )
+        .unwrap();
+
+    let sources: std::collections::BTreeSet<_> = store
+        .proposals()
+        .unwrap()
+        .into_iter()
+        .map(|proposal| proposal.source)
+        .collect();
+    assert_eq!(
+        sources.len(),
+        2,
+        "the two proposals landed in one review group: {sources:?}"
+    );
 }

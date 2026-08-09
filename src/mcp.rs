@@ -1388,7 +1388,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_tokens",
-        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. Provide the entries one of two ways: inline in tokens, or — for anything beyond a handful — as a producer's token_list artifact_reference envelope passed through VERBATIM as reference, which the wallet fetches and integrity-verifies itself instead of having the list restated a field at a time. Prefer the reference: a thousand-token list costs about fifty thousand output tokens to write out and a few hundred to reference, and the two paths are otherwise identical. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet meta-tokens review`, where they accept or reject them by list. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting reaches no chain at all: a contract cannot tell the owner whether the curator you cited is trustworthy, which is the only question a listing raises, so their approval is the check and an address with nothing behind it just yields a row that names nothing.",
+        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. Provide the entries one of two ways: inline in tokens, or — for anything beyond a handful — as a producer's token_list artifact_reference envelope passed through VERBATIM as reference, which the wallet fetches and integrity-verifies itself instead of having the list restated a field at a time. Prefer the reference: a thousand-token list costs about fifty thousand output tokens to write out and a few hundred to reference, and the two paths are otherwise identical. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet meta-tokens review`, where they accept or reject them by list. The owner sees your list_name marked as a name you gave rather than one anything verified, so it can never be mistaken for a group wallet_import_token_list built from a publisher's own TLS host. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting reaches no chain at all: a contract cannot tell the owner whether the curator you cited is trustworthy, which is the only question a listing raises, so their approval is the check and an address with nothing behind it just yields a row that names nothing.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1470,7 +1470,10 @@ impl WalletMcpServer {
             .lock()
             .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
         let summary = store
-            .propose(&listed, &list_name)
+            .propose(
+                &listed,
+                &crate::token_store::ProposalSource::Claimed(&list_name),
+            )
             .map_err(|error| tool_error(&error))?;
         let awaiting_review = store
             .count_proposals()
@@ -1540,16 +1543,17 @@ impl WalletMcpServer {
         // deciding about a publisher, so the publisher is what they read
         // first, and a list that names itself something it is not cannot push
         // that off the label.
-        let list_name = match &parsed.declared_name {
-            Some(declared) => format!("{host} — {declared}"),
-            None => host.clone(),
+        let source = crate::token_store::ProposalSource::Served {
+            host: &host,
+            declared: parsed.declared_name.as_deref(),
         };
+        let list_name = source.label();
         let mut store = self
             .tokens
             .lock()
             .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
         let summary = store
-            .propose(&parsed.tokens, &list_name)
+            .propose(&parsed.tokens, &source)
             .map_err(|error| tool_error(&error))?;
         let awaiting_review = store
             .count_proposals()
