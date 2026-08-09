@@ -127,10 +127,21 @@ pub fn parse_typed_data(value: &serde_json::Value) -> Result<(TypedData, u64, B2
 /// A payload with an extra member is not a payload whose display needs fixing;
 /// it is one whose author is describing something other than what they are
 /// asking for, and the wallet has no way to know which half was the mistake.
-/// The members EIP-712 defines for a domain. The domain hash is built from
+/// The members EIP-712 defines for a domain, and the type each one hashes
+/// under, in the order the standard lists them. The domain hash is built from
 /// these and only these, so a payload's own `EIP712Domain` declaration decides
 /// nothing about what is signed.
-const DOMAIN_MEMBERS: [&str; 5] = ["name", "version", "chainId", "verifyingContract", "salt"];
+const DOMAIN_MEMBERS: [(&str, &str); 5] = [
+    ("name", "string"),
+    ("version", "string"),
+    ("chainId", "uint256"),
+    ("verifyingContract", "address"),
+    ("salt", "bytes32"),
+];
+
+fn is_domain_member(name: &str) -> bool {
+    DOMAIN_MEMBERS.iter().any(|(member, _)| *member == name)
+}
 
 fn reject_unsigned_members(value: &serde_json::Value, typed: &TypedData) -> Result<()> {
     // The payload has to be an object before any of the checks below can look
@@ -163,23 +174,39 @@ fn reject_unsigned_members(value: &serde_json::Value, typed: &TypedData) -> Resu
     // declaration decides nothing about what gets signed — preferring it here
     // meant an attacker could declare `note`, satisfy this check with it, and
     // have the member displayed and ignored by the hash all the same.
-    if let Some(domain) = value.get("domain").and_then(serde_json::Value::as_object) {
+    let domain = value.get("domain").and_then(serde_json::Value::as_object);
+    if let Some(domain) = domain {
         for key in domain.keys() {
             ensure!(
-                DOMAIN_MEMBERS.contains(&key.as_str()),
+                is_domain_member(key),
                 "typed data domain carries \"{key}\", which EIP712Domain does not define; \
                  it would be displayed but not signed"
             );
         }
     }
-    if let Some(declared) = declared_members(declarations, "EIP712Domain") {
-        for member in declared {
-            ensure!(
-                DOMAIN_MEMBERS.contains(&member),
-                "typed data declares EIP712Domain member \"{member}\", which EIP-712 does not \
-                 define; it would be displayed but not signed"
-            );
-        }
+    // The declaration itself is display text and nothing more, so it is
+    // required to be exactly the declaration the domain's own fields imply:
+    // the same members, each under the type EIP-712 fixes for it, in the
+    // standard's order and no more than once.
+    //
+    // Allowlisting the member *names* was not enough. `{"name": "chainId",
+    // "type": "string"}` passed it while telling the reviewer this signature
+    // is not chain-bound; so did declaring `verifyingContract` that the domain
+    // never carries, or listing `name` twice with two different renderings of
+    // the same field. None of that reaches the hash, all of it reaches the
+    // review transcript, and the transcript is what the person approves.
+    if let Some(declared) = declarations.and_then(|types| types.get("EIP712Domain")) {
+        let expected = DOMAIN_MEMBERS
+            .iter()
+            .filter(|(member, _)| domain.is_some_and(|domain| domain.contains_key(*member)))
+            .map(|(member, kind)| serde_json::json!({"name": member, "type": kind}))
+            .collect::<Vec<_>>();
+        ensure!(
+            declared.as_array() == Some(&expected),
+            "typed data declares EIP712Domain as {declared}, but the domain it carries is \
+             hashed as {}; the declaration is displayed and not signed",
+            serde_json::Value::from(expected)
+        );
     }
 
     reject_unsigned_declarations(declarations)?;
@@ -261,23 +288,6 @@ fn reject_unreachable_types(types: Option<&serde_json::Value>, primary_type: &st
         );
     }
     Ok(())
-}
-
-/// The member names a payload's own `types` map declares for `name`, or `None`
-/// when it declares no such type — which for a member's type means "not a
-/// struct", and so nothing to descend into.
-fn declared_members<'a>(
-    types: Option<&'a serde_json::Value>,
-    name: &str,
-) -> Option<std::collections::BTreeSet<&'a str>> {
-    Some(
-        types?
-            .get(name)?
-            .as_array()?
-            .iter()
-            .filter_map(|member| member.get("name").and_then(serde_json::Value::as_str))
-            .collect(),
-    )
 }
 
 /// Apply the same rule to a struct value at any depth.

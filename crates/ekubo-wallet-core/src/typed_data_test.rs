@@ -35,6 +35,68 @@ fn a_member_the_type_does_not_declare_is_refused() {
     assert!(parse_typed_data(&permit_payload()).is_ok());
 }
 
+#[test]
+fn the_domain_declaration_has_to_be_the_one_the_domain_implies() {
+    // The declaration is never hashed: alloy builds the domain separator from
+    // the `domain` object's own fields under the types EIP-712 fixes. So the
+    // declaration is display text, and display text that contradicts what is
+    // signed is exactly the gap this module exists to close.
+
+    // A member declared under a type it does not hash under. This one reads as
+    // "not bound to a chain" while the signature is bound to chain 1.
+    let mut lying_type = permit_payload();
+    lying_type["types"]["EIP712Domain"][2]["type"] = json!("string");
+    let error = parse_typed_data(&lying_type).unwrap_err().to_string();
+    assert!(error.contains("EIP712Domain"), "{error}");
+    assert!(error.contains("not signed"), "{error}");
+
+    // A member the domain does not carry. Nothing hashes it, and the reviewer
+    // reads it as a field of the payload.
+    let mut absent = permit_payload();
+    absent["types"]["EIP712Domain"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "salt", "type": "bytes32"}));
+    assert!(parse_typed_data(&absent).is_err());
+
+    // The same member twice, which the hash counts once.
+    let mut repeated = permit_payload();
+    repeated["types"]["EIP712Domain"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "name", "type": "string"}));
+    assert!(parse_typed_data(&repeated).is_err());
+
+    // Out of the standard's order, so two payloads hashing identically read
+    // as different documents.
+    let mut reordered = permit_payload();
+    reordered["types"]["EIP712Domain"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    assert!(parse_typed_data(&reordered).is_err());
+
+    // A domain missing a field its declaration still names.
+    let mut narrowed = permit_payload();
+    narrowed["domain"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    assert!(parse_typed_data(&narrowed).is_err());
+
+    // And dropping both together is a payload that says what it signs.
+    let mut consistent = permit_payload();
+    consistent["domain"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    consistent["types"]["EIP712Domain"]
+        .as_array_mut()
+        .unwrap()
+        .remove(1);
+    assert!(parse_typed_data(&consistent).is_ok());
+}
+
 pub(crate) fn permit_payload() -> serde_json::Value {
     json!({
         "types": {
