@@ -1,4 +1,4 @@
-#compdef ekubo-wallet ew
+#compdef ekubo-wallet
 
 _ekubo-wallet() {
   local -a candidates
