@@ -48,6 +48,20 @@ fn cancellation_outbids_every_incumbent_at_the_replacement_floor() {
 
     // No incumbent means nothing to cancel.
     assert!(cancellation_fees(&[], 100, 10).is_err());
+
+    // An endpoint naming an enormous market fee no longer names the ceiling
+    // as well. The cap used to include `market_max_fee` in the maximum it was
+    // capping, so a reported fee of M was checked against at least 2M and
+    // every M it could name passed -- the one signing path with no policy and
+    // no approval screen behind it, taking a builder tip from a stranger.
+    let (max_fee, priority) = cancellation_fees(&[(800, 80)], 10_000_000, 9_000_000).unwrap();
+    assert_eq!(max_fee, 3_200, "four times the fee the owner committed to");
+    assert_eq!(priority, 3_200);
+
+    // Clamped rather than refused, so the envelope still replaces the one it
+    // is cancelling. Refusing would let the same endpoint deny cancellation
+    // by reporting a large enough number.
+    assert!(max_fee >= 900 && priority >= 90);
 }
 
 #[test]

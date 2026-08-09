@@ -650,10 +650,22 @@ pub fn signed_transaction_nonce(serialized_transaction: &str) -> Result<u64> {
 /// so bump by 12.5% (×9/8, integer-exact) to clear it with margin.
 const REPLACEMENT_FEE_BUMP_NUMERATOR: u128 = 9;
 const REPLACEMENT_FEE_BUMP_DENOMINATOR: u128 = 8;
-/// Defense-in-depth ceiling for the one signing path that consults no
-/// policy: a cancellation's fee never exceeds twice the highest fee already
-/// on the table (the incumbent envelopes and the current market estimate).
-const CANCELLATION_FEE_CAP_MULTIPLIER: u128 = 2;
+/// Defense-in-depth ceiling for the one signing path that consults no policy:
+/// a cancellation's fee never exceeds this multiple of the highest fee the
+/// owner already committed to for this nonce.
+///
+/// Anchored to the incumbent envelopes and to nothing else. It used to include
+/// the endpoint's own market estimate in the maximum it was capping, which
+/// made the cap a function of the value it was bounding: an endpoint reporting
+/// a market fee of `M` produced a selected fee of at least `M` against a cap
+/// of at least `2M`, so the check passed for every `M` it could name. That is
+/// not a ceiling, it is an assertion that two multiples of the same number are
+/// ordered.
+///
+/// Four rather than two because the anchor is now strictly tighter, and gas
+/// markets do move between the moment a transaction was signed and the moment
+/// its sender wants it gone.
+const CANCELLATION_FEE_CAP_MULTIPLIER: u128 = 4;
 const CANCELLATION_GAS_MULTIPLIER: u64 = 2;
 
 fn bumped_fee(fee: u128) -> u128 {
@@ -663,8 +675,23 @@ fn bumped_fee(fee: u128) -> u128 {
 
 /// Fee selection for a cancellation, split from the RPC calls so the one
 /// policy-free pricing decision is directly testable: outbid every incumbent
-/// at the replacement floor, never price under the current market, and keep
-/// the pair EIP-1559-consistent.
+/// at the replacement floor, never price under the current market, never above
+/// the cap the incumbents set, and keep the pair EIP-1559-consistent.
+///
+/// Nothing reviews this. There is no policy question a cancellation asks and
+/// no approval screen it draws, so `market_max_fee` and `market_priority_fee`
+/// — two numbers one endpoint chose — would otherwise reach a signature
+/// unbounded. The incumbents are the other half of the input and are not:
+/// they are envelopes this wallet signed for this nonce, so the fee the owner
+/// already committed to is the anchor everything here is measured against.
+///
+/// Above the cap the market estimate is clamped rather than refused. The
+/// replacement floor is 9/8 of an incumbent and the cap is four times one, so
+/// a clamped fee still outbids what it is replacing — the envelope is always a
+/// valid replacement, just possibly an underpriced one in a market that has
+/// moved more than fourfold since. Refusing instead would let an endpoint deny
+/// cancellation outright by reporting a large enough number, which is the
+/// other half of the same attack.
 fn cancellation_fees(
     incumbents: &[(u128, u128)],
     market_max_fee: u128,
@@ -672,22 +699,23 @@ fn cancellation_fees(
 ) -> Result<(u128, u128)> {
     let floor_max = incumbents.iter().map(|fees| bumped_fee(fees.0)).max();
     let floor_priority = incumbents.iter().map(|fees| bumped_fee(fees.1)).max();
-    let (floor_max, floor_priority) = (
+    let incumbent_max = incumbents.iter().map(|fees| fees.0).max();
+    let (floor_max, floor_priority, incumbent_max) = (
         floor_max.context("cancellation has no incumbent envelope to outbid")?,
         floor_priority.context("cancellation has no incumbent envelope to outbid")?,
+        incumbent_max.context("cancellation has no incumbent envelope to outbid")?,
     );
-    let max_priority_fee_per_gas = market_priority_fee.max(floor_priority);
-    let max_fee_per_gas = market_max_fee.max(floor_max).max(max_priority_fee_per_gas);
-    let cap = incumbents
-        .iter()
-        .map(|fees| fees.0)
-        .max()
-        .unwrap_or(0)
-        .max(market_max_fee)
-        .saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER);
+    let cap = incumbent_max
+        .saturating_mul(CANCELLATION_FEE_CAP_MULTIPLIER)
+        .max(floor_max);
+    let max_priority_fee_per_gas = market_priority_fee.max(floor_priority).min(cap);
+    let max_fee_per_gas = market_max_fee
+        .max(floor_max)
+        .max(max_priority_fee_per_gas)
+        .min(cap);
     ensure!(
-        max_fee_per_gas <= cap,
-        "cancellation fee escalation exceeds its safety cap"
+        max_fee_per_gas >= floor_max && max_priority_fee_per_gas >= floor_priority,
+        "cancellation cannot be priced above the envelope it replaces"
     );
     Ok((max_fee_per_gas, max_priority_fee_per_gas))
 }
