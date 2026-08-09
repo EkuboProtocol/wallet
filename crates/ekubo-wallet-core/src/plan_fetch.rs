@@ -59,11 +59,34 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::LazyLock;
 use std::time::Duration;
 use url::{Host, Url};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Caller-named outbound fetches this process performs at once.
+///
+/// Every one of them resolves a name, opens a TLS connection, waits through
+/// multi-second timeouts, and accumulates up to the artifact's body cap. An
+/// MCP client that could start them without limit would have a wallet-shaped
+/// outbound request amplifier, and would exhaust this process's tasks,
+/// sockets, and resolver workers on the way.
+///
+/// Attached to the fetch itself rather than to a tool. `wallet_propose_network`
+/// has had its own one-at-a-time limiter since it was the only tool that sent
+/// a request to a URL its caller named; a token-list URL and every reference
+/// body are the same thing, and putting the limit on the primitive is what
+/// keeps the next one from being added without it.
+///
+/// Two rather than one: unlike a network probe, a person waits on these
+/// several at a time — importing a couple of lists — and neither number is
+/// parallelism worth having for a sweep.
+const MAX_CONCURRENT_FETCHES: usize = 2;
+
+static FETCH_SLOTS: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_FETCHES));
 
 /// The longest `data:` payload that could decode to a body of `max_body`.
 ///
@@ -638,6 +661,12 @@ async fn fetch_remote(
     max_bytes: usize,
 ) -> Result<(Vec<u8>, String)> {
     let noun = artifact_type.noun();
+    // Held for the whole fetch: the resolve, the connect, and the read are all
+    // work a caller can ask for, and none of them is bounded by anything else.
+    let _permit = FETCH_SLOTS
+        .acquire()
+        .await
+        .context("the outbound fetch limiter was closed")?;
     let parsed = Url::parse(url).with_context(|| format!("{noun} URL is not a valid URL"))?;
     ensure!(
         parsed.scheme() == "https" || (policy.allow_insecure && parsed.scheme() == "http"),
