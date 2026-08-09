@@ -250,7 +250,7 @@ fn review_fullscreen_choosing_blocking(
         let mut screen = Screen::enter()?;
         // Same reason as the refreshable review: whatever the terminal
         // buffered before anything was drawn must not answer this document.
-        drain_type_ahead()?;
+        crate::tui::drain_type_ahead()?;
         loop {
             screen
                 .terminal
@@ -308,7 +308,7 @@ fn review_fullscreen_blocking(
         // a document that fits the viewport has `reached_end` set by its own
         // first draw — so a buffered Tab and Enter, typed into the silence
         // before anything was drawn, would move to Approve and take it.
-        drain_type_ahead()?;
+        crate::tui::drain_type_ahead()?;
         loop {
             screen
                 .terminal
@@ -382,19 +382,12 @@ fn run_refresh(
         }
     };
     review.finish_refresh(outcome);
-    drain_type_ahead()?;
+    crate::tui::drain_type_ahead()?;
     Ok(())
 }
 
 /// Discard whatever the terminal buffered while nothing was on screen to read
 /// it, so a keystroke can only ever answer a document its typist has seen.
-fn drain_type_ahead() -> Result<()> {
-    while crossterm::event::poll(std::time::Duration::ZERO)? {
-        let _ = crossterm::event::read()?;
-    }
-    Ok(())
-}
-
 /// How often the waiting screen redraws. Short enough that the elapsed
 /// seconds tick visibly, long enough not to spin.
 const REFRESH_TICK_MILLIS: u64 = 200;

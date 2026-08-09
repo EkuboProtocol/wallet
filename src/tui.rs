@@ -192,6 +192,17 @@ struct Inline {
     terminal: Terminal<CrosstermBackend<io::Stderr>>,
 }
 
+/// Throw away input that arrived before this surface did.
+///
+/// Called on entering every prompt and screen, and again after anything that
+/// takes long enough for someone to have typed at the old picture.
+pub(crate) fn drain_type_ahead() -> Result<()> {
+    while crossterm::event::poll(std::time::Duration::ZERO)? {
+        let _ = crossterm::event::read()?;
+    }
+    Ok(())
+}
+
 impl Inline {
     fn open(height: u16) -> Result<Self> {
         ensure!(
@@ -200,6 +211,17 @@ impl Inline {
         );
         crate::render::note_interactive_surface();
         raw::enable_raw_mode()?;
+        // Whatever the terminal collected while this prompt did not exist is
+        // not an answer to it. Getting here took RPC round trips, an authored
+        // approval document, or both, and the keys typed into that silence
+        // were meant for whatever the person thought was in front of them.
+        //
+        // The full-screen approval screens already drained for this reason.
+        // The inline prompts did not, and they are what `account export` and
+        // `account remove` draw: a picker that starts on Reject still reads a
+        // buffered arrow key and a buffered Enter, and the two gates in front
+        // of revealing a private key become one.
+        drain_type_ahead()?;
         match Terminal::with_options(
             CrosstermBackend::new(io::stderr()),
             TerminalOptions {
