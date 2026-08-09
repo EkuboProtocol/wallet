@@ -260,4 +260,7 @@ recorded per finding.
 
 ## Licensing
 
-No open-source license is granted. See [LICENSE](LICENSE).
+Licensed under the [Functional Source License, FSL-1.1-MIT](LICENSE). In
+plain terms: read it, build it, run it, audit it, patch it, and use it for
+anything you like — except offering it, or a derivative of it, as a competing
+product. Each release becomes plain MIT two years after it ships.
