@@ -2995,8 +2995,17 @@ const MAX_TOOL_ERROR_CHARS: usize = 1_024;
 fn tool_error(error: &impl std::fmt::Display) -> ErrorData {
     // Stripped as well as capped: the text is untrusted — an RPC or a plan
     // producer chose it — and a transcript is something a person reads.
+    //
+    // The alternate flag, not `{error}`: an `anyhow::Error`'s plain `Display`
+    // prints only the outermost `.context()`, dropping the underlying cause
+    // (an `io::Error`'s "permission denied", say) that names what actually
+    // went wrong. `{:#}` walks the whole chain, matching the convention
+    // already used for user-facing errors elsewhere (tx_browser.rs,
+    // connect.rs, cli.rs). Types that don't special-case the alternate flag —
+    // `String`, the literals most tests pass here — render identically
+    // either way.
     ErrorData::internal_error(
-        crate::sanitize::stripped_capped(&error.to_string(), MAX_TOOL_ERROR_CHARS),
+        crate::sanitize::stripped_capped(&format!("{error:#}"), MAX_TOOL_ERROR_CHARS),
         None,
     )
 }
