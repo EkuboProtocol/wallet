@@ -369,7 +369,6 @@ pub async fn approve_transaction(
     let Authored {
         simulation,
         prepared,
-        ..
     } = review.take_authored()?;
 
     let review_digest = prepared.review_digest();
@@ -466,16 +465,17 @@ struct TransactionReview<'a> {
     latest: Mutex<Option<Authored>>,
 }
 
-/// One authored review: the simulation, the envelope prepared from it, and
-/// the document rendered from both. They travel together because they are one
-/// consistent answer about one moment; mixing a document from one refresh with
-/// a prepared envelope from another would show a reviewer fees and effects
-/// that never coexisted.
+/// One authored review: the simulation and the envelope prepared from it.
+/// They travel together because they are one consistent answer about one
+/// moment; mixing a simulation from one refresh with a prepared envelope from
+/// another would show a reviewer fees and effects that never coexisted. The
+/// rendered document itself does not need to travel with them — the caller
+/// that triggers a refresh already holds the `ApprovalRequest` `author`
+/// returns and hands it straight to the presenter, so nothing ever reads it
+/// back out of here.
 struct Authored {
     simulation: SimulationResult,
     prepared: crate::execution::PreparedExecution,
-    #[allow(dead_code)]
-    approval: ApprovalRequest,
 }
 
 impl TransactionReview<'_> {
@@ -514,7 +514,6 @@ impl TransactionReview<'_> {
             .map_err(|_| anyhow::anyhow!("review state lock was poisoned"))? = Some(Authored {
             simulation: simulation.clone(),
             prepared,
-            approval: approval.clone(),
         });
         Ok((approval, simulation))
     }

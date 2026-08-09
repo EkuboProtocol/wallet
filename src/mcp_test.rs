@@ -30,6 +30,21 @@ fn tool_errors_are_capped_and_stripped() {
     assert!(error.message.starts_with("upstream said"));
 }
 
+#[test]
+fn tool_errors_keep_the_anyhow_cause_chain() {
+    // anyhow::Error's plain `Display` prints only the outermost context,
+    // silently dropping the cause it was built to explain. An agent that
+    // only sees "failed to open the config file" cannot tell a permission
+    // problem from a missing directory from a stale symlink.
+    let error = anyhow::anyhow!("permission denied").context("failed to open the config file");
+    let message = tool_error(&error).message;
+    assert!(
+        message.contains("failed to open the config file"),
+        "{message}"
+    );
+    assert!(message.contains("permission denied"), "{message}");
+}
+
 fn server() -> (tempfile::TempDir, WalletMcpServer) {
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
