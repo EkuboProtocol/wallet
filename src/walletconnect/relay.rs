@@ -48,6 +48,37 @@ const JWT_TTL_SECONDS: i64 = 86_400;
 /// How long to wait for the relay to answer one of our own JSON-RPC calls.
 const RELAY_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Delivered messages held for the session loop before the relay is left to
+/// hold the rest.
+///
+/// The loop consumes one at a time and stops entirely while the owner is
+/// reading an approval — which is minutes, and is exactly when a hostile peer
+/// would choose to flood. An unbounded queue turned that pause into unbounded
+/// memory: every payload was acknowledged and enqueued the moment it arrived,
+/// so nothing anywhere pushed back.
+///
+/// A relay redelivers what it was not acknowledged for, so a full queue is not
+/// a lost message. It is the backpressure this had none of: the acknowledgement
+/// is withheld, the peer's message stays the relay's problem, and the session
+/// picks it up when the owner is done.
+const MAX_QUEUED_MESSAGES: usize = 64;
+
+/// Frames waiting to reach the socket.
+///
+/// Mostly acknowledgements and pongs, one per inbound frame, so a flood
+/// generates one of these per message too. Bounded for the same reason and
+/// dropped rather than queued when full: an unacknowledged message is
+/// redelivered, and an unanswered ping is followed by another.
+const MAX_QUEUED_FRAMES: usize = 256;
+
+/// The largest websocket frame this client will read at all.
+///
+/// Twice [`super::crypto::MAX_ENVELOPE_BYTES`], so the JSON-RPC wrapper around
+/// a maximum-size envelope fits and nothing much larger does. Enforced by the
+/// socket rather than by this module, because a frame is assembled in full
+/// before any of this code is reached.
+const MAX_FRAME_BYTES: usize = 2 * super::crypto::MAX_ENVELOPE_BYTES;
+
 /// A message the relay delivered on a topic this client subscribed to.
 pub struct RelayMessage {
     pub topic: String,
@@ -62,8 +93,16 @@ pub struct RelayMessage {
 /// normal state of affairs, since answering a request means publishing while
 /// still listening.
 pub struct RelayConnection {
-    outgoing: mpsc::UnboundedSender<Message>,
-    incoming: mpsc::UnboundedReceiver<RelayMessage>,
+    outgoing: mpsc::Sender<Message>,
+    incoming: mpsc::Receiver<RelayMessage>,
+    /// Every topic this connection has subscribed to.
+    ///
+    /// The relay is trusted for liveness and nothing else, so what it delivers
+    /// is checked against what was asked for rather than assumed to match. A
+    /// topic nobody subscribed to has no key that opens it and no session that
+    /// wants it; enqueueing one only spends memory on a string the session
+    /// will discard.
+    subscribed: Subscriptions,
     pending: PendingCalls,
     /// Distinguishes calls made within the same millisecond; see
     /// [`next_call_id`].
@@ -73,6 +112,7 @@ pub struct RelayConnection {
 }
 
 type PendingCalls = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+type Subscriptions = Arc<Mutex<std::collections::HashSet<String>>>;
 
 impl RelayConnection {
     /// Open and authenticate a connection.
@@ -88,19 +128,31 @@ impl RelayConnection {
              in the clear",
             url.scheme()
         );
-        let (stream, _) = tokio_tungstenite::connect_async(url.as_str())
-            .await
-            .with_context(|| {
-                format!(
-                    "could not reach the WalletConnect relay at {}",
-                    relay.as_str()
-                )
-            })?;
+        // The socket's own bounds, below tungstenite's 64 MiB message and 16
+        // MiB frame defaults. A frame is buffered whole before this code sees
+        // it, so a limit applied any later is a limit on what is kept rather
+        // than on what is read. Two megabytes is twice the largest envelope
+        // this wallet will accept, which leaves room for the JSON-RPC wrapper
+        // around one and refuses anything that is not a message at all.
+        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+            .max_message_size(Some(MAX_FRAME_BYTES))
+            .max_frame_size(Some(MAX_FRAME_BYTES));
+        let (stream, _) =
+            tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), false)
+                .await
+                .with_context(|| {
+                    format!(
+                        "could not reach the WalletConnect relay at {}",
+                        relay.as_str()
+                    )
+                })?;
         let (mut sink, mut source) = stream.split();
 
-        let (outgoing_sender, mut outgoing_receiver) = mpsc::unbounded_channel::<Message>();
-        let (incoming_sender, incoming_receiver) = mpsc::unbounded_channel::<RelayMessage>();
+        let (outgoing_sender, mut outgoing_receiver) = mpsc::channel::<Message>(MAX_QUEUED_FRAMES);
+        let (incoming_sender, incoming_receiver) =
+            mpsc::channel::<RelayMessage>(MAX_QUEUED_MESSAGES);
         let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
+        let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
         let writer = tokio::spawn(async move {
             while let Some(message) = outgoing_receiver.recv().await {
@@ -112,13 +164,20 @@ impl RelayConnection {
         });
 
         let reader_pending = Arc::clone(&pending);
+        let reader_subscribed = Arc::clone(&subscribed);
         let reader_outgoing = outgoing_sender.clone();
         let reader = tokio::spawn(async move {
             while let Some(frame) = source.next().await {
                 let Ok(frame) = frame else { break };
                 match frame {
                     Message::Text(text) => {
-                        dispatch(&text, &reader_pending, &incoming_sender, &reader_outgoing);
+                        dispatch(
+                            &text,
+                            &reader_pending,
+                            &reader_subscribed,
+                            &incoming_sender,
+                            &reader_outgoing,
+                        );
                     }
                     // tungstenite queues its own pong, but only flushes it on
                     // the next write, and a wallet waiting quietly for a
@@ -126,7 +185,7 @@ impl RelayConnection {
                     // explicitly is what keeps the relay from timing the
                     // connection out mid-session.
                     Message::Ping(payload) => {
-                        let _ = reader_outgoing.send(Message::Pong(payload));
+                        let _ = reader_outgoing.try_send(Message::Pong(payload));
                     }
                     Message::Close(_) => break,
                     _ => {}
@@ -147,6 +206,7 @@ impl RelayConnection {
             outgoing: outgoing_sender,
             incoming: incoming_receiver,
             pending,
+            subscribed,
             salt: AtomicU16::new(0),
             reader,
             writer,
@@ -155,6 +215,12 @@ impl RelayConnection {
 
     /// Subscribe to a topic and return the relay's subscription id.
     pub async fn subscribe(&self, topic: &str) -> Result<String> {
+        // Recorded before the call, so a message that races the answer is not
+        // discarded as unsolicited. Recording it for a subscription that then
+        // fails costs nothing: nothing will be delivered on it.
+        if let Ok(mut subscribed) = self.subscribed.lock() {
+            subscribed.insert(topic.to_owned());
+        }
         let result = self
             .call("irn_subscribe", json!({ "topic": topic }))
             .await?;
@@ -217,13 +283,17 @@ impl RelayConnection {
             "method": method,
             "params": params,
         });
-        if self
-            .outgoing
-            .send(Message::text(request.to_string()))
-            .is_err()
-        {
+        if let Err(error) = self.outgoing.try_send(Message::text(request.to_string())) {
             self.forget(id);
-            bail!("the relay connection is closed");
+            match error {
+                mpsc::error::TrySendError::Closed(_) => {
+                    bail!("the relay connection is closed")
+                }
+                mpsc::error::TrySendError::Full(_) => bail!(
+                    "the relay connection has {MAX_QUEUED_FRAMES} frames waiting to be sent, so \
+                     `{method}` was not queued behind them"
+                ),
+            }
         }
         match tokio::time::timeout(RELAY_CALL_TIMEOUT, receiver).await {
             Ok(Ok(Ok(value))) => Ok(value),
@@ -266,26 +336,56 @@ fn next_call_id(salt: &AtomicU16) -> u64 {
 fn dispatch(
     text: &str,
     pending: &PendingCalls,
-    incoming: &mpsc::UnboundedSender<RelayMessage>,
-    outgoing: &mpsc::UnboundedSender<Message>,
+    subscribed: &Subscriptions,
+    incoming: &mpsc::Sender<RelayMessage>,
+    outgoing: &mpsc::Sender<Message>,
 ) {
     let Ok(message) = serde_json::from_str::<IncomingMessage>(text) else {
         return;
     };
     if let Some(("irn_subscription", params)) = message.as_request() {
-        // Acknowledged before the payload is even looked at: the relay
-        // redelivers anything it was not told arrived, and a malformed payload
-        // would then be redelivered forever.
-        let _ = outgoing.send(Message::text(
-            json!({ "id": message.id, "jsonrpc": JSONRPC_VERSION, "result": true }).to_string(),
-        ));
         let topic = params.pointer("/data/topic").and_then(Value::as_str);
         let payload = params.pointer("/data/message").and_then(Value::as_str);
-        if let (Some(topic), Some(payload)) = (topic, payload) {
-            let _ = incoming.send(RelayMessage {
-                topic: topic.to_owned(),
-                message: payload.to_owned(),
-            });
+        // Everything that can be decided here is decided before the queue is
+        // touched, and each outcome is acknowledged — the relay redelivers
+        // what it was not told arrived, and none of these get better on a
+        // second attempt.
+        //
+        // The size bound is the envelope's own, applied here rather than after
+        // dequeue: a megabyte that will be refused is still a megabyte held
+        // while the owner reads an approval. The topic check is against what
+        // this connection actually subscribed to, since a relay that decides
+        // to deliver on a topic nobody asked for is spending this process's
+        // memory on a string no key opens.
+        let deliverable = match (topic, payload) {
+            (Some(topic), Some(payload))
+                if payload.len() <= super::crypto::MAX_ENVELOPE_BYTES
+                    && subscribed
+                        .lock()
+                        .is_ok_and(|subscribed| subscribed.contains(topic)) =>
+            {
+                Some(RelayMessage {
+                    topic: topic.to_owned(),
+                    message: payload.to_owned(),
+                })
+            }
+            _ => None,
+        };
+        let Some(delivery) = deliverable else {
+            let _ = outgoing.try_send(Message::text(
+                json!({ "id": message.id, "jsonrpc": JSONRPC_VERSION, "result": true }).to_string(),
+            ));
+            return;
+        };
+        // Acknowledged only once it is held. A full queue means the session is
+        // busy — reading an approval, most likely — and withholding the
+        // acknowledgement leaves the message with the relay to redeliver
+        // rather than accumulating it here. That is the backpressure the
+        // unbounded channel had none of.
+        if incoming.try_send(delivery).is_ok() {
+            let _ = outgoing.try_send(Message::text(
+                json!({ "id": message.id, "jsonrpc": JSONRPC_VERSION, "result": true }).to_string(),
+            ));
         }
         return;
     }

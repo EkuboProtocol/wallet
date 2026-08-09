@@ -86,8 +86,9 @@ fn a_delivered_message_is_acknowledged_before_it_is_read() {
     // only well-formed payloads would mean a malformed one is redelivered
     // forever, so the ack goes out before the payload is even inspected.
     let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
-    let (incoming, mut incoming_rx) = mpsc::unbounded_channel();
-    let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel();
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let (incoming, mut incoming_rx) = mpsc::channel(8);
+    let (outgoing, mut outgoing_rx) = mpsc::channel(8);
 
     dispatch(
         &json!({
@@ -96,6 +97,7 @@ fn a_delivered_message_is_acknowledged_before_it_is_read() {
         })
         .to_string(),
         &pending,
+        &subscribed,
         &incoming,
         &outgoing,
     );
@@ -110,8 +112,10 @@ fn a_delivered_message_is_acknowledged_before_it_is_read() {
 #[test]
 fn a_delivered_message_reaches_the_consumer_with_its_topic() {
     let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
-    let (incoming, mut incoming_rx) = mpsc::unbounded_channel();
-    let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    subscribed.lock().unwrap().insert("abc".to_owned());
+    let (incoming, mut incoming_rx) = mpsc::channel(8);
+    let (outgoing, _outgoing_rx) = mpsc::channel(8);
 
     dispatch(
         &json!({
@@ -120,6 +124,7 @@ fn a_delivered_message_reaches_the_consumer_with_its_topic() {
         })
         .to_string(),
         &pending,
+        &subscribed,
         &incoming,
         &outgoing,
     );
@@ -131,14 +136,16 @@ fn a_delivered_message_reaches_the_consumer_with_its_topic() {
 #[test]
 fn a_response_wakes_exactly_the_call_that_is_waiting_for_it() {
     let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
-    let (incoming, _incoming_rx) = mpsc::unbounded_channel();
-    let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let (incoming, _incoming_rx) = mpsc::channel(8);
+    let (outgoing, _outgoing_rx) = mpsc::channel(8);
     let (sender, receiver) = oneshot::channel();
     pending.lock().unwrap().insert(9, sender);
 
     dispatch(
         &json!({ "id": 9, "jsonrpc": "2.0", "result": "subscription-id" }).to_string(),
         &pending,
+        &subscribed,
         &incoming,
         &outgoing,
     );
@@ -152,8 +159,9 @@ fn a_response_wakes_exactly_the_call_that_is_waiting_for_it() {
 #[test]
 fn a_relay_error_reaches_the_waiting_call_as_an_error() {
     let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
-    let (incoming, _incoming_rx) = mpsc::unbounded_channel();
-    let (outgoing, _outgoing_rx) = mpsc::unbounded_channel();
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let (incoming, _incoming_rx) = mpsc::channel(8);
+    let (outgoing, _outgoing_rx) = mpsc::channel(8);
     let (sender, receiver) = oneshot::channel();
     pending.lock().unwrap().insert(3, sender);
 
@@ -164,6 +172,7 @@ fn a_relay_error_reaches_the_waiting_call_as_an_error() {
         })
         .to_string(),
         &pending,
+        &subscribed,
         &incoming,
         &outgoing,
     );
@@ -174,9 +183,119 @@ fn a_relay_error_reaches_the_waiting_call_as_an_error() {
 #[test]
 fn a_frame_that_is_not_json_is_ignored_rather_than_fatal() {
     let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
-    let (incoming, mut incoming_rx) = mpsc::unbounded_channel();
-    let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel();
-    dispatch("not json at all", &pending, &incoming, &outgoing);
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let (incoming, mut incoming_rx) = mpsc::channel(8);
+    let (outgoing, mut outgoing_rx) = mpsc::channel(8);
+    dispatch(
+        "not json at all",
+        &pending,
+        &subscribed,
+        &incoming,
+        &outgoing,
+    );
     assert!(incoming_rx.try_recv().is_err());
     assert!(outgoing_rx.try_recv().is_err());
+}
+
+#[test]
+fn a_message_on_a_topic_nobody_subscribed_to_is_acknowledged_and_dropped() {
+    // The relay is trusted for liveness and nothing else. A topic this
+    // connection never asked for has no key that opens it and no session that
+    // wants it, so holding the strings costs memory and buys nothing.
+    let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    subscribed.lock().unwrap().insert("ours".to_owned());
+    let (incoming, mut incoming_rx) = mpsc::channel(8);
+    let (outgoing, mut outgoing_rx) = mpsc::channel(8);
+
+    dispatch(
+        &json!({
+            "id": 7, "jsonrpc": "2.0", "method": "irn_subscription",
+            "params": { "id": "sub", "data": { "topic": "theirs", "message": "AAAA" } },
+        })
+        .to_string(),
+        &pending,
+        &subscribed,
+        &incoming,
+        &outgoing,
+    );
+    assert!(incoming_rx.try_recv().is_err());
+    // Acknowledged all the same: it will not become deliverable on a second
+    // attempt, and an unacknowledged message is redelivered forever.
+    assert!(
+        outgoing_rx
+            .try_recv()
+            .expect("no acknowledgement")
+            .to_text()
+            .unwrap()
+            .contains("\"id\":7")
+    );
+}
+
+#[test]
+fn an_oversized_payload_is_refused_before_it_is_queued() {
+    // The envelope's own bound, applied at the door rather than after
+    // dequeue. A megabyte that is going to be refused is still a megabyte held
+    // while the owner reads an approval.
+    let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    subscribed.lock().unwrap().insert("ours".to_owned());
+    let (incoming, mut incoming_rx) = mpsc::channel(8);
+    let (outgoing, _outgoing_rx) = mpsc::channel(8);
+
+    let huge = "A".repeat(crate::walletconnect::crypto::MAX_ENVELOPE_BYTES + 1);
+    dispatch(
+        &json!({
+            "id": 8, "jsonrpc": "2.0", "method": "irn_subscription",
+            "params": { "id": "sub", "data": { "topic": "ours", "message": huge } },
+        })
+        .to_string(),
+        &pending,
+        &subscribed,
+        &incoming,
+        &outgoing,
+    );
+    assert!(incoming_rx.try_recv().is_err());
+}
+
+#[test]
+fn a_full_queue_withholds_the_acknowledgement_rather_than_growing() {
+    // The backpressure the unbounded channel had none of. The session loop
+    // stops consuming while the owner reads an approval, which is exactly when
+    // a hostile peer would flood; a relay redelivers what it was not
+    // acknowledged for, so a full queue loses nothing.
+    let pending: PendingCalls = Arc::new(Mutex::new(HashMap::new()));
+    let subscribed: Subscriptions = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    subscribed.lock().unwrap().insert("ours".to_owned());
+    let (incoming, _incoming_rx) = mpsc::channel(1);
+    let (outgoing, mut outgoing_rx) = mpsc::channel(8);
+
+    let deliver = |id: u64| {
+        dispatch(
+            &json!({
+                "id": id, "jsonrpc": "2.0", "method": "irn_subscription",
+                "params": { "id": "sub", "data": { "topic": "ours", "message": "AAAA" } },
+            })
+            .to_string(),
+            &pending,
+            &subscribed,
+            &incoming,
+            &outgoing,
+        );
+    };
+    deliver(1);
+    assert!(
+        outgoing_rx
+            .try_recv()
+            .expect("the first one fits")
+            .to_text()
+            .unwrap()
+            .contains("\"id\":1")
+    );
+
+    deliver(2);
+    assert!(
+        outgoing_rx.try_recv().is_err(),
+        "a message that did not fit must not be acknowledged, or the relay stops redelivering it"
+    );
 }

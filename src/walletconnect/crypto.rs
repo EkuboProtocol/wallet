@@ -52,7 +52,7 @@ const BASE64URL: base64::engine::general_purpose::GeneralPurpose =
 /// becomes a `serde_json` parse. One megabyte is far beyond any legitimate
 /// session request — the largest realistic one is a typed-data payload — and
 /// well under anything that would matter for memory.
-const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
 
 /// Fill a buffer from the platform CSPRNG, or fail loudly.
 ///
