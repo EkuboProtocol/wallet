@@ -138,8 +138,12 @@ from bounded, short-timeout, best-effort reads of the configured RPC, which is
 itself untrusted: a failed lookup degrades the line to exact base units, and a
 returned symbol is stripped of control and parenthesis characters so a hostile
 token cannot forge additional review fields. Effectively unlimited allowances and
-blanket `setApprovalForAll` grants are surfaced as explicit warnings. The review
-digest binds the exact calldata, not this rendering.
+blanket `setApprovalForAll` grants are surfaced as explicit warnings when the
+call itself makes one. A `multicall(bytes[])` wrapper's nested calls are not
+individually reviewed, so the wrapper instead warns that its contents are
+unverified: the absence of a specific warning under a multicall is not evidence
+that no such grant is inside it. The review digest binds the exact calldata, not
+this rendering.
 
 ERC-7730 descriptors are vendored in the repository
 (`crates/ekubo-wallet-core/clearsign/`) — the complete upstream registry
@@ -336,7 +340,9 @@ come from bounded, best-effort reads of the configured RPC; when a lookup fails
 the line degrades to exact base units rather than to a guess, and all
 descriptor- and token-supplied text is sanitized so it cannot forge additional
 review output. Effectively unlimited allowances and blanket `setApprovalForAll`
-grants raise explicit warnings.
+grants raise explicit warnings when the call itself makes one; a
+`multicall(bytes[])` is not unwrapped to look for one inside it, and warns
+instead that its nested calls were not individually reviewed.
 
 These readings are supplemental. The review digest binds the exact ordered
 calldata, and the displayed target, selector, and value remain authoritative.

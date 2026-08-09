@@ -86,39 +86,28 @@ pub struct StepInterpretation {
     pub warnings: Vec<String>,
 }
 
-/// Whether `call` — or a call reachable by unwrapping up to `remaining_depth`
-/// `multicall(bytes[])` layers — is a standard token call, so its target
-/// belongs in [`plan_token_targets`]'s set.
-///
-/// Mirrors how deep `standard_call_warnings` already looks for a grant: a
-/// token whose only mention is inside a nested multicall call must resolve
-/// the same metadata a top-level call would, or the warning that call earns
-/// renders the token unlisted even though the local database names it.
-fn names_standard_token(call: &StandardCall, remaining_depth: u8) -> bool {
-    match call {
-        StandardCall::Approve { .. }
-        | StandardCall::Transfer { .. }
-        | StandardCall::TransferFrom { .. } => true,
-        StandardCall::Multicall { calls } if remaining_depth > 0 => calls
-            .iter()
-            .filter_map(decode_standard_call)
-            .any(|nested| names_standard_token(&nested, remaining_depth - 1)),
-        StandardCall::Multicall { .. } | StandardCall::SetApprovalForAll { .. } => false,
-    }
-}
-
 /// Collect the token contracts a plan names through standard token calldata
 /// or through the token references of a matching ERC-7730 descriptor.
 ///
 /// The caller resolves these against the token database. Collection contacts
 /// no network: which addresses a plan names is decided by its calldata alone.
+///
+/// A `multicall(bytes[])` wrapper's nested calls are not unwrapped looking
+/// for a token target: see `standard_call_warnings`'s doc comment for why a
+/// multicall's contents are treated as unverified rather than individually
+/// inspected.
 #[must_use]
 pub async fn plan_token_targets(steps: &[ExecutionStep]) -> Vec<Address> {
     let mut targets = BTreeSet::new();
     for step in steps {
-        if decode_standard_call(&step.transaction.data)
-            .is_some_and(|call| names_standard_token(&call, MAX_WARNING_SCAN_DEPTH))
-        {
+        if matches!(
+            decode_standard_call(&step.transaction.data),
+            Some(
+                StandardCall::Approve { .. }
+                    | StandardCall::Transfer { .. }
+                    | StandardCall::TransferFrom { .. }
+            )
+        ) {
             targets.insert(step.transaction.to);
         }
         if let Ok(chain_id) = step.transaction.chain_id.as_str().parse::<u64>() {
@@ -415,30 +404,6 @@ pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenM
     )
 }
 
-/// How many `multicall(bytes[])` wrappers a warning scan will unwrap looking
-/// for a grant nested inside one multicall inside another.
-///
-/// A single step's calldata may be up to `MAX_TOTAL_CALLDATA_BYTES` (8 MiB,
-/// `core::execution_plan`), and every byte of overhead a level of nesting
-/// costs is reusable at the next level down — so unwrapping without a limit
-/// would let a plan turn "find the grant" into a recursion whose depth it
-/// controls. This bounds it the same way `MAX_DISPLAYED_NESTED_CALLS` bounds
-/// the sibling count at one level: generous enough to see through a router
-/// batching a few multicall-enabled steps together, too shallow to matter as
-/// an attack surface.
-const MAX_WARNING_SCAN_DEPTH: u8 = 4;
-
-/// How many grant warnings one step will list before summarizing the rest.
-///
-/// The scan behind this is deliberately unbounded in the *number* of nested
-/// calls it checks (see `standard_call_warnings`'s doc comment) — but a
-/// `multicall` can pack in far more nested calls than any human reviews line
-/// by line, and a warning per grant would let that same flood drown the
-/// warning that matters instead of a hidden one. Same shape as
-/// `MAX_DISPLAYED_NESTED_CALLS` and `MAX_DISPLAYED_BALANCE_CHANGES`: bound
-/// what is *shown*, and say how much was cut, never bound what is checked.
-const MAX_GRANT_WARNINGS: usize = 8;
-
 /// What a call does, stated independently of how it reads.
 ///
 /// These are the two grants that outlive the transaction carrying them: an
@@ -446,93 +411,46 @@ const MAX_GRANT_WARNINGS: usize = 8;
 /// control of a collection. Both are facts about the decoded call, so they are
 /// derived from the call and attached to whatever description is displayed —
 /// a clear-signing descriptor renders an approval more legibly, which is no
-/// reason for its ceiling to stop being mentioned. A `multicall(bytes[])`
-/// wrapper is no reason either: a grant packed into a nested call, or a call
-/// nested that many multicalls deep, gets the same warning a standalone one
-/// would, down to [`MAX_WARNING_SCAN_DEPTH`] levels.
+/// reason for its ceiling to stop being mentioned.
 ///
-/// Every nested call at a given level is scanned for a grant, not only the
-/// first `MAX_DISPLAYED_NESTED_CALLS` the description prints: that cap exists
-/// to keep the *rendered text* readable, not to bound the work, and the array
-/// it truncates was already fully decoded by `decode_standard_call` to get
-/// its length. Capping the warning scan at the same number would let a grant
-/// sit past the cap with no warning at all — exactly the missing ceiling this
-/// crate otherwise guards against, just moved from "how many nested calls are
-/// shown" to "how many are checked". [`MAX_GRANT_WARNINGS`] bounds the other
-/// direction instead — how many of the grants found are printed — so a plan
-/// with more grants than any reviewer would read one by one cannot bury the
-/// first one under a wall of identical-looking lines.
+/// A `multicall(bytes[])` wrapper's nested calls are not unwrapped looking
+/// for a grant hiding inside one: a nested call is arbitrary calldata this
+/// crate has no bounded way to fully account for, and a scan deep enough to
+/// find every grant is also a scan whose cost and coverage a plan's own
+/// nesting gets to choose. Rather than promise a specific finding a bounded
+/// scan cannot actually guarantee, a multicall earns a warning that its
+/// contents were not individually reviewed, so a reviewer treats everything
+/// it might carry as unverified instead of trusting the absence of a
+/// specific warning as the absence of a specific grant.
 fn standard_call_warnings(
     step: u32,
     token: Address,
     display: &TokenMetadata,
     call: Option<&StandardCall>,
 ) -> Vec<String> {
-    let mut warnings = warnings_at_depth(step, token, display, call, MAX_WARNING_SCAN_DEPTH);
-    let total = warnings.len();
-    if total > MAX_GRANT_WARNINGS {
-        warnings.truncate(MAX_GRANT_WARNINGS);
-        warnings.push(format!(
-            "Call {step} makes {} further grant(s) not listed above.",
-            total - MAX_GRANT_WARNINGS
-        ));
-    }
-    warnings
-}
-
-fn warnings_at_depth(
-    step: u32,
-    token: Address,
-    display: &TokenMetadata,
-    call: Option<&StandardCall>,
-    remaining_depth: u8,
-) -> Vec<String> {
     match call {
-        Some(StandardCall::Multicall { calls }) if remaining_depth > 0 => calls
-            .iter()
-            .filter_map(decode_standard_call)
-            .flat_map(|nested_call| {
-                warnings_at_depth(
-                    step,
-                    token,
-                    display,
-                    Some(&nested_call),
-                    remaining_depth - 1,
-                )
-            })
-            .collect(),
-        // Depth exhausted on a further multicall: stop rather than unwrap it,
-        // matching the guard above rather than falling through to
-        // `grant_warning`, which would never match a `Multicall` anyway.
-        Some(StandardCall::Multicall { .. }) | None => Vec::new(),
-        Some(call) => grant_warning(step, token, display, call)
-            .into_iter()
-            .collect(),
-    }
-}
-
-fn grant_warning(
-    step: u32,
-    token: Address,
-    display: &TokenMetadata,
-    call: &StandardCall,
-) -> Option<String> {
-    match call {
-        StandardCall::Approve { spender, amount }
+        Some(StandardCall::Multicall { calls }) => vec![format!(
+            "Call {step} is a multicall bundling {} nested call(s); their contents are not \
+             individually reviewed, so treat this call as unverified.",
+            calls.len()
+        )],
+        Some(StandardCall::Approve { spender, amount })
             if *amount != U256::ZERO && is_effectively_unlimited(*amount) =>
         {
-            Some(format!(
+            vec![format!(
                 "Call {step} grants an effectively unlimited {} allowance to {spender:#x}.",
                 token_label(token, display)
-            ))
+            )]
         }
-        StandardCall::SetApprovalForAll {
+        Some(StandardCall::SetApprovalForAll {
             operator,
             approved: true,
-        } => Some(format!(
-            "Call {step} grants {operator:#x} blanket operator control of every {token:#x} token held by this wallet."
-        )),
-        _ => None,
+        }) => {
+            vec![format!(
+                "Call {step} grants {operator:#x} blanket operator control of every {token:#x} token held by this wallet."
+            )]
+        }
+        _ => Vec::new(),
     }
 }
 
