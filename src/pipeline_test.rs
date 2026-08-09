@@ -96,6 +96,10 @@ struct StubChain {
     /// Whether the plan reverts here. A revert is not a vote under `m_of_n`,
     /// so two of these leave the quorum with nothing to agree on.
     reverts: bool,
+    /// Whether this node refuses `eth_sendRawTransaction`. A plan can simulate
+    /// perfectly and still be an envelope no node will accept -- one that
+    /// spends the whole native balance has nothing left to pay for itself.
+    refuses_send: bool,
 }
 
 /// The one lie a stub tells, if it tells one.
@@ -105,6 +109,7 @@ struct StubLie {
     block_gas_limit: Option<u64>,
     wallet_code: Option<String>,
     reverts: bool,
+    refuses_send: bool,
 }
 
 fn zero_bloom() -> String {
@@ -250,6 +255,7 @@ async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain
         block_gas_limit: lie.block_gas_limit,
         wallet_code: lie.wallet_code,
         reverts: lie.reverts,
+        refuses_send: lie.refuses_send,
         ..StubChain::default()
     });
     let serve_chain = chain.clone();
@@ -298,6 +304,16 @@ async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain
                     let respond = |request: &serde_json::Value| {
                         let method = request["method"].as_str().expect("method");
                         let params = &request["params"];
+                        if method == "eth_sendRawTransaction" && chain.refuses_send {
+                            return serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "error": {
+                                    "code": -32000,
+                                    "message": "insufficient funds for gas * price + value",
+                                },
+                            });
+                        }
                         serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": request["id"],
@@ -987,4 +1003,59 @@ async fn a_quorum_that_never_formed_is_not_reported_as_an_answer() {
         simulation.result.simulation.gas_used.is_none(),
         "{simulation:?}"
     );
+}
+
+/// A plan that simulates and is then refused by every endpoint must not leave
+/// the wallet frozen on that chain.
+///
+/// The row used to be recorded `broadcast` before anyone looked at
+/// `broadcast_error`. `broadcast` cannot be discarded locally, holds the one
+/// in-flight slot the partial unique index allows per wallet and chain, and --
+/// since the nonce was never consumed -- reconciles as pending forever. A dapp
+/// that could get one policy-allowed plan signed, and chose one that cannot pay
+/// for itself, froze the account until someone intervened by hand.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_no_endpoint_accepted_leaves_the_chain_usable() {
+    let (address, chain) = start_stub_lying(StubLie {
+        refuses_send: true,
+        ..StubLie::default()
+    })
+    .await;
+    let (_directory, server, wallet) =
+        pipeline_server(address, &WalletPolicy::allow_all_with_approval());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("a refused send is a reportable outcome, not a crash")
+        .0;
+    assert!(chain.mined.lock().unwrap().is_empty());
+
+    // Approved, not SubmissionPending: the row is signed and never submitted,
+    // which is what happened. The node's own reason travels with it.
+    assert_eq!(output.status, ExecutionStatus::Approved, "{output:?}");
+    assert!(
+        output
+            .broadcast_error
+            .as_deref()
+            .is_some_and(|error| error.contains("insufficient funds")),
+        "{output:?}"
+    );
+
+    // And because it is signed rather than broadcast, it can be discarded --
+    // which is what frees the wallet's one in-flight slot for this chain
+    // without a nonce-consuming transaction on chain.
+    let record = {
+        let mut pending = server.pending.lock().unwrap();
+        pending.discard_unsent(output.request_id).unwrap()
+    };
+    assert_eq!(record.status, PendingStatus::Cancelled, "{record:?}");
+    let _ = wallet;
 }

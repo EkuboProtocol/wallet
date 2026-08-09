@@ -300,7 +300,9 @@ async fn reconcile_cancelling(
 /// Broadcast a claimed submission's exact persisted bytes and persist what
 /// the chain said: broadcast on acceptance, straight to confirmed or
 /// reverted when a receipt already exists. Releases the submission lease
-/// when the send itself fails, so the signed bytes stay retryable.
+/// when the send itself fails, so the signed bytes stay retryable -- and
+/// equally when every endpoint refused the envelope, which is a send that
+/// failed rather than one that happened.
 pub async fn submit_claimed(
     pending: &Mutex<PendingStore>,
     wallet: &WalletMetadata,
@@ -332,6 +334,26 @@ pub async fn submit_claimed(
                 return Err(error);
             }
         };
+    // Every endpoint refused it, and the chain was asked again afterwards and
+    // does not hold it — which is what a `broadcast_error` means, since a
+    // rejection that turned out to describe a transaction the node already had
+    // is reported as an ordinary pending send. Nothing reached the network, so
+    // recording `broadcast` would be a lie the lifecycle then has to live
+    // with: `broadcast` cannot be discarded locally, holds the wallet's one
+    // in-flight slot for the chain, and -- with the nonce never consumed --
+    // reconciliation goes on reporting it as pending forever. A dapp needed
+    // only one policy-allowed plan that simulates and cannot pay for itself to
+    // freeze the account on that chain.
+    //
+    // The lease goes back instead, exactly as a transport failure returns it.
+    // The row is `signed` again: retryable, discardable, and honest about
+    // never having been submitted.
+    if broadcast.broadcast_error.is_some() {
+        let record = lock(pending)?
+            .release_submission(claimed.request_id, claimed.generation)
+            .context("failed to release the lease of a transaction no endpoint accepted")?;
+        return Ok((record, broadcast));
+    }
     let record = {
         let mut pending = lock(pending)?;
         let broadcast_record = pending.mark_broadcast(
