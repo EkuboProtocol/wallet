@@ -637,6 +637,31 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
     );
 }
 
+/// Every other optional list on this tool's inputs (`tokens`, `chain_ids`)
+/// tolerates a caller who omits it; `aliases` used to be the one exception,
+/// failing deserialization outright instead of reaching this tool's own
+/// `tool_error` path.
+#[test]
+fn proposing_a_network_tolerates_a_call_that_omits_aliases() {
+    let input = serde_json::json!({
+        "name": "untrusted",
+        "display_name": "Untrusted Test",
+        "chain_id": "999999",
+        "rpc_urls": ["http://127.0.0.1:9"],
+        "max_gas_limit": "30000000",
+        "native_currency": {
+            "name": "Test Ether",
+            "symbol": "TETH",
+            "decimals": 18,
+        },
+        "block_explorer_url": "https://explorer.example.invalid",
+        "documentation_url": "https://docs.example.invalid",
+    });
+    let parsed: AddNetworkInput =
+        serde_json::from_value(input).expect("aliases should be optional");
+    assert!(parsed.aliases.is_empty());
+}
+
 fn add_network_input(rpc_url: &str) -> AddNetworkInput {
     AddNetworkInput {
         name: "untrusted".into(),

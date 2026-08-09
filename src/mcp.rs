@@ -355,7 +355,8 @@ struct AddNetworkInput {
     /// How the network is written out for a human, 1-128 characters.
     display_name: String,
     /// Up to 8 further identifiers for the same network, each in the same
-    /// character set as `name`.
+    /// character set as `name`. Omit for none.
+    #[serde(default)]
     aliases: Vec<String>,
     /// Canonical decimal chain ID, positive and without leading zeros.
     chain_id: String,
