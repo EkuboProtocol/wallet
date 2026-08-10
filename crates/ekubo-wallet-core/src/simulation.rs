@@ -1397,6 +1397,39 @@ fn signed_delta(before: U256, after: U256) -> String {
     }
 }
 
+/// How much endpoint-authored prose the wallet will carry into a review.
+///
+/// A revert message is written by whatever the endpoint chose to send and is
+/// rendered to a person deciding whether to sign. Nothing bounded it: the
+/// string was copied into the failure, into the stored simulation result, and
+/// onto the approval screen at whatever length arrived.
+///
+/// Generous, because the point is to have a ceiling rather than to edit
+/// diagnostics: a real revert reason is a sentence, and anything past this is
+/// not one.
+const MAX_RPC_MESSAGE_BYTES: usize = 4_096;
+
+/// One endpoint-authored message, bounded and honest about it.
+///
+/// Truncated on a character boundary rather than by byte, so the result is
+/// still a `String` a terminal can render, and the marker says what was
+/// dropped. `sanitize` still runs over this downstream: this bounds the
+/// length, not the contents.
+fn bounded_rpc_message(message: &str) -> String {
+    if message.len() <= MAX_RPC_MESSAGE_BYTES {
+        return message.to_owned();
+    }
+    let mut end = MAX_RPC_MESSAGE_BYTES;
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}… ({} more bytes from the endpoint, not shown)",
+        &message[..end],
+        message.len() - end
+    )
+}
+
 fn execution_output(
     plan: &ExecutionPlan,
     result: &SimCallResult,
@@ -1419,7 +1452,13 @@ fn execution_output(
     }
     let message = result.error.as_ref().map_or_else(
         || "eth_simulateV1 execution failed without an error object".into(),
-        |error| format!("{} (RPC code {})", error.message, error.code),
+        |error| {
+            format!(
+                "{} (RPC code {})",
+                bounded_rpc_message(&error.message),
+                error.code
+            )
+        },
     );
     let revert_bytes = result
         .error

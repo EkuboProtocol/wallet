@@ -559,3 +559,49 @@ fn a_token_that_answers_neither_probe_is_named_rather_than_dropped() {
     // A token nothing tracks is not the policy's business and is not reported.
     assert!(unverified_token_probes(&[], &before, &after).is_empty());
 }
+
+mod bounded_rpc_message_tests {
+    //! A revert reason is written by the endpoint and read by a person.
+
+    use super::*;
+
+    /// Nothing bounded it. The string was copied into the failure, into the
+    /// stored simulation result, and onto the approval screen at whatever
+    /// length arrived -- from the one party in the exchange with an interest
+    /// in the person not reading it.
+    #[test]
+    fn an_oversized_message_is_bounded_and_says_so() {
+        let flood = "A".repeat(MAX_RPC_MESSAGE_BYTES * 4);
+        let bounded = bounded_rpc_message(&flood);
+        assert!(bounded.len() < flood.len());
+        assert!(
+            bounded.contains("more bytes from the endpoint, not shown"),
+            "truncation is disclosed rather than silent: {}",
+            &bounded[bounded.len().saturating_sub(80)..]
+        );
+    }
+
+    /// A real revert reason is a sentence and passes through untouched. The
+    /// ceiling exists to have one, not to edit diagnostics.
+    #[test]
+    fn an_ordinary_message_is_unchanged() {
+        for message in [
+            "execution reverted: ERC20: transfer amount exceeds balance",
+            "",
+            "insufficient funds for gas * price + value",
+        ] {
+            assert_eq!(bounded_rpc_message(message), message);
+        }
+    }
+
+    /// Truncation lands on a character boundary, so the result is still a
+    /// `String` a terminal can render. Cutting by byte through a multi-byte
+    /// character would panic on the slice.
+    #[test]
+    fn truncation_does_not_split_a_character() {
+        let multibyte = "é".repeat(MAX_RPC_MESSAGE_BYTES);
+        let bounded = bounded_rpc_message(&multibyte);
+        assert!(bounded.starts_with('é'));
+        assert!(bounded.contains("not shown"));
+    }
+}
