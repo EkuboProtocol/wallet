@@ -119,7 +119,61 @@ pub struct ReadCallsBody {
     pub block_parameter: String,
     #[serde(default)]
     pub from: Option<String>,
+    #[serde(deserialize_with = "bounded_calls")]
     pub calls: Vec<BatchReadCall>,
+}
+
+/// Stop reading the array at the limit rather than after it.
+///
+/// The transport cap bounds a fetched bundle's *bytes*, and 16 MiB of small
+/// calls is a great many calls. `validate_input` refuses anything over
+/// `MAX_BATCH_CALLS` -- but only once `serde_json::from_slice` has built the
+/// whole vector, so a bundle destined to be refused was materialized in full
+/// first, every time it was offered.
+///
+/// Bounded here instead, which is the same move the policy types made: the
+/// limit belongs to the type, so no parse can produce a value that breaks it
+/// and `validate_input`'s check becomes a restatement rather than the only
+/// enforcement. Deserialization now stops on the call after the limit, so the
+/// work is proportional to the limit rather than to the body.
+fn bounded_calls<'de, D>(deserializer: D) -> std::result::Result<Vec<BatchReadCall>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error as _, SeqAccess, Visitor};
+
+    struct Bounded;
+
+    impl<'de> Visitor<'de> for Bounded {
+        type Value = Vec<BatchReadCall>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "at most {MAX_BATCH_CALLS} read calls")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut calls = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or_default()
+                    .min(MAX_BATCH_CALLS),
+            );
+            while let Some(call) = sequence.next_element()? {
+                if calls.len() == MAX_BATCH_CALLS {
+                    return Err(A::Error::custom(format!(
+                        "read-call bundle carries more than {MAX_BATCH_CALLS} calls"
+                    )));
+                }
+                calls.push(call);
+            }
+            Ok(calls)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
 }
 
 /// Settle the `reference` envelope surface into an effective inline input.
