@@ -56,7 +56,10 @@ async fn a_refused_creation_still_clears_the_key_it_inserted() {
             Ok(())
         })
         .unwrap();
-    service.keys.delete("primary").unwrap();
+    service
+        .keys
+        .delete_matching("primary", first.address)
+        .unwrap();
     service
         .config
         .update(|config| {
@@ -199,7 +202,9 @@ async fn a_replacement_wallet_keeps_its_key() {
                     Ok(())
                 })
                 .unwrap();
-            swap_keys.delete("primary").unwrap();
+            swap_keys
+                .delete_matching("primary", original.address)
+                .unwrap();
             other.create("primary").unwrap();
         })),
     );
@@ -211,5 +216,212 @@ async fn a_replacement_wallet_keeps_its_key() {
         keys.load("primary").unwrap().signer().address(),
         replacement.address,
         "the replacement wallet's key must outlive an approval given for its predecessor"
+    );
+}
+
+/// A key store that answers `delete_matching` however the test needs, over a
+/// real [`MemoryKeyStore`] that holds the actual material. Every failure below
+/// is a credential store that reported an error without saying what it did,
+/// which is the only thing the removal path cannot observe for itself.
+struct FlakyKeyStore {
+    inner: MemoryKeyStore,
+    /// Run instead of the real deletion. Returns the error to report.
+    on_delete: Box<dyn Fn(&MemoryKeyStore) -> anyhow::Error + Send + Sync>,
+    /// Fail `address_of` too, so the removal cannot tell what happened.
+    blind: bool,
+}
+
+impl crate::sealed::SealedKeyStore for FlakyKeyStore {}
+
+impl KeyStore for FlakyKeyStore {
+    fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
+        self.inner.insert_new(wallet_id, key)
+    }
+
+    fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial> {
+        self.inner.load(wallet_id)
+    }
+
+    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>> {
+        ensure!(!self.blind, "credential store is unreachable");
+        self.inner.address_of(wallet_id)
+    }
+
+    fn delete_matching(&self, _wallet_id: &str, _expected: Address) -> Result<Deletion> {
+        Err((self.on_delete)(&self.inner))
+    }
+}
+
+fn flaky(
+    on_delete: impl Fn(&MemoryKeyStore) -> anyhow::Error + Send + Sync + 'static,
+    blind: bool,
+) -> (
+    tempfile::TempDir,
+    Arc<FlakyKeyStore>,
+    CustodyService<FlakyKeyStore, TestHumanPresence>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let keys = Arc::new(FlakyKeyStore {
+        inner: MemoryKeyStore::default(),
+        on_delete: Box::new(on_delete),
+        blind,
+    });
+    let service = CustodyService::new(
+        ConfigStore::new(directory.path()),
+        Arc::clone(&keys),
+        Arc::new(TestHumanPresence { allow: true }),
+    );
+    (directory, keys, service)
+}
+
+#[tokio::test]
+async fn a_deletion_that_destroyed_the_key_before_failing_does_not_relist_the_wallet() {
+    // The shape that listed a wallet nobody could sign with. `delete` reported
+    // an error *after* the credential was gone, and the rollback restored the
+    // row on the strength of the error alone — an inventory entry that reads
+    // as available and can never produce a signature.
+    let (directory, keys, service) = flaky(
+        |inner| {
+            let address = inner.address_of("primary").unwrap().unwrap();
+            inner.delete_matching("primary", address).unwrap();
+            anyhow::anyhow!("credential store failed after deleting")
+        },
+        false,
+    );
+    service.create("primary").unwrap();
+
+    // The removal the owner asked for did happen, so it is not an error.
+    service.remove("primary").await.unwrap();
+    assert!(
+        keys.address_of("primary").unwrap().is_none(),
+        "the credential really is gone"
+    );
+    assert!(
+        ConfigStore::new(directory.path())
+            .wallet("primary")
+            .is_err(),
+        "a wallet whose key was destroyed must not be restored to the inventory"
+    );
+}
+
+#[tokio::test]
+async fn a_deletion_that_kept_the_key_restores_the_row() {
+    // The other half of the same question, and the reason the rollback exists
+    // at all: the credential is still there, so the row has to come back or a
+    // reachable key is orphaned with nothing naming it.
+    let (directory, keys, service) = flaky(
+        |_| anyhow::anyhow!("credential store failed before deleting"),
+        false,
+    );
+    let wallet = service.create("primary").unwrap();
+
+    assert!(service.remove("primary").await.is_err());
+    assert_eq!(
+        keys.address_of("primary").unwrap(),
+        Some(wallet.address),
+        "the key survived"
+    );
+    assert_eq!(
+        ConfigStore::new(directory.path())
+            .wallet("primary")
+            .unwrap()
+            .address,
+        wallet.address,
+        "so the row naming it must survive too"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_credential_store_does_not_relist_the_wallet() {
+    // "Cannot tell" is not "the key survived". Restoring here is a coin flip
+    // on whether the row can ever sign again, so the removal says what it does
+    // not know instead of guessing.
+    let (directory, _keys, service) = flaky(
+        |_| anyhow::anyhow!("credential store failed at an unknown point"),
+        true,
+    );
+    service.create("primary").unwrap();
+
+    let error = format!("{:#}", service.remove("primary").await.unwrap_err());
+    assert!(
+        error.contains("could not be re-read"),
+        "the owner is told the state is indeterminate: {error}"
+    );
+    assert!(
+        ConfigStore::new(directory.path())
+            .wallet("primary")
+            .is_err(),
+        "an indeterminate credential must not produce a row that claims to be usable"
+    );
+}
+
+#[test]
+fn deletion_is_addressed_by_key_rather_than_by_name() {
+    // The invariant the trait exists to enforce. A wallet id is reusable, so
+    // every historical way this went wrong — a removal landing on the wallet
+    // that replaced its target, a losing creation clearing the winner's key —
+    // reduces to a deletion that named an id and accepted whatever answered.
+    // There is no method that can express that any more; this is the refusal.
+    let keys = MemoryKeyStore::default();
+    let mine = PrivateKeyMaterial::from_bytes(
+        alloy::signers::local::PrivateKeySigner::random()
+            .to_bytes()
+            .as_slice(),
+    )
+    .unwrap();
+    let theirs = PrivateKeyMaterial::from_bytes(
+        alloy::signers::local::PrivateKeySigner::random()
+            .to_bytes()
+            .as_slice(),
+    )
+    .unwrap();
+    let mine_address = mine.address();
+    keys.insert_new("primary", &theirs).unwrap();
+
+    assert_eq!(
+        keys.delete_matching("primary", mine_address).unwrap(),
+        Deletion::Mismatched(theirs.address()),
+        "a credential belonging to another wallet is reported, not deleted"
+    );
+    assert_eq!(
+        keys.address_of("primary").unwrap(),
+        Some(theirs.address()),
+        "and it is still there"
+    );
+    assert_eq!(
+        keys.delete_matching("absent", mine_address).unwrap(),
+        Deletion::Absent
+    );
+}
+
+#[tokio::test]
+async fn a_creation_that_loses_the_configuration_race_keeps_the_winners_key() {
+    // Two creations of the same id. The lifecycle lock is what makes this
+    // impossible to reach concurrently now, but the loser's rollback is
+    // addressed by key as well, so even a lock that failed to serialize them
+    // cannot turn the loser's cleanup into the winner's key loss.
+    let directory = tempfile::tempdir().unwrap();
+    let keys = Arc::new(MemoryKeyStore::default());
+    let service = CustodyService::new(
+        ConfigStore::new(directory.path()),
+        Arc::clone(&keys),
+        Arc::new(TestHumanPresence { allow: true }),
+    );
+    let winner = service.create("primary").unwrap();
+
+    // A second creation under the same id: the credential store refuses the
+    // insert, so nothing is deleted and the winner is untouched.
+    assert!(service.create("primary").is_err());
+    assert_eq!(
+        keys.load("primary").unwrap().signer().address(),
+        winner.address,
+        "the first wallet's key is still the one stored under its id"
+    );
+    assert_eq!(
+        ConfigStore::new(directory.path())
+            .wallet("primary")
+            .unwrap()
+            .address,
+        winner.address
     );
 }

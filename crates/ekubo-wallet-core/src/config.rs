@@ -557,6 +557,40 @@ impl ConfigStore {
         result
     }
 
+    /// Run a whole wallet-lifecycle operation as one cross-process step.
+    ///
+    /// [`Self::update`] serializes a single read-modify-write of the
+    /// configuration, which is the wrong granularity for creating or removing
+    /// a wallet: those touch the credential store *and* the configuration, and
+    /// between the two another process could complete an entire lifecycle of
+    /// its own. That is what let two creations of the same id both write a
+    /// credential, and what let a replacement wallet be created in the gap
+    /// between a removal deleting a row and deleting the key it named.
+    ///
+    /// A separate lock file, not `config.lock`: `update` is called from inside
+    /// this section, and `flock` on a second descriptor for the same file
+    /// deadlocks against the descriptor this process already holds.
+    pub fn with_lifecycle_lock<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        create_private_dir(&self.data_dir)?;
+        let lock_path = self.data_dir.join("lifecycle.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open {}", lock_path.display()))?;
+        set_private_handle_permissions(&lock)?;
+        lock.lock_exclusive()
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+        let result = body();
+        // Discarded for the same reason `update` discards it: the work's own
+        // answer is the only one worth reporting, and the lock is released
+        // when this process exits regardless.
+        let _ = FileExt::unlock(&lock);
+        result
+    }
+
     pub fn wallet(&self, id: &str) -> Result<WalletMetadata> {
         self.load()?
             .wallets
