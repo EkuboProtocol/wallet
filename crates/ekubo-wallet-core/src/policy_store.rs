@@ -700,6 +700,7 @@ impl PolicyStore {
     /// decisions to make.
     pub fn put_network_proposal(&mut self, profile: &NetworkConfig) -> Result<()> {
         validate_network(profile)?;
+        crate::config::validate_admissible_endpoints(profile)?;
         ensure!(profile.chain_id > 0, "network chain ID must be positive");
         let profile_json = serde_json::to_string(profile)?;
         ensure!(

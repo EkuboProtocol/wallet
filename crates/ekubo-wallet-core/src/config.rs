@@ -699,6 +699,47 @@ pub fn default_data_dir() -> Result<PathBuf> {
 /// configuration contains" is a configuration question.
 pub use crate::networks::default_networks;
 
+/// Refuse a plaintext endpoint that is not a node on this machine.
+///
+/// An RPC connection carries the addresses, calldata, and balances this wallet
+/// reads, and the fee estimate an automatic transaction is signed against. Over
+/// `http` to a remote host, anything on the path reads the first and chooses
+/// the second: `capped_fee` leaves an estimate unchanged when no ceiling is
+/// configured, and the shipped profiles configure none. `https` is what makes
+/// the endpoint the thing that answers.
+///
+/// Loopback is exempt because that is the case the allowance exists for -- a
+/// node on this machine, reached over a path with nothing on it. Nothing else
+/// is: a LAN address is a network an attacker can be on.
+///
+/// **Checked on admission, not in [`validate_config`].** `validate_config`
+/// runs on every `load`, and a rule there would refuse to load a configuration
+/// that already holds a plaintext endpoint -- taking the wallet roster and
+/// every other network with it, and leaving no way to run the edit that would
+/// fix it. An existing configuration keeps working and can be repaired; what
+/// this stops is one being written.
+pub fn validate_admissible_endpoints(network: &NetworkConfig) -> Result<()> {
+    for rpc_url in &network.rpc_urls {
+        if rpc_url.scheme() != "http" {
+            continue;
+        }
+        let local = match rpc_url.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+            None => false,
+        };
+        ensure!(
+            local,
+            "{rpc_url} is plaintext http to a remote host. Anything on the path can read the \
+             addresses, calldata, and balances this wallet asks about, and can choose the fee \
+             estimate an automatic transaction is signed against. Use https, or a node on this \
+             machine."
+        );
+    }
+    Ok(())
+}
+
 pub fn validate_config(config: &WalletConfig) -> Result<()> {
     ensure!(config.version == 2, "unsupported configuration version");
     let mut wallet_ids = BTreeSet::new();
@@ -951,6 +992,7 @@ pub fn add_configured_network(
     next: NetworkConfig,
 ) -> Result<()> {
     validate_network(&next)?;
+    validate_admissible_endpoints(&next)?;
     if let Some(existing) = networks
         .iter()
         .find(|network| network.chain_id == next.chain_id)
@@ -993,6 +1035,7 @@ pub fn replace_configured_network(
     next: NetworkConfig,
 ) -> Result<()> {
     validate_network(&next)?;
+    validate_admissible_endpoints(&next)?;
     let identifiers = std::iter::once(&next.name)
         .chain(next.aliases.iter())
         .collect::<BTreeSet<_>>();

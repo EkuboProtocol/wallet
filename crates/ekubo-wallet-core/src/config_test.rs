@@ -632,3 +632,88 @@ mod record_network_tests {
             .expect("the same profile, under a name it already answered to");
     }
 }
+
+mod plaintext_endpoint_tests {
+    //! An RPC connection carries what the wallet reads and what it signs.
+
+    use super::*;
+
+    fn network_with(url: &str) -> NetworkConfig {
+        NetworkConfig {
+            name: "custom".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: vec![url.parse().unwrap()],
+            rpc_strategy: RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        }
+    }
+
+    /// Over plaintext to a remote host, anything on the path reads the
+    /// addresses, calldata, and balances this wallet asks about -- and chooses
+    /// the fee estimate an automatic transaction is signed against, since
+    /// `capped_fee` leaves an estimate unchanged when no ceiling is set and the
+    /// shipped profiles set none.
+    #[test]
+    fn a_remote_plaintext_endpoint_is_not_admissible() {
+        for remote in [
+            "http://rpc.example.com/v1",
+            "http://192.168.1.5:8545",
+            "http://10.0.0.1:8545",
+            "http://[2001:db8::1]:8545",
+        ] {
+            let error = format!(
+                "{:#}",
+                validate_admissible_endpoints(&network_with(remote))
+                    .expect_err("{remote} is plaintext to somewhere else")
+            );
+            assert!(error.contains("plaintext http"), "{remote}: {error}");
+        }
+    }
+
+    /// A node on this machine is the case the allowance exists for: a path
+    /// with nothing on it. A LAN address is not that -- it is a network an
+    /// attacker can be on.
+    #[test]
+    fn a_node_on_this_machine_is_still_reachable_in_plaintext() {
+        for local in [
+            "http://localhost:8545",
+            "http://127.0.0.1:8545",
+            "http://[::1]:8545",
+            "http://node.localhost:8545",
+        ] {
+            validate_admissible_endpoints(&network_with(local))
+                .unwrap_or_else(|error| panic!("{local} is a local node: {error:#}"));
+        }
+        validate_admissible_endpoints(&network_with("https://rpc.example.com/v1"))
+            .expect("https anywhere is the ordinary case");
+    }
+
+    /// The rule is on admission, not on `load`. A configuration that already
+    /// holds a plaintext endpoint has to keep loading: refusing would take the
+    /// wallet roster and every other network with it, and leave no way to run
+    /// the edit that would fix it.
+    #[test]
+    fn an_existing_configuration_still_loads() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let config = WalletConfig {
+            version: 2,
+            wallets: Vec::new(),
+            networks: vec![network_with("http://rpc.example.com/v1")],
+        };
+        validate_config(&config).expect("a stored profile is not refused on the way in");
+        store
+            .update(|current| {
+                current.networks = config.networks.clone();
+                Ok(())
+            })
+            .expect("and it can be written back, so the profile can be repaired");
+        assert_eq!(store.load().unwrap().networks.len(), 1);
+    }
+}

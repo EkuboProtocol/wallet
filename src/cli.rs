@@ -3626,6 +3626,7 @@ fn network_candidate(
     // chain-ID probe, and an operating-system authentication prompt, all to
     // be told at the end that a number they typed was out of range.
     ekubo_wallet_core::config::validate_network(&candidate)?;
+    ekubo_wallet_core::config::validate_admissible_endpoints(&candidate)?;
     Ok(candidate)
 }
 
