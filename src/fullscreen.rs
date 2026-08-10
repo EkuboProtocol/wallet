@@ -160,9 +160,22 @@ pub(crate) fn wrap_line_hanging(line: &Line, columns: usize, indent: usize) -> V
             lines.push(assemble(&flat[start..end]));
             break;
         }
-        // The space a line breaks at is dropped; everything else survives.
+        // The space a line breaks at stays on the row it ended.
+        //
+        // Dropping it is ordinary prose wrapping and was wrong here: this
+        // wrapper renders the complete EIP-712 payload a person reads before
+        // signing it, and a space inside a JSON string literal is part of the
+        // value the digest commits to. A requester that puts a meaningful
+        // space at a reachable wrap boundary had it vanish from every visual
+        // row, with no marker saying anything was removed -- so the string on
+        // screen was not the string being signed.
+        //
+        // Keeping it costs a trailing space at a line end, which no reader
+        // will notice, and buys the property that matters: the rendered
+        // document contains every character of its input. Layout is this
+        // function's job; editing the text is not.
         let (line_end, next_start) = match last_space {
-            Some(space) if space > start => (space, space + 1),
+            Some(space) if space > start => (space + 1, space + 1),
             _ => (end, end),
         };
         lines.push(assemble(&flat[start..line_end]));
