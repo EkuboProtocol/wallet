@@ -508,6 +508,35 @@ fn validate_preflight(
 /// bounded nothing at all unless the network carried a configured maximum,
 /// which most shipped profiles do not. On an ordinary network that left one
 /// endpoint's `estimate_gas` deciding the signed gas limit by itself.
+/// The gas limit a cancellation is signed with, from an endpoint's estimate.
+///
+/// Bounded above by the usable ceiling, as before, and now bounded below by
+/// what the transaction actually costs. A cancellation is a zero-value
+/// self-send: its intrinsic cost is exactly `INTRINSIC_TRANSACTION_GAS` and
+/// nothing it does can be cheaper. An endpoint answering `0` -- or anything
+/// under half that, since the multiplier is 2 -- produced an envelope below
+/// the floor, which every honest peer rejects.
+///
+/// The rejection is not the damage. The envelope is persisted before it is
+/// broadcast, so each one spends a slot in a history capped at
+/// `MAX_CANCELLATION_ATTEMPTS`, and at the cap `reconcile` stops repricing and
+/// rebroadcasts the newest stored envelope instead. Eight bad estimates leave
+/// the owner permanently unable to cancel, resending an invalid envelope
+/// forever while the transaction they were trying to stop mines.
+///
+/// Raised rather than refused, which is the opposite of `capped_fee` and for
+/// the reason that function's comment gives: there, not signing is the safe
+/// answer; here, not producing an envelope is the failure. Raising is exact
+/// rather than a guess -- the floor is what the chain charges, not a number
+/// chosen here -- and `usable_gas_ceiling` has already established the ceiling
+/// is at least the intrinsic cost, so this can never exceed it.
+fn cancellation_gas_limit(estimated_gas: u64, maximum: u64) -> u64 {
+    estimated_gas
+        .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
+        .min(maximum)
+        .max(INTRINSIC_TRANSACTION_GAS)
+}
+
 fn usable_gas_ceiling(network: &NetworkConfig, block_maximum: u64) -> Result<u64> {
     let configured = network
         .max_gas_limit
@@ -976,10 +1005,11 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
                 "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas \
                  limit {maximum}"
             );
-            let gas_limit = estimated_gas
-                .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
-                .min(maximum);
-            Ok((chain_id, market, gas_limit))
+            Ok((
+                chain_id,
+                market,
+                cancellation_gas_limit(estimated_gas, maximum),
+            ))
         })
         .await?;
     let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(

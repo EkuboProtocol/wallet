@@ -492,3 +492,64 @@ fn a_delegation_that_moved_after_simulation_refuses_the_send() {
     // Code that is not a designator at all is not something to sign against.
     assert!(authorization_for_send(&Bytes::from(vec![0x60, 0x00]), wallet, None).is_err());
 }
+
+mod cancellation_gas_tests {
+    //! A cancellation that cannot be mined is a cancellation that did not happen.
+
+    use super::*;
+
+    /// The estimate is an endpoint's answer and a cancellation cannot be
+    /// simulated, so nothing else checks it. Zero -- or anything under half the
+    /// intrinsic cost, since the multiplier is 2 -- signed an envelope below
+    /// the 21,000 gas every transaction costs before it does anything, which
+    /// every honest peer rejects.
+    ///
+    /// The rejection is not the damage. The envelope is persisted before it is
+    /// broadcast, so each one spends a slot in a history capped at
+    /// `MAX_CANCELLATION_ATTEMPTS`; at the cap, reconciliation stops repricing
+    /// and rebroadcasts the newest stored envelope. Eight bad estimates leave
+    /// the owner resending an invalid envelope forever while the transaction
+    /// they were trying to stop mines.
+    #[test]
+    fn an_estimate_below_the_intrinsic_cost_still_signs_a_mineable_limit() {
+        let ceiling = 30_000_000;
+        for dishonest in [0, 1, 10_499] {
+            assert_eq!(
+                cancellation_gas_limit(dishonest, ceiling),
+                INTRINSIC_TRANSACTION_GAS,
+                "an estimate of {dishonest} must still buy a transaction that can mine"
+            );
+        }
+    }
+
+    /// An honest estimate is doubled as before. The floor is a floor, not a
+    /// replacement for the estimate.
+    #[test]
+    fn an_ordinary_estimate_is_unchanged() {
+        assert_eq!(cancellation_gas_limit(21_000, 30_000_000), 42_000);
+        assert_eq!(cancellation_gas_limit(50_000, 30_000_000), 100_000);
+    }
+
+    /// And the ceiling still wins over the multiplier, because that is the
+    /// bound protecting against the estimate being too large rather than too
+    /// small.
+    #[test]
+    fn the_usable_ceiling_still_caps_the_result() {
+        assert_eq!(cancellation_gas_limit(u64::MAX, 100_000), 100_000);
+        assert_eq!(cancellation_gas_limit(60_000, 100_000), 100_000);
+    }
+
+    /// The floor can never breach the ceiling, because `usable_gas_ceiling`
+    /// refuses a ceiling below the intrinsic cost before this is reached. This
+    /// is what makes raising safe rather than a second guess about the bound.
+    #[test]
+    fn the_floor_cannot_exceed_a_ceiling_that_was_admitted() {
+        let network = crate::config::default_networks()
+            .into_iter()
+            .find(|network| network.chain_id == 1)
+            .expect("mainnet preset");
+        assert!(usable_gas_ceiling(&network, INTRINSIC_TRANSACTION_GAS - 1).is_err());
+        let admitted = usable_gas_ceiling(&network, INTRINSIC_TRANSACTION_GAS).unwrap();
+        assert!(cancellation_gas_limit(0, admitted) <= admitted);
+    }
+}
