@@ -133,6 +133,46 @@ fn shuffle<T>(items: &mut [T]) {
     }
 }
 
+/// What a completed round of quorum voting decided.
+///
+/// There are two quorums in this crate — a generic read in
+/// [`agree_across_endpoints`] and a simulation in `simulation.rs` — and they
+/// bucket entirely different things. What they must not do differently is
+/// *decide*, so the rule lives here and neither of them reasons about it
+/// locally. Both used to, and both made the same mistake: accepting the
+/// `required`-th matching witness as final, which made a later contradiction
+/// unobservable and left "a disagreement is refused" true only when the
+/// disagreeing endpoint happened to be visited early.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuorumVerdict {
+    /// Every endpoint that answered gave the same answer, and at least
+    /// `required` of them did. The index is the single bucket.
+    Agreed(usize),
+    /// Endpoints answered and contradicted each other. Refuse; there is no
+    /// basis on which to pick a side.
+    Contradicted,
+    /// One answer at most, but too few endpoints stood behind it. Carries how
+    /// many did, which is what separates "unavailable" from "disagreed".
+    TooFewWitnesses(usize),
+}
+
+/// Decide a quorum from how many endpoints stood behind each distinct answer.
+///
+/// Takes counts rather than the answers themselves so the two callers can keep
+/// their own bucket types, and so the rule is testable without either of them.
+/// Call it only after every configured endpoint has been heard: a verdict
+/// computed from a partial tally is the very bug this exists to prevent.
+pub(crate) fn quorum_verdict(witness_counts: &[usize], required: usize) -> QuorumVerdict {
+    if witness_counts.len() > 1 {
+        return QuorumVerdict::Contradicted;
+    }
+    match witness_counts.first() {
+        Some(&count) if count >= required => QuorumVerdict::Agreed(0),
+        Some(&count) => QuorumVerdict::TooFewWitnesses(count),
+        None => QuorumVerdict::TooFewWitnesses(0),
+    }
+}
+
 /// Run one read against enough endpoints to satisfy the network's strategy,
 /// and return the answer only if that many of them agree.
 ///
@@ -170,24 +210,41 @@ where
     // Answers, each with the endpoints that returned it. A second endpoint
     // returning an answer already seen is what agreement means.
     let mut answers: Vec<(T, Vec<&url::Url>)> = Vec::new();
+    // Every configured endpoint is asked, including the ones after the
+    // `required`-th agreement. Returning at the threshold made the
+    // contradiction check below unreachable exactly when it mattered: with
+    // `m_of_n(2)` over three endpoints, two agreeing answers ended the loop
+    // and the third endpoint — the one that would have disagreed — was never
+    // consulted. Whether a disagreement was noticed then depended on the order
+    // the endpoints happened to be visited in, which under `random` is a coin
+    // flip. "A genuine disagreement fails closed" has to mean every configured
+    // witness was heard, or it means nothing.
+    //
+    // The cost is the difference between `agree` requests and one per
+    // configured endpoint. That is what the guarantee costs; an owner who does
+    // not want to pay it is asking for `ordered`.
     for endpoint in endpoint_order(network) {
         match operation(provider_for(endpoint)).await {
             Ok(value) => {
                 if let Some(slot) = answers.iter_mut().find(|(seen, _)| *seen == value) {
                     slot.1.push(endpoint);
-                    if slot.1.len() >= required {
-                        return Ok(answers
-                            .into_iter()
-                            .find(|(_, witnesses)| witnesses.len() >= required)
-                            .map(|(value, _)| value)
-                            .expect("the slot just counted is still there"));
-                    }
                 } else {
                     answers.push((value, vec![endpoint]));
                 }
             }
             Err(error) => failures.push((endpoint, error)),
         }
+    }
+    let counts: Vec<usize> = answers
+        .iter()
+        .map(|(_, witnesses)| witnesses.len())
+        .collect();
+    if let QuorumVerdict::Agreed(index) = quorum_verdict(&counts, required) {
+        return Ok(answers
+            .into_iter()
+            .nth(index)
+            .map(|(value, _)| value)
+            .expect("the bucket the verdict names is still there"));
     }
     // Disagreement outranks unavailability in the message: an owner whose
     // endpoints contradict each other has a different problem, and a more
@@ -245,17 +302,24 @@ pub async fn median_fee_estimate(
     let mut failures = Vec::new();
     let mut max_fees = Vec::new();
     let mut priority_fees = Vec::new();
+    // Every configured endpoint votes, not the first `required` to answer.
+    // See `median_head` below for why stopping early defeats the median.
     for endpoint in endpoint_order(network) {
-        if max_fees.len() >= required {
-            break;
-        }
-        match tokio::time::timeout(
-            FEE_ESTIMATE_TIMEOUT,
-            provider_for(endpoint).estimate_eip1559_fees(),
-        )
+        let provider = provider_for(endpoint);
+        // The chain is asked about in the same round trip as the estimate, for
+        // the reason spelled out in `median_head`: an endpoint serving some
+        // other chain is not a witness to this one's fees, and a vote it casts
+        // cannot be taken back once it is inside the median.
+        match tokio::time::timeout(FEE_ESTIMATE_TIMEOUT, async {
+            tokio::try_join!(provider.get_chain_id(), provider.estimate_eip1559_fees())
+        })
         .await
         {
-            Ok(Ok(estimate)) => {
+            Ok(Ok((chain_id, _))) if chain_id != network.chain_id => failures.push((
+                endpoint,
+                anyhow::anyhow!("RPC reports chain {chain_id}, not {}", network.chain_id),
+            )),
+            Ok(Ok((_, estimate))) => {
                 max_fees.push(estimate.max_fee_per_gas);
                 priority_fees.push(estimate.max_priority_fee_per_gas);
             }
@@ -293,15 +357,37 @@ pub async fn median_head(network: &NetworkConfig) -> Result<Option<u64>> {
         return Ok(None);
     }
     let mut heads = Vec::new();
+    // Every configured endpoint votes, not the first `required` to answer.
+    //
+    // "A median with a majority honest is a height an honest endpoint
+    // reported, and one liar moves it by at most a position" is only true of a
+    // median over the whole set. Stopping at `required` made the sample the
+    // first responders, and a liar is fast — with `m_of_n(2)` over three
+    // endpoints, one stale endpoint answering alongside one current endpoint
+    // is half the sample, the lower median takes the stale height, and the
+    // honest third endpoint is never asked. Every other endpoint then
+    // simulates against the state the liar chose, agrees honestly about it,
+    // and the quorum is real while the thing agreed on is the attacker's.
+    //
+    // This is the same mistake `agree_across_endpoints` made, fixed the same
+    // way and at the same cost: one request per configured endpoint.
+    //
+    // Each head is asked for together with the chain it belongs to. Nothing
+    // requires every configured endpoint to serve the configured chain —
+    // `validate_network` checks the shape of the list, not its identity — and
+    // an endpoint on some other chain reports that chain's height. Its vote
+    // enters the median here, and `simulate_execution_through`'s own chain
+    // check comes far too late to help: it disqualifies the endpoint from
+    // *simulating*, long after that endpoint's height became the pin every
+    // honest endpoint is held to. A vote cannot be taken back out of a median
+    // once it is in, so it has to be refused at the door.
     for endpoint in endpoint_order(network) {
-        if heads.len() >= required {
-            break;
-        }
-        if let Ok(Ok(number)) = tokio::time::timeout(
-            FEE_ESTIMATE_TIMEOUT,
-            provider_for(endpoint).get_block_number(),
-        )
+        let provider = provider_for(endpoint);
+        if let Ok(Ok((chain_id, number))) = tokio::time::timeout(FEE_ESTIMATE_TIMEOUT, async {
+            tokio::try_join!(provider.get_chain_id(), provider.get_block_number())
+        })
         .await
+            && chain_id == network.chain_id
         {
             heads.push(u128::from(number));
         }
@@ -569,6 +655,25 @@ pub async fn transaction_receipt(
         // rather than the whole lookup failing on its word.
         receipt
             .map(|receipt| {
+                // The receipt has to be the receipt for the hash that was
+                // asked about. Nothing else here establishes that: the request
+                // names a hash, and the response is taken as the answer to it
+                // on the endpoint's word alone.
+                //
+                // Every terminal settlement in the wallet runs through this
+                // one function. `observe` treats any receipt as `Mined`,
+                // `reconcile_cancelling` finalizes the original or marks the
+                // request cancelled from one, and none of those states is ever
+                // reconciled again — leaving them releases the wallet's
+                // in-flight slot for that chain. So an endpoint returning some
+                // unrelated transaction's receipt settles a still-live
+                // envelope as confirmed, reverted, or cancelled, and the real
+                // one goes on to mine with the wallet no longer watching it.
+                ensure!(
+                    receipt.transaction_hash == hash,
+                    "RPC returned a receipt for {:#x} rather than the requested {hash:#x}",
+                    receipt.transaction_hash
+                );
                 let block_number = receipt
                     .block_number
                     .context("RPC returned a receipt without a block number")?;

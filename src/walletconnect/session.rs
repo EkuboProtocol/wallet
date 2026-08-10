@@ -28,7 +28,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 /// Request ids remembered for replay protection at once.
 ///
@@ -285,21 +285,63 @@ const SESSION_METHODS: [&str; 6] = [
     method::SESSION_EVENT,
 ];
 
+/// The ids this session has already answered, forgotten oldest-arrival first.
+///
+/// A set alone cannot say which entry is oldest without ordering by the value,
+/// and the value belongs to the peer. The queue records arrival; the set
+/// answers membership. They are kept in step by construction: every id in one
+/// is in the other.
+#[derive(Debug, Default)]
+struct AnsweredIds {
+    seen: HashSet<u64>,
+    arrival: VecDeque<u64>,
+}
+
+impl AnsweredIds {
+    fn remember(&mut self, id: u64) -> bool {
+        if !self.seen.insert(id) {
+            return false;
+        }
+        self.arrival.push_back(id);
+        while self.arrival.len() > MAX_ANSWERED_IDS {
+            if let Some(oldest) = self.arrival.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.seen.len(), self.arrival.len());
+        self.seen.len()
+    }
+}
+
 /// Record `id` as answered, reporting whether it is new.
 ///
-/// The oldest ids go when the set is full. Protocol ids are microsecond-scale
-/// timestamps, so the lowest is the oldest, and the bound is far above any
-/// burst a dapp legitimately produces while being well under what a peer could
-/// spend this process's memory on deliberately. A relay's redelivery window is
-/// minutes; nothing evicted at this depth is still eligible to arrive again.
-fn remember(answered: &mut BTreeSet<u64>, id: u64) -> bool {
-    if !answered.insert(id) {
-        return false;
-    }
-    while answered.len() > MAX_ANSWERED_IDS {
-        answered.pop_first();
-    }
-    true
+/// The oldest ids go when the set is full, and *oldest* means the order they
+/// arrived in rather than their numeric value. Protocol ids are conventionally
+/// microsecond-scale timestamps, so the lowest usually is the oldest — but the
+/// id is a `u64` a peer chooses, and this set is the only thing standing
+/// between a captured envelope and a second execution of the request inside
+/// it.
+///
+/// Evicting the numerically smallest let the peer pick what was forgotten: a
+/// settled dapp sends enough high-valued answerable messages to push out the
+/// low id it used earlier, replays the authenticated envelope carrying that
+/// id, and `remember` reports it as new. `on_request` then dispatches it
+/// again, and for a policy-allowed `eth_sendTransaction` that reaches
+/// simulation, signing, and broadcast a second time at a fresh nonce, with no
+/// new review.
+///
+/// Arrival order is not something the peer can address. The bound is unchanged
+/// and still far above any burst a dapp legitimately produces while being well
+/// under what a peer could spend this process's memory on deliberately, and a
+/// relay's redelivery window is minutes, so nothing evicted at this depth is
+/// still eligible to arrive again.
+fn remember(answered: &mut AnsweredIds, id: u64) -> bool {
+    answered.remember(id)
 }
 
 /// Whether a method may be answered when it arrived on `origin`.
@@ -360,7 +402,7 @@ pub struct Session<'a> {
     /// tiny envelopes with a method nobody handles grew this set for as long
     /// as `connect` ran, without ever opening a review or doing anything the
     /// wallet would notice.
-    answered: BTreeSet<u64>,
+    answered: AnsweredIds,
     salt: u16,
 }
 
@@ -380,7 +422,7 @@ impl<'a> Session<'a> {
             relay_protocol: pairing.relay_protocol,
             relay_data: pairing.relay_data,
             settled: None,
-            answered: BTreeSet::new(),
+            answered: AnsweredIds::default(),
             salt: 0,
         }
     }

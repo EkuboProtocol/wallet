@@ -119,7 +119,68 @@ pub(crate) fn load_matching_signer<K: KeyStore + ?Sized>(
 pub trait KeyStore: crate::sealed::SealedKeyStore + Send + Sync {
     fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()>;
     fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial>;
-    fn delete(&self, wallet_id: &str) -> Result<()>;
+
+    /// Which address the stored credential controls, or `None` when this id
+    /// names no credential.
+    ///
+    /// An `Err` means the store could not answer. It never means "empty":
+    /// conflating the two is how a removal that could not read the credential
+    /// store concluded the key was already gone.
+    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>>;
+
+    /// Delete the credential under `wallet_id`, but only if it controls
+    /// `expected`.
+    ///
+    /// There is deliberately no `delete(wallet_id)`. A wallet id is reusable,
+    /// so a deletion addressed by id alone is a deletion of whatever happens
+    /// to be there when it lands — which is how an authorization to remove one
+    /// wallet destroyed the key of the wallet that replaced it, and how a
+    /// creation that lost a race deleted the winner's key. Requiring the
+    /// address makes that sentence impossible to write: a caller must say
+    /// which key it means, and a store that finds a different one refuses.
+    fn delete_matching(&self, wallet_id: &str, expected: Address) -> Result<Deletion>;
+}
+
+/// What a credential-store write that reported an error actually did.
+///
+/// Separate from the code that produces it so the four answers can be tested
+/// without a platform credential store: the whole defect was a flow that only
+/// ever considered one of them.
+#[derive(Debug)]
+pub(crate) enum FailedWrite {
+    /// The secret is there and is the one that was being written. The error
+    /// was reported after the write committed.
+    Committed,
+    /// Nothing is there. The write really did fail.
+    NotWritten,
+    /// Something else is there under this name.
+    Conflicting,
+    /// The store could not be re-read, so nothing is known.
+    Unknown(anyhow::Error),
+}
+
+/// Decide what a failed write did from a readback: `Ok(None)` for no entry,
+/// `Ok(Some(matches))` for an entry that does or does not hold the intended
+/// secret, `Err` when the store could not answer.
+pub(crate) fn classify_failed_write(readback: Result<Option<bool>>) -> FailedWrite {
+    match readback {
+        Ok(Some(true)) => FailedWrite::Committed,
+        Ok(Some(false)) => FailedWrite::Conflicting,
+        Ok(None) => FailedWrite::NotWritten,
+        Err(unreadable) => FailedWrite::Unknown(unreadable),
+    }
+}
+
+/// What [`KeyStore::delete_matching`] found when it looked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deletion {
+    /// The expected credential was there and is now gone.
+    Removed,
+    /// There was no credential under this id.
+    Absent,
+    /// A credential is there, but it controls a different address, so it
+    /// belongs to some other wallet and was left alone.
+    Mismatched(Address),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -165,9 +226,45 @@ impl KeyStore for OsKeyStore {
                     return Err(error).context("failed to inspect platform credential store");
                 }
             }
-            entry
-                .set_secret(key.as_bytes())
-                .context("failed to save private key in platform credential store")
+            let Err(error) = entry.set_secret(key.as_bytes()) else {
+                return Ok(());
+            };
+            // An error from `set_secret` is not proof that nothing was
+            // written, and treating it as proof is how a key ended up in the
+            // credential store with no configuration row naming it: `add`
+            // returned here, before it could write the metadata or run any
+            // rollback, and the next attempt to create the same wallet was
+            // refused as a duplicate by the very credential it had orphaned.
+            //
+            // The same readback `load_or_create_database_key` uses, for the
+            // same reason — the store itself is the only honest witness to
+            // what it did.
+            let readback = match entry.get_secret() {
+                Ok(mut stored) => {
+                    let outcome = Ok(Some(stored == key.as_bytes()));
+                    stored.zeroize();
+                    outcome
+                }
+                Err(KeyringError::NoEntry) => Ok(None),
+                Err(unreadable) => Err(anyhow::Error::new(unreadable)),
+            };
+            match classify_failed_write(readback) {
+                // It landed. Reporting the error would strand it.
+                FailedWrite::Committed => Ok(()),
+                FailedWrite::NotWritten => {
+                    Err(error).context("failed to save private key in platform credential store")
+                }
+                FailedWrite::Conflicting => Err(error).context(format!(
+                    "failed to save the private key for wallet {wallet_id}, and the credential \
+                     store now holds a different secret under that name; resolve it there before \
+                     retrying"
+                )),
+                FailedWrite::Unknown(unreadable) => Err(error).context(format!(
+                    "failed to save the private key for wallet {wallet_id}, and the credential \
+                     store could not be re-read to establish whether it was written anyway; \
+                     check for an entry named {wallet_id} before retrying: {unreadable:#}"
+                )),
+            }
         })
     }
 
@@ -182,10 +279,40 @@ impl KeyStore for OsKeyStore {
         })
     }
 
-    fn delete(&self, wallet_id: &str) -> Result<()> {
-        tokio::task::block_in_place(|| match Self::entry(wallet_id)?.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(error).context("failed to delete private key from credential store"),
+    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>> {
+        tokio::task::block_in_place(|| match Self::entry(wallet_id)?.get_secret() {
+            Ok(mut bytes) => {
+                let material = PrivateKeyMaterial::from_bytes(&bytes);
+                bytes.zeroize();
+                Ok(Some(material?.address()))
+            }
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(error) => Err(error).context("failed to inspect platform credential store"),
+        })
+    }
+
+    fn delete_matching(&self, wallet_id: &str, expected: Address) -> Result<Deletion> {
+        tokio::task::block_in_place(|| {
+            let entry = Self::entry(wallet_id)?;
+            let mut bytes = match entry.get_secret() {
+                Ok(bytes) => bytes,
+                Err(KeyringError::NoEntry) => return Ok(Deletion::Absent),
+                Err(error) => {
+                    return Err(error).context("failed to inspect platform credential store");
+                }
+            };
+            let material = PrivateKeyMaterial::from_bytes(&bytes);
+            bytes.zeroize();
+            let actual = material?.address();
+            if actual != expected {
+                return Ok(Deletion::Mismatched(actual));
+            }
+            match entry.delete_credential() {
+                Ok(()) | Err(KeyringError::NoEntry) => Ok(Deletion::Removed),
+                Err(error) => {
+                    Err(error).context("failed to delete private key from credential store")
+                }
+            }
         })
     }
 }
@@ -234,65 +361,120 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             exported_at: None,
         };
 
-        self.keys.insert_new(wallet_id, key)?;
-        let update = self.config.update(|config| {
-            ensure!(
-                !config.wallets.iter().any(|wallet| wallet.id == wallet_id),
-                "wallet {wallet_id} already exists"
-            );
-            ensure!(
-                !config
-                    .wallets
-                    .iter()
-                    .any(|wallet| wallet.address == address),
-                "address {address} is already configured"
-            );
-            config.wallets.push(metadata.clone());
-            Ok(())
-        });
-        if let Err(error) = update {
-            // An error is not proof that nothing was written. The metadata
-            // write commits when the replacement file lands, and steps after
-            // that can still report failure — so rolling back on the error
-            // alone can delete the only copy of a key the wallet it belongs to
-            // is still listed under, which nothing can undo.
-            //
-            // Ask instead of assuming, and ask precisely: a row naming this
-            // wallet at this address can only be the row this call just wrote,
-            // because the update refuses a duplicate address. An id that is
-            // taken by some *other* address means the write never happened, so
-            // the credential inserted a moment ago is still garbage to clear.
-            if self
-                .config
-                .wallet(wallet_id)
-                .is_ok_and(|existing| existing.address == address)
-            {
-                return Err(error).context(format!(
-                    "wallet {wallet_id} was created and its key is stored, but the write reported \
-                     an error; verify with `ekubo-wallet account list` before retrying"
-                ));
+        // The credential write and the configuration write are one operation.
+        // Held apart, two creations of the same id both passed the
+        // "credential store already contains wallet" check, both wrote, and
+        // the loser's rollback deleted the winner's key.
+        self.config.with_lifecycle_lock(|| {
+            self.keys.insert_new(wallet_id, key)?;
+            let update = self.config.update(|config| {
+                ensure!(
+                    !config.wallets.iter().any(|wallet| wallet.id == wallet_id),
+                    "wallet {wallet_id} already exists"
+                );
+                ensure!(
+                    !config
+                        .wallets
+                        .iter()
+                        .any(|wallet| wallet.address == address),
+                    "address {address} is already configured"
+                );
+                config.wallets.push(metadata.clone());
+                Ok(())
+            });
+            if let Err(error) = update {
+                // An error is not proof that nothing was written. The metadata
+                // write commits when the replacement file lands, and steps
+                // after that can still report failure — so rolling back on the
+                // error alone can delete the only copy of a key the wallet it
+                // belongs to is still listed under, which nothing can undo.
+                //
+                // Ask instead of assuming, and ask precisely: a row naming this
+                // wallet at this address can only be the row this call just
+                // wrote, because the update refuses a duplicate address. An id
+                // that is taken by some *other* address means the write never
+                // happened, so the credential inserted a moment ago is still
+                // garbage to clear.
+                if self
+                    .config
+                    .wallet(wallet_id)
+                    .is_ok_and(|existing| existing.address == address)
+                {
+                    return Err(error).context(format!(
+                        "wallet {wallet_id} was created and its key is stored, but the write \
+                         reported an error; verify with `ekubo-wallet account list` before retrying"
+                    ));
+                }
+                // Addressed by the key this call inserted, never by the id
+                // alone: if anything else now occupies the id, that credential
+                // belongs to another wallet and this rollback is not entitled
+                // to it.
+                match self.keys.delete_matching(wallet_id, address) {
+                    Ok(Deletion::Removed | Deletion::Absent) => {}
+                    Ok(Deletion::Mismatched(other)) => {
+                        return Err(error).context(format!(
+                            "wallet {wallet_id} now holds a credential for {other} rather than \
+                             the {address} this call inserted, so that credential was left in \
+                             place"
+                        ));
+                    }
+                    Err(rollback) => {
+                        return Err(error).context(format!(
+                            "configuration update failed and credential rollback also failed: \
+                             {rollback:#}"
+                        ));
+                    }
+                }
+                return Err(error);
             }
-            if let Err(rollback) = self.keys.delete(wallet_id) {
-                return Err(error).context(format!(
-                    "configuration update failed and credential rollback also failed: {rollback:#}"
-                ));
-            }
-            return Err(error);
-        }
-        Ok(metadata)
+            Ok(metadata.clone())
+        })
     }
 
-    pub async fn export(&self, wallet_id: &str) -> Result<Zeroizing<String>> {
-        let metadata = self.config.wallet(wallet_id)?;
+    /// Reveal the raw private key of the wallet at `expected`, and record that
+    /// it left.
+    ///
+    /// `expected` is the address the owner was shown, and it is required for
+    /// the same reason `delete_matching` requires one: a wallet id is
+    /// reusable, so an export addressed by name alone is an export of whatever
+    /// holds that name when it lands. This used to check the loaded credential
+    /// against the loaded metadata, which is a real check of a different
+    /// thing — both are read after the review, so a replacement that happened
+    /// before this was called produces two values that agree with each other
+    /// and with nothing the owner saw. An owner approving "reveal the key for
+    /// 0xabc…" could be handed the key for a wallet that address was never
+    /// part of.
+    ///
+    /// So the reviewed address is compared at each place the id is resolved:
+    /// before owner authentication, so a doomed export does not put a prompt
+    /// on their screen; after it, because authentication takes as long as a
+    /// person takes; against the credential itself; and against the row the
+    /// disclosure is recorded on, so the mark cannot land on a successor while
+    /// the predecessor's key is what was returned.
+    ///
+    /// The lifecycle lock covers everything after the prompt, so a create or a
+    /// remove cannot interleave with the read at all. The comparisons remain
+    /// because the lock is not held across the prompt: it is the answer to
+    /// concurrency, not to time.
+    pub async fn export(&self, wallet_id: &str, expected: Address) -> Result<Zeroizing<String>> {
+        Self::ensure_reviewed(&self.config.wallet(wallet_id)?, wallet_id, expected)?;
         self.presence
             .confirm(&PresenceRequest::ExportPrivateKey {
                 wallet: wallet_id.into(),
             })
             .await?;
+        self.config
+            .with_lifecycle_lock(|| self.export_locked(wallet_id, expected))
+    }
+
+    fn export_locked(&self, wallet_id: &str, expected: Address) -> Result<Zeroizing<String>> {
+        Self::ensure_reviewed(&self.config.wallet(wallet_id)?, wallet_id, expected)?;
         let key = self.keys.load(wallet_id)?;
         ensure!(
-            key.signer().address() == metadata.address,
-            "credential address does not match wallet metadata"
+            key.signer().address() == expected,
+            "the credential stored under {wallet_id} controls {} rather than the {expected} that \
+             was reviewed; nothing was revealed",
+            key.signer().address()
         );
 
         // Record that a copy left through this tool before returning key
@@ -304,12 +486,29 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             let wallet = config
                 .wallets
                 .iter_mut()
-                .find(|wallet| wallet.id == wallet_id)
-                .with_context(|| format!("unknown wallet {wallet_id}"))?;
+                .find(|wallet| wallet.id == wallet_id && wallet.address == expected)
+                .with_context(|| {
+                    format!("no wallet {wallet_id} holds the reviewed address {expected}")
+                })?;
             wallet.exported_at.get_or_insert_with(Utc::now);
             Ok(())
         })?;
         Ok(key.expose_hex())
+    }
+
+    /// Refuse a wallet that is no longer the one the owner reviewed.
+    fn ensure_reviewed(
+        metadata: &WalletMetadata,
+        wallet_id: &str,
+        expected: Address,
+    ) -> Result<()> {
+        ensure!(
+            metadata.address == expected,
+            "wallet {wallet_id} now holds address {} rather than the {expected} that was \
+             reviewed; it was replaced while this export was being authorized",
+            metadata.address
+        );
+        Ok(())
     }
 
     pub async fn remove(&self, wallet_id: &str) -> Result<WalletMetadata> {
@@ -320,16 +519,27 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             })
             .await?;
 
-        // Remove metadata first. If key deletion fails, reinsert the metadata
-        // so a reachable credential is not orphaned without an inventory row.
+        // The lock is taken *after* authentication, not before: owner
+        // authentication can take arbitrarily long, and blocking every other
+        // process for as long as a human takes to answer a prompt is its own
+        // defect. What it must cover is the pair of writes below — removing
+        // the row and deleting the key it named — because a wallet created in
+        // the gap between them inherits the id and had its brand-new key
+        // deleted by this call's approval.
         //
-        // Owner authentication above can take arbitrarily long, and no
-        // configuration lock is held while it waits. A concurrent process can
-        // remove this wallet and create another under the same name in that
-        // window, so the row is matched on the address the owner actually
-        // reviewed rather than on the name alone: removing by name would
-        // delete a replacement wallet's row — and then its key — on the
-        // strength of an approval given for its predecessor.
+        // Removing the row first is still right: if key deletion fails, the
+        // metadata goes back, so a reachable credential is never orphaned
+        // without an inventory row naming it.
+        //
+        // The row is matched on the address the owner actually reviewed rather
+        // than on the name alone: removing by name would delete a replacement
+        // wallet's row on the strength of an approval given for its
+        // predecessor.
+        self.config
+            .with_lifecycle_lock(|| self.remove_locked(wallet_id, &metadata))
+    }
+
+    fn remove_locked(&self, wallet_id: &str, metadata: &WalletMetadata) -> Result<WalletMetadata> {
         if let Err(error) = self.config.update(|config| {
             let index = config
                 .wallets
@@ -367,19 +577,63 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 }
             }
         }
-        if let Err(error) = self.keys.delete(wallet_id) {
-            let rollback = self.config.update(|config| {
-                config.wallets.push(metadata.clone());
-                Ok(())
-            });
-            if let Err(rollback) = rollback {
-                return Err(error).context(format!(
-                    "credential deletion failed and metadata rollback also failed: {rollback:#}"
-                ));
+        match self.keys.delete_matching(wallet_id, metadata.address) {
+            Ok(Deletion::Removed | Deletion::Absent) => Ok(metadata.clone()),
+            // Something else holds this id now. The approval was for
+            // `metadata.address`, so that credential is not this call's to
+            // delete, and the row that names it is not this call's to restore.
+            Ok(Deletion::Mismatched(other)) => Err(anyhow::anyhow!(
+                "wallet {wallet_id} now holds a credential for {other} rather than the {} that \
+                 was reviewed, so it was replaced while this removal ran; the replacement's key \
+                 was left in place",
+                metadata.address
+            )),
+            Err(error) => {
+                // A deletion that reports failure has not said whether it
+                // failed before or after removing the credential, so the
+                // pre-operation metadata is not a state that is known to be
+                // recoverable. Restoring it unconditionally is what listed a
+                // wallet whose only key was already destroyed — an inventory
+                // row that looks available and can never sign.
+                //
+                // Ask the store what is actually there, and restore only on a
+                // positive answer that the reviewed key survived.
+                match self.keys.address_of(wallet_id) {
+                    Ok(Some(surviving)) if surviving == metadata.address => {
+                        let rollback = self.config.update(|config| {
+                            ensure!(
+                                !config.wallets.iter().any(|wallet| wallet.id == wallet_id),
+                                "wallet {wallet_id} was recreated while this removal was failing"
+                            );
+                            config.wallets.push(metadata.clone());
+                            Ok(())
+                        });
+                        if let Err(rollback) = rollback {
+                            return Err(error).context(format!(
+                                "credential deletion failed and metadata rollback also failed: \
+                                 {rollback:#}"
+                            ));
+                        }
+                        Err(error)
+                    }
+                    // The key is gone. The removal the owner asked for
+                    // happened; putting the row back would list a wallet that
+                    // cannot sign and cannot be exported.
+                    Ok(None) => Ok(metadata.clone()),
+                    Ok(Some(other)) => Err(error).context(format!(
+                        "wallet {wallet_id} now holds a credential for {other} rather than the {} \
+                         that was reviewed, so its metadata was not restored",
+                        metadata.address
+                    )),
+                    Err(unreadable) => Err(error).context(format!(
+                        "the credential store could not be re-read to establish whether the \
+                         private key for {wallet_id} survived, so its metadata was not restored; \
+                         check with `ekubo-wallet account list` before recreating it: \
+                         {unreadable:#}"
+                    )),
+                }
             }
-            return Err(error);
         }
-        Ok(metadata)
     }
 }
 
@@ -406,9 +660,25 @@ impl KeyStore for MemoryKeyStore {
         PrivateKeyMaterial::from_bytes(keys.get(wallet_id).context("missing test key")?)
     }
 
-    fn delete(&self, wallet_id: &str) -> Result<()> {
-        self.0.lock().unwrap().remove(wallet_id);
-        Ok(())
+    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>> {
+        let keys = self.0.lock().unwrap();
+        match keys.get(wallet_id) {
+            None => Ok(None),
+            Some(bytes) => Ok(Some(PrivateKeyMaterial::from_bytes(bytes)?.address())),
+        }
+    }
+
+    fn delete_matching(&self, wallet_id: &str, expected: Address) -> Result<Deletion> {
+        let mut keys = self.0.lock().unwrap();
+        let Some(bytes) = keys.get(wallet_id) else {
+            return Ok(Deletion::Absent);
+        };
+        let actual = PrivateKeyMaterial::from_bytes(bytes)?.address();
+        if actual != expected {
+            return Ok(Deletion::Mismatched(actual));
+        }
+        keys.remove(wallet_id);
+        Ok(Deletion::Removed)
     }
 }
 

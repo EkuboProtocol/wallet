@@ -366,8 +366,23 @@ pub struct PermitApproval {
     pub spender: String,
     /// The approved or transferable amount in the token's smallest unit.
     pub amount: String,
+    /// How long the *signature* may be submitted for.
+    ///
+    /// For ERC-2612 and DAI permits this is also when the allowance stops
+    /// being usable, because those grant it at submission and it lasts until
+    /// spent. For Permit2 it is `sigDeadline`, which bounds nothing except
+    /// how long this signature can be redeemed — see [`Self::expiration`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
+    /// When the granted allowance itself stops being usable, where the permit
+    /// shape says so separately.
+    ///
+    /// Permit2's `PermitDetails.expiration`, which is per token and unrelated
+    /// to `sigDeadline`. Dropping it let a permit show a deadline minutes away
+    /// while granting an allowance that lasts until the maximum `uint48` —
+    /// the reviewer reads "deadline soon" and approves a standing authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration: Option<String>,
 }
 
 impl PermitApproval {
@@ -410,6 +425,7 @@ pub fn interpret_permit_approvals(
             spender: field_address(message, "spender")?.to_checksum(None),
             amount: field_u256(message, "value")?.to_string(),
             deadline: Some(field_u256(message, "deadline")?.to_string()),
+            expiration: None,
         }]));
     }
     if encoded == DAI_PERMIT_TYPE {
@@ -428,11 +444,15 @@ pub fn interpret_permit_approvals(
             spender: field_address(message, "spender")?.to_checksum(None),
             amount: if allowed { U256::MAX } else { U256::ZERO }.to_string(),
             deadline: Some(field_u256(message, "expiry")?.to_string()),
+            expiration: None,
         }]));
     }
 
+    // `expiration` travels per entry because Permit2 puts it there: a batch
+    // can grant one token an allowance that lapses this hour and another that
+    // lasts until the maximum `uint48`, under one signature.
     let permit2 = |kind: &str,
-                   entries: Vec<(Address, U256)>,
+                   entries: Vec<(Address, U256, Option<U256>)>,
                    spender: Address,
                    deadline: U256|
      -> Result<Option<Vec<PermitApproval>>> {
@@ -443,12 +463,13 @@ pub fn interpret_permit_approvals(
         Ok(Some(
             entries
                 .into_iter()
-                .map(|(token, amount)| PermitApproval {
+                .map(|(token, amount, expiration)| PermitApproval {
                     kind: kind.into(),
                     token: token.to_checksum(None),
                     spender: spender.to_checksum(None),
                     amount: amount.to_string(),
                     deadline: Some(deadline.to_string()),
+                    expiration: expiration.map(|value| value.to_string()),
                 })
                 .collect(),
         ))
@@ -464,6 +485,7 @@ pub fn interpret_permit_approvals(
                 vec![(
                     field_address(details, "token")?,
                     field_u256(details, "amount")?,
+                    Some(field_u256(details, "expiration")?),
                 )],
                 field_address(message, "spender")?,
                 field_u256(message, "sigDeadline")?,
@@ -476,7 +498,13 @@ pub fn interpret_permit_approvals(
                 .context("PermitBatch has no details array")?;
             let entries = details
                 .iter()
-                .map(|entry| Ok((field_address(entry, "token")?, field_u256(entry, "amount")?)))
+                .map(|entry| {
+                    Ok((
+                        field_address(entry, "token")?,
+                        field_u256(entry, "amount")?,
+                        Some(field_u256(entry, "expiration")?),
+                    ))
+                })
                 .collect::<Result<Vec<_>>>()?;
             ensure!(!entries.is_empty(), "PermitBatch approves no tokens");
             permit2(
@@ -495,6 +523,9 @@ pub fn interpret_permit_approvals(
                 vec![(
                     field_address(permitted, "token")?,
                     field_u256(permitted, "amount")?,
+                    // A signature transfer grants no standing allowance, so
+                    // there is no lifetime distinct from the deadline.
+                    None,
                 )],
                 field_address(message, "spender")?,
                 field_u256(message, "deadline")?,
@@ -507,7 +538,13 @@ pub fn interpret_permit_approvals(
                 .context("PermitBatchTransferFrom has no permitted array")?;
             let entries = permitted
                 .iter()
-                .map(|entry| Ok((field_address(entry, "token")?, field_u256(entry, "amount")?)))
+                .map(|entry| {
+                    Ok((
+                        field_address(entry, "token")?,
+                        field_u256(entry, "amount")?,
+                        None,
+                    ))
+                })
                 .collect::<Result<Vec<_>>>()?;
             ensure!(
                 !entries.is_empty(),
@@ -627,7 +664,10 @@ impl TypedDataStore {
 
     /// Atomically record approval and the exact signature. The stored payload
     /// digest must still match what the approver reviewed.
-    pub fn store_signature(
+    ///
+    /// Crate-private: see the twin in `message.rs`. Its checks are about the
+    /// row, not about anyone having reviewed, authenticated, or signed.
+    pub(crate) fn store_signature(
         &mut self,
         request_id: Uuid,
         signer_wallet_id: &str,

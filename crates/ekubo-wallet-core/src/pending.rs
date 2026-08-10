@@ -22,6 +22,27 @@ use uuid::Uuid;
 
 const MAX_AWAITING_APPROVALS_PER_WALLET: i64 = 64;
 
+/// Terminal lifecycle rows kept per wallet.
+///
+/// `MAX_AWAITING_APPROVALS_PER_WALLET` bounds the queue and the partial unique
+/// index bounds what is in flight, but nothing bounded what those rows become.
+/// Every automatic signature writes a durable row before it broadcasts, so a
+/// caller making repeated *valid* requests grows the shared `SQLCipher` database
+/// and its indexes without limit — and when writes finally fail they fail for
+/// every wallet in the store, taking signing, reconciliation, policy changes
+/// and recovery with them.
+///
+/// Generous, because this is history a person may want to read and the cost of
+/// keeping it is small next to the cost of losing a record someone needed.
+const MAX_TERMINAL_HISTORY_PER_WALLET: i64 = 1_000;
+
+/// The statuses a row never leaves, as the column spells them.
+///
+/// Kept beside [`PendingStatus::is_terminal`], which decides the same question
+/// for a parsed value; `terminal_statuses_match_the_enum` holds the two to each
+/// other so a new state cannot be added to one and forgotten in the other.
+const TERMINAL_STATUSES: [&str; 5] = ["rejected", "confirmed", "reverted", "cancelled", "replaced"];
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingStatus {
@@ -60,6 +81,121 @@ impl PendingStatus {
             _ => anyhow::bail!("stored pending transaction has invalid status {value}"),
         }
     }
+
+    /// Whether this row is finished and will not move again.
+    ///
+    /// Exhaustive on purpose: a new lifecycle state has to be classified here,
+    /// where the answer decides whether history for it is ever reclaimed.
+    ///
+    /// Test-only because the pruning itself runs in SQL, against
+    /// [`TERMINAL_STATUSES`]. This is the second opinion the SQL list is held
+    /// to, and holding it there rather than in production code keeps the
+    /// production path a single statement.
+    #[cfg(test)]
+    const fn is_terminal(self) -> bool {
+        match self {
+            Self::Rejected
+            | Self::Confirmed
+            | Self::Reverted
+            | Self::Cancelled
+            | Self::Replaced => true,
+            Self::AwaitingApproval
+            | Self::Signed
+            | Self::Submitting
+            | Self::Broadcast
+            | Self::Cancelling => false,
+        }
+    }
+
+    #[cfg(test)]
+    const fn column(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Rejected => "rejected",
+            Self::Signed => "signed",
+            Self::Submitting => "submitting",
+            Self::Broadcast => "broadcast",
+            Self::Confirmed => "confirmed",
+            Self::Reverted => "reverted",
+            Self::Cancelled => "cancelled",
+            Self::Replaced => "replaced",
+            Self::Cancelling => "cancelling",
+        }
+    }
+
+    /// Every variant, so a test can walk them.
+    #[cfg(test)]
+    const ALL: [Self; 10] = [
+        Self::AwaitingApproval,
+        Self::Rejected,
+        Self::Signed,
+        Self::Submitting,
+        Self::Broadcast,
+        Self::Confirmed,
+        Self::Reverted,
+        Self::Cancelled,
+        Self::Replaced,
+        Self::Cancelling,
+    ];
+}
+
+/// Whether this error means the store simply does not hold that request.
+///
+/// A request id does not say which of the three signing queues owns it, so the
+/// CLI tries each in turn. What it must not do is treat *every* failure as
+/// "not here": a transaction row whose stored envelope no longer parses, a
+/// typed-data row that has already been decided, a database that cannot be
+/// read at all — each of those used to send the search on to the next queue,
+/// where a colliding or merely subsequent id could be found and, in the
+/// rejection path, terminally closed. The request the owner meant stayed
+/// awaiting a decision, and the error they were shown named the wrong queue.
+///
+/// Only a missing row is an invitation to look elsewhere. Every store reports
+/// that the same way, because every store reads through `query_row`, so
+/// `QueryReturnedNoRows` anywhere in the chain is the one answer that means
+/// absence rather than trouble.
+#[must_use]
+pub fn is_unknown_request(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::QueryReturnedNoRows)
+        )
+    })
+}
+
+/// Drop this wallet's oldest finished rows past the retention bound.
+///
+/// Only terminal rows, and only the oldest beyond the cap: anything still
+/// awaiting a decision, signed, in flight, or cancelling is live lifecycle
+/// state that reconciliation and submission still need, and deleting one would
+/// lose an envelope the chain may yet mine.
+///
+/// Runs inside the caller's transaction, on the insert paths, so history is
+/// reclaimed by the same activity that produces it rather than by a sweep
+/// somebody has to remember to run.
+fn prune_terminal_history(
+    transaction: &rusqlite::Transaction<'_>,
+    wallet_id: &str,
+) -> Result<usize> {
+    let placeholders = TERMINAL_STATUSES
+        .iter()
+        .map(|status| format!("'{status}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let removed = transaction.execute(
+        &format!(
+            "DELETE FROM pending_transactions
+             WHERE request_id IN (
+                 SELECT request_id FROM pending_transactions
+                 WHERE wallet_id = ?1 AND status IN ({placeholders})
+                 ORDER BY created_at DESC, request_id DESC
+                 LIMIT -1 OFFSET ?2
+             )"
+        ),
+        params![wallet_id, MAX_TERMINAL_HISTORY_PER_WALLET],
+    )?;
+    Ok(removed)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -195,6 +331,8 @@ impl PendingStore {
             "wallet already has {MAX_AWAITING_APPROVALS_PER_WALLET} requests awaiting approval"
         );
 
+        prune_terminal_history(&transaction, wallet_id)?;
+
         let request_id = Uuid::new_v4();
         let plan_json = serde_json::to_string(plan)?;
         transaction.execute(
@@ -239,8 +377,7 @@ impl PendingStore {
             "network name cannot be empty"
         );
         plan.validate()?;
-        let serialized_transaction = parse_envelope(serialized_transaction)?;
-        let transaction_hash = parse_hash(transaction_hash)?;
+        let envelope = VerifiedEnvelope::parse(serialized_transaction, transaction_hash)?;
         let policy_revision =
             i64::try_from(policy_revision).context("policy revision is too large")?;
         let transaction = self.database.connection.transaction()?;
@@ -255,6 +392,8 @@ impl PendingStore {
             active_revision == Some(policy_revision),
             "active policy revision changed before signed transaction persistence"
         );
+
+        prune_terminal_history(&transaction, wallet_id)?;
 
         let request_id = Uuid::new_v4();
         let created_at = sql::now();
@@ -276,8 +415,8 @@ impl PendingStore {
                     plan_source,
                     policy_revision,
                     Millis(created_at),
-                    Blob(serialized_transaction),
-                    Blob(transaction_hash),
+                    Blob(envelope.bytes),
+                    Blob(envelope.hash),
                 ],
             )
             .with_context(|| in_flight_conflict(&transaction, wallet_id, chain_id))?;
@@ -367,7 +506,7 @@ impl PendingStore {
 
     /// Atomically records owner approval and the exact locally validated signed
     /// bytes. Approval without a complete signed transaction is never stored.
-    pub fn store_signed(
+    pub(crate) fn store_signed(
         &mut self,
         request_id: Uuid,
         expected_digest: &str,
@@ -376,8 +515,7 @@ impl PendingStore {
         transaction_hash: &str,
     ) -> Result<PendingTransaction> {
         let review_digest = parse_hash(review_digest)?;
-        let serialized_transaction = parse_envelope(serialized_transaction)?;
-        let transaction_hash = parse_hash(transaction_hash)?;
+        let envelope = VerifiedEnvelope::parse(serialized_transaction, transaction_hash)?;
         let expected_digest = parse_hash(expected_digest)?;
         let transaction = self.database.connection.transaction()?;
         let (wallet_id, chain_id, digest, policy_revision, status, approval_required): (
@@ -438,8 +576,8 @@ impl PendingStore {
                 params![
                     request_id,
                     Millis(sql::now()),
-                    Blob(serialized_transaction),
-                    Blob(transaction_hash),
+                    Blob(envelope.bytes),
+                    Blob(envelope.hash),
                     Blob(review_digest),
                 ],
             )
@@ -597,8 +735,9 @@ impl PendingStore {
         cancel_serialized_transaction: &str,
         cancel_transaction_hash: &str,
     ) -> Result<PendingTransaction> {
-        let cancel_serialized_transaction = parse_envelope(cancel_serialized_transaction)?;
-        let cancel_transaction_hash = parse_hash(cancel_transaction_hash)?;
+        let cancellation =
+            VerifiedEnvelope::parse(cancel_serialized_transaction, cancel_transaction_hash)?;
+        let cancel_transaction_hash = cancellation.hash;
         let priced_against = priced_against.map(parse_hash).transpose()?;
         let transaction = self.database.connection.transaction()?;
         let (status, hashes): (String, Option<Vec<u8>>) = transaction
@@ -642,7 +781,7 @@ impl PendingStore {
              WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
             params![
                 request_id,
-                Blob(cancel_serialized_transaction),
+                Blob(cancellation.bytes),
                 encode_cancel_hashes(&hashes),
                 Millis(sql::now()),
             ],
@@ -927,6 +1066,51 @@ impl PendingRow {
                 keccak256(serialized) == *hash,
                 "stored signed transaction does not hash to its recorded hash"
             );
+            // And they decode. Hashing to the recorded hash says the two
+            // columns agree about the bytes; it says nothing about the bytes
+            // being a transaction, because a hash agrees with whatever it was
+            // taken over. Every reader that does anything with an envelope
+            // decodes it -- `signed_transaction_nonce` is how reconciliation
+            // recovers the nonce -- and that decode failing is the one error
+            // `reconcile_all` swallows, deliberately, so a listing still
+            // renders.
+            //
+            // The result is a row that holds its wallet and chain's one
+            // in-flight slot and can never leave it: reconciliation cannot
+            // settle it, and `execute_automatic` reconciles the in-flight row
+            // before signing, so nothing further can be signed for that wallet
+            // on that chain either. Only editing the database frees it.
+            //
+            // Checked here for the same reason as the two checks above, and
+            // with the same effect: a permanent wedge becomes a read that
+            // fails loudly and names the request.
+            crate::execution::signed_transaction_nonce(&format!("0x{}", hex::encode(serialized)))
+                .context("stored signed transaction is not a decodable envelope")?;
+        }
+        // And the broadcast hash names that same envelope, because it is the
+        // only envelope this row has. `mark_broadcast` already refuses to
+        // write any other — its `UPDATE` matches on
+        // `signed_transaction_hash = ?2` — but a guard in one writer is not an
+        // invariant of the row, and this one is read by code that trusts it
+        // completely: `reconcile` looks a receipt up by
+        // `broadcast_transaction_hash` in preference to the signed hash, while
+        // `observe` takes the nonce from `serialized_transaction`. Those two
+        // disagreeing means some other transaction's receipt — or its absence
+        // — settles this plan as mined, reverted, or replaced, releasing the
+        // in-flight slot while the envelope that was actually signed is still
+        // out there and may yet mine.
+        //
+        // Checked here rather than in the writer for the same reason the pair
+        // above is: this is the boundary every reader crosses.
+        if let Some(broadcast) = &self.broadcast_transaction_hash {
+            let signed = self
+                .signed_transaction_hash
+                .as_ref()
+                .context("stored broadcast hash has no signed transaction to belong to")?;
+            ensure!(
+                broadcast == signed,
+                "stored broadcast hash names a different transaction than the signed envelope"
+            );
         }
         let policy_revision =
             u64::try_from(self.policy_revision).context("stored policy revision is invalid")?;
@@ -940,6 +1124,34 @@ impl PendingRow {
             "automatic transaction unexpectedly has a review digest"
         );
         let status = PendingStatus::parse(&self.status)?;
+        // The envelope is not optional decoration on an in-flight row; it is
+        // the thing the row is about. A `signed`, `submitting`, `broadcast`,
+        // or `cancelling` row with no envelope still holds the wallet's one
+        // in-flight slot through the partial unique index, and nothing can
+        // move it on: `claim_for_submission` leases any `signed` row without
+        // looking, `submit_claimed` then fails building `SignedExecution`
+        // before it reaches its lease-release handling, and reconciliation
+        // cannot observe a record it cannot take a nonce from. `reconcile_all`
+        // keeps the record on error, so the slot is held until someone repairs
+        // the database.
+        //
+        // The converse matters too, more quietly: a `rejected` row is reached
+        // only from `awaiting_approval`, which never had an envelope, so
+        // signed bytes on one are bytes that should not exist and are readable
+        // through the ordinary transaction reads.
+        match envelope_requirement(status) {
+            EnvelopeRequirement::Required => ensure!(
+                self.serialized_transaction.is_some(),
+                "a {} transaction must carry the signed envelope it was reached by",
+                self.status
+            ),
+            EnvelopeRequirement::Forbidden => ensure!(
+                self.serialized_transaction.is_none(),
+                "a {} transaction precedes any signature and must not carry signed bytes",
+                self.status
+            ),
+            EnvelopeRequirement::Either => {}
+        }
         let (approved_at, rejected_at) =
             split_decision(self.decided_at, status == PendingStatus::Rejected);
         ensure!(
@@ -1117,6 +1329,40 @@ fn encode_cancel_hashes(hashes: &[B256]) -> Vec<u8> {
 }
 
 /// One hash from the `0x`-prefixed hex a caller passed across the API.
+/// Whether a row in this lifecycle state has an envelope behind it.
+///
+/// Written as an exhaustive match rather than a set of "in-flight" statuses so
+/// that adding a state is a decision someone has to make here, in the one
+/// place that says what an envelope means, instead of a default that silently
+/// admits a row with nothing to submit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnvelopeRequirement {
+    /// Reached by signing, so the bytes have to be there.
+    Required,
+    /// Precedes any signature, so bytes here are bytes that should not exist.
+    Forbidden,
+    /// Reachable from both sides.
+    Either,
+}
+
+const fn envelope_requirement(status: PendingStatus) -> EnvelopeRequirement {
+    match status {
+        PendingStatus::AwaitingApproval | PendingStatus::Rejected => EnvelopeRequirement::Forbidden,
+        PendingStatus::Signed
+        | PendingStatus::Submitting
+        | PendingStatus::Broadcast
+        | PendingStatus::Confirmed
+        | PendingStatus::Reverted
+        | PendingStatus::Replaced
+        | PendingStatus::Cancelling => EnvelopeRequirement::Required,
+        // Two honest origins. `discard_unsent` cancels a `signed` row that was
+        // never submitted, which has its envelope; removing a wallet's state
+        // cancels its `awaiting_approval` rows, which never had one. Demanding
+        // either would refuse a row the wallet itself writes.
+        PendingStatus::Cancelled => EnvelopeRequirement::Either,
+    }
+}
+
 fn parse_hash(value: &str) -> Result<B256> {
     B256::from_str(value).context("value must be a 0x-prefixed 32-byte hash")
 }
@@ -1126,6 +1372,42 @@ fn parse_envelope(value: &str) -> Result<Bytes> {
     let bytes = Bytes::from_str(value).context("value must be 0x-prefixed hexadecimal")?;
     ensure!(!bytes.is_empty(), "signed transaction bytes are empty");
     Ok(bytes)
+}
+
+/// An envelope and the hash that names it, which agree.
+///
+/// The two used to arrive at every writer as separate strings, each parsed on
+/// its own, and `keccak256(bytes) == hash` was checked only by
+/// [`PendingRow::parse`] — on the way back *out*. A caller that supplied a
+/// well-formed but mismatched pair therefore committed the row, and only the
+/// `self.get` after the commit failed. The row is durable, `signed` and
+/// `cancelling` both hold the wallet's one in-flight slot through the partial
+/// unique index, and every read of it fails — including `reconcile_all`, which
+/// swallows the error to keep a listing rendering. Nothing further can be
+/// signed for that wallet on that chain until the database is repaired by
+/// hand, and if the wedged row is a *cancellation* the owner is locked out
+/// while trying to stop a transaction.
+///
+/// So the pair is one value with one constructor. A writer cannot hold the
+/// bytes and the hash separately long enough to disagree about them, and a
+/// future writer cannot reintroduce the two-argument shape without saying so
+/// out loud.
+struct VerifiedEnvelope {
+    bytes: Bytes,
+    hash: B256,
+}
+
+impl VerifiedEnvelope {
+    fn parse(serialized: &str, transaction_hash: &str) -> Result<Self> {
+        let bytes = parse_envelope(serialized)?;
+        let hash = parse_hash(transaction_hash)?;
+        ensure!(
+            keccak256(&bytes) == hash,
+            "signed transaction bytes do not hash to {hash:#x}, so the pair would not be readable \
+             once stored"
+        );
+        Ok(Self { bytes, hash })
+    }
 }
 
 /// A plan's chain as the column holds it.

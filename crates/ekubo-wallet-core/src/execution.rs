@@ -6,7 +6,7 @@ use crate::{
     },
     custody::{KeyStore, load_matching_signer},
     rpc::{rpc_error, transaction_receipt},
-    simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
+    simulation::{CANONICAL_CALIBUR, ExecutionMode, PlannedCall, SimulationResult, planned_call},
 };
 use alloy::{
     consensus::{
@@ -160,6 +160,32 @@ pub struct BroadcastResult {
     pub mined_fee: Option<crate::rpc::MinedFee>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broadcast_error: Option<String>,
+    /// Whether the absence a `broadcast_error` asserts was actually observed.
+    ///
+    /// Not serialized: this says something about how the wallet came to its
+    /// conclusion rather than about the transaction, and only
+    /// `reconcile::submit_claimed` needs it. `true` for every result that
+    /// carries no `broadcast_error`, so the field is only ever read alongside
+    /// one.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub absence_established: bool,
+}
+
+/// What the chain said about an exact hash after a send failed.
+///
+/// Three answers, not two. Collapsing the third into `Absent` is finding
+/// 202009: a raw-send timeout can happen *after* the node accepted the
+/// transaction, and an observation that timed out or errored establishes
+/// nothing either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Presence {
+    /// The node holds this exact transaction.
+    Held,
+    /// The node was asked and does not have it.
+    Absent,
+    /// The node could not be asked, or did not answer.
+    Unobserved,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -264,7 +290,23 @@ pub async fn prepare_execution(
     // cared to name.
     let max_fee_per_gas = capped_fee(network, max_fee_per_gas)?;
     let max_priority_fee_per_gas = max_priority_fee_per_gas.min(max_fee_per_gas);
-    if simulation.will_authorize_delegation {
+    // The delegation the authorization is decided against is read here, not
+    // taken from the simulation.
+    //
+    // A recorded simulation can be sent minutes after it was produced, and
+    // nothing between the two rereads the account's code: `validate_send`
+    // checks the wallet, the chain, the policy revision, the plan digest, and
+    // the fork flag, and none of those move when a delegation does. So the
+    // batch could be signed against an implementation that was never simulated
+    // and never reviewed — or, if the delegation had been removed, spend a
+    // nonce on a batch that cannot execute.
+    //
+    // A failed simulation is worse still: `base_failure_result` asserts
+    // `will_authorize_delegation` from the execution mode alone, having
+    // observed nothing at all, and that result is exactly the one a human is
+    // asked to override.
+    let authorize_delegation = delegation_at_send(wallet, network, &planned, simulation).await?;
+    if authorize_delegation {
         prepared
             .1
             .checked_add(1)
@@ -278,9 +320,77 @@ pub async fn prepare_execution(
         max_fee_per_gas,
         max_priority_fee_per_gas,
         planned,
-        authorize_delegation: simulation.will_authorize_delegation,
+        authorize_delegation,
         plan_digest: simulation.digest.clone(),
     })
+}
+
+/// Whether this send should carry an EIP-7702 authorization, decided against
+/// the account's delegation as it is now rather than as it was simulated.
+///
+/// Returns the authorization decision, and refuses outright when the *reviewed*
+/// delegation context has changed: a plan simulated against no delegation, or
+/// against one particular implementation, was reviewed on that basis, and a
+/// different one at send time is a different transaction than the one anybody
+/// agreed to. Recomputing the flag silently would sign it anyway.
+async fn delegation_at_send(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    planned: &PlannedCall,
+    simulation: &SimulationResult,
+) -> Result<bool> {
+    if planned.mode != ExecutionMode::CaliburBatch {
+        // A direct call never authorizes anything, and `sign_prepared` refuses
+        // the combination outright.
+        return Ok(false);
+    }
+    let code = crate::rpc::try_endpoints(network, |provider| async move {
+        tokio::time::timeout(RPC_TIMEOUT, provider.get_code_at(wallet.address))
+            .await
+            .context("delegation recheck RPC timed out")?
+            .map_err(|error| rpc_error(&error))
+    })
+    .await?;
+    authorization_for_send(
+        &code,
+        wallet.address,
+        simulation.replaces_delegated_implementation.as_deref(),
+    )
+}
+
+/// The decision [`delegation_at_send`] makes, without the request that feeds
+/// it: given the account's code as it is now and the delegation the simulation
+/// was evaluated against, whether to authorize — or whether the context moved
+/// far enough that nothing should be signed.
+///
+/// Separate so every branch is testable without a stub endpoint. The branch
+/// that mattered had no test at all, because it only exists between a
+/// simulation and a send that happen at different times.
+pub(crate) fn authorization_for_send(
+    code: &alloy::primitives::Bytes,
+    wallet: alloy::primitives::Address,
+    recorded_replaces: Option<&str>,
+) -> Result<bool> {
+    let (authorize, replaces) = match crate::rpc::delegated_implementation(code) {
+        // Already delegated to the implementation this batch targets, so the
+        // authorization would be a no-op that still consumes a nonce.
+        Some(address) if address == CANONICAL_CALIBUR => (false, None),
+        Some(address) => (true, Some(format!("{address:#x}"))),
+        None if code.is_empty() => (true, None),
+        None => bail!(
+            "wallet {wallet} has code that is not an EIP-7702 delegation designator, so this \
+             batch cannot be sent"
+        ),
+    };
+    ensure!(
+        replaces.as_deref() == recorded_replaces,
+        "the account's EIP-7702 delegation changed after this plan was simulated: the simulation \
+         was evaluated against {}, and the account now has {}. Simulate the plan again and send \
+         the new simulation.",
+        recorded_replaces.unwrap_or("no delegation to replace"),
+        replaces.as_deref().unwrap_or("no delegation to replace")
+    );
+    Ok(authorize)
 }
 
 /// Load the key and sign exactly the already-reviewed preparation fields.
@@ -398,6 +508,35 @@ fn validate_preflight(
 /// bounded nothing at all unless the network carried a configured maximum,
 /// which most shipped profiles do not. On an ordinary network that left one
 /// endpoint's `estimate_gas` deciding the signed gas limit by itself.
+/// The gas limit a cancellation is signed with, from an endpoint's estimate.
+///
+/// Bounded above by the usable ceiling, as before, and now bounded below by
+/// what the transaction actually costs. A cancellation is a zero-value
+/// self-send: its intrinsic cost is exactly `INTRINSIC_TRANSACTION_GAS` and
+/// nothing it does can be cheaper. An endpoint answering `0` -- or anything
+/// under half that, since the multiplier is 2 -- produced an envelope below
+/// the floor, which every honest peer rejects.
+///
+/// The rejection is not the damage. The envelope is persisted before it is
+/// broadcast, so each one spends a slot in a history capped at
+/// `MAX_CANCELLATION_ATTEMPTS`, and at the cap `reconcile` stops repricing and
+/// rebroadcasts the newest stored envelope instead. Eight bad estimates leave
+/// the owner permanently unable to cancel, resending an invalid envelope
+/// forever while the transaction they were trying to stop mines.
+///
+/// Raised rather than refused, which is the opposite of `capped_fee` and for
+/// the reason that function's comment gives: there, not signing is the safe
+/// answer; here, not producing an envelope is the failure. Raising is exact
+/// rather than a guess -- the floor is what the chain charges, not a number
+/// chosen here -- and `usable_gas_ceiling` has already established the ceiling
+/// is at least the intrinsic cost, so this can never exceed it.
+fn cancellation_gas_limit(estimated_gas: u64, maximum: u64) -> u64 {
+    estimated_gas
+        .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
+        .min(maximum)
+        .max(INTRINSIC_TRANSACTION_GAS)
+}
+
 fn usable_gas_ceiling(network: &NetworkConfig, block_maximum: u64) -> Result<u64> {
     let configured = network
         .max_gas_limit
@@ -474,9 +613,30 @@ fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> 
         baseline <= maximum,
         "simulated gas {baseline} exceeds the network maximum gas limit {maximum}"
     );
+    // The same floor `cancellation_gas_limit` applies, on the path that has
+    // even less standing between it and the chain. `gas_used` is whatever the
+    // endpoint reported: `execution_output` copies `max_used_gas` or
+    // `gas_used` through untouched, and a successful simulation claiming `0`
+    // multiplied to `0` and was signed. An envelope under the intrinsic cost
+    // is rejected by every node before it executes, and the automatic path
+    // records it -- taking the wallet's one in-flight slot for the chain until
+    // something reconciles or cancels it, with no human anywhere in the
+    // sequence to notice.
+    //
+    // A delegation pays its authorization on top of the intrinsic cost, so the
+    // floor moves with it rather than being a constant.
+    let floor = INTRINSIC_TRANSACTION_GAS
+        .checked_add(authorization_cost)
+        .context("intrinsic gas floor overflow")?;
+    ensure!(
+        floor <= maximum,
+        "the {maximum} gas ceiling is below the {floor} gas this transaction costs before it \
+         does anything"
+    );
     Ok(baseline
         .saturating_mul(SIMULATION_GAS_MULTIPLIER)
-        .min(maximum))
+        .min(maximum)
+        .max(floor))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -605,6 +765,18 @@ pub fn validate_signed_execution(
             "signed transaction exceeds configured maximum gas limit"
         );
     }
+    // And from below. This function is the last thing between a freshly signed
+    // envelope and the row that records it, and it checked every field except
+    // whether the transaction can execute at all. The bound belongs here as
+    // well as in `signing_gas_limit`, because this is what a caller reaches
+    // for to ask "is this envelope sound" -- including callers that did not
+    // compute the limit themselves.
+    ensure!(
+        envelope.gas_limit() >= INTRINSIC_TRANSACTION_GAS,
+        "signed transaction carries {} gas, below the {INTRINSIC_TRANSACTION_GAS} every \
+         transaction costs before it does anything; no node would execute it",
+        envelope.gas_limit()
+    );
 
     match (&envelope, planned.mode) {
         (TxEnvelope::Eip1559(_), _) => {}
@@ -866,10 +1038,11 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
                 "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas \
                  limit {maximum}"
             );
-            let gas_limit = estimated_gas
-                .saturating_mul(CANCELLATION_GAS_MULTIPLIER)
-                .min(maximum);
-            Ok((chain_id, market, gas_limit))
+            Ok((
+                chain_id,
+                market,
+                cancellation_gas_limit(estimated_gas, maximum),
+            ))
         })
         .await?;
     let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(
@@ -1026,6 +1199,7 @@ async fn send_exact_bytes_through(
         block_number: None,
         mined_fee: None,
         broadcast_error: None,
+        absence_established: true,
     })
 }
 
@@ -1052,12 +1226,15 @@ async fn reconcile_failed_send<P: Provider>(
         .await
         .ok()
         .flatten();
-    let accepted = tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash))
-        .await
-        .ok()
-        .and_then(std::result::Result::ok)
-        .flatten()
-        .is_some();
+    // `Ok(Ok(None))` is the node answering that it does not hold the
+    // transaction. A timeout or a transport error is the node not answering,
+    // and the two used to arrive here as the same `false`.
+    let accepted =
+        match tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash)).await {
+            Ok(Ok(Some(_))) => Presence::Held,
+            Ok(Ok(None)) => Presence::Absent,
+            Ok(Err(_)) | Err(_) => Presence::Unobserved,
+        };
     send_failure_outcome(&signed.transaction_hash, receipt, accepted, failure)
 }
 
@@ -1065,10 +1242,10 @@ async fn reconcile_failed_send<P: Provider>(
 ///
 /// Split out from the RPC calls so the decision itself is testable: it is the
 /// part that has to be right.
-fn send_failure_outcome(
+pub(crate) fn send_failure_outcome(
     hash: &str,
     receipt: Option<crate::rpc::ReceiptStatus>,
-    accepted: bool,
+    accepted: Presence,
     failure: String,
 ) -> BroadcastResult {
     // Mined already. The send was rejected because it had nothing left to do.
@@ -1080,11 +1257,20 @@ fn send_failure_outcome(
         receipt_status: ReceiptStatus::Pending,
         block_number: None,
         mined_fee: None,
-        // The node holds this exact transaction, so submission succeeded and
-        // the rejection described an earlier attempt rather than a problem
-        // with this one. That is indistinguishable from an ordinary accepted
-        // send still waiting for a receipt, and is reported as one.
-        broadcast_error: (!accepted).then_some(failure),
+        // `Held`: the node holds this exact transaction, so submission
+        // succeeded and the rejection described an earlier attempt rather than
+        // a problem with this one. That is indistinguishable from an ordinary
+        // accepted send still waiting for a receipt, and is reported as one.
+        //
+        // `Unobserved` still reports the failure, because the caller asked for
+        // a send and did not get one — but it says the absence was never
+        // established, and `submit_claimed` will not spend that on a lifecycle
+        // transition.
+        broadcast_error: match accepted {
+            Presence::Held => None,
+            Presence::Absent | Presence::Unobserved => Some(failure),
+        },
+        absence_established: accepted != Presence::Unobserved,
     }
 }
 
@@ -1099,6 +1285,7 @@ fn receipt_result(hash: &str, receipt: crate::rpc::ReceiptStatus) -> BroadcastRe
         block_number: Some(receipt.block_number.to_string()),
         mined_fee: Some(receipt.mined_fee()),
         broadcast_error: None,
+        absence_established: true,
     }
 }
 

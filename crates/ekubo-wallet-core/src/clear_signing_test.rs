@@ -141,3 +141,97 @@ async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
         "{resolved:?}"
     );
 }
+
+mod vendored_embedding_tests {
+    //! What ships as a vendored descriptor is what was reviewed as one.
+
+    use super::super::CLEARSIGN_FILES;
+    use std::{collections::BTreeMap, fs, path::PathBuf};
+
+    fn vendored_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("clearsign")
+    }
+
+    fn walk(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        found: &mut BTreeMap<String, String>,
+    ) {
+        for entry in fs::read_dir(directory).expect("the vendored tree is readable") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                walk(root, &path, found);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("under the vendored root")
+                    .to_str()
+                    .expect("a UTF-8 name")
+                    .replace('\\', "/");
+                found.insert(relative, fs::read_to_string(&path).expect("readable"));
+            }
+        }
+    }
+
+    /// The build now copies each file into `OUT_DIR` and embeds the copy, so
+    /// the copy is a thing that can be wrong. This is what says it is not:
+    /// every vendored path is embedded, nothing else is, and each one carries
+    /// the bytes on disk.
+    #[test]
+    fn the_embedded_table_is_exactly_the_vendored_tree() {
+        let root = vendored_root();
+        let mut on_disk = BTreeMap::new();
+        walk(&root, &root, &mut on_disk);
+        let embedded: BTreeMap<String, String> = CLEARSIGN_FILES
+            .iter()
+            .map(|(path, contents)| ((*path).to_string(), (*contents).to_string()))
+            .collect();
+        assert!(on_disk.len() > 300, "the vendored registry is missing");
+        assert_eq!(
+            on_disk.keys().collect::<Vec<_>>(),
+            embedded.keys().collect::<Vec<_>>(),
+            "the embedded table and the vendored tree name different files"
+        );
+        for (path, contents) in &on_disk {
+            assert_eq!(
+                embedded.get(path),
+                Some(contents),
+                "clearsign/{path} was embedded with different bytes than it holds"
+            );
+        }
+    }
+
+    /// The defect this replaced: the build checked a pathname and then handed
+    /// the same pathname to rustc, which checked nothing and decided what
+    /// shipped. Anything able to write to the checkout in between could swap
+    /// the file, or a directory above it, for a symlink and put unreviewed
+    /// bytes on the approval screen.
+    ///
+    /// Pinned in the source because a race is not a thing a fixture can hold
+    /// still: what is checkable is that no path in the mutable checkout is
+    /// ever resolved a second time, by anyone.
+    #[test]
+    fn no_vendored_path_is_resolved_by_a_second_reader() {
+        let build = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+            .expect("build.rs is readable");
+        let generated: Vec<&str> = build
+            .lines()
+            .filter(|line| line.contains("include_str!(concat!"))
+            .collect();
+        assert!(!generated.is_empty(), "the build must still embed the tree");
+        for line in generated {
+            assert!(
+                line.contains("env!(\\\"OUT_DIR\\\")"),
+                "an embedded file must come from the staged copy this build wrote: {line}"
+            );
+            assert!(
+                !line.contains("CARGO_MANIFEST_DIR"),
+                "embedding a path in the mutable checkout hands rustc a lookup nothing checked: \
+                 {line}"
+            );
+        }
+    }
+}

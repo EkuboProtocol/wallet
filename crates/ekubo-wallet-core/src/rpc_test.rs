@@ -416,14 +416,25 @@ async fn median_head_excludes_a_dead_endpoint_from_the_median() {
 }
 
 /// A blocking stub `eth_feeHistory` responder, built the same way as
-/// [`stub_endpoint`] and for the same reason. `median_fee_estimate` never
-/// checks `eth_chainId`, so this answers only the one method it calls.
+/// [`stub_endpoint`] and for the same reason. It answers `eth_chainId` too:
+/// `median_fee_estimate` now refuses a witness that is not on the configured
+/// chain, so a stub that stayed silent about its chain would be skipped.
 ///
 /// `base_fee_per_gas` is repeated so [`alloy::providers::Provider::estimate_eip1559_fees`]'s
 /// `latest_block_base_fee` (the second-to-last element) reads it back, and the
 /// single reward bucket is what alloy's default estimator takes as this
 /// endpoint's priority-fee vote.
 fn fee_history_stub(base_fee_per_gas: u128, reward: u128) -> (Url, std::thread::JoinHandle<()>) {
+    fee_history_stub_on_chain(7, base_fee_per_gas, reward)
+}
+
+/// The same stub, on a chain the caller picks, so a wrong-chain endpoint can
+/// be put in front of `median_fee_estimate` and `median_head`.
+fn fee_history_stub_on_chain(
+    chain_id: u64,
+    base_fee_per_gas: u128,
+    reward: u128,
+) -> (Url, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stub endpoint");
     let address = listener.local_addr().expect("stub endpoint address");
     let handle = std::thread::spawn(move || {
@@ -431,12 +442,17 @@ fn fee_history_stub(base_fee_per_gas: u128, reward: u128) -> (Url, std::thread::
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { return };
             let mut buffer = [0_u8; 4096];
-            let Ok(_read) = stream.read(&mut buffer) else {
+            let Ok(read) = stream.read(&mut buffer) else {
                 continue;
             };
-            let body = format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"baseFeePerGas\":[\"{base_fee_per_gas:#x}\",\"{base_fee_per_gas:#x}\"],\"gasUsedRatio\":[0.5],\"oldestBlock\":\"0x1\",\"reward\":[[\"{reward:#x}\"]]}}}}"
-            );
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let body = if request.contains("eth_chainId") {
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{chain_id:#x}\"}}")
+            } else {
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"baseFeePerGas\":[\"{base_fee_per_gas:#x}\",\"{base_fee_per_gas:#x}\"],\"gasUsedRatio\":[0.5],\"oldestBlock\":\"0x1\",\"reward\":[[\"{reward:#x}\"]]}}}}"
+                )
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -525,4 +541,264 @@ fn a_receipt_the_lifecycle_cannot_store_is_the_endpoints_failure() {
     let highest = u64::try_from(i64::MAX).unwrap();
     assert!(storable_receipt_fields(highest, highest).is_ok());
     assert!(storable_receipt_fields(highest + 1, 0).is_err());
+}
+
+/// The gap the two-endpoint contradiction test could not see. With `agree`
+/// equal to the endpoint count a quorum is only ever reached on the last
+/// endpoint, so the early return at the threshold never fired and the
+/// disagreement branch always ran. Give the quorum room -- `m_of_n(2)` over
+/// three endpoints, which `validate_network` explicitly permits -- and the
+/// two agreeing endpoints ended the loop before the third could contradict
+/// them. Whether the wallet noticed depended on the order the endpoints were
+/// visited in, and under `random` that is a coin flip per request.
+#[tokio::test]
+async fn agreement_hears_every_endpoint_before_accepting_a_quorum() {
+    let (first, _a) = stub_endpoint(7, 500);
+    let (second, _b) = stub_endpoint(7, 500);
+    let (dissenter, _c) = stub_endpoint(7, 999_999);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![first, second, dissenter],
+    );
+    let error = format!(
+        "{:#}",
+        crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect_err("a witness that contradicts the quorum must still be heard")
+    );
+    assert!(error.contains("do not agree"), "unexpected: {error}");
+    assert!(error.contains("2 distinct answers"), "unexpected: {error}");
+}
+
+/// The other half: reaching the threshold early must still succeed once every
+/// endpoint has been heard and none of them dissented. A dead third endpoint
+/// is a missing witness, so it neither blocks the answer nor forges a
+/// contradiction.
+#[tokio::test]
+async fn a_quorum_still_answers_when_the_remaining_endpoint_is_silent() {
+    let (first, _a) = stub_endpoint(7, 500);
+    let (second, _b) = stub_endpoint(7, 500);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![first, second, dead_endpoint()],
+    );
+    assert_eq!(
+        crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect("two endpoints agreed and the third said nothing"),
+        500
+    );
+}
+
+/// The rule both quorums obey, tested once because both now read it from the
+/// same function rather than each deciding for itself. The historical defect
+/// is the third case: a tally in which one answer has already reached the
+/// threshold *and* another endpoint contradicted it is a refusal, not a win
+/// for whichever bucket filled first.
+#[test]
+fn a_quorum_verdict_refuses_any_tally_that_contains_a_contradiction() {
+    use crate::rpc::{QuorumVerdict, quorum_verdict};
+
+    assert_eq!(quorum_verdict(&[2], 2), QuorumVerdict::Agreed(0));
+    assert_eq!(quorum_verdict(&[3], 2), QuorumVerdict::Agreed(0));
+    assert_eq!(
+        quorum_verdict(&[2, 1], 2),
+        QuorumVerdict::Contradicted,
+        "a bucket at the threshold does not outrank a dissenting witness"
+    );
+    assert_eq!(
+        quorum_verdict(&[1, 1], 2),
+        QuorumVerdict::Contradicted,
+        "and neither does one below it"
+    );
+    assert_eq!(quorum_verdict(&[1], 2), QuorumVerdict::TooFewWitnesses(1));
+    assert_eq!(quorum_verdict(&[], 2), QuorumVerdict::TooFewWitnesses(0));
+}
+
+/// The pin the whole quorum simulates against, chosen by one stale endpoint.
+///
+/// `median_head` stopped sampling at `required`, so with `m_of_n(2)` over
+/// three endpoints the first two answers *were* the sample. One stale endpoint
+/// answering alongside one current endpoint is half of it, the lower median
+/// takes the stale height, and the honest third endpoint never contributes.
+/// Every remaining endpoint is then held to that height and agrees honestly
+/// about it -- a real quorum over the attacker's choice of state.
+#[tokio::test]
+async fn median_head_samples_every_endpoint_not_the_first_to_answer() {
+    let (stale, _a) = stub_endpoint(7, 100);
+    let (current, _b) = stub_endpoint(7, 300);
+    let (also_current, _c) = stub_endpoint(7, 300);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![stale, current, also_current],
+    );
+    assert_eq!(
+        median_head(&network).await.unwrap(),
+        Some(300),
+        "a single stale endpoint must not choose the height two honest ones disagree with"
+    );
+}
+
+/// The same sampling bug on the fee path, where the number reaches the chain
+/// rather than the screen: `gas_limit x max_fee_per_gas` is what an automatic
+/// transaction can lose to an endpoint that answers dishonestly.
+#[tokio::test]
+async fn median_fee_estimate_samples_every_endpoint_not_the_first_to_answer() {
+    // The liar answers low and answers first. `median` takes the lower of the
+    // two middle values, so in a truncated two-endpoint sample the low answer
+    // *is* the median -- and the honest third endpoint, which would have
+    // carried it, was never asked. A fee estimate driven under the market
+    // leaves an automatic transaction stuck in the mempool holding the
+    // wallet's one in-flight slot for that chain.
+    let (understated, _a) = fee_history_stub(10, 1); // max_fee 21, priority 1
+    let (market, _b) = fee_history_stub(1_000, 100); // max_fee 2100, priority 100
+    let (also_market, _c) = fee_history_stub(1_000, 100);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![understated, market, also_market],
+    );
+    assert_eq!(
+        median_fee_estimate(&network, 0, 0).await.unwrap(),
+        (2100, 100),
+        "one endpoint answering below the market must not choose the fee two others disagree with"
+    );
+}
+
+/// A vote cannot be taken back out of a median once it is in.
+///
+/// Nothing requires every configured endpoint to serve the configured chain --
+/// `validate_network` checks the shape of the RPC list, not its identity -- and
+/// an endpoint on another chain reports that chain's height. `median_head` took
+/// it. `simulate_execution_through` does check the chain, but far too late: by
+/// then the wrong-chain height is already the pin every honest endpoint is held
+/// to, and disqualifying that endpoint from simulating does not unmake the pin
+/// it chose.
+#[tokio::test]
+async fn median_head_refuses_a_witness_serving_another_chain() {
+    let (impostor, _a) = stub_endpoint(999, 100);
+    let (honest, _b) = stub_endpoint(7, 300);
+    let (also_honest, _c) = stub_endpoint(7, 300);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![impostor, honest, also_honest],
+    );
+    assert_eq!(
+        median_head(&network).await.unwrap(),
+        Some(300),
+        "a height from another chain must not enter the median"
+    );
+
+    // And it is not counted toward the quorum either: two endpoints, one of
+    // them on the wrong chain, is one witness.
+    let (impostor, _d) = stub_endpoint(999, 100);
+    let (lonely, _e) = stub_endpoint(7, 300);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![impostor, lonely]);
+    let error = format!("{:#}", median_head(&network).await.unwrap_err());
+    assert!(error.contains("only 1"), "{error}");
+}
+
+/// The same door, on the fee path.
+#[tokio::test]
+async fn median_fee_estimate_refuses_a_witness_serving_another_chain() {
+    let (impostor, _a) = fee_history_stub_on_chain(999, 10, 1); // max_fee 21
+    let (honest, _b) = fee_history_stub(1_000, 100); // max_fee 2100
+    let (also_honest, _c) = fee_history_stub(1_000, 100);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![impostor, honest, also_honest],
+    );
+    assert_eq!(
+        median_fee_estimate(&network, 0, 0).await.unwrap(),
+        (2100, 100),
+        "a fee from another chain must not enter the median"
+    );
+}
+
+/// A stub endpoint that answers `eth_getTransactionReceipt` with a receipt for
+/// whichever hash the caller chose, regardless of which one was asked about.
+/// That mismatch is the whole point: the receipt lookup used to take the
+/// endpoint's word that a response was an answer to the request.
+fn receipt_stub(chain_id: u64, receipt_for: B256) -> (Url, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stub endpoint");
+    let address = listener.local_addr().expect("stub endpoint address");
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                continue;
+            };
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let body = if request.contains("eth_chainId") {
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{chain_id:#x}\"}}")
+            } else {
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\
+                       \"transactionHash\":\"{receipt_for:#x}\",\
+                       \"transactionIndex\":\"0x0\",\
+                       \"blockHash\":\"0x{}\",\
+                       \"blockNumber\":\"0x64\",\
+                       \"from\":\"0x1111111111111111111111111111111111111111\",\
+                       \"to\":\"0x2222222222222222222222222222222222222222\",\
+                       \"cumulativeGasUsed\":\"0x5208\",\
+                       \"gasUsed\":\"0x5208\",\
+                       \"effectiveGasPrice\":\"0x1\",\
+                       \"logs\":[],\
+                       \"logsBloom\":\"0x{}\",\
+                       \"status\":\"0x1\",\
+                       \"type\":\"0x2\"\
+                     }}}}",
+                    "22".repeat(32),
+                    "00".repeat(256)
+                )
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (
+        format!("http://{address}/").parse().expect("stub URL"),
+        handle,
+    )
+}
+
+/// Every terminal settlement in the wallet runs through `transaction_receipt`,
+/// and none of the states it produces is ever reconciled again -- reaching one
+/// releases the wallet's in-flight slot for that chain. The request named a
+/// hash and the response was taken as the answer to it on the endpoint's word
+/// alone, so an endpoint returning an unrelated receipt could settle a
+/// still-live envelope as confirmed, and the real one would go on to mine with
+/// nothing watching it.
+#[tokio::test]
+async fn a_receipt_for_another_transaction_is_not_an_answer() {
+    let asked_about = B256::repeat_byte(0xaa);
+    let unrelated = B256::repeat_byte(0xbb);
+    let (endpoint, _handle) = receipt_stub(7, unrelated);
+    let network = network_with(7, vec![endpoint]);
+
+    let error = format!(
+        "{:#}",
+        transaction_receipt(&network, &format!("{asked_about:#x}"))
+            .await
+            .expect_err("a receipt for a different transaction settles nothing")
+    );
+    assert!(error.contains("rather than the requested"), "{error}");
+
+    // The honest case still works, so the check is not simply refusing.
+    let (honest, _handle) = receipt_stub(7, asked_about);
+    let network = network_with(7, vec![honest]);
+    let receipt = transaction_receipt(&network, &format!("{asked_about:#x}"))
+        .await
+        .unwrap()
+        .expect("the endpoint answered about the transaction that was asked about");
+    assert!(receipt.succeeded);
+    assert_eq!(receipt.block_number, 100);
 }

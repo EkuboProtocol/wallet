@@ -621,3 +621,124 @@ fn a_legacy_database_claiming_schema_one_is_refused() {
     assert!(error.contains("schema 1 is not the schema"), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+mod in_flight_tests {
+    //! Removing a wallet must not throw away a transaction that can still mine.
+
+    use super::*;
+
+    /// The set this reports and the set the schema's uniqueness index treats
+    /// as live have to be the same set. A status counted as in flight by the
+    /// index but not here would let a wallet be removed out from under a
+    /// transaction the schema considers live -- which is the whole defect,
+    /// reintroduced by a one-word edit in a list.
+    #[test]
+    fn the_in_flight_set_matches_the_schema_index() {
+        let schema = include_str!("policy_store.rs");
+        let index = schema
+            .split_once("pending_transactions_wallet_chain_in_flight")
+            .expect("the index exists")
+            .1;
+        let predicate = index
+            .split_once("WHERE status IN (")
+            .expect("it has a status predicate")
+            .1
+            .split_once(')')
+            .expect("which closes")
+            .0;
+        for status in IN_FLIGHT_STATUSES {
+            assert!(
+                predicate.contains(&format!("'{status}'")),
+                "`{status}` is in flight here but not in the index"
+            );
+        }
+        assert_eq!(
+            predicate.matches('\'').count() / 2,
+            IN_FLIGHT_STATUSES.len(),
+            "the index names a status this set does not"
+        );
+    }
+
+    /// A queued request is not in flight: nothing is signed, so nothing can
+    /// reach the chain and removal is free to discard it. This is the boundary
+    /// the set draws, and drawing it too wide would make every pending review
+    /// block a removal.
+    #[test]
+    fn a_request_awaiting_approval_is_not_in_flight() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let key = DatabaseKey::new([3; 32]);
+        let mut database = PolicyStore::open(&path, &key).unwrap();
+        database
+            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .unwrap();
+        assert!(
+            database
+                .in_flight_transactions("primary")
+                .unwrap()
+                .is_empty(),
+            "a wallet with nothing queued has nothing in flight"
+        );
+        assert!(
+            database
+                .in_flight_transactions("absent")
+                .unwrap()
+                .is_empty(),
+            "and a wallet with no rows at all answers the same way rather than failing"
+        );
+    }
+}
+
+mod database_lock_tests {
+    //! A lock taken by pathname serializes two processes only if both of them
+    //! locked the same inode.
+
+    /// A symlink at `policies.lock` gave two processes different inodes, and
+    /// the first-use path is what that costs: both see no database, both
+    /// generate a key, the second `set_secret` wins, and the first creates a
+    /// database encrypted under a key the credential store no longer holds.
+    /// Nothing can open it afterwards.
+    ///
+    /// `open_private_file` carries `O_NOFOLLOW`, so the handle refers to that
+    /// name or to nothing. Tested through the helper rather than through
+    /// `production`, which needs the real credential store.
+    #[cfg(unix)]
+    #[test]
+    fn the_database_lock_refuses_a_symlinked_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let elsewhere = directory.path().join("elsewhere.lock");
+        std::fs::write(&elsewhere, b"").unwrap();
+        let planted = directory.path().join("policies.lock");
+        std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
+
+        assert!(
+            crate::config::open_private_file(&planted).is_err(),
+            "a lock reached through a link is a lock on somebody else's inode"
+        );
+
+        // And an ordinary path still opens, so the refusal is of links rather
+        // than of locking.
+        let real = directory.path().join("real.lock");
+        crate::config::open_private_file(&real).expect("a real path locks as before");
+    }
+
+    /// The readback stays, and it is what covers the window this cannot: two
+    /// processes that legitimately raced before either created the file.
+    #[test]
+    fn the_key_readback_is_still_the_arbiter() {
+        let source = include_str!("policy_store.rs");
+        let body = source
+            .split_once("Err(KeyringError::NoEntry)")
+            .expect("the first-use branch exists")
+            .1;
+        let wrote = body.find("set_secret(").expect("it writes a key");
+        let read = body.find("get_secret()").expect("and reads it back");
+        let created = body
+            .find("another process initialized")
+            .expect("and refuses when the store no longer holds what it wrote");
+        assert!(
+            wrote < read && read < created,
+            "write, read back, then decide -- the credential store is the arbiter"
+        );
+    }
+}

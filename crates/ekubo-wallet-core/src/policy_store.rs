@@ -7,8 +7,7 @@
 
 use crate::{
     config::{
-        NetworkConfig, create_private_dir, set_private_file_permissions,
-        set_private_handle_permissions, validate_network, validate_wallet_id,
+        NetworkConfig, create_private_dir, open_private_file, validate_network, validate_wallet_id,
     },
     core::policy::WalletPolicy,
     sql::{Millis, RowExt},
@@ -19,7 +18,7 @@ use fs2::FileExt;
 use keyring::{Entry, Error as KeyringError};
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::{fs::OpenOptions, path::Path};
+use std::path::Path;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The shape of the encrypted database. There is one, and this build creates
@@ -168,6 +167,24 @@ pub(crate) enum SeedDefaults {
     No,
 }
 
+/// The statuses in which an envelope may still reach the chain.
+///
+/// The same set the `pending_transactions_wallet_chain_in_flight` index uses,
+/// and held to it by a test: a status that counts as in flight for the
+/// uniqueness rule but not for this one would let a wallet be removed out from
+/// under a transaction the schema considers live.
+pub(crate) const IN_FLIGHT_STATUSES: [&str; 4] =
+    ["signed", "submitting", "broadcast", "cancelling"];
+
+/// One transaction that may still execute, named well enough for a person to
+/// go and settle it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InFlightTransaction {
+    pub request_id: uuid::Uuid,
+    pub chain_id: String,
+    pub status: String,
+}
+
 impl PolicyStore {
     /// Opens the production policy database, creating its credential-store key
     /// only when no database exists. A missing key for an existing database is
@@ -175,18 +192,41 @@ impl PolicyStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
         create_private_dir(data_dir)?;
         let lock_path = data_dir.join(DATABASE_LOCK_FILE);
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("failed to open {}", lock_path.display()))?;
-        set_private_handle_permissions(&lock)?;
+        // `open_private_file`, not a bare `OpenOptions`: it carries
+        // `O_NOFOLLOW`, so this handle refers to that name or to nothing.
+        //
+        // A lock taken by pathname serializes two processes only if both of
+        // them locked the same inode. A symlink at `policies.lock` gives them
+        // different ones, and the first-use path below is what that costs:
+        // both see no database, both generate a key, the second `set_secret`
+        // wins, and the first creates a database encrypted under a key the
+        // credential store no longer holds. The readback there is the
+        // arbiter for the residual window; this removes the way the two locks
+        // came apart in the first place.
+        let lock = open_private_file(&lock_path)?;
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
         let path = data_dir.join(DATABASE_FILE);
-        let key = load_or_create_database_key(data_dir, path.exists())?;
+        // Whether a database exists decides whether a missing credential-store
+        // key is state loss or a first run, so it must not be a separate
+        // question from the one the open below answers. `path.exists()`
+        // resolved the name a second time and followed a link, which let a
+        // replacement between the two calls turn "this database exists and its
+        // key is gone" into "there is no database, mint a key" — and the
+        // original wallet database is then unopenable forever.
+        //
+        // Asking a handle instead binds the answer to an inode. Size rather
+        // than presence is the test SQLite itself applies: a zero-length file
+        // is a database with nothing in it yet, and a stray empty file left by
+        // a failed first run must not brick the next one.
+        let database = open_private_file(&path)?;
+        let database_exists = database
+            .metadata()
+            .with_context(|| format!("failed to inspect {}", path.display()))?
+            .len()
+            > 0;
+        let key = load_or_create_database_key(data_dir, database_exists)?;
+        drop(database);
         let result = Self::open_with(&path, &key, SeedDefaults::Yes);
         // The work's own error is the one worth reporting. Unlocking after a
         // failure and propagating *that* replaces "the database key is wrong"
@@ -323,7 +363,11 @@ impl PolicyStore {
              lost with it)"
         );
         verify_integrity(&connection)?;
-        set_private_file_permissions(path)?;
+        // Narrowed through a handle that refuses to follow a link, not through
+        // the name. This runs after the connection is open, which is exactly
+        // the window in which a by-path chmod could be pointed at some other
+        // reachable file.
+        drop(open_private_file(path)?);
         Ok(Self { connection })
     }
 
@@ -659,6 +703,9 @@ impl PolicyStore {
     /// decisions to make.
     pub fn put_network_proposal(&mut self, profile: &NetworkConfig) -> Result<()> {
         validate_network(profile)?;
+        // `None`, always: an agent may not propose a plaintext endpoint, so no
+        // stored proposal can carry one and the acceptance path never judges one.
+        crate::config::validate_admissible_endpoints(profile, None)?;
         ensure!(profile.chain_id > 0, "network chain ID must be positive");
         let profile_json = serde_json::to_string(profile)?;
         ensure!(
@@ -780,6 +827,48 @@ impl PolicyStore {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Every transaction under this wallet whose bytes may still reach the
+    /// chain.
+    ///
+    /// Removal consults this *before* destroying the credential. `purge`
+    /// deletes these rows unconditionally, which is right where it is called
+    /// at creation time -- the previous wallet's key is already gone and the
+    /// name has to become usable again -- and wrong as the second half of a
+    /// removal: it throws away the exact signed envelope, the hashes, and the
+    /// cancellation state that are the only means of observing, rebroadcasting
+    /// or cancelling something already authorized and possibly already sent.
+    ///
+    /// So this is not a check inside `purge`. The two callers want different
+    /// things, and the one that must refuse is the one that is about to
+    /// destroy a key.
+    pub fn in_flight_transactions(&self, wallet_id: &str) -> Result<Vec<InFlightTransaction>> {
+        validate_wallet_id(wallet_id)?;
+        let placeholders = IN_FLIGHT_STATUSES
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT request_id, chain_id, status FROM pending_transactions
+             WHERE wallet_id = ?1 AND status IN ({placeholders})
+             ORDER BY created_at"
+        ))?;
+        let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&wallet_id];
+        for status in &IN_FLIGHT_STATUSES {
+            parameters.push(status);
+        }
+        let rows = statement
+            .query_map(parameters.as_slice(), |row| {
+                Ok(InFlightTransaction {
+                    request_id: row.get(0)?,
+                    chain_id: row.get::<_, i64>(1)?.to_string(),
+                    status: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Deletes a policy only if it still has the revision reviewed by the

@@ -12,7 +12,7 @@ use crate::{
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceRequest},
     legal::{self, LegalDocument, LegalStore},
     message::{MessageStore, PendingMessage},
-    pending::{PendingStatus, PendingStore, PendingTransaction},
+    pending::{PendingStatus, PendingStore, PendingTransaction, is_unknown_request},
     policy_store::PolicyStore,
     render::{OutputMode, described_time, emit, print_json, relative_time},
     rpc::verify_chain_id,
@@ -138,8 +138,14 @@ enum Command {
     /// List exceptional requests, or review one locally and approve or reject it.
     Review {
         request_id: Option<Uuid>,
-        /// Decide without the interactive prompt. Approving still requires
-        /// platform owner authentication.
+        /// Decide without the interactive prompt.
+        ///
+        /// `reject` needs no terminal: it signs nothing, and a scripted
+        /// session must always be able to say no. `approve` still draws the
+        /// review for a message or typed-data request, because the review is
+        /// what that signature is about -- owner authentication names a wallet
+        /// and an operation, not the bytes. Approving still requires platform
+        /// owner authentication either way.
         #[arg(long, value_enum)]
         decision: Option<ReviewDecision>,
     },
@@ -368,6 +374,11 @@ struct NetworkAddArgs {
     native_currency_decimals: Option<u8>,
     #[arg(long)]
     max_gas_limit: Option<String>,
+    /// Most this wallet will ever sign as `maxFeePerGas` on this chain, in
+    /// wei. Unset means unbounded: the fee of an automatic transaction comes
+    /// from an endpoint, no policy rule speaks about it, and nobody reviews it.
+    #[arg(long)]
+    max_fee_per_gas: Option<String>,
     #[arg(long)]
     block_explorer_url: Option<Url>,
     #[arg(long)]
@@ -424,8 +435,15 @@ enum ServerTransport {
 ///
 /// Three of them own their own MCP configuration and expose a CLI for it, so
 /// registration shells out rather than editing their files: their format is
-/// theirs to change. Cursor has no such command, which is why it is the one
-/// whose `mcp.json` this writes directly.
+/// theirs to change. Cursor and opencode have no such command, which is why
+/// they are the two whose configuration files this writes directly.
+///
+/// opencode is the near miss worth recording. It does have an `opencode mcp
+/// add`, but its `mcp` command tree is `add`, `list`, `auth`, `logout`, and
+/// `debug` — there is nothing that takes a server back out. Registering
+/// through a CLI that cannot unregister would leave `meta-agent remove`
+/// editing the file regardless, so both directions go through the file and
+/// there is one mechanism to reason about rather than two that can disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 enum AgentName {
     Codex,
@@ -434,10 +452,17 @@ enum AgentName {
     #[value(name = "gemini-cli")]
     Gemini,
     Cursor,
+    Opencode,
 }
 
 impl AgentName {
-    const ALL: [Self; 4] = [Self::Codex, Self::ClaudeCode, Self::Gemini, Self::Cursor];
+    const ALL: [Self; 5] = [
+        Self::Codex,
+        Self::ClaudeCode,
+        Self::Gemini,
+        Self::Cursor,
+        Self::Opencode,
+    ];
 
     const fn label(self) -> &'static str {
         match self {
@@ -445,6 +470,9 @@ impl AgentName {
             Self::ClaudeCode => "Claude Code",
             Self::Gemini => "Gemini CLI",
             Self::Cursor => "Cursor",
+            // Lowercase deliberately: it is how the project spells itself
+            // everywhere, including its own binary and documentation.
+            Self::Opencode => "opencode",
         }
     }
 
@@ -454,6 +482,7 @@ impl AgentName {
             Self::ClaudeCode => "claude-code",
             Self::Gemini => "gemini-cli",
             Self::Cursor => "cursor",
+            Self::Opencode => "opencode",
         }
     }
 
@@ -463,7 +492,7 @@ impl AgentName {
             Self::Codex => Some("codex"),
             Self::ClaudeCode => Some("claude"),
             Self::Gemini => Some("gemini"),
-            Self::Cursor => None,
+            Self::Cursor | Self::Opencode => None,
         }
     }
 }
@@ -1154,7 +1183,7 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
             .await?;
 
             let progress = crate::tui::Progress::start("Waiting for owner authentication");
-            let result = custody.export(&wallet_id).await;
+            let result = custody.export(&wallet_id, wallet.address).await;
             let key = match result {
                 Ok(key) => {
                     progress.stop("Owner authenticated; export recorded");
@@ -1173,17 +1202,47 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
         }
         AccountCommand::Remove { wallet_id } => {
             let wallet = config.wallet(&wallet_id)?;
-            require_approval(
-                ApprovalRequest::new(
-                    ApprovalKind::RemoveWallet,
-                    "Remove wallet",
-                    "Delete this wallet's platform credential and local metadata.",
-                )
-                .fact("Wallet", &wallet.id)
-                .fact("Address", format!("{:#x}", wallet.address))
-                .warning("This operation cannot be undone unless a separate key backup exists."),
+            // Read before the approval is drawn, so the owner decides with
+            // this in front of them. Removal ends in `purge`, which deletes
+            // every pending row under the name -- including the exact signed
+            // envelope, the hashes and the cancellation state that are the
+            // only means of observing, rebroadcasting or cancelling something
+            // already authorized and possibly already sent. Those bytes do not
+            // stop being valid because the wallet was removed: the transaction
+            // can still mine and consume its nonce, with nothing left locally
+            // that knows it exists.
+            //
+            // Read here rather than after `custody.remove` because by then the
+            // key is gone and there is no decision left to inform.
+            let in_flight =
+                PolicyStore::production(config.data_dir())?.in_flight_transactions(&wallet.id)?;
+            let mut request = ApprovalRequest::new(
+                ApprovalKind::RemoveWallet,
+                "Remove wallet",
+                "Delete this wallet's platform credential and local metadata.",
             )
-            .await?;
+            .fact("Wallet", &wallet.id)
+            .fact("Address", format!("{:#x}", wallet.address))
+            .warning("This operation cannot be undone unless a separate key backup exists.");
+            // On the screen rather than in front of it. An owner whose node is
+            // gone, whose transaction will never mine, and who wants this
+            // wallet off this machine is entitled to say so -- and refusing
+            // left them editing the database, which is the outcome the rest of
+            // this file works to avoid.
+            for transaction in &in_flight {
+                request = request.warning(format!(
+                    "Transaction {} is {} on chain {} and may still reach the chain. Removing \
+                     this wallet deletes the only copy of its signed bytes, so it could mine \
+                     with nothing here able to see or cancel it. `ekubo-wallet transaction show \
+                     {}` settles it; `ekubo-wallet transaction cancel {}` stops it.",
+                    transaction.request_id,
+                    transaction.status,
+                    transaction.chain_id,
+                    transaction.request_id,
+                    transaction.request_id
+                ));
+            }
+            require_approval(request).await?;
 
             let progress = crate::tui::Progress::start("Waiting for owner authentication");
             let result = custody.remove(&wallet_id).await;
@@ -1998,6 +2057,41 @@ async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMo
 /// then authenticated against the OS — the policy decides what may be signed
 /// with nobody watching, so replacing it requires the owner even though no
 /// key material is read — and is revision-guarded end to end.
+/// Refuse to act on a wallet that is no longer the one the owner reviewed.
+///
+/// Every policy change is authorized against a screen naming a wallet id *and*
+/// an address, and then applied by id after an owner authentication that takes
+/// as long as a person takes. A wallet id is reusable: `account remove` purges
+/// this database by name and `account create` under the same name starts a new
+/// wallet whose policy numbering begins again at revision 1. So the row a
+/// stale review lands on can be a different wallet's, holding a different key,
+/// and the revision check cannot see it -- the numbers match precisely because
+/// the sequence restarted.
+///
+/// Comparing the whole `WalletMetadata` rather than the address alone is
+/// deliberate: `created_at` distinguishes two wallets that somehow share an
+/// address, and a field added later is covered by having been added.
+fn ensure_reviewed_wallet(
+    config: &ConfigStore,
+    reviewed: &crate::config::WalletMetadata,
+) -> Result<()> {
+    let current = config.wallet(&reviewed.id).with_context(|| {
+        format!(
+            "wallet {} could not be re-read after it was authorized, so nothing was applied",
+            reviewed.id
+        )
+    })?;
+    anyhow::ensure!(
+        current == *reviewed,
+        "wallet {} now holds address {:#x} rather than the {:#x} that was reviewed; it was \
+         replaced while this change was being authorized, and nothing was applied",
+        reviewed.id,
+        current.address,
+        reviewed.address
+    );
+    Ok(())
+}
+
 async fn review_policy_proposal(
     config: &ConfigStore,
     wallet_id: &str,
@@ -2072,6 +2166,7 @@ async fn review_policy_proposal(
     // during the review fail closed; matching the proposal itself covers the
     // case that check cannot see, where a newer proposal arrived while the
     // active revision never moved.
+    ensure_reviewed_wallet(config, &wallet)?;
     let stored = policies.consume_proposal(&proposal)?;
     eprintln!(
         "Applied. An agent can observe the new revision through wallet_get_policy; nothing \
@@ -2168,6 +2263,7 @@ async fn run_transaction(
             let pending = std::sync::Mutex::new(pending);
             let (record, broadcast) = crate::reconcile::attempt_cancellation(
                 &pending,
+                config,
                 &wallet,
                 &network,
                 record,
@@ -2232,7 +2328,12 @@ async fn run_transaction(
         }
         TransactionCommand::Discard { identifier } => {
             let record = pending.get_by_identifier(&identifier)?;
-            let network = config.network_by_chain_id(&record.chain_id)?;
+            // The one destructive lifecycle command: it drops tracking for an
+            // envelope that may still mine. Its whole basis is what the
+            // configured node says about the hash, so it must be the node the
+            // transaction was signed against and not whichever profile holds
+            // the chain id today.
+            let network = config.network_for_record(&record.chain_id, &record.network_name)?;
             // `signed` does not by itself mean "never sent". A submission whose
             // process died mid-send is recovered by returning the row to
             // `signed`, and that recovery turns on `transaction_known`, whose
@@ -2647,11 +2748,34 @@ fn print_pending_approvals(
 fn run_reject(config: &ConfigStore, request_id: Uuid, mode: OutputMode) -> Result<()> {
     let request = match PendingStore::production(config.data_dir())?.reject(request_id) {
         Ok(request) => request,
+        // Only an absent row sends the search on. Anything else -- a row that
+        // has already been decided, an envelope that no longer parses, a
+        // database that cannot be read -- is this queue's answer about this
+        // request, and carrying on past it rejected whatever the next queue
+        // happened to hold under that id while the request the owner meant
+        // stayed awaiting a decision.
+        Err(transaction_error) if !is_unknown_request(&transaction_error) => {
+            return Err(transaction_error);
+        }
         Err(transaction_error) => {
             let mut typed_data = TypedDataStore::production(config.data_dir())?;
-            let Ok(request) = typed_data.reject(request_id) else {
+            let request = match typed_data.reject(request_id) {
+                Ok(request) => Some(request),
+                Err(typed_data_error) if !is_unknown_request(&typed_data_error) => {
+                    return Err(typed_data_error);
+                }
+                Err(_) => None,
+            };
+            let Some(request) = request else {
                 let mut messages = MessageStore::production(config.data_dir())?;
-                let Ok(request) = messages.reject(request_id) else {
+                let request = match messages.reject(request_id) {
+                    Ok(request) => Some(request),
+                    Err(message_error) if !is_unknown_request(&message_error) => {
+                        return Err(message_error);
+                    }
+                    Err(_) => None,
+                };
+                let Some(request) = request else {
                     return Err(transaction_error);
                 };
                 return emit_rejected(
@@ -2742,17 +2866,43 @@ async fn run_approve(
     let pending = PendingStore::production(config.data_dir())?;
     let request = match pending.get(request_id) {
         Ok(request) => request,
+        // As in `run_reject`: only a missing row means "try the next queue".
+        // A stored row this queue cannot read is a failure the owner has to
+        // see, not permission to review something else under the same id.
+        Err(transaction_error) if !is_unknown_request(&transaction_error) => {
+            return Err(transaction_error);
+        }
         Err(transaction_error) => {
             drop(pending);
             let typed_data = TypedDataStore::production(config.data_dir())?;
-            let Ok(request) = typed_data.get(request_id) else {
+            let found = match typed_data.get(request_id) {
+                Ok(request) => Some(request),
+                Err(typed_data_error) if !is_unknown_request(&typed_data_error) => {
+                    return Err(typed_data_error);
+                }
+                Err(_) => None,
+            };
+            let Some(request) = found else {
                 let messages = MessageStore::production(config.data_dir())?;
-                let Ok(request) = messages.get(request_id) else {
+                let found = match messages.get(request_id) {
+                    Ok(request) => Some(request),
+                    Err(message_error) if !is_unknown_request(&message_error) => {
+                        return Err(message_error);
+                    }
+                    Err(_) => None,
+                };
+                let Some(request) = found else {
                     return Err(transaction_error);
                 };
-                return approve_message(config, messages, request, no_confirm, mode).await;
+                // Opened here rather than at the moment of signing: this is
+                // where the other request stores are opened, and a database
+                // that will not open should say so before a person reads a
+                // payload, not after they have approved one.
+                let policies = PolicyStore::production(config.data_dir())?;
+                return approve_message(config, &policies, messages, request, mode).await;
             };
-            return approve_typed_data(config, typed_data, request, no_confirm, mode).await;
+            let policies = PolicyStore::production(config.data_dir())?;
+            return approve_typed_data(config, &policies, typed_data, request, mode).await;
         }
     };
     let data_dir = config.data_dir().to_path_buf();
@@ -2861,12 +3011,20 @@ impl crate::approval::ReviewPresenter for CliTransactionPresenter {
 
 async fn approve_typed_data(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: TypedDataStore,
     request: PendingTypedData,
-    no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    match crate::signing_review::decide_typed_data(config, store, request, no_confirm).await? {
+    match crate::signing_review::decide_typed_data(
+        config,
+        policies,
+        store,
+        request,
+        &crate::signing_review::SigningAccount::AsRecorded,
+    )
+    .await?
+    {
         crate::signing_review::TypedDataDecision::Rejected(rejected) => emit_rejected(
             mode,
             "typed-data request",
@@ -2901,12 +3059,20 @@ async fn approve_typed_data(
 
 async fn approve_message(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: MessageStore,
     request: PendingMessage,
-    no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    match crate::signing_review::decide_message(config, store, request, no_confirm).await? {
+    match crate::signing_review::decide_message(
+        config,
+        policies,
+        store,
+        request,
+        &crate::signing_review::SigningAccount::AsRecorded,
+    )
+    .await?
+    {
         crate::signing_review::MessageDecision::Rejected(rejected) => emit_rejected(
             mode,
             "message request",
@@ -2975,6 +3141,38 @@ async fn replace_policy(
             |value| value.revision.to_string(),
         ),
     )
+    .fact("New policy digest", &digest)
+    // The change itself, which this prompt did not show. The proposal review
+    // has always rendered `diff_policies` and called it authoritative; the
+    // direct route asked the same authority question -- `policy set`,
+    // `allow-all`, `require-approval` all land here -- and answered it with a
+    // wallet name, a revision number, and a generic warning. An owner could
+    // approve a materially more permissive policy without being shown a single
+    // chain, call, or value that was gaining unattended signing authority.
+    //
+    // Against the fail-closed baseline when there is no current policy, since
+    // that is what "no policy" means to every signing path: nothing is
+    // permitted. A diff against it reads as what this policy grants.
+    .fact_lines(
+        if current.is_some() {
+            "Changes"
+        } else {
+            "Grants (this wallet has no policy today)"
+        },
+        {
+            let baseline = current
+                .as_ref()
+                .map_or_else(WalletPolicy::require_approval_for_everything, |stored| {
+                    stored.policy.clone()
+                });
+            let lines = crate::core::policy::diff_policies(&baseline, policy);
+            if lines.is_empty() {
+                vec!["no change to what this wallet may sign".to_owned()]
+            } else {
+                lines
+            }
+        },
+    )
     .warning(
         "A more permissive policy can authorize transactions without an exceptional approval.",
     );
@@ -2995,6 +3193,7 @@ async fn replace_policy(
             wallet: wallet.id.clone(),
         })
         .await?;
+    ensure_reviewed_wallet(config, &wallet)?;
     let stored = policies.put(
         wallet_id,
         policy,
@@ -3179,7 +3378,8 @@ async fn run_network(
                 .iter()
                 .find(|network| network.chain_id == candidate.chain_id)
                 .cloned();
-            replace_configured_network(&mut prospective, candidate.clone())?;
+            let owner = owner_at_terminal()?;
+            replace_configured_network(&mut prospective, candidate.clone(), Some(&owner))?;
             // The complete URL is shown, not just its origin. This is the
             // one moment the user can catch a typo or the wrong endpoint, and
             // `network list` already prints configured URLs in full; an RPC
@@ -3206,7 +3406,7 @@ async fn run_network(
                 .await?;
             config.update(|state| {
                 ensure_reviewed_network(&state.networks, candidate.chain_id, reviewed.as_ref())?;
-                replace_configured_network(&mut state.networks, candidate.clone())
+                replace_configured_network(&mut state.networks, candidate.clone(), Some(&owner))
             })?;
             emit(
                 mode,
@@ -3422,6 +3622,14 @@ fn network_candidate(
     // chain-ID probe, and an operating-system authentication prompt, all to
     // be told at the end that a number they typed was out of range.
     ekubo_wallet_core::config::validate_network(&candidate)?;
+    // No plaintext-endpoint refusal here. It used to fire before
+    // `confirm_network_change`, a live chain-ID probe, and an OS
+    // authentication prompt -- three human gates, and the first of them prints
+    // the complete RPC URLs. An operator with a node at
+    // `http://192.168.1.10:8545`, on Tailscale, or in a lab VLAN was told no
+    // by a wall in front of the screen that exists to let them say "yes, I
+    // know". The refusal still stands for every path that cannot present an
+    // `InteractiveOwner`; here it is a warning on that screen instead.
     Ok(candidate)
 }
 
@@ -3691,9 +3899,10 @@ async fn run_network_edit(
             network: draft.name.clone(),
         })
         .await?;
+    let owner = owner_at_terminal()?;
     config.update(|state| {
         ensure_reviewed_network(&state.networks, draft.chain_id, Some(&original))?;
-        replace_configured_network(&mut state.networks, draft.clone())
+        replace_configured_network(&mut state.networks, draft.clone(), Some(&owner))
     })?;
     emit(
         mode,
@@ -3729,6 +3938,9 @@ fn network_field_value(network: &NetworkConfig, flag: &str) -> String {
         "--native-currency-symbol" => currency.symbol,
         "--native-currency-decimals" => currency.decimals.to_string(),
         "--max-gas-limit" => network.max_gas_limit.clone().unwrap_or_default(),
+        // Empty when unset, which is also what clears it: unset is unbounded,
+        // and an owner who set a ceiling needs a way to take it off again.
+        "--max-fee-per-gas" => network.max_fee_per_gas.clone().unwrap_or_default(),
         "--block-explorer-url" => network
             .block_explorer_url
             .as_ref()
@@ -3783,6 +3995,22 @@ fn set_network_field(network: &mut NetworkConfig, flag: &str, value: &str) -> Re
             network.native_currency = Some(currency);
         }
         "--max-gas-limit" => network.max_gas_limit = Some(value.trim().to_owned()),
+        "--max-fee-per-gas" => {
+            let ceiling = value.trim();
+            network.max_fee_per_gas = if ceiling.is_empty() {
+                // Blank clears it. Unset is unbounded, and an owner who set a
+                // ceiling has to be able to take it off without editing JSON.
+                None
+            } else {
+                // Parsed here rather than at signing time: a ceiling that does
+                // not fit is a ceiling that refuses every transaction on the
+                // chain, and finding that out when one is due is too late.
+                ceiling
+                    .parse::<u128>()
+                    .context("maximum fee per gas must be a whole number of wei")?;
+                Some(ceiling.to_owned())
+            };
+        }
         "--block-explorer-url" => {
             network.block_explorer_url = Some(
                 value
@@ -3904,6 +4132,9 @@ fn apply_network_overrides(mut base: NetworkConfig, args: NetworkAddArgs) -> Res
     if let Some(maximum) = args.max_gas_limit {
         base.max_gas_limit = Some(maximum);
     }
+    if let Some(ceiling) = args.max_fee_per_gas {
+        set_network_field(&mut base, "--max-fee-per-gas", &ceiling)?;
+    }
     if let Some(url) = args.block_explorer_url {
         base.block_explorer_url = Some(url);
     }
@@ -4007,6 +4238,14 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         optional: false,
     },
     RequiredField {
+        flag: "--max-fee-per-gas",
+        prompt: "Maximum fee per gas (wei, blank for none)",
+        help: "Largest maxFeePerGas this wallet may sign here. The fee of an automatic transaction comes from an endpoint, no policy rule speaks about it, and nobody reviews it, so this is the only bound on what one dishonest answer can cost",
+        example: "50000000000",
+        default: None,
+        optional: true,
+    },
+    RequiredField {
         flag: "--block-explorer-url",
         prompt: "Block explorer URL",
         help: "Where the CLI links transactions and addresses",
@@ -4068,6 +4307,7 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
             args.native_currency_decimals.map(|value| value.to_string()),
         ),
         ("--max-gas-limit", args.max_gas_limit.clone()),
+        ("--max-fee-per-gas", args.max_fee_per_gas.clone()),
         (
             "--block-explorer-url",
             args.block_explorer_url.as_ref().map(ToString::to_string),
@@ -4114,10 +4354,18 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
             .parse()
             .context("RPC strategy is invalid")?,
         max_gas_limit: Some(field("--max-gas-limit")),
-        // Not asked for here. A fee ceiling is a judgement about what the
-        // owner's transactions are worth rather than a property of the chain,
-        // like `rpc_strategy`, and the form asks only for the latter.
-        max_fee_per_gas: None,
+        // Asked for, and optional. It is a judgement about what the owner's
+        // transactions are worth rather than a property of the chain -- but so
+        // is `rpc_strategy`, which the form has always asked, and leaving it
+        // out meant the ceiling `docs/networks.md` calls the protection for
+        // automatic transactions could not be set through the CLI at all.
+        // Blank stays blank: unset is unbounded, and a number invented here
+        // would be wrong on most chains.
+        max_fee_per_gas: answers
+            .get("--max-fee-per-gas")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
         native_currency: Some(NativeCurrency {
             name: field("--native-currency-name"),
             symbol: field("--native-currency-symbol"),
@@ -4239,6 +4487,14 @@ fn validate_network_field(flag: &str, input: &str) -> std::result::Result<(), St
     {
         let value = input.trim();
         match flag {
+            // Before the emptiness rule, because blank is a real answer here:
+            // no ceiling. Every other field is required, so the general rule
+            // stays and this is the exception that says so.
+            "--max-fee-per-gas" if value.is_empty() => Ok(()),
+            "--max-fee-per-gas" => value
+                .parse::<u128>()
+                .map(|_| ())
+                .map_err(|_| "must be a whole number of wei, or blank for no ceiling".into()),
             _ if value.is_empty() => Err("a value is required".into()),
             "--rpc-url" | "--block-explorer-url" | "--documentation-url" => Url::parse(value)
                 .map_err(|error| format!("not a URL: {error}"))
@@ -4376,12 +4632,35 @@ async fn review_one_network_proposal(
             ("RPC endpoints", endpoint_list(proposal)),
             ("RPC strategy", vec![proposal.rpc_strategy.to_string()]),
         ];
+        // Shown because it is the one field here that becomes an argument to
+        // another program: pressing `o` on a transaction hands this base, plus
+        // the hash, to whatever the desktop has registered for `http`. The
+        // reviewer was accepting that destination without being told it.
+        if let Some(explorer) = &proposal.block_explorer_url {
+            facts.push(("Block explorer", vec![explorer.to_string()]));
+        }
         // An edit is the dangerous shape: the chain keeps working and its
         // narrator changes. Say which endpoint is being replaced, because the
         // difference between the two URLs is the entire decision.
         let (title, summary) = if let Some(existing) = &existing {
             facts.push(("Replaces endpoints", endpoint_list(existing)));
             facts.push(("Configured name", vec![existing.name.clone()]));
+            // The one setting on this screen that bounds what an automatic
+            // transaction can spend, and it was not on it. A proposal never
+            // names a ceiling — an agent does not choose one — so a reviewer
+            // seeing only endpoints could not tell whether the profile they
+            // were about to accept still had theirs. It does: the replacement
+            // inherits it. Saying so is what makes that checkable rather than
+            // something the reviewer has to know.
+            facts.push((
+                "Fee ceiling",
+                vec![match existing.max_fee_per_gas.as_deref() {
+                    Some(ceiling) => format!("{ceiling} wei per gas, unchanged by this edit"),
+                    None => {
+                        "none — automatic transactions accept whatever fee the RPC names".to_owned()
+                    }
+                }],
+            ));
             (
                 "Accept an edited network",
                 "An agent suggested changing how this wallet reaches a chain it already uses.",
@@ -4428,9 +4707,11 @@ async fn review_one_network_proposal(
         config.update(|state| {
             ensure_reviewed_network(&state.networks, proposal.chain_id, existing.as_ref())?;
             if existing.is_some() {
-                replace_configured_network(&mut state.networks, proposal.clone())
+                // `None` on both: an agent may not propose a plaintext
+                // endpoint, so accepting one is not a case that arises.
+                replace_configured_network(&mut state.networks, proposal.clone(), None)
             } else {
-                add_configured_network(&mut state.networks, proposal.clone())
+                add_configured_network(&mut state.networks, proposal.clone(), None)
             }
         })?;
         PolicyStore::production(config.data_dir())?.discard_network_proposal(proposal)?;
@@ -4466,6 +4747,23 @@ const NETWORK_TRUST_WARNING: &str = "The configured RPC supplies the chain state
 /// The scrollback rendering, for the network commands that never open a
 /// screen. A command that has already shown one asks with
 /// [`crate::fullscreen::Review::ask`] instead.
+/// The witness that a network write came down the interactive owner path.
+///
+/// One place, so `tests/boundary.rs` enumerates one new origin rather than one
+/// per command. `network add` and `network edit` both reach it, and both then
+/// put the profile through `confirm_network_change` -- which prints the
+/// complete RPC URLs and warns about a plaintext one by name -- before anything
+/// is written.
+///
+/// Holding this does not mean the owner agreed. It means the question will be
+/// asked, on a screen they are sitting in front of. What an agent's proposal
+/// cannot do is get here at all.
+fn owner_at_terminal() -> Result<ekubo_wallet_core::config::InteractiveOwner> {
+    Ok(ekubo_wallet_core::config::InteractiveOwner::at_terminal(
+        &crate::approval::InteractiveProof::from_terminal()?,
+    ))
+}
+
 fn confirm_network_change(
     title: &str,
     summary: &str,
@@ -4683,8 +4981,13 @@ fn server_command() -> Result<String> {
 }
 
 fn agent_binary(agent: AgentName) -> Option<PathBuf> {
-    let name = agent.binary()?;
-    // `which` is not available everywhere this runs, so PATH is walked here.
+    binary_on_path(agent.binary()?)
+}
+
+/// The first `name` on `PATH`, if it is there.
+///
+/// `which` is not available everywhere this runs, so PATH is walked here.
+fn binary_on_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|directory| directory.join(name))
@@ -4699,6 +5002,14 @@ fn agent_installed(agent: AgentName) -> bool {
         // directory is the evidence that it is here.
         AgentName::Cursor => {
             BaseDirs::new().is_some_and(|base| base.home_dir().join(".cursor").is_dir())
+        }
+        // opencode ships a CLI *and* a desktop app, and either one creates the
+        // config directory on first run — it is `mkdir`ed unconditionally at
+        // startup. So the directory answers for both, where looking only for
+        // the binary would report the desktop-only install as absent.
+        AgentName::Opencode => {
+            binary_on_path("opencode").is_some()
+                || opencode_config_dir().is_ok_and(|directory| directory.is_dir())
         }
         _ => agent_binary(agent).is_some(),
     }
@@ -4718,6 +5029,9 @@ fn agent_registered(agent: AgentName) -> Option<Registration> {
             wallet: servers.get(LOCAL_SERVER_NAME).is_some(),
             companion: servers.get(COMPANION_SERVER_NAME).is_some(),
         });
+    }
+    if agent == AgentName::Opencode {
+        return opencode_registration_at(&opencode_config_dir().ok()?);
     }
     let output = std::process::Command::new(agent_binary(agent)?)
         .args(["mcp", "list"])
@@ -4780,6 +5094,10 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
         configure_cursor_mcp(name, transport)?;
         return Ok(());
     }
+    if agent == AgentName::Opencode {
+        configure_opencode_mcp(name, transport)?;
+        return Ok(());
+    }
     let binary =
         agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
     // Removed first so re-registering after moving the binary replaces the old
@@ -4835,7 +5153,9 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
                 "--scope".into(),
                 "user".into(),
             ]),
-            AgentName::Cursor => unreachable!("Cursor is configured by file above"),
+            AgentName::Cursor | AgentName::Opencode => {
+                unreachable!("Cursor and opencode are configured by file above")
+            }
         },
     }
     let status = std::process::Command::new(&binary)
@@ -4864,6 +5184,9 @@ fn unregister_agent(agent: AgentName) -> Result<()> {
 fn unregister_server(agent: AgentName, name: &str) -> Result<()> {
     if agent == AgentName::Cursor {
         return remove_cursor_mcp(name);
+    }
+    if agent == AgentName::Opencode {
+        return remove_opencode_mcp(name);
     }
     let binary =
         agent_binary(agent).with_context(|| format!("{} is not installed here", agent.label()))?;
@@ -4907,13 +5230,7 @@ fn remove_cursor_mcp_at(home: &Path, name: &str) -> Result<()> {
     };
     servers.remove(name);
     document.insert("mcpServers".into(), servers.into());
-    let directory = file.parent().context("mcp.json has no parent directory")?;
-    let mut temporary = NamedTempFile::new_in(directory)?;
-    set_private_permissions(temporary.path(), false)?;
-    serde_json::to_writer_pretty(&mut temporary, &document)?;
-    std::io::Write::write_all(&mut temporary, b"\n")?;
-    temporary.persist(&file).map_err(|error| error.error)?;
-    Ok(())
+    write_private_json(&file, &document)
 }
 
 fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
@@ -5094,27 +5411,254 @@ fn configure_cursor_mcp_at(
         },
     );
     document.insert("mcpServers".into(), servers.into());
+    write_private_json(&file, &document)?;
+    Ok(file)
+}
 
-    fs::create_dir_all(&directory)
+/// The global configuration files opencode reads, in the order it merges them.
+///
+/// All three are loaded and merged rather than the first one found winning, so
+/// a name defined in a later file shadows the same name in an earlier one.
+/// That ordering is why removal has to consider every one of them and why
+/// detection reads them all.
+const OPENCODE_CONFIG_FILES: [&str; 3] = ["config.json", "opencode.json", "opencode.jsonc"];
+
+/// The one this wallet writes.
+///
+/// opencode's own `mcp add` prefers whichever of `opencode.json` and
+/// `opencode.jsonc` already exists; this always writes the `.json`. The
+/// difference matters for one person — whoever keeps their settings in a
+/// commented `.jsonc` — and for them it is the difference between an entry
+/// added to a file this wallet owns outright and their own file rewritten
+/// through a serializer that would delete every comment in it. opencode merges
+/// all three of these files, so an entry written here is read either way.
+const OPENCODE_WRITTEN_CONFIG: &str = "opencode.json";
+
+/// Where opencode keeps its global configuration.
+///
+/// Deliberately not `BaseDirs::config_dir`. opencode resolves this path with
+/// the `xdg-basedir` package rather than any platform convention, and that
+/// package answers `$XDG_CONFIG_HOME`, or `~/.config` when it is unset, on
+/// every operating system — including macOS and Windows, where the native
+/// config directory is somewhere else entirely and a file written there would
+/// be read by nothing.
+fn opencode_config_dir() -> Result<PathBuf> {
+    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(base).join("opencode"));
+    }
+    let base = BaseDirs::new().context("could not determine the user home directory")?;
+    Ok(base.home_dir().join(".config").join("opencode"))
+}
+
+/// One server in the shape opencode's `mcp` map expects.
+///
+/// The two forms are a tagged union rather than Cursor's "whichever key is
+/// present", and `command` is an argv array rather than a string: a local
+/// server written as `"command": "/path/to/ekubo-wallet server"` is rejected
+/// by opencode's schema, and one written with Cursor's `args` key is silently
+/// launched with no arguments at all.
+fn opencode_server_entry(transport: &ServerTransport) -> serde_json::Value {
+    match transport {
+        ServerTransport::Stdio(command) => serde_json::json!({
+            "type": "local",
+            "command": [command, "server"],
+            "enabled": true,
+        }),
+        ServerTransport::Http(url) => serde_json::json!({
+            "type": "remote",
+            "url": url,
+            "enabled": true,
+        }),
+    }
+}
+
+fn configure_opencode_mcp(name: &str, transport: &ServerTransport) -> Result<PathBuf> {
+    if let ServerTransport::Stdio(command) = transport {
+        ensure!(!command.trim().is_empty(), "server command cannot be empty");
+    }
+    configure_opencode_mcp_at(&opencode_config_dir()?, name, transport)
+}
+
+fn configure_opencode_mcp_at(
+    directory: &Path,
+    name: &str,
+    transport: &ServerTransport,
+) -> Result<PathBuf> {
+    let file = directory.join(OPENCODE_WRITTEN_CONFIG);
+    // opencode parses every one of its configuration files as JSONC, the
+    // `.json` included, so an existing file may hold comments this wallet
+    // cannot round-trip. Failing here rather than starting from an empty
+    // document is what keeps a hand-written configuration from being replaced
+    // by one entry; the message has to say what to do instead, because there
+    // is no automatic path out of it.
+    let mut document = read_opencode_config(&file)
+        .with_context(|| {
+            format!(
+                "this wallet writes plain JSON and will not rewrite {}. Add the entry by hand — \
+                 `ekubo-wallet meta-agent list` prints the command and URL it would have used",
+                file.display()
+            )
+        })?
+        .unwrap_or_default();
+    let mut servers = match document.remove("mcp") {
+        Some(value) => value
+            .as_object()
+            .cloned()
+            .context("opencode `mcp` must be a JSON object")?,
+        None => serde_json::Map::new(),
+    };
+    servers.insert(name.into(), opencode_server_entry(transport));
+    document.insert("mcp".into(), servers.into());
+    write_private_json(&file, &document)?;
+    Ok(file)
+}
+
+/// Drop one server from opencode's global configuration, leaving every other
+/// entry and every unrelated key exactly as they were.
+///
+/// Every file opencode merges is considered rather than only the one this
+/// wallet writes: an entry someone added by hand to `opencode.jsonc` shadows
+/// the one in `opencode.json`, so removing only what was written here would
+/// leave the server registered while reporting it removed.
+fn remove_opencode_mcp(name: &str) -> Result<()> {
+    remove_opencode_mcp_at(&opencode_config_dir()?, name)
+}
+
+fn remove_opencode_mcp_at(directory: &Path, name: &str) -> Result<()> {
+    for candidate in OPENCODE_CONFIG_FILES {
+        let file = directory.join(candidate);
+        if !file.exists() {
+            continue;
+        }
+        let mut document = match read_opencode_config(&file) {
+            Ok(Some(document)) => document,
+            Ok(None) => continue,
+            // A `.jsonc` may hold comments and trailing commas that
+            // `serde_json` refuses, and rewriting such a file is not on offer.
+            // One that never mentions the server cannot be registering it, so
+            // it is passed over; one that does is reported, because silently
+            // leaving it would make `meta-agent remove` a lie.
+            Err(error) => {
+                ensure!(
+                    !file_mentions_server(&file, name),
+                    "{} registers `{name}` and this wallet cannot rewrite it — remove that entry \
+                     by hand: {error:#}",
+                    file.display()
+                );
+                continue;
+            }
+        };
+        let Some(mut servers) = document
+            .remove("mcp")
+            .and_then(|value| value.as_object().cloned())
+        else {
+            continue;
+        };
+        if servers.remove(name).is_none() {
+            continue;
+        }
+        document.insert("mcp".into(), servers.into());
+        write_private_json(&file, &document)?;
+    }
+    Ok(())
+}
+
+/// What opencode's merged global configuration says about the two servers.
+///
+/// `None` means the question could not be answered, which is what a file this
+/// wallet cannot parse leaves behind when it might be the file holding the
+/// registration.
+fn opencode_registration_at(directory: &Path) -> Option<Registration> {
+    let mut found = Registration {
+        wallet: false,
+        companion: false,
+    };
+    for candidate in OPENCODE_CONFIG_FILES {
+        let file = directory.join(candidate);
+        if !file.exists() {
+            continue;
+        }
+        let document = match read_opencode_config(&file) {
+            Ok(Some(document)) => document,
+            Ok(None) => continue,
+            Err(_) => {
+                if file_mentions_server(&file, LOCAL_SERVER_NAME)
+                    || file_mentions_server(&file, COMPANION_SERVER_NAME)
+                {
+                    return None;
+                }
+                continue;
+            }
+        };
+        let Some(servers) = document.get("mcp").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        found.wallet |= servers.contains_key(LOCAL_SERVER_NAME);
+        found.companion |= servers.contains_key(COMPANION_SERVER_NAME);
+    }
+    Some(found)
+}
+
+/// Read one of opencode's configuration files.
+///
+/// `Ok(None)` is a file that is not there. A file that is there and will not
+/// parse is an error rather than an absence, because treating it as an absence
+/// would let a registration this wallet cannot see be reported as missing.
+fn read_opencode_config(file: &Path) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
+    if !file.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(file).with_context(|| format!("failed to read {}", file.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    Ok(Some(value.as_object().cloned().with_context(|| {
+        format!("{} must hold a JSON object", file.display())
+    })?))
+}
+
+/// Whether a file this wallet could not parse names one of the two servers.
+///
+/// The name is quoted before the search because `ekubo` is a prefix of
+/// `ekubo-wallet`: a bare substring test would find the companion in every
+/// file that holds only the wallet. An unreadable file answers yes, because
+/// the point of the question is whether it is safe to pass over.
+fn file_mentions_server(file: &Path, name: &str) -> bool {
+    fs::read_to_string(file).is_ok_and(|text| text.contains(&format!("\"{name}\"")))
+}
+
+/// Replace a configuration file with `document`, atomically and privately.
+///
+/// Shared by every agent whose file this wallet writes itself, so that one of
+/// them cannot quietly stop being durable or stop being private: the temporary
+/// file is created in the destination directory, given the final permissions
+/// before it holds anything, flushed, and renamed over the target.
+fn write_private_json(
+    file: &Path,
+    document: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let directory = file
+        .parent()
+        .with_context(|| format!("{} has no parent directory", file.display()))?;
+    fs::create_dir_all(directory)
         .with_context(|| format!("failed to create {}", directory.display()))?;
-    set_private_permissions(&directory, true)?;
-    let mut temporary = NamedTempFile::new_in(&directory).with_context(|| {
+    set_private_permissions(directory, true)?;
+    let mut temporary = NamedTempFile::new_in(directory).with_context(|| {
         format!(
             "failed to create a temporary file in {}",
             directory.display()
         )
     })?;
     set_private_permissions(temporary.path(), false)?;
-    serde_json::to_writer_pretty(&mut temporary, &document)?;
+    serde_json::to_writer_pretty(&mut temporary, document)?;
     temporary.write_all(b"\n")?;
     temporary.as_file().sync_all()?;
     temporary
-        .persist(&file)
+        .persist(file)
         .map_err(|error| error.error)
         .with_context(|| format!("failed to replace {}", file.display()))?;
-    set_private_permissions(&file, false)?;
-    sync_directory(&directory)?;
-    Ok(file)
+    set_private_permissions(file, false)?;
+    sync_directory(directory)?;
+    Ok(())
 }
 
 fn set_private_permissions(path: &Path, directory: bool) -> Result<()> {

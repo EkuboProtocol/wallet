@@ -38,7 +38,9 @@ use crate::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     sanitize::terminal_safe_line,
-    signing_review::{MessageDecision, TypedDataDecision, decide_message, decide_typed_data},
+    signing_review::{
+        MessageDecision, SigningAccount, TypedDataDecision, decide_message, decide_typed_data,
+    },
     simulation::simulate_execution,
     token_store::TokenStore,
     typed_data::{TypedDataStore, parse_typed_data},
@@ -61,7 +63,10 @@ use serde_json::{Value, json};
 use std::{
     cell::RefCell,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use url::Url;
 
@@ -166,6 +171,7 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
         data_dir: config.data_dir().to_path_buf(),
         state: Arc::clone(&state),
         idle: RefCell::new(None),
+        quit: Arc::new(AtomicBool::new(false)),
         submitted_batches: RefCell::new(std::collections::BTreeSet::new()),
     };
     let session = Session::new(relay, pairing, &handler);
@@ -241,6 +247,17 @@ struct DappSession<'a> {
     /// Exactly one of them ever reads a keystroke, and the handover is the
     /// `suspend_idle`/`enter_idle` pair rather than anything implicit.
     idle: RefCell<Option<IdleView>>,
+    /// Whether the person asked to disconnect, held by the session rather than
+    /// by whichever idle view happened to be on screen when they said so.
+    ///
+    /// The flag used to belong to the view. A view is stopped and replaced
+    /// around every review, and the session loop selects between relay
+    /// delivery and this answer -- so a `q`, Escape, or Ctrl-C that lands
+    /// while a request wins that race set a flag on a view that `suspend_idle`
+    /// then dropped, and `enter_idle` built a replacement that started out
+    /// saying no. The disconnect was not delayed; it was gone, and the dapp
+    /// stayed connected with a person who believed they had left.
+    quit: Arc<AtomicBool>,
     /// Batch ids this session minted, so `wallet_getCallsStatus` answers about
     /// the dapp's own batches and nothing else.
     ///
@@ -271,6 +288,12 @@ impl DappSession<'_> {
         }
     }
 
+    /// Whether a disconnect has been asked for, at any point since the session
+    /// started and from whichever surface was on screen at the time.
+    fn quit_pending(&self) -> bool {
+        self.quit.load(Ordering::Relaxed)
+    }
+
     /// Record something that happened, for the idle surface's log.
     fn log(&self, tone: crate::tui::Tone, text: impl AsRef<str>) {
         if let Ok(mut state) = self.state.lock() {
@@ -291,7 +314,7 @@ impl SessionHandler for DappSession<'_> {
         if self.idle.borrow().is_some() {
             return;
         }
-        let view = IdleView::start(Arc::clone(&self.state));
+        let view = IdleView::start(Arc::clone(&self.state), Arc::clone(&self.quit));
         *self.idle.borrow_mut() = Some(view);
     }
 
@@ -301,12 +324,7 @@ impl SessionHandler for DappSession<'_> {
         // around every review, and this future is dropped and rebuilt on every
         // turn of the session loop anyway.
         loop {
-            if self
-                .idle
-                .borrow()
-                .as_ref()
-                .is_some_and(IdleView::wants_quit)
-            {
+            if self.quit_pending() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -716,6 +734,37 @@ impl DappSession<'_> {
     }
 
     async fn dispatch(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
+        // Acceptance is live state, not a fact established at startup. A
+        // session lasts as long as the dapp keeps it, and `legal accept`
+        // records a digest: publishing new terms makes an existing acceptance
+        // stale without anything here noticing. `run` checks once before the
+        // session exists and never again, so a session opened this morning
+        // would keep signing all day under documents the owner has not
+        // accepted -- and it is the only surface with a window that long, since
+        // the MCP dispatch re-checks per tool call and each CLI command
+        // re-checks on entry.
+        //
+        // So it is checked here, where the MCP server checks it: once per
+        // request, before the method is even looked at, so a method added
+        // later is covered by having been dispatched rather than by having
+        // remembered.
+        // A disconnect already asked for is not undone by a request arriving.
+        // The session loop selects between the relay and the quit future, so
+        // delivery can win the race and reach here with the answer already
+        // given; the loop honours it on its next turn, and until then this is
+        // what keeps the interval from being one more signature.
+        if self.quit_pending() {
+            return Ok(RequestOutcome::Error {
+                code: error_code::UNSUPPORTED_METHODS,
+                message: "The wallet owner disconnected this session.".into(),
+            });
+        }
+        if let Err(error) = legal::require_current_acceptance(self.config.data_dir()) {
+            return Ok(RequestOutcome::Error {
+                code: error_code::UNSUPPORTED_METHODS,
+                message: format!("{error:#}"),
+            });
+        }
         if let Some(refusal) = self.refuse_replaced_account() {
             return Ok(refusal);
         }
@@ -804,9 +853,18 @@ impl DappSession<'_> {
             Some(&requester),
         )?;
         let store = MessageStore::production(&self.data_dir)?;
+        let policies = PolicyStore::production(&self.data_dir)?;
         // Every message is reviewed by a person, so this one always draws.
         self.suspend_idle().await;
-        match decide_message(self.config, store, record, false).await? {
+        match decide_message(
+            self.config,
+            &policies,
+            store,
+            record,
+            &SigningAccount::Settled(self.wallet()),
+        )
+        .await?
+        {
             MessageDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this message.",
             )),
@@ -846,10 +904,19 @@ impl DappSession<'_> {
             Some(&requester),
         )?;
         let store = TypedDataStore::production(&self.data_dir)?;
+        let policies = PolicyStore::production(&self.data_dir)?;
         // Every typed-data payload is reviewed by a person, so this one always
         // draws.
         self.suspend_idle().await;
-        match decide_typed_data(self.config, store, record, false).await? {
+        match decide_typed_data(
+            self.config,
+            &policies,
+            store,
+            record,
+            &SigningAccount::Settled(self.wallet()),
+        )
+        .await?
+        {
             TypedDataDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this payload.",
             )),

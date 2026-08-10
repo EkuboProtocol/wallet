@@ -483,9 +483,17 @@ fn rule_strategy() -> impl Strategy<Value = serde_json::Value> {
         })
 }
 
+/// An address no rule in these tests names.
+const STRANGER: Address = alloy::primitives::address!("3333333333333333333333333333333333333333");
+
 fn call_strategy() -> impl Strategy<Value = (Address, String, String)> {
     (
-        prop::sample::select(vec![TOKEN, ROUTER, WALLET, Address::ZERO]),
+        // A fourth address no rule names, so the strategy covers "matches
+        // nothing" as well as the three it does name. It used to be
+        // `Address::ZERO`; a plan cannot carry that recipient any more --
+        // `ExecutionPlan::validate` refuses it -- so the stranger has to be an
+        // address that is merely unknown rather than one that is forbidden.
+        prop::sample::select(vec![TOKEN, ROUTER, WALLET, STRANGER]),
         prop::sample::select(vec!["0x", "0xdeadbeef"]),
         prop::sample::select(vec!["0", "1", "1000"]),
     )
@@ -785,4 +793,279 @@ fn replacing_a_delegation_asks_a_person_rather_than_being_denied_or_allowed() {
         PolicyOutcome::RequiresApproval
     );
     assert!(denial_reasons(std::slice::from_ref(&finding)).is_empty());
+}
+
+#[test]
+fn authorizing_a_first_delegation_is_disclosed_without_blocking_the_batch() {
+    // The companion to the finding above, and the reason it exists: whether
+    // `delegation_replaced` fires at all is decided by a single `get_code_at`
+    // answer. An endpoint reporting empty code for an account that is really
+    // delegated elsewhere produced no delegation finding whatsoever, while the
+    // wallet went on to sign the authorization -- so the replacement happened
+    // on chain with the document silent about delegations entirely.
+    //
+    // This one is therefore not conditional on that answer being honest. It
+    // must stay a warning: every account's first batch authorizes a
+    // delegation, and making that `RequiresApproval` would mean no unattended
+    // batch could ever run.
+    let finding = PolicyFinding {
+        severity: FindingSeverity::Warning,
+        code: DELEGATION_AUTHORIZED_CODE.into(),
+        message: "would authorize a delegation".into(),
+        step: None,
+    };
+    assert!(policy_allows(std::slice::from_ref(&finding)));
+    assert_eq!(
+        policy_outcome(std::slice::from_ref(&finding)),
+        PolicyOutcome::Allowed,
+        "disclosure must not turn every first batch into an approval prompt"
+    );
+
+    // And it never displaces the stronger finding when both could apply.
+    let replaced = PolicyFinding {
+        severity: FindingSeverity::Error,
+        code: DELEGATION_REPLACED_CODE.into(),
+        message: "would replace the delegation".into(),
+        step: None,
+    };
+    let both = [finding, replaced];
+    assert_eq!(policy_outcome(&both), PolicyOutcome::RequiresApproval);
+}
+
+#[test]
+fn an_unreadable_token_balance_stops_the_automatic_path() {
+    // Deliberately an error rather than a warning, unlike
+    // `delegation_authorized` above. The two are different questions: a first
+    // delegation is a thing the wallet knows it is doing and discloses, while
+    // this is the wallet saying it does not know how much of a limited token
+    // moved. Enforcing a spending limit against a number nobody has is not
+    // something an unattended signature should do.
+    let finding = PolicyFinding {
+        severity: FindingSeverity::Error,
+        code: TOKEN_BALANCE_UNVERIFIED_CODE.into(),
+        message: "balance of 0xaa.. could not be read".into(),
+        step: None,
+    };
+    assert!(!policy_allows(std::slice::from_ref(&finding)));
+    assert_eq!(
+        policy_outcome(std::slice::from_ref(&finding)),
+        PolicyOutcome::RequiresApproval,
+        "a human can still override it; the policy has no rule to edit that would help"
+    );
+    // Not a denial: `denial_reasons` names rules the owner could change, and
+    // there is no rule that makes an unreadable token readable.
+    assert!(denial_reasons(std::slice::from_ref(&finding)).is_empty());
+}
+
+mod admission_tests_belong_to_the_types {
+    //! Deserializing any policy type is admission, not just
+    //! `WalletPolicy::parse`.
+    //!
+    //! The checks used to hang off `parse` alone, so `from_value` was a second
+    //! door into the same authority-bearing types that skipped every one of
+    //! them. `evaluate_policy` then read `max_calls_per_batch` from whatever it
+    //! was handed, so a policy that never passed admission decided what signed
+    //! automatically.
+
+    use crate::core::policy::{ChainPolicy, Rule, WalletPolicy};
+    use serde_json::json;
+
+    /// The finding's own repro, at the type it names. Deserialization is the
+    /// only way an out-of-crate caller can build one of these at all, so
+    /// refusing here is refusing everywhere.
+    #[test]
+    fn a_directly_deserialized_policy_cannot_exceed_the_batch_ceiling() {
+        let document = json!({
+            "version": 1,
+            "chains": {"1": {"max_calls_per_batch": 5000, "rules": []}}
+        });
+
+        let direct = serde_json::from_value::<WalletPolicy>(document.clone())
+            .expect_err("4096 is the ceiling however the policy was built");
+        assert!(
+            direct.to_string().contains("max_calls_per_batch"),
+            "{direct}"
+        );
+
+        // And `parse` still says the same thing, because it is now the same
+        // door rather than the only checked one.
+        assert!(WalletPolicy::parse(document).is_err());
+    }
+
+    /// One level down: a chain policy lifted out of a fragment on its own is
+    /// checked by the code that checks one reached through a document. Left
+    /// unchecked, the same value arrives at `evaluate_policy` inside a
+    /// `WalletPolicy` a caller assembled around it.
+    #[test]
+    fn a_chain_policy_deserialized_on_its_own_is_checked_too() {
+        assert!(
+            serde_json::from_value::<ChainPolicy>(json!({"max_calls_per_batch": 5000})).is_err()
+        );
+        assert!(serde_json::from_value::<ChainPolicy>(json!({"max_calls_per_batch": 0})).is_err());
+        assert!(serde_json::from_value::<ChainPolicy>(json!({"label": ""})).is_err());
+        assert!(
+            serde_json::from_value::<ChainPolicy>(json!({"max_calls_per_batch": 4096})).is_ok(),
+            "the ceiling itself is admissible"
+        );
+    }
+
+    /// And a rule, whose invariant is that each predicate is applicable to the
+    /// slot holding it. A `length` predicate over an address decides nothing;
+    /// admitted, it silently never matches, so a rule the owner reviewed as a
+    /// restriction restricts nothing.
+    #[test]
+    fn a_rule_deserialized_on_its_own_has_its_slots_checked() {
+        let inapplicable = json!({"effect": "allow", "to": {"length": {"eq": "20"}}});
+        let error = serde_json::from_value::<Rule>(inapplicable.clone())
+            .expect_err("a predicate must be applicable to the slot it sits in");
+        assert!(error.to_string().contains("applicable"), "{error}");
+
+        // The same rule inside a document is refused by the same code, so the
+        // two paths cannot disagree about what a valid rule is.
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({
+                "version": 1,
+                "chains": {"1": {"rules": [inapplicable]}}
+            }))
+            .is_err()
+        );
+    }
+
+    /// Version and chain keys are `WalletPolicy`'s own, and they travel with
+    /// the type rather than with one constructor.
+    #[test]
+    fn the_document_level_checks_travel_with_the_type() {
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({"version": 2, "chains": {}})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({"chains": {"01": {}}})).is_err(),
+            "a non-canonical chain key governs nothing and must not be admitted"
+        );
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({"chains": {}})).is_ok(),
+            "and an empty document is still a policy: it governs nothing automatically"
+        );
+    }
+
+    /// The guard on the private mirrors this fix introduced. A field added to
+    /// a public type and forgotten in its mirror would be rejected by the
+    /// mirror's `deny_unknown_fields` rather than quietly skipping validation
+    /// — this is the test that notices, by round-tripping a document that
+    /// names every field there is.
+    #[test]
+    fn every_field_survives_a_round_trip_through_the_validating_deserializer() {
+        let document = json!({
+            "$schema": "https://example.invalid/policy.schema.json",
+            "version": 1,
+            "chains": {
+                "*": {
+                    "label": "every chain",
+                    "max_calls_per_batch": 32,
+                    "native_value": {"eq": "0"},
+                    "rules": [{
+                        "effect": "deny",
+                        "label": "no calls to the stranger",
+                        "to": {"eq": "0x3333333333333333333333333333333333333333"},
+                        "from": {"eq": "$self"},
+                        "value": {"eq": "0"},
+                        "calldata": {"eq": "0x"}
+                    }]
+                }
+            }
+        });
+        let policy: WalletPolicy = serde_json::from_value(document.clone()).expect("admissible");
+        assert_eq!(
+            serde_json::to_value(&policy).expect("serializes"),
+            document,
+            "a field dropped by a mirror would vanish here"
+        );
+        // Every shipped example is likewise admissible through `from_value`
+        // and not only through `parse`.
+        assert_eq!(policy.chains.len(), 1);
+    }
+}
+
+mod admission_bounds_tests {
+    //! Admission does bounded work, and the bound belongs to the policy
+    //! language rather than to whichever parser delivered the document.
+
+    use crate::core::{
+        policy::WalletPolicy,
+        predicate::{MAX_PREDICATE_DEPTH, MAX_PREDICATE_NODES},
+    };
+    use serde_json::{Value, json};
+
+    /// `{"not": {"not": {... }}}`, `depth` levels of it.
+    fn nested(depth: usize) -> Value {
+        let mut predicate = json!("any_value");
+        for _ in 0..depth {
+            predicate = json!({ "not": predicate });
+        }
+        predicate
+    }
+
+    fn policy_with(calldata: &Value) -> Value {
+        json!({
+            "version": 1,
+            "chains": {"1": {"rules": [{"effect": "allow", "calldata": calldata}]}}
+        })
+    }
+
+    /// The stack was never actually unbounded -- `serde_json` refuses past 128
+    /// levels while parsing -- but that is a constant inside a dependency's
+    /// parser, not a fact about this type. It says nothing about a `Predicate`
+    /// reached any other way, and this crate would not notice it changing.
+    #[test]
+    fn a_predicate_nested_past_the_limit_is_refused() {
+        let error = format!(
+            "{:#}",
+            WalletPolicy::parse(policy_with(&nested(MAX_PREDICATE_DEPTH + 4)))
+                .expect_err("a tree nobody can review is not admissible")
+        );
+        assert!(error.contains("nests deeper"), "{error}");
+    }
+
+    /// And the limit is far enough above real documents that reaching it means
+    /// something is wrong. The deepest shipped example nests four.
+    #[test]
+    fn an_ordinarily_nested_predicate_is_admitted() {
+        WalletPolicy::parse(policy_with(&nested(4))).expect("four levels is an ordinary policy");
+    }
+
+    /// Depth alone would miss this: one level, enormous sideways. The node
+    /// budget is what bounds the work rather than the stack.
+    #[test]
+    fn a_predicate_that_is_wide_rather_than_deep_is_refused() {
+        let literals: Vec<String> = (0..=MAX_PREDICATE_NODES)
+            .map(|index| format!("{index}"))
+            .collect();
+        let error = format!(
+            "{:#}",
+            WalletPolicy::parse(policy_with(&json!({ "in": literals })))
+                .expect_err("a million-entry set is not a reviewable rule")
+        );
+        assert!(error.contains("more than"), "{error}");
+    }
+
+    /// The counts around the rules are bounded too, so admission cannot be
+    /// made expensive by repetition instead of by nesting.
+    #[test]
+    fn a_document_with_too_many_rules_is_refused() {
+        let rules: Vec<Value> = (0..2_000)
+            .map(|_| json!({"effect": "allow", "calldata": "any_value"}))
+            .collect();
+        assert!(
+            WalletPolicy::parse(json!({
+                "version": 1,
+                "chains": {"1": {"rules": rules}}
+            }))
+            .is_err()
+        );
+
+        let chains: serde_json::Map<String, Value> = (1..=300)
+            .map(|index| (index.to_string(), json!({"rules": []})))
+            .collect();
+        assert!(WalletPolicy::parse(json!({"version": 1, "chains": chains})).is_err());
+    }
 }

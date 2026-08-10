@@ -35,7 +35,7 @@ use crate::{
     human_presence::{HumanPresence, PresenceRequest},
     message::{MessageStatus, MessageStore, PendingMessage},
     pending::{PendingStatus, PendingStore, PendingTransaction},
-    policy_store::StoredPolicy,
+    policy_store::{PolicyStore, StoredPolicy},
     simulation::{SimulationResult, simulate_execution},
     typed_data::{PendingTypedData, TypedDataStatus, TypedDataStore},
 };
@@ -112,6 +112,40 @@ fn lock(pending: &Mutex<PendingStore>) -> Result<std::sync::MutexGuard<'_, Pendi
     pending
         .lock()
         .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))
+}
+
+/// Write down that the owner said no, and be honest about it if that fails.
+///
+/// By the time this runs the reviewer has already been told the request was
+/// refused — the presenter drew that on their terminal. The row is what decides
+/// whether it is true: `store_signed` accepts anything still
+/// `AwaitingApproval`, so a rejection that did not commit leaves a request the
+/// owner declined available to a later approval flow, which can sign it.
+///
+/// Two distinct outcomes were previously reported the same way. `reject`
+/// commits and *then* re-reads, so a failure in that read means the rejection
+/// did land while the caller hears an error. Asking the row settles which
+/// happened: already `Rejected` is a success that reported itself badly, and
+/// anything else is a rejection that genuinely is not recorded — which the
+/// owner has to be told plainly, because what they saw says otherwise.
+fn record_rejection(
+    pending: &Mutex<PendingStore>,
+    request_id: uuid::Uuid,
+) -> Result<PendingTransaction> {
+    let error = match lock(pending).and_then(|mut store| store.reject(request_id)) {
+        Ok(rejected) => return Ok(rejected),
+        Err(error) => error,
+    };
+    if let Ok(current) = lock(pending).and_then(|store| store.get(request_id))
+        && current.status == PendingStatus::Rejected
+    {
+        return Ok(current);
+    }
+    Err(error).context(format!(
+        "the rejection was not recorded, so request {request_id} is still awaiting approval and \
+         can still be signed even though it was refused; reject it again with `ekubo-wallet \
+         review {request_id} --decision reject`"
+    ))
 }
 
 /// The admission ladder every send passes before any decision is made on the
@@ -358,8 +392,10 @@ pub async fn approve_transaction(
     // refused. A decision this function calls a decision has to be written
     // like one.
     if decision != ApprovalDecision::Approved {
-        let rejected = lock(&pending)?.reject(request.request_id)?;
-        return Ok(ApprovalOutcome::Rejected(rejected));
+        return Ok(ApprovalOutcome::Rejected(record_rejection(
+            &pending,
+            request.request_id,
+        )?));
     }
     // Whatever the reviewer last had in front of them, not what was authored
     // first. A refresh replaces the simulation and the prepared envelope
@@ -713,6 +749,40 @@ async fn transaction_approval_request(
     Ok(request)
 }
 
+/// Refuse a wallet that has no policy, whatever it is being asked to sign.
+///
+/// "No policy" is the half-provisioned state: `account create` and
+/// `account import` write the wallet into `config.json` and only then
+/// initialize its policy, so a failure between the two leaves a wallet whose
+/// key exists and whose authority was never described. The CLI tells the owner
+/// that state fails closed — "it has no policy, so signing fails closed and the
+/// MCP server refuses to start until it has one" — and for transactions it
+/// does, because grading a plan needs a policy to grade it against.
+///
+/// Off-chain signing consulted no policy at all, by design: a policy cannot
+/// score what a permit authorizes, so a person reads every payload. But
+/// "consults no policy" quietly became "does not need one to exist", and the
+/// only enforcement of the invariant was a loop over the wallets present when
+/// the server started. A wallet half-provisioned afterwards was invisible to
+/// it, and a running server would queue and sign that wallet's EIP-712
+/// payloads — a permit, an order, a delegation — for a human who was told the
+/// wallet was inert.
+///
+/// So the check sits on the signature rather than on startup, and it is a
+/// separate question from what a policy *says*: this asks only whether the
+/// wallet was ever finished. A wallet is either provisioned or it is not, and
+/// nothing it holds may be signed until it is.
+fn require_provisioned_wallet(policies: &PolicyStore, wallet_id: &str) -> Result<()> {
+    ensure!(
+        policies.get(wallet_id)?.is_some(),
+        "wallet {wallet_id} has no policy, so nothing it holds can be signed. It was created or \
+         imported while policy initialization failed. Give it one with `ekubo-wallet policy \
+         require-approval {wallet_id}`, or remove it with `ekubo-wallet account remove \
+         {wallet_id}`."
+    );
+    Ok(())
+}
+
 /// Confirm owner presence and sign one reviewed EIP-191 message.
 ///
 /// The caller has already drawn the review and taken the reviewer's decision;
@@ -728,6 +798,7 @@ async fn transaction_approval_request(
 /// repeats the digest and status checks inside its own transaction.
 pub async fn sign_reviewed_message(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: &mut MessageStore,
     request: &PendingMessage,
     wallet: &WalletMetadata,
@@ -735,6 +806,8 @@ pub async fn sign_reviewed_message(
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
 ) -> Result<PendingMessage> {
+    require_provisioned_wallet(policies, &wallet.id)?;
+
     presence
         .confirm(&PresenceRequest::SignMessage {
             wallet: wallet.id.clone(),
@@ -776,6 +849,7 @@ pub async fn sign_reviewed_message(
 /// the same reasons; only the queue and the presence reason differ.
 pub async fn sign_reviewed_typed_data(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: &mut TypedDataStore,
     request: &PendingTypedData,
     wallet: &WalletMetadata,
@@ -783,6 +857,8 @@ pub async fn sign_reviewed_typed_data(
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
 ) -> Result<PendingTypedData> {
+    require_provisioned_wallet(policies, &wallet.id)?;
+
     presence
         .confirm(&PresenceRequest::SignTypedData {
             wallet: wallet.id.clone(),
@@ -821,3 +897,11 @@ pub async fn sign_reviewed_typed_data(
 #[cfg(test)]
 #[path = "orchestrator_calldata_display_test.rs"]
 mod calldata_display_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_rejection_test.rs"]
+mod rejection_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_provisioning_test.rs"]
+mod provisioning_tests;

@@ -75,7 +75,7 @@ fn a_rejected_send_whose_transaction_landed_is_reported_as_mined() {
                 gas_used: 21_000,
                 effective_gas_price: 1_000_000_000,
             }),
-            false,
+            Presence::Absent,
             (*rejection).to_owned(),
         );
         assert_eq!(result.receipt_status, ReceiptStatus::Success);
@@ -97,7 +97,7 @@ fn a_rejected_send_whose_transaction_reverted_reports_the_revert_not_the_rejecti
             gas_used: 21_000,
             effective_gas_price: 1_000_000_000,
         }),
-        false,
+        Presence::Absent,
         "nonce too low".to_owned(),
     );
     assert_eq!(result.receipt_status, ReceiptStatus::Reverted);
@@ -110,7 +110,7 @@ fn a_rejected_send_whose_transaction_is_in_the_mempool_is_an_ordinary_pending_se
     // Submission succeeded; the rejection described an earlier attempt.
     // An agent must not be able to tell this from a clean send, because
     // there is nothing different for it to do.
-    let result = send_failure_outcome("0xabc", None, true, "already known".to_owned());
+    let result = send_failure_outcome("0xabc", None, Presence::Held, "already known".to_owned());
     assert_eq!(result.receipt_status, ReceiptStatus::Pending);
     assert_eq!(result.block_number, None);
     assert!(result.broadcast_error.is_none());
@@ -121,13 +121,42 @@ fn a_send_the_chain_never_heard_of_keeps_its_error() {
     let result = send_failure_outcome(
         "0xabc",
         None,
-        false,
+        Presence::Absent,
         "insufficient funds for gas * price + value".to_owned(),
     );
     assert_eq!(result.receipt_status, ReceiptStatus::Pending);
     assert_eq!(
         result.broadcast_error.as_deref(),
         Some("insufficient funds for gas * price + value")
+    );
+    assert!(
+        result.absence_established,
+        "the node answered, so the lifecycle may act on this"
+    );
+}
+
+/// The third answer, which used to arrive as the second. A raw-send timeout
+/// can happen *after* the node accepted the transaction, so an observation
+/// that timed out or errored establishes nothing -- and `submit_claimed` used
+/// to spend it on releasing the submission lease, putting a possibly-live
+/// transaction back to `signed` where it is retryable and discardable.
+#[test]
+fn a_send_whose_absence_could_not_be_observed_says_so() {
+    let result = send_failure_outcome(
+        "0xabc",
+        None,
+        Presence::Unobserved,
+        "transaction submission RPC timed out".to_owned(),
+    );
+    assert_eq!(result.receipt_status, ReceiptStatus::Pending);
+    assert_eq!(
+        result.broadcast_error.as_deref(),
+        Some("transaction submission RPC timed out"),
+        "the caller asked for a send and did not get one, so the failure is still reported"
+    );
+    assert!(
+        !result.absence_established,
+        "but nothing observed the transaction to be absent, so the lifecycle must not act on it"
     );
 }
 
@@ -407,4 +436,220 @@ fn a_configured_fee_ceiling_refuses_an_endpoint_that_names_more() {
 
     network.max_fee_per_gas = Some("not a number".into());
     assert!(capped_fee(&network, 1).is_err());
+}
+
+/// The window between recording a simulation and sending it. Nothing in
+/// `validate_send` moves when a delegation does -- it checks the wallet, the
+/// chain, the policy revision, the plan digest, and the fork flag -- so the
+/// batch used to be signed against whatever `will_authorize_delegation` said
+/// minutes earlier.
+#[test]
+fn a_delegation_that_moved_after_simulation_refuses_the_send() {
+    use alloy::primitives::{Address, Bytes};
+
+    let wallet = Address::repeat_byte(0x11);
+    let other = Address::repeat_byte(0x22);
+    let designator = |address: Address| {
+        let mut bytes = vec![0xef, 0x01, 0x00];
+        bytes.extend_from_slice(address.as_slice());
+        Bytes::from(bytes)
+    };
+    let empty = Bytes::new();
+
+    // Undelegated at simulation and still undelegated: authorize, as before.
+    assert!(authorization_for_send(&empty, wallet, None).unwrap());
+
+    // Already delegated to the implementation this batch targets. The
+    // authorization would be a no-op that still consumes a nonce.
+    assert!(
+        !authorization_for_send(&designator(CANONICAL_CALIBUR), wallet, None).unwrap(),
+        "an account already delegated to Calibur must not pay for a second authorization"
+    );
+
+    // Simulated against no delegation, but the account acquired one in the
+    // meantime. The batch would replace an implementation nobody reviewed.
+    let error = format!(
+        "{:#}",
+        authorization_for_send(&designator(other), wallet, None)
+            .expect_err("a delegation that appeared after simulation must stop the send")
+    );
+    assert!(error.contains("delegation changed"), "{error}");
+    assert!(error.contains("Simulate the plan again"), "{error}");
+
+    // And the reverse: reviewed as replacing `other`, but it is gone now.
+    let error = format!(
+        "{:#}",
+        authorization_for_send(&empty, wallet, Some(&format!("{other:#x}")))
+            .expect_err("a delegation that vanished after simulation must stop the send")
+    );
+    assert!(error.contains("delegation changed"), "{error}");
+
+    // Reviewed as replacing `other`, and that is still what is there.
+    assert!(
+        authorization_for_send(&designator(other), wallet, Some(&format!("{other:#x}"))).unwrap()
+    );
+
+    // Code that is not a designator at all is not something to sign against.
+    assert!(authorization_for_send(&Bytes::from(vec![0x60, 0x00]), wallet, None).is_err());
+}
+
+mod cancellation_gas_tests {
+    //! A cancellation that cannot be mined is a cancellation that did not happen.
+
+    use super::*;
+
+    /// The estimate is an endpoint's answer and a cancellation cannot be
+    /// simulated, so nothing else checks it. Zero -- or anything under half the
+    /// intrinsic cost, since the multiplier is 2 -- signed an envelope below
+    /// the 21,000 gas every transaction costs before it does anything, which
+    /// every honest peer rejects.
+    ///
+    /// The rejection is not the damage. The envelope is persisted before it is
+    /// broadcast, so each one spends a slot in a history capped at
+    /// `MAX_CANCELLATION_ATTEMPTS`; at the cap, reconciliation stops repricing
+    /// and rebroadcasts the newest stored envelope. Eight bad estimates leave
+    /// the owner resending an invalid envelope forever while the transaction
+    /// they were trying to stop mines.
+    #[test]
+    fn an_estimate_below_the_intrinsic_cost_still_signs_a_mineable_limit() {
+        let ceiling = 30_000_000;
+        for dishonest in [0, 1, 10_499] {
+            assert_eq!(
+                cancellation_gas_limit(dishonest, ceiling),
+                INTRINSIC_TRANSACTION_GAS,
+                "an estimate of {dishonest} must still buy a transaction that can mine"
+            );
+        }
+    }
+
+    /// An honest estimate is doubled as before. The floor is a floor, not a
+    /// replacement for the estimate.
+    #[test]
+    fn an_ordinary_estimate_is_unchanged() {
+        assert_eq!(cancellation_gas_limit(21_000, 30_000_000), 42_000);
+        assert_eq!(cancellation_gas_limit(50_000, 30_000_000), 100_000);
+    }
+
+    /// And the ceiling still wins over the multiplier, because that is the
+    /// bound protecting against the estimate being too large rather than too
+    /// small.
+    #[test]
+    fn the_usable_ceiling_still_caps_the_result() {
+        assert_eq!(cancellation_gas_limit(u64::MAX, 100_000), 100_000);
+        assert_eq!(cancellation_gas_limit(60_000, 100_000), 100_000);
+    }
+
+    /// The floor can never breach the ceiling, because `usable_gas_ceiling`
+    /// refuses a ceiling below the intrinsic cost before this is reached. This
+    /// is what makes raising safe rather than a second guess about the bound.
+    #[test]
+    fn the_floor_cannot_exceed_a_ceiling_that_was_admitted() {
+        let network = crate::config::default_networks()
+            .into_iter()
+            .find(|network| network.chain_id == 1)
+            .expect("mainnet preset");
+        assert!(usable_gas_ceiling(&network, INTRINSIC_TRANSACTION_GAS - 1).is_err());
+        let admitted = usable_gas_ceiling(&network, INTRINSIC_TRANSACTION_GAS).unwrap();
+        assert!(cancellation_gas_limit(0, admitted) <= admitted);
+    }
+}
+
+mod automatic_gas_floor_tests {
+    //! The twin of the cancellation floor, on the path with no human on it.
+
+    use super::*;
+
+    fn simulation(gas_used: &str, block_gas_limit: &str, delegating: bool) -> SimulationResult {
+        let mut result = crate::simulation::SimulationResult {
+            simulation_id: None,
+            digest: format!("0x{}", "11".repeat(32)),
+            allowed: true,
+            policy_outcome: crate::core::policy::PolicyOutcome::Allowed,
+            policy_findings: Vec::new(),
+            policy_revision: 1,
+            execution_mode: crate::simulation::ExecutionMode::Direct,
+            implementation: None,
+            will_authorize_delegation: delegating,
+            replaces_delegated_implementation: None,
+            simulation: crate::simulation::SimulationExecution {
+                success: true,
+                gas_used: Some(gas_used.into()),
+                block_gas_limit: Some(block_gas_limit.into()),
+                output: None,
+                error: None,
+                failure: None,
+            },
+            token_spends: std::collections::BTreeMap::new(),
+            balance_changes: None,
+            block_number: "100".into(),
+            fork: None,
+        };
+        result.simulation.success = true;
+        result
+    }
+
+    fn mainnet() -> crate::config::NetworkConfig {
+        crate::config::default_networks()
+            .into_iter()
+            .find(|network| network.chain_id == 1)
+            .expect("mainnet preset")
+    }
+
+    /// `execution_output` copies `max_used_gas` or `gas_used` through
+    /// untouched, so a successful simulation claiming `0` multiplied to `0`
+    /// and was signed. Nodes reject an envelope under the intrinsic cost
+    /// before executing it, and the automatic path records it -- taking the
+    /// wallet's one in-flight slot for the chain, with no human anywhere in
+    /// the sequence to notice.
+    #[test]
+    fn a_simulation_reporting_no_gas_still_signs_a_mineable_limit() {
+        let network = mainnet();
+        for reported in ["0", "1", "10499"] {
+            let limit = signing_gas_limit(&network, &simulation(reported, "30000000", false))
+                .expect("an endpoint's number is not a reason to refuse to sign");
+            assert!(
+                limit >= INTRINSIC_TRANSACTION_GAS,
+                "{reported} gas produced a limit of {limit}"
+            );
+        }
+    }
+
+    /// A delegation pays its authorization on top of the intrinsic cost, so
+    /// the floor moves with it rather than being a constant.
+    ///
+    /// It does not bind here, and that is worth stating rather than asserting
+    /// around: the authorization cost is already in the baseline, so doubling
+    /// it clears the floor by itself. What the floor guarantees is the bound,
+    /// not that it is the answer.
+    #[test]
+    fn a_delegating_transaction_floors_above_the_bare_intrinsic_cost() {
+        let floor = INTRINSIC_TRANSACTION_GAS + EIP7702_AUTHORIZATION_INTRINSIC_COST;
+        let limit = signing_gas_limit(&mainnet(), &simulation("0", "30000000", true)).unwrap();
+        assert!(
+            limit >= floor,
+            "{limit} is below the {floor} this transaction costs"
+        );
+        assert!(
+            limit > INTRINSIC_TRANSACTION_GAS,
+            "the bare intrinsic cost is not enough for a transaction that authorizes"
+        );
+    }
+
+    /// An ordinary simulation is unchanged: the floor is a floor, not a
+    /// replacement for the estimate.
+    #[test]
+    fn an_ordinary_simulation_is_unchanged() {
+        let limit = signing_gas_limit(&mainnet(), &simulation("50000", "30000000", false)).unwrap();
+        assert_eq!(limit, 100_000);
+    }
+
+    /// And a ceiling that cannot hold the floor is refused rather than
+    /// silently clamped past it -- the one case where raising would otherwise
+    /// breach a bound the owner set.
+    #[test]
+    fn a_ceiling_below_the_floor_is_refused() {
+        let mut network = mainnet();
+        network.max_gas_limit = Some("21000".into());
+        assert!(signing_gas_limit(&network, &simulation("0", "30000000", true)).is_err());
+    }
 }

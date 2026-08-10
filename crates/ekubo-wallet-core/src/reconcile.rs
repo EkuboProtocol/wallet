@@ -235,7 +235,32 @@ async fn recheck_replaced(
 }
 
 fn submission_lease_expired(record: &PendingTransaction) -> bool {
-    Utc::now() - record.updated_at >= TimeDelta::seconds(SUBMISSION_LEASE_SECONDS)
+    lease_expired(Utc::now() - record.updated_at)
+}
+
+/// Whether a submission lease of this age may be reclaimed.
+///
+/// Split from the clock so the rule is testable without one, and because the
+/// interesting case is the age nobody expected: a negative one.
+///
+/// `updated_at` is a durable wall-clock value with no plausibility bound in
+/// the schema or the row decoding, so a row stamped in the future — a clock
+/// that jumped and came back, a database copied between machines, a restored
+/// backup — yields a negative age. Compared only against the lease interval,
+/// that reads as a lease with time still to run, and reconciliation declines
+/// to recover the row until wall time catches up to the stamp *and then* 120
+/// seconds pass. `submitting` holds the wallet's one in-flight slot for that
+/// chain through the partial unique index, so the wallet is frozen there for
+/// however far ahead the timestamp was, and nothing short of repairing the
+/// database shortens it.
+///
+/// A lease whose age is negative is therefore not a lease. The two failure
+/// directions are not symmetric: recovering too early is bounded — every
+/// recovery transition is a compare-and-set on `generation`, so a recovery
+/// racing a live submitter loses rather than corrupting it — while refusing to
+/// recover is unbounded and needs a human with a SQL prompt.
+fn lease_expired(age: TimeDelta) -> bool {
+    age < TimeDelta::zero() || age >= TimeDelta::seconds(SUBMISSION_LEASE_SECONDS)
 }
 
 /// Settle the race between a broadcast envelope and its own cancellation
@@ -348,11 +373,28 @@ pub async fn submit_claimed(
     // The lease goes back instead, exactly as a transport failure returns it.
     // The row is `signed` again: retryable, discardable, and honest about
     // never having been submitted.
-    if broadcast.broadcast_error.is_some() {
+    //
+    // All of which holds only when the absence was actually observed. A
+    // raw-send timeout can happen *after* the node accepted the transaction,
+    // and the lookups that follow it can themselves time out — so
+    // `broadcast_error` alone does not mean the chain does not have this
+    // envelope, it means the wallet asked for a send and did not get one.
+    // Releasing the lease on that reads "we could not tell" as "it is not
+    // there", puts a possibly-live transaction back to `signed`, and invites
+    // the owner to discard or replace something that may still mine.
+    //
+    // Unobserved keeps the lease. The row stays `submitting`, which is what
+    // the stale-lease machinery is for: it lapses after
+    // `SUBMISSION_LEASE_SECONDS` and the next reconcile pass asks the chain
+    // again and settles it on an observation rather than on a guess.
+    if broadcast.broadcast_error.is_some() && broadcast.absence_established {
         let record = lock(pending)?
             .release_submission(claimed.request_id, claimed.generation)
             .context("failed to release the lease of a transaction no endpoint accepted")?;
         return Ok((record, broadcast));
+    }
+    if broadcast.broadcast_error.is_some() {
+        return Ok((claimed, broadcast));
     }
     let record = {
         let mut pending = lock(pending)?;
@@ -393,11 +435,43 @@ pub async fn submit_claimed(
 /// narrow an in-flight authorization to nothing, at the cost of gas.
 pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     pending: &Mutex<PendingStore>,
+    config: &ConfigStore,
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     record: PendingTransaction,
     keys: &K,
 ) -> Result<(PendingTransaction, BroadcastResult)> {
+    // The record is re-read below; the configuration was not read at all.
+    //
+    // The caller resolved both of these before the await, and the snapshot it
+    // handed over then decides endpoint selection, chain-ID validation, fee
+    // estimation, the gas ceiling, and where the envelope is broadcast.
+    // Configuration writes replace the whole document atomically and readers
+    // hold independent snapshots, so another CLI or the MCP server can replace
+    // the profile -- or remove the wallet -- while this runs. A cancellation
+    // priced and sent through endpoints the owner has already replaced is the
+    // one signing path with no policy and no review behind it.
+    //
+    // This asks only whether they changed underneath, not which profile is
+    // allowed. Nothing an owner might legitimately want is refused: the remedy
+    // is to run the command again, which picks up whatever is current now and
+    // succeeds. Refusing on the grounds that a profile *had* been replaced --
+    // the rule `network_for_record` applies to `transaction discard` -- would
+    // be wrong here, because being unable to cancel is the failure this path
+    // exists to prevent.
+    ensure!(
+        config.wallet(&record.wallet_id)? == *wallet,
+        "wallet {} changed while this cancellation was being prepared; nothing was signed. Run \
+         the command again.",
+        record.wallet_id
+    );
+    ensure!(
+        config.network_by_chain_id(&record.chain_id)? == *network,
+        "the network profile for chain {} changed while this cancellation was being prepared, \
+         so it would have been priced and sent through endpoints that are no longer configured; \
+         nothing was signed. Run the command again.",
+        record.chain_id
+    );
     // Re-read before pricing anything. The caller hands over a snapshot: the
     // transaction browser captured its copy before the owner opened the detail
     // view and pressed the key, and the CLI and the MCP server share this

@@ -36,9 +36,10 @@ use crate::{
         MessageStatus, MessageStore, PendingMessage, describe_message, message_digest, parse_siwe,
         siwe_warnings,
     },
+    policy_store::PolicyStore,
     typed_data::{
-        PendingTypedData, TypedDataStatus, TypedDataStore, interpret_permit_approvals,
-        parse_typed_data,
+        PendingTypedData, PermitApproval, TypedDataStatus, TypedDataStore,
+        interpret_permit_approvals, parse_typed_data,
     },
 };
 use anyhow::{Result, ensure};
@@ -69,17 +70,69 @@ pub enum TypedDataDecision {
 /// `no_confirm` skips only the interactive review. Owner authentication still
 /// follows, and the transcript is still printed, so the reviewer sees the
 /// subject even on the path that answers the question for them.
+/// Which account a queued signature has to be for.
+///
+/// A request row keeps `wallet_id`, and a wallet id is reusable: `account
+/// remove` then `account create` under the same name gives it a different key
+/// and a different address. Reloading the wallet by id at review time
+/// therefore answers "whichever account holds that name now", which is the
+/// right answer in one caller and the wrong one in the other.
+///
+/// The CLI review has nothing but the request, so the id is the whole context
+/// and [`Self::AsRecorded`] is correct — the orchestrator still re-reads the
+/// configuration at signing time, so the wallet cannot change between review
+/// and signature.
+///
+/// A `WalletConnect` session has more: it settled on a specific account during
+/// the connection review, told the dapp that address, and measures every
+/// request against it. But it stored a request under an id and then waited for
+/// a person, and those two bindings can come apart while it waits. The
+/// session's own `refuse_replaced_account` catches that at dispatch and does
+/// not run again, so the account could be replaced during the review — leaving
+/// the session's checks measuring the old address and the signature produced
+/// by the new key. A payload naming the old address as its RPC signer would
+/// pass the session's scope while carrying a permit whose owner is the new
+/// account, which is the key that would sign it. [`Self::Settled`] is the
+/// session saying which account it meant, so the review can refuse rather than
+/// follow the name.
+pub enum SigningAccount<'a> {
+    /// Whatever `wallet_id` names now.
+    AsRecorded,
+    /// The account a live session settled on and advertised.
+    Settled(&'a crate::config::WalletMetadata),
+}
+
+impl SigningAccount<'_> {
+    /// Refuse a wallet that is no longer the account this decision is for.
+    fn check(&self, wallet: &crate::config::WalletMetadata) -> Result<()> {
+        let Self::Settled(settled) = self else {
+            return Ok(());
+        };
+        ensure!(
+            wallet == *settled,
+            "the account this session connected with ({}) is no longer configured under {}, so \
+             this request would be signed by a different key than the one the session \
+             advertised. Disconnect and reconnect to use the account that is.",
+            settled.address.to_checksum(None),
+            settled.id
+        );
+        Ok(())
+    }
+}
+
 pub async fn decide_message(
     config: &ConfigStore,
+    policies: &PolicyStore,
     mut store: MessageStore,
     request: PendingMessage,
-    no_confirm: bool,
+    account: &SigningAccount<'_>,
 ) -> Result<MessageDecision> {
     ensure!(
         request.status == MessageStatus::AwaitingApproval,
         "message request is not awaiting approval"
     );
     let wallet = config.wallet(&request.wallet_id)?;
+    account.check(&wallet)?;
     if let Some(chain_id) = &request.chain_id {
         config.network_by_chain_id(chain_id)?;
     }
@@ -206,12 +259,21 @@ pub async fn decide_message(
             "siwe": siwe,
         },
     }))?;
-    if !no_confirm
-        && !reviewer_approved(
-            approval,
-            message_payload_lines(&request.message_hex, &display),
-        )
-        .await?
+    // Not conditional on anything. `--decision approve` used to skip this,
+    // and this is the component that defaults to Reject and refuses Approve
+    // until the end of the payload has been on screen. The owner
+    // authentication that follows names a wallet and an operation; it is not
+    // evidence that anyone saw *these bytes*, which for an EIP-191 login or an
+    // EIP-712 permit is the only thing the signature is about.
+    //
+    // A non-interactive approval of an off-chain signature is therefore not a
+    // thing this offers. Rejecting without a prompt still is: it signs
+    // nothing, and a scripted session must always be able to say no.
+    if !reviewer_approved(
+        approval,
+        message_payload_lines(&request.message_hex, &display),
+    )
+    .await?
     {
         return Ok(MessageDecision::Rejected(store.reject(request.request_id)?));
     }
@@ -222,6 +284,7 @@ pub async fn decide_message(
     Ok(MessageDecision::Signed(
         crate::orchestrator::sign_reviewed_message(
             config,
+            policies,
             &mut store,
             &request,
             &wallet,
@@ -238,15 +301,17 @@ pub async fn decide_message(
 /// Who asked is read from the row, on the same terms as [`decide_message`].
 pub async fn decide_typed_data(
     config: &ConfigStore,
+    policies: &PolicyStore,
     mut store: TypedDataStore,
     request: PendingTypedData,
-    no_confirm: bool,
+    account: &SigningAccount<'_>,
 ) -> Result<TypedDataDecision> {
     ensure!(
         request.status == TypedDataStatus::AwaitingApproval,
         "typed-data request is not awaiting approval"
     );
     let wallet = config.wallet(&request.wallet_id)?;
+    account.check(&wallet)?;
     config.network_by_chain_id(&request.chain_id)?;
     let (typed, chain_id, digest) = parse_typed_data(&request.typed_data)?;
     ensure!(
@@ -303,20 +368,52 @@ pub async fn decide_typed_data(
     }
 
     if let Some(approvals) = &permit_approvals {
+        // A standing allowance and a one-time transfer authorization are not
+        // the same grant, and the decoder has always known which is which --
+        // `kind` says so. The renderer said "allow X to spend up to Y" for
+        // both. A SignatureTransfer creates nothing the owner can later
+        // inspect or revoke: the spender consumes it once, to a recipient
+        // chosen when they execute it, and there is no allowance to go and
+        // look at afterwards. Describing that as an allowance tells the reader
+        // to expect a thing that will not exist.
+        let mut any_transfer = false;
         for (index, permit) in approvals.iter().enumerate() {
+            let one_time = permit.kind == "permit2_signature_transfer";
+            any_transfer |= one_time;
+            let grant = permit_grant_sentence(permit, one_time);
             approval = approval.fact(
                 format!("Grants approval {}", index + 1),
                 format!(
-                    "{}: allow {} to spend up to {} of token {}{}",
-                    permit.kind,
-                    permit.spender,
-                    permit.amount,
-                    permit.token,
+                    "{grant}{}{}",
+                    // Two different clocks, and calling both "deadline" is
+                    // what made the shorter one look like the limit. For
+                    // Permit2 this one bounds only how long the signature may
+                    // be submitted; the allowance it grants then lasts until
+                    // `expiration`, which can be far later or maximal.
                     permit
                         .deadline
                         .as_deref()
-                        .map_or_else(String::new, |deadline| format!("; deadline {deadline}")),
+                        .map_or_else(String::new, |deadline| {
+                            if permit.expiration.is_some() {
+                                format!("; signature usable until {deadline}")
+                            } else {
+                                format!("; deadline {deadline}")
+                            }
+                        }),
+                    permit
+                        .expiration
+                        .as_deref()
+                        .map_or_else(String::new, |expiration| format!(
+                            "; ALLOWANCE LASTS UNTIL {expiration}"
+                        )),
                 ),
+            );
+        }
+        if any_transfer {
+            approval = approval.warning(
+                "A one-time transfer authorization is not an allowance: there is nothing to \
+                 inspect or revoke afterwards, and the recipient is chosen by whoever executes \
+                 it, not by this signature.",
             );
         }
         approval = approval.warning(
@@ -335,9 +432,9 @@ pub async fn decide_typed_data(
         "approval": approval,
         "typed_data": request.typed_data,
     }))?;
-    if !no_confirm
-        && !reviewer_approved(approval, typed_data_payload_lines(&request.typed_data)).await?
-    {
+    // As in `decide_message`: the review is what the signature is about, so
+    // there is no mode that skips it.
+    if !reviewer_approved(approval, typed_data_payload_lines(&request.typed_data)).await? {
         return Ok(TypedDataDecision::Rejected(
             store.reject(request.request_id)?,
         ));
@@ -348,6 +445,7 @@ pub async fn decide_typed_data(
     Ok(TypedDataDecision::Signed(
         crate::orchestrator::sign_reviewed_typed_data(
             config,
+            policies,
             &mut store,
             &request,
             &wallet,
@@ -410,6 +508,33 @@ pub async fn reviewer_approved(
         crate::approve_tui::review_fullscreen(&request, payload).await?
             == ApprovalDecision::Approved,
     )
+}
+
+/// How one decoded permit reads in the review.
+///
+/// A standing allowance and a one-time transfer authorization are not the same
+/// grant, and the decoder has always known which is which — `kind` says so.
+/// The renderer described both as "allow X to spend up to Y". A Permit2
+/// `SignatureTransfer` creates nothing the owner can later inspect or revoke:
+/// the spender consumes it once, to a recipient chosen when they execute it.
+/// Calling that an allowance tells the reader to expect a thing that will not
+/// exist, and to look for a revocation that is not there.
+///
+/// Separate from the review so both sentences are testable without building a
+/// request, a wallet, and a configuration to reach them.
+pub(crate) fn permit_grant_sentence(permit: &PermitApproval, one_time: bool) -> String {
+    if one_time {
+        format!(
+            "{}: one-time transfer of up to {} of token {}, which {} may execute once to a \
+             recipient it chooses",
+            permit.kind, permit.amount, permit.token, permit.spender,
+        )
+    } else {
+        format!(
+            "{}: allow {} to spend up to {} of token {}",
+            permit.kind, permit.spender, permit.amount, permit.token,
+        )
+    }
 }
 
 /// Payload text for the full-screen review: every control or bidirectional
@@ -486,8 +611,46 @@ fn hex_payload_rows(message_hex: &str) -> Vec<String> {
         .collect()
 }
 
+/// One line rewritten with every non-ASCII character as its code point, or
+/// `None` when the line is pure ASCII and so has only one possible reading.
+///
+/// `escape_payload_line` shows the characters that are invisible or that
+/// reorder what follows them. It cannot show the ones whose whole trick is
+/// that they look exactly like something else: Cyrillic `а` renders as Latin
+/// `a`, Greek `ο` as `o`, and a payload naming `USDС` with a Cyrillic Es is a
+/// different string than one naming `USDC`, signed by a digest that knows the
+/// difference even though the terminal does not.
+///
+/// A confusable list is the wrong answer to that — it is a denylist, it has to
+/// be maintained, and the character it does not know about is the one an
+/// attacker picks. What the reviewer needs is not a warning about particular
+/// characters but the exact ones, so this states them: any non-ASCII at all
+/// gets written out. The rendered line stays as it was, since a reviewer who
+/// reads Japanese should still be shown Japanese; the escape sits under it as
+/// the thing that decides.
+fn code_point_line(line: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    if line.is_ascii() {
+        return None;
+    }
+    let mut exact = String::with_capacity(line.len());
+    for character in line.chars() {
+        if character.is_ascii() {
+            exact.push(character);
+        } else {
+            let _ = write!(exact, "\\u{{{:04x}}}", character as u32);
+        }
+    }
+    Some(exact)
+}
+
 /// The complete EIP-712 payload, pretty-printed, for the scrollable review
 /// document.
+///
+/// The digest commits to the exact code points, so the review has to show them
+/// wherever the rendering alone would not. Every line that is not pure ASCII
+/// carries its exact form underneath; a payload that is all ASCII — nearly all
+/// of them — reads exactly as it did.
 #[must_use]
 pub fn typed_data_payload_lines(typed_data: &serde_json::Value) -> Vec<crate::fullscreen::Line> {
     use crate::fullscreen::Span;
@@ -498,11 +661,26 @@ pub fn typed_data_payload_lines(typed_data: &serde_json::Value) -> Vec<crate::fu
         Vec::new(),
         vec![Span::toned("Complete EIP-712 payload", Tone::Emphasis)],
     ];
-    lines.extend(
-        pretty
-            .split('\n')
-            .map(|line| vec![Span::plain(escape_payload_line(line))]),
-    );
+    let mut annotated = false;
+    for line in pretty.split('\n') {
+        lines.push(vec![Span::plain(escape_payload_line(line))]);
+        if let Some(exact) = code_point_line(line) {
+            annotated = true;
+            lines.push(vec![Span::toned(
+                format!("  exactly: {exact}"),
+                Tone::Warning,
+            )]);
+        }
+    }
+    if annotated {
+        lines.push(Vec::new());
+        lines.push(vec![Span::toned(
+            "This payload contains characters outside ASCII. Each such line is followed by its \
+             exact code points, because two different strings can render identically and the \
+             signature commits to the one written here, not to what it looks like.",
+            Tone::Warning,
+        )]);
+    }
     lines
 }
 

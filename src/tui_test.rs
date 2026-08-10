@@ -93,3 +93,41 @@ fn a_spent_stdin_does_not_manufacture_a_terminal() {
         "a consumed stdin must not substitute for a terminal to draw on"
     );
 }
+
+/// A permission diff is a list, and a list joined onto one row is a list
+/// nobody reads. `Confirmation` clamped every fact to a single line, which is
+/// why direct policy replacement showed a wallet name, a revision number and a
+/// generic warning where the proposal review had always shown the change
+/// itself.
+#[test]
+fn a_multi_line_fact_keeps_its_lines_apart() {
+    let question = Confirmation::new("Replace wallet policy", "Summary").fact_lines(
+        "Changes",
+        vec![
+            "every chain (*): transfers now allowed up to 1 ETH".to_owned(),
+            "chain 1: approvals to 0xrouter now signed without asking".to_owned(),
+        ],
+    );
+    let rendered = question.rendered_body();
+    assert!(
+        rendered.contains("Changes:\n  every chain (*): transfers now allowed up to 1 ETH"),
+        "the label stands alone and the first line is indented under it: {rendered}"
+    );
+    assert!(
+        rendered.contains("\n  chain 1: approvals to 0xrouter now signed without asking"),
+        "and every later line gets its own row: {rendered}"
+    );
+
+    // A single value is unchanged: still `label: value` on one row.
+    let single = Confirmation::new("t", "s").fact("Wallet", "primary");
+    assert!(single.rendered_body().contains("Wallet: primary"));
+
+    // A newline smuggled into a line cannot forge another fact.
+    let sneaky = Confirmation::new("t", "s")
+        .fact_lines("Changes", vec!["harmless\nAddress: 0xattacker".to_owned()]);
+    let rendered = sneaky.rendered_body();
+    assert!(
+        !rendered.contains("\nAddress: 0xattacker"),
+        "a line is clamped like any other fact value: {rendered}"
+    );
+}

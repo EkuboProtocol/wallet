@@ -478,9 +478,24 @@ fn document_status(document: LegalDocument, record: Option<&AcceptanceRecord>) -
 }
 
 /// Fails closed unless the current terms of service and privacy policy have
-/// both been accepted. The MCP dispatch calls this before every tool except
-/// `wallet_get_legal` (the privacy policy governs even read-only RPC and
-/// agent data exposure), and the signing paths repeat it as defense in depth.
+/// both been accepted.
+///
+/// Called once per request by the two dispatchers — the MCP server before
+/// every tool except `wallet_get_legal` (the privacy policy governs even
+/// read-only RPC and agent data exposure), and the `WalletConnect` session
+/// before every dapp method — and on entry by each CLI command that can reach
+/// a signature.
+///
+/// It is **not** called by the signing paths themselves. The sentence here
+/// used to claim they repeated it as defense in depth, and that was wrong:
+/// none of them calls it. Acceptance is live state: it goes stale when a document changes,
+/// which can happen while a review waits for a person or a reconciliation loop
+/// runs. Per-request dispatch bounds that window to one request; it does not
+/// close it. Closing it means checking at [`crate::custody::load_matching_signer`],
+/// the one point every signature in this process passes through, which means
+/// threading a store into the signing kernel and deciding whether a
+/// *cancellation* — protective rather than new authority — should be refused
+/// when terms have lapsed. Both are maintainer calls.
 pub fn require_current_acceptance(data_dir: &Path) -> Result<()> {
     require_status_allows_use(&LegalStore::production(data_dir)?.status()?)
 }

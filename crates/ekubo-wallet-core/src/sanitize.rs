@@ -37,25 +37,65 @@ pub const fn is_bidirectional_control(character: char) -> bool {
 /// Excluding the zero-width joiners costs correct rendering of scripts that
 /// need them and of emoji sequences. That is a real loss, taken deliberately:
 /// these helpers guard identifiers, amounts, and addresses — text where being
-/// unable to see a character is the whole attack — not prose.
+/// unable to see a character is the whole attack — not prose. The variation
+/// selectors are excluded for the same reason and at the same cost: they
+/// choose which glyph a preceding character wears, so two byte-distinct
+/// values can be made to render identically or a familiar label given an
+/// unfamiliar face, and neither is visible as a character of its own.
+///
+/// This is a denylist, which is the standing weakness of it: everything here
+/// was added because somebody noticed. `std` exposes no Unicode general
+/// category, so the honest alternatives are this list or a `unicode-*`
+/// dependency that carries the Cf and Mn tables. If the list grows again,
+/// that dependency is the better answer — the characters that matter here are
+/// exactly general categories Cf and Mn, and enumerating them by hand will
+/// keep losing to the next revision of the standard.
 #[must_use]
 pub const fn is_invisible_format(character: char) -> bool {
     matches!(
         character,
         '\u{00ad}'                  // soft hyphen
+            | '\u{034f}'            // combining grapheme joiner
             | '\u{180e}'            // Mongolian vowel separator
             | '\u{200b}'..='\u{200d}' // zero-width space, non-joiner, joiner
             | '\u{2060}'..='\u{2064}' // word joiner and invisible operators
+            | '\u{2065}'            // unassigned, but inside the format block
+            | '\u{206a}'..='\u{206f}' // deprecated format characters
+            | '\u{fe00}'..='\u{fe0f}' // variation selectors
             | '\u{feff}'            // zero-width no-break space / BOM
+            | '\u{fff9}'..='\u{fffb}' // interlinear annotation
             | '\u{e0000}'..='\u{e007f}' // tag characters
+            | '\u{e0100}'..='\u{e01ef}' // variation selectors supplement
     )
 }
 
+/// Characters that end a line without being control characters.
+///
+/// `char::is_control` is a property of the C0 and C1 blocks, and these two are
+/// in neither: they are ordinary printable-category punctuation that a great
+/// many renderers nonetheless treat as a hard line break. Every other line
+/// ending this file cares about — `\n`, `\r`, the C1 NEL — is a control
+/// character and was already covered, which is exactly why these two were not.
+///
+/// [`terminal_safe_line`]'s whole contract is that its result occupies the one
+/// line it was given. A stored alias, label, or descriptor carrying `U+2028`
+/// could break that line in a transcript or a platform dialog and draw what
+/// looks like the wallet's own next line — separating an authentication prompt
+/// from the subject it names.
+#[must_use]
+pub const fn is_line_separator(character: char) -> bool {
+    matches!(character, '\u{2028}' | '\u{2029}')
+}
+
 /// The set no rendered surface accepts: control characters, Unicode
-/// bidirectional controls, and zero-width format characters.
+/// bidirectional controls, zero-width format characters, and the two
+/// printable-category line separators.
 #[must_use]
 pub fn is_disallowed(character: char) -> bool {
-    character.is_control() || is_bidirectional_control(character) || is_invisible_format(character)
+    character.is_control()
+        || is_bidirectional_control(character)
+        || is_invisible_format(character)
+        || is_line_separator(character)
 }
 
 /// Every disallowed character, newlines included, becomes a space.

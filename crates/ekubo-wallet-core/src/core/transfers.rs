@@ -35,6 +35,10 @@ pub fn transfer_plan(
     transfers: Vec<Transfer>,
 ) -> Result<ExecutionPlan> {
     ensure!(!transfers.is_empty(), "at least one transfer is required");
+    // The zero-address recipient is refused by `ExecutionPlan::validate`, not
+    // here. It was here first, and here only covered `wallet_send_transfers`;
+    // `wallet_send_execution_plan` reaches the same send with a plan this
+    // function never sees.
     make_plan(
         chain_id,
         sender,
@@ -93,3 +97,7 @@ fn make_plan(
     plan.validate()?;
     Ok(plan)
 }
+
+#[cfg(test)]
+#[path = "transfers_test.rs"]
+mod tests;

@@ -487,3 +487,27 @@ fn two_dapps_asking_for_the_same_bytes_get_two_decisions() {
     assert!(agent.requester.is_none());
     assert_eq!(store.awaiting_approval(None).unwrap().len(), 3);
 }
+
+/// `escape_for_display` tested controls and bidi only -- a narrower copy of
+/// part of the shared predicate -- so every invisible-format character passed
+/// through unescaped into the text a person reads before signing it.
+#[test]
+fn invisible_characters_are_escaped_in_the_message_a_person_reads() {
+    let hidden = "send 1\u{200b}0 ETH\u{fe0f}";
+    let escaped = escape_for_display(hidden);
+    assert!(
+        escaped.contains("\\u{200b}"),
+        "a zero-width space between digits has to be visible: {escaped}"
+    );
+    assert!(
+        escaped.contains("\\u{fe0f}"),
+        "so does a glyph-changing selector: {escaped}"
+    );
+    assert!(
+        !escaped.contains('\u{200b}') && !escaped.contains('\u{fe0f}'),
+        "and neither survives raw: {escaped}"
+    );
+
+    // Ordinary text is untouched, so the escaping stays readable.
+    assert_eq!(escape_for_display("send 10 ETH"), "send 10 ETH");
+}

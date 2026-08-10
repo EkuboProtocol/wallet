@@ -510,8 +510,19 @@ impl ConfigStore {
         // the one permission change in this file that resolved a path instead
         // of a handle — on the configuration, immediately after publishing it.
         //
-        // `sync_parent` stays best-effort: the durability it buys is bounded by
-        // what the platform offers anyway.
+        // `sync_parent`'s result is discarded on purpose, and the reason is the
+        // paragraph above rather than anything about how much durability it
+        // buys. The rename has already committed. A caller told "the update
+        // failed" about a write that landed rolls back something that
+        // happened, and `custody::add` doing that deletes the only copy of a
+        // private key -- run 6207's critical, and run 6304's 203740 and
+        // 203742, all of which are that mistake.
+        //
+        // So the residual is real and is accepted knowingly: a power loss
+        // between the rename and this fsync can lose a configuration the
+        // caller was told was saved. Making it an error would trade a rare
+        // lost row for a reachable destroyed key. Do not "fix" this by adding
+        // a `?`.
         let _ = sync_parent(&self.data_dir);
         Ok(())
     }
@@ -557,6 +568,40 @@ impl ConfigStore {
         result
     }
 
+    /// Run a whole wallet-lifecycle operation as one cross-process step.
+    ///
+    /// [`Self::update`] serializes a single read-modify-write of the
+    /// configuration, which is the wrong granularity for creating or removing
+    /// a wallet: those touch the credential store *and* the configuration, and
+    /// between the two another process could complete an entire lifecycle of
+    /// its own. That is what let two creations of the same id both write a
+    /// credential, and what let a replacement wallet be created in the gap
+    /// between a removal deleting a row and deleting the key it named.
+    ///
+    /// A separate lock file, not `config.lock`: `update` is called from inside
+    /// this section, and `flock` on a second descriptor for the same file
+    /// deadlocks against the descriptor this process already holds.
+    pub fn with_lifecycle_lock<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        create_private_dir(&self.data_dir)?;
+        let lock_path = self.data_dir.join("lifecycle.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open {}", lock_path.display()))?;
+        set_private_handle_permissions(&lock)?;
+        lock.lock_exclusive()
+            .with_context(|| format!("failed to lock {}", lock_path.display()))?;
+        let result = body();
+        // Discarded for the same reason `update` discards it: the work's own
+        // answer is the only one worth reporting, and the lock is released
+        // when this process exits regardless.
+        let _ = FileExt::unlock(&lock);
+        result
+    }
+
     pub fn wallet(&self, id: &str) -> Result<WalletMetadata> {
         self.load()?
             .wallets
@@ -577,6 +622,39 @@ impl ConfigStore {
             })
             .cloned()
             .with_context(|| format!("unknown network {requested}"))
+    }
+
+    /// The network a pending transaction belongs to, refusing a profile that
+    /// has been replaced since the envelope was signed.
+    ///
+    /// One profile is configured per chain id, and `replace_configured_network`
+    /// takes a chain over: the endpoints behind a chain id can be swapped
+    /// wholesale while every pending row keeps pointing at that id. A chain id
+    /// is not an identity for a *node set* -- a stale, isolated, or forked
+    /// endpoint reports the same number -- so a lifecycle decision resolved
+    /// this way can be made against endpoints that never saw the transaction
+    /// they are being asked about.
+    ///
+    /// The row already records the name it was signed under, and nothing was
+    /// comparing it. Comparing it is not proof the endpoints are the same ones
+    /// -- nothing local can prove that -- but it catches the case the wallet
+    /// can see, and it fails closed: a caller is told the profile changed
+    /// rather than being given an answer from somewhere else.
+    ///
+    /// Aliases count, so renaming a network through an alias it already
+    /// carried is not treated as a replacement.
+    pub fn network_for_record(&self, chain_id: &str, network_name: &str) -> Result<NetworkConfig> {
+        let network = self.network_by_chain_id(chain_id)?;
+        ensure!(
+            network.name == network_name
+                || network.aliases.iter().any(|alias| alias == network_name),
+            "this transaction was signed against network `{network_name}`, but chain {chain_id} \
+             is now configured as `{}`. Its endpoints may never have seen the transaction, so \
+             nothing here can decide its fate. Restore the profile it was signed against, or \
+             cancel it on chain.",
+            network.name
+        );
+        Ok(network)
     }
 
     pub fn network_by_chain_id(&self, chain_id: &str) -> Result<NetworkConfig> {
@@ -620,6 +698,103 @@ pub fn default_data_dir() -> Result<PathBuf> {
 /// in the tree already imports it from `config`, and because "what a new
 /// configuration contains" is a configuration question.
 pub use crate::networks::default_networks;
+
+/// Whether this endpoint sends the wallet's reads in the clear to another
+/// machine.
+///
+/// One predicate, two callers: the refusal below and the warning the CLI puts
+/// on the confirmation screen. Loopback is not remote -- that is the case the
+/// plaintext allowance exists for.
+#[must_use]
+pub fn is_remote_plaintext(rpc_url: &url::Url) -> bool {
+    if rpc_url.scheme() != "http" {
+        return false;
+    }
+    !match rpc_url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+        None => false,
+    }
+}
+
+/// A write reached through the interactive owner path.
+///
+/// A self-hosted node behind a private address -- `http://192.168.1.10:8545`,
+/// something on Tailscale, a lab VLAN -- is a configuration an operator is
+/// entitled to accept, and the human `network add` flow already shows them the
+/// complete RPC URLs on a full-screen review before writing anything. Refusing
+/// outright turned "the agent cannot configure plaintext" into "nobody can",
+/// which is the shape this repository treats as the failure mode.
+///
+/// It is a type rather than a flag because a flag would not stay on the human
+/// path. `add_configured_network` and `replace_configured_network` are crossed
+/// by the agent's proposal and its acceptance as well, so a boolean threaded
+/// through them is a boolean the agent's route can also set. This can only be
+/// made from an [`InteractiveProof`], whose sole production origin is
+/// `from_terminal` and whose call sites are enumerated one by one in
+/// `tests/boundary.rs` -- so a new way to mint one cannot appear quietly.
+///
+/// `put_network_proposal` has no way to construct it, and that is deliberate:
+/// an agent may not propose a plaintext endpoint at all, so no stored proposal
+/// can carry one and the acceptance path never has to judge one.
+///
+/// What this type asserts is *which path* the write came down, not that the
+/// owner has already agreed. Their agreement is carried by
+/// `confirm_network_change`, which prints the complete URLs and now warns about
+/// the plaintext one by name, and which has to return true before the write
+/// happens at all. Holding one of these does not mean yes; it means the
+/// question will be asked.
+pub struct InteractiveOwner(());
+
+impl InteractiveOwner {
+    /// Minted only where a terminal has been established.
+    #[must_use]
+    pub const fn at_terminal(_proof: &crate::approval::InteractiveProof) -> Self {
+        Self(())
+    }
+}
+
+/// Refuse a plaintext endpoint that is not a node on this machine.
+///
+/// An RPC connection carries the addresses, calldata, and balances this wallet
+/// reads, and the fee estimate an automatic transaction is signed against. Over
+/// `http` to a remote host, anything on the path reads the first and chooses
+/// the second: `capped_fee` leaves an estimate unchanged when no ceiling is
+/// configured, and the shipped profiles configure none. `https` is what makes
+/// the endpoint the thing that answers.
+///
+/// Loopback is exempt because that is the case the allowance exists for -- a
+/// node on this machine, reached over a path with nothing on it. Nothing else
+/// is: a LAN address is a network an attacker can be on.
+///
+/// **Checked on admission, not in [`validate_config`].** `validate_config`
+/// runs on every `load`, and a rule there would refuse to load a configuration
+/// that already holds a plaintext endpoint -- taking the wallet roster and
+/// every other network with it, and leaving no way to run the edit that would
+/// fix it. An existing configuration keeps working and can be repaired; what
+/// this stops is one being written.
+pub fn validate_admissible_endpoints(
+    network: &NetworkConfig,
+    owner: Option<&InteractiveOwner>,
+) -> Result<()> {
+    if owner.is_some() {
+        // The owner is at a terminal and `confirm_network_change` will print
+        // these URLs and warn about this one before anything is written. A
+        // self-hosted node behind a private address is theirs to accept.
+        return Ok(());
+    }
+    for rpc_url in &network.rpc_urls {
+        ensure!(
+            !is_remote_plaintext(rpc_url),
+            "{rpc_url} is plaintext http to a remote host. Anything on the path can read the \
+             addresses, calldata, and balances this wallet asks about, and can choose the fee \
+             estimate an automatic transaction is signed against. Use https, or a node on this \
+             machine."
+        );
+    }
+    Ok(())
+}
 
 pub fn validate_config(config: &WalletConfig) -> Result<()> {
     ensure!(config.version == 2, "unsupported configuration version");
@@ -831,6 +1006,26 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
                 matches!(url.scheme(), "http" | "https"),
                 "{label} must use http:// or https://"
             );
+            // Neither of these is ever fetched; they are handed to whatever
+            // the desktop has registered for `http`. That launcher is a fixed
+            // program on every platform now (see `tx_browser::open_in_browser`,
+            // which used to route through `cmd.exe` on Windows), but this is
+            // an agent-supplied string that ends up as an argument to a
+            // process, so it is worth being narrow about at the door as well.
+            //
+            // A base is a base: `explorer_transaction_url` appends
+            // `/tx/{hash}`, so anything after a `?` or `#` would be discarded
+            // or produce nonsense anyway, and refusing them removes the
+            // ordinary place an `&` can legitimately appear.
+            ensure!(
+                url.query().is_none() && url.fragment().is_none(),
+                "{label} must be a base URL with no query string or fragment; the transaction \
+                 path is appended to it"
+            );
+            ensure!(
+                !url.as_str().chars().any(crate::sanitize::is_disallowed),
+                "{label} must not contain control, bidirectional, or zero-width characters"
+            );
         }
     }
     Ok(())
@@ -851,8 +1046,10 @@ fn validate_network_identifier(value: &str, label: &str) -> Result<()> {
 pub fn add_configured_network(
     networks: &mut Vec<NetworkConfig>,
     next: NetworkConfig,
+    owner: Option<&InteractiveOwner>,
 ) -> Result<()> {
     validate_network(&next)?;
+    validate_admissible_endpoints(&next, owner)?;
     if let Some(existing) = networks
         .iter()
         .find(|network| network.chain_id == next.chain_id)
@@ -893,8 +1090,10 @@ pub fn add_configured_network(
 pub fn replace_configured_network(
     networks: &mut Vec<NetworkConfig>,
     next: NetworkConfig,
+    owner: Option<&InteractiveOwner>,
 ) -> Result<()> {
     validate_network(&next)?;
+    validate_admissible_endpoints(&next, owner)?;
     let identifiers = std::iter::once(&next.name)
         .chain(next.aliases.iter())
         .collect::<BTreeSet<_>>();
@@ -915,6 +1114,33 @@ pub fn replace_configured_network(
             existing.chain_id
         );
     }
+    // The owner's fee ceiling survives a replacement it did not ask to change.
+    //
+    // Both constructors of a candidate profile leave `max_fee_per_gas` as
+    // `None` and say why: the MCP one because "an agent does not choose the
+    // owner's fee ceiling", the CLI form because a ceiling is a judgement
+    // about what the owner's transactions are worth rather than a property of
+    // the chain. Both are right about intent and both achieved the opposite,
+    // because this function replaces the whole profile — so a routine endpoint
+    // edit deleted the ceiling, and an absent ceiling is unbounded. Nothing
+    // downstream notices: no policy rule speaks about fees, no reviewer sees
+    // them, and `capped_fee` returns an endpoint's estimate unchanged when
+    // there is nothing to check it against.
+    //
+    // Carried rather than required, because `None` here has only ever meant
+    // "not specified". Nothing in the CLI or MCP surface sets a ceiling at
+    // all; the owner writes one into the configuration by hand, and the
+    // owner's own `network edit` path clones the existing profile, so a
+    // deliberate change arrives as `Some`. A future affordance for *removing*
+    // one needs to say so explicitly rather than by omission.
+    let inherited = networks
+        .iter()
+        .find(|network| network.chain_id == next.chain_id)
+        .and_then(|existing| existing.max_fee_per_gas.clone());
+    let next = NetworkConfig {
+        max_fee_per_gas: next.max_fee_per_gas.or(inherited),
+        ..next
+    };
     networks.retain(|network| network.chain_id != next.chain_id);
     networks.push(next);
     Ok(())
@@ -946,17 +1172,43 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        if !path.exists() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(path)?;
-        }
-        // An existing directory may predate this rule, or have been restored
-        // from a backup that widened it.
-        let mode = fs::metadata(path)?.permissions().mode();
-        if mode & 0o077 != 0 {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        // `symlink_metadata` rather than `exists`/`metadata`: both of those
+        // resolve the name, so a symlink planted at `path` answered for its
+        // target and the mode below was applied to whatever the link pointed
+        // at. Asking about the link itself is the only question with a stable
+        // answer, and a data directory reached through a link is refused
+        // outright rather than hardened in place — the wallet cannot promise
+        // 0700 on a directory whose identity another process chooses.
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "{} is a symbolic link; the wallet data directory must be a real directory it \
+                     can keep private",
+                    path.display()
+                );
+            }
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_dir(),
+                    "{} exists and is not a directory",
+                    path.display()
+                );
+                // An existing directory may predate this rule, or have been
+                // restored from a backup that widened it.
+                let mode = metadata.permissions().mode();
+                if mode & 0o077 != 0 {
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(path)?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
         }
     }
     #[cfg(not(unix))]
@@ -964,14 +1216,30 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_private_file_permissions(path: &Path) -> Result<()> {
+/// Open a file that only this owner may read, refusing to follow a symlink
+/// planted in its place, and return the handle that names the inode.
+///
+/// There is deliberately no by-path counterpart. `fs::set_permissions` and
+/// `File::open` each resolve the name independently, so a caller that opens a
+/// file and then narrows it by name has asked the filesystem the same question
+/// twice and may be answered differently each time — the second answer being a
+/// link the mode is then applied to. Handing back the handle means the caller
+/// cannot reintroduce that gap: it already holds the only reference it needs.
+pub(crate) fn open_private_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW fails with ELOOP rather than opening a link's target, so
+        // the handle below refers to the name itself or to nothing.
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let _ = path;
-    Ok(())
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    set_private_handle_permissions(&file)?;
+    Ok(file)
 }
 
 /// Narrow the file this handle already refers to, rather than whatever its

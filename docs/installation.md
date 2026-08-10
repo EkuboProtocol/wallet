@@ -7,15 +7,36 @@ Sigstore bundles, and GitHub build-provenance attestations.
 The installer downloads the archive for your platform, **verifies the Sigstore
 signature over `SHA256SUMS` and the archive's SHA-256 checksum against it
 before extracting anything**, installs `ekubo-wallet`, registers it and the
-Ekubo protocol server with every agent CLI it detects (Codex, Claude Code,
-Gemini CLI, and Cursor), and installs completion for your login shell:
+Ekubo protocol server with every agent it detects (Codex, Claude Code,
+Gemini CLI, Cursor, and opencode), and installs completion for your login
+shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
+tag=v1.0.0-rc.0   # the release you are installing
+base=https://github.com/EkuboProtocol/wallet-mcp-server/releases/download/$tag
+d=$(mktemp -d)
+curl -fsSL -o "$d/install.sh" "$base/install.sh"
+curl -fsSL -o "$d/install.sh.sigstore.json" "$base/install.sh.sigstore.json"
+cosign verify-blob \
+  --bundle "$d/install.sh.sigstore.json" \
+  --certificate-identity \
+  "https://github.com/EkuboProtocol/wallet-mcp-server/.github/workflows/release.yml@refs/tags/$tag" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$d/install.sh"
+sh "$d/install.sh"
 ```
 
-Read [`install.sh`](../install.sh) before piping it to a shell. Replace `main` with
-an exact release tag for a reproducible installation.
+The installer is verified before it runs, and that is the reason for the extra
+lines rather than a pipe. `install.sh` checks everything it downloads, but a
+shell begins executing a piped script as it arrives: an installer chosen by
+somebody else has already run to completion before any check written inside it
+could matter. Checks in a file the same party can replace are not checks. So
+the script is published as a release asset with a signature of its own, and the
+commands above verify it against the workflow that produced it.
+
+`install.sh` is pinned to a tag here for the same reason. Tracking `main` means
+installing whatever that branch says today, which is not a thing any signature
+covers.
 
 `cosign` is required. The checksum file travels the same path as the archive it
 describes, from the same host, so whoever can substitute one can substitute both
@@ -121,6 +142,33 @@ differently — `claude mcp add --transport http ekubo https://mcp.ekubo.org/mcp
 `gemini mcp add ekubo https://mcp.ekubo.org/mcp --transport http`, and
 `codex mcp add ekubo --url https://mcp.ekubo.org/mcp` — which is why
 `ekubo-wallet meta-agent add` exists rather than a documented command per agent.
+
+opencode spells it differently again, under an `mcp` key in
+`~/.config/opencode/opencode.json` — that path on every platform, because
+opencode follows the XDG variables rather than the native config directory:
+
+```json
+{
+  "mcp": {
+    "ekubo-wallet": {
+      "type": "local",
+      "command": ["ekubo-wallet", "server"],
+      "enabled": true
+    },
+    "ekubo": {
+      "type": "remote",
+      "url": "https://mcp.ekubo.org/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+`ekubo-wallet meta-agent add opencode` writes exactly that. It writes
+`opencode.json` even when an `opencode.jsonc` is what you keep your settings
+in: opencode merges both, and this wallet will not rewrite a commented file
+through a serializer that would drop the comments. Remove an entry from a
+`.jsonc` by hand — `meta-agent remove` says so rather than passing over it.
 
 Use an absolute path, such as `/home/you/.local/bin/ekubo-wallet`, if the agent
 does not inherit your login shell's `PATH`. Confirm the installed build with
