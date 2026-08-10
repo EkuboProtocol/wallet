@@ -114,6 +114,40 @@ fn lock(pending: &Mutex<PendingStore>) -> Result<std::sync::MutexGuard<'_, Pendi
         .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))
 }
 
+/// Write down that the owner said no, and be honest about it if that fails.
+///
+/// By the time this runs the reviewer has already been told the request was
+/// refused — the presenter drew that on their terminal. The row is what decides
+/// whether it is true: `store_signed` accepts anything still
+/// `AwaitingApproval`, so a rejection that did not commit leaves a request the
+/// owner declined available to a later approval flow, which can sign it.
+///
+/// Two distinct outcomes were previously reported the same way. `reject`
+/// commits and *then* re-reads, so a failure in that read means the rejection
+/// did land while the caller hears an error. Asking the row settles which
+/// happened: already `Rejected` is a success that reported itself badly, and
+/// anything else is a rejection that genuinely is not recorded — which the
+/// owner has to be told plainly, because what they saw says otherwise.
+fn record_rejection(
+    pending: &Mutex<PendingStore>,
+    request_id: uuid::Uuid,
+) -> Result<PendingTransaction> {
+    let error = match lock(pending).and_then(|mut store| store.reject(request_id)) {
+        Ok(rejected) => return Ok(rejected),
+        Err(error) => error,
+    };
+    if let Ok(current) = lock(pending).and_then(|store| store.get(request_id))
+        && current.status == PendingStatus::Rejected
+    {
+        return Ok(current);
+    }
+    Err(error).context(format!(
+        "the rejection was not recorded, so request {request_id} is still awaiting approval and \
+         can still be signed even though it was refused; reject it again with `ekubo-wallet \
+         review {request_id} --decision reject`"
+    ))
+}
+
 /// The admission ladder every send passes before any decision is made on the
 /// simulation verdict: plan shape; sender and chain against this wallet and
 /// network; the simulation digest binding the result to this exact plan; and
@@ -358,8 +392,10 @@ pub async fn approve_transaction(
     // refused. A decision this function calls a decision has to be written
     // like one.
     if decision != ApprovalDecision::Approved {
-        let rejected = lock(&pending)?.reject(request.request_id)?;
-        return Ok(ApprovalOutcome::Rejected(rejected));
+        return Ok(ApprovalOutcome::Rejected(record_rejection(
+            &pending,
+            request.request_id,
+        )?));
     }
     // Whatever the reviewer last had in front of them, not what was authored
     // first. A refresh replaces the simulation and the prepared envelope
@@ -821,3 +857,7 @@ pub async fn sign_reviewed_typed_data(
 #[cfg(test)]
 #[path = "orchestrator_calldata_display_test.rs"]
 mod calldata_display_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_rejection_test.rs"]
+mod rejection_tests;
