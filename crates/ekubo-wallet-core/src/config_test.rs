@@ -538,3 +538,30 @@ fn a_replacement_that_names_a_ceiling_sets_it() {
     replace_configured_network(&mut fresh, edited).unwrap();
     assert!(fresh[0].max_fee_per_gas.is_none());
 }
+
+/// The explorer base is never fetched by the wallet; it is handed to whatever
+/// the desktop registered for `http`, as an argument to a process. On Windows
+/// that launcher used to be `cmd /C start`, which reparses `&` and friends as
+/// command syntax -- so an agent-proposed profile could run commands the first
+/// time the owner pressed `o` on a transaction. The launcher is fixed, and
+/// this narrows what can reach it.
+#[test]
+fn an_explorer_base_is_a_base_and_nothing_else() {
+    let base = |url: &str| {
+        let mut network = default_networks()[0].clone();
+        network.block_explorer_url = Some(url.parse().unwrap());
+        validate_network(&network)
+    };
+
+    assert!(base("https://etherscan.io").is_ok());
+    assert!(base("https://etherscan.io/").is_ok());
+
+    // A query is where an `&` legitimately lives, and a base with one produces
+    // nonsense once `/tx/{hash}` is appended to it regardless.
+    let error = format!("{:#}", base("https://etherscan.io/?a=1&calc").unwrap_err());
+    assert!(error.contains("no query string or fragment"), "{error}");
+    assert!(base("https://etherscan.io/#frag").is_err());
+
+    // And the scheme rule still stands.
+    assert!(base("ftp://etherscan.io").is_err());
+}

@@ -865,6 +865,26 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
                 matches!(url.scheme(), "http" | "https"),
                 "{label} must use http:// or https://"
             );
+            // Neither of these is ever fetched; they are handed to whatever
+            // the desktop has registered for `http`. That launcher is a fixed
+            // program on every platform now (see `tx_browser::open_in_browser`,
+            // which used to route through `cmd.exe` on Windows), but this is
+            // an agent-supplied string that ends up as an argument to a
+            // process, so it is worth being narrow about at the door as well.
+            //
+            // A base is a base: `explorer_transaction_url` appends
+            // `/tx/{hash}`, so anything after a `?` or `#` would be discarded
+            // or produce nonsense anyway, and refusing them removes the
+            // ordinary place an `&` can legitimately appear.
+            ensure!(
+                url.query().is_none() && url.fragment().is_none(),
+                "{label} must be a base URL with no query string or fragment; the transaction \
+                 path is appended to it"
+            );
+            ensure!(
+                !url.as_str().chars().any(crate::sanitize::is_disallowed),
+                "{label} must not contain control, bidirectional, or zero-width characters"
+            );
         }
     }
     Ok(())

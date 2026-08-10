@@ -4469,6 +4469,13 @@ async fn review_one_network_proposal(
             ("RPC endpoints", endpoint_list(proposal)),
             ("RPC strategy", vec![proposal.rpc_strategy.to_string()]),
         ];
+        // Shown because it is the one field here that becomes an argument to
+        // another program: pressing `o` on a transaction hands this base, plus
+        // the hash, to whatever the desktop has registered for `http`. The
+        // reviewer was accepting that destination without being told it.
+        if let Some(explorer) = &proposal.block_explorer_url {
+            facts.push(("Block explorer", vec![explorer.to_string()]));
+        }
         // An edit is the dangerous shape: the chain keeps working and its
         // narrator changes. Say which endpoint is being replaced, because the
         // difference between the two URLs is the entire decision.
