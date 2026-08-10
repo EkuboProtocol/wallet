@@ -1397,3 +1397,98 @@ mod fee_ceiling_surface_tests {
         assert!(field.default.is_none(), "and no number is invented for it");
     }
 }
+
+/// `7e73dfa` let the interactive owner accept a plaintext-to-a-remote-host RPC
+/// that `validate_admissible_endpoints` still refuses on every other path, on
+/// the strength of `confirm_network_change`/`network_review` warning about it
+/// "by name". `is_remote_plaintext` was never actually called from `cli.rs`,
+/// so every owner who added or edited such a network saw only the generic,
+/// transport-agnostic [`NETWORK_TRUST_WARNING`] -- identical to what an
+/// ordinary `https` network shows, naming nothing about the one property that
+/// makes this configuration different. These tests are what that gap needed.
+mod plaintext_remote_endpoint_warning_tests {
+    use super::*;
+
+    fn network(rpc_urls: &[&str]) -> crate::config::NetworkConfig {
+        crate::config::NetworkConfig {
+            name: "custom".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: rpc_urls.iter().map(|url| url.parse().unwrap()).collect(),
+            rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        }
+    }
+
+    #[test]
+    fn an_https_or_loopback_endpoint_earns_no_extra_warning() {
+        assert!(plaintext_remote_warning(&network(&["https://rpc.example.invalid"])).is_none());
+        assert!(plaintext_remote_warning(&network(&["http://127.0.0.1:8545"])).is_none());
+        assert!(plaintext_remote_warning(&network(&["http://localhost:8545"])).is_none());
+    }
+
+    #[test]
+    fn a_remote_plaintext_endpoint_is_named_in_the_warning() {
+        let warning = plaintext_remote_warning(&network(&["http://192.0.2.10:8545"]))
+            .expect("a remote http endpoint earns a warning");
+        assert!(
+            warning.contains("http://192.0.2.10:8545/"),
+            "names the offending URL: {warning}"
+        );
+        assert!(
+            warning.contains("plaintext http to a remote host"),
+            "states what is wrong: {warning}"
+        );
+    }
+
+    #[test]
+    fn several_remote_plaintext_endpoints_are_all_named() {
+        let warning = plaintext_remote_warning(&network(&[
+            "https://safe.example.invalid",
+            "http://192.0.2.10:8545",
+            "http://198.51.100.20:8545",
+        ]))
+        .expect("two remote http endpoints earn a warning");
+        assert!(warning.contains("http://192.0.2.10:8545/"), "{warning}");
+        assert!(warning.contains("http://198.51.100.20:8545/"), "{warning}");
+        assert!(
+            !warning.contains("safe.example.invalid"),
+            "the https endpoint is not implicated: {warning}"
+        );
+    }
+
+    /// The confirmation screen an owner actually sees, not just the predicate
+    /// behind it -- `network_review`/`confirm_network_change` are what could
+    /// silently drop the warning even with `plaintext_remote_warning` correct.
+    #[test]
+    fn the_review_document_carries_the_named_warning() {
+        let candidate = network(&["http://192.0.2.10:8545"]);
+        let review = network_review(
+            "Add or update network",
+            "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
+            vec![("RPC URLs", endpoint_list(&candidate))],
+            plaintext_remote_warning(&candidate),
+        );
+        let text = crate::fullscreen::lines_to_text(&review.document(), |text, _| text.to_owned());
+        assert!(text.contains("plaintext http to a remote host"), "{text}");
+        assert!(text.contains("http://192.0.2.10:8545/"), "{text}");
+    }
+
+    #[test]
+    fn the_review_document_says_nothing_extra_for_a_safe_endpoint() {
+        let candidate = network(&["https://rpc.example.invalid"]);
+        let review = network_review(
+            "Add or update network",
+            "The wallet will read chain state and run eth_simulateV1 through this endpoint.",
+            vec![("RPC URLs", endpoint_list(&candidate))],
+            plaintext_remote_warning(&candidate),
+        );
+        let text = crate::fullscreen::lines_to_text(&review.document(), |text, _| text.to_owned());
+        assert!(!text.contains("plaintext"), "{text}");
+    }
+}
