@@ -1812,6 +1812,7 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         let (record, broadcast) = crate::reconcile::attempt_cancellation(
             &self.pending,
+            &self.config,
             &wallet,
             &network,
             record,

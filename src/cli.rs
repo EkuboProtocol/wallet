@@ -2263,6 +2263,7 @@ async fn run_transaction(
             let pending = std::sync::Mutex::new(pending);
             let (record, broadcast) = crate::reconcile::attempt_cancellation(
                 &pending,
+                config,
                 &wallet,
                 &network,
                 record,

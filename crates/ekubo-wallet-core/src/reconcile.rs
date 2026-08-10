@@ -435,11 +435,43 @@ pub async fn submit_claimed(
 /// narrow an in-flight authorization to nothing, at the cost of gas.
 pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     pending: &Mutex<PendingStore>,
+    config: &ConfigStore,
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     record: PendingTransaction,
     keys: &K,
 ) -> Result<(PendingTransaction, BroadcastResult)> {
+    // The record is re-read below; the configuration was not read at all.
+    //
+    // The caller resolved both of these before the await, and the snapshot it
+    // handed over then decides endpoint selection, chain-ID validation, fee
+    // estimation, the gas ceiling, and where the envelope is broadcast.
+    // Configuration writes replace the whole document atomically and readers
+    // hold independent snapshots, so another CLI or the MCP server can replace
+    // the profile -- or remove the wallet -- while this runs. A cancellation
+    // priced and sent through endpoints the owner has already replaced is the
+    // one signing path with no policy and no review behind it.
+    //
+    // This asks only whether they changed underneath, not which profile is
+    // allowed. Nothing an owner might legitimately want is refused: the remedy
+    // is to run the command again, which picks up whatever is current now and
+    // succeeds. Refusing on the grounds that a profile *had* been replaced --
+    // the rule `network_for_record` applies to `transaction discard` -- would
+    // be wrong here, because being unable to cancel is the failure this path
+    // exists to prevent.
+    ensure!(
+        config.wallet(&record.wallet_id)? == *wallet,
+        "wallet {} changed while this cancellation was being prepared; nothing was signed. Run \
+         the command again.",
+        record.wallet_id
+    );
+    ensure!(
+        config.network_by_chain_id(&record.chain_id)? == *network,
+        "the network profile for chain {} changed while this cancellation was being prepared, \
+         so it would have been priced and sent through endpoints that are no longer configured; \
+         nothing was signed. Run the command again.",
+        record.chain_id
+    );
     // Re-read before pricing anything. The caller hands over a snapshot: the
     // transaction browser captured its copy before the owner opened the detail
     // view and pressed the key, and the CLI and the MCP server share this

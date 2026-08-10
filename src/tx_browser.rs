@@ -875,6 +875,7 @@ async fn cancel_record(
     let network = config.network_by_chain_id(&record.chain_id)?;
     let (updated, broadcast) = crate::reconcile::attempt_cancellation(
         pending,
+        config,
         &wallet,
         &network,
         record,
