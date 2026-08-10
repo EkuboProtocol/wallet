@@ -59,6 +59,17 @@ pub enum Effect {
     Deny,
 }
 
+/// How many chains one document may govern, and how many rules one chain may
+/// carry.
+///
+/// The counts a reviewer can actually read are far below these; the point of
+/// stating them is that admission does bounded work, and that the work is
+/// bounded by the policy language rather than by whichever parser happened to
+/// deliver the document. See [`Predicate::check_size`] for the same argument
+/// about the trees inside a rule.
+const MAX_CHAINS: usize = 256;
+const MAX_RULES_PER_CHAIN: usize = 1_024;
+
 /// One rule: a conjunction of predicate slots and the effect of matching them.
 /// Every slot is optional and an absent slot constrains nothing, so a rule
 /// naming only `to` covers every function that contract has, including any
@@ -118,6 +129,11 @@ impl Rule {
     fn validate(&self) -> Result<()> {
         validate_label(self.label.as_deref())?;
         for (slot, predicate, ty) in self.slots() {
+            // Size before applicability: both walk the tree, and there is no
+            // reason to walk an unbounded one twice to reject it.
+            predicate
+                .check_size()
+                .with_context(|| format!("predicate on `{slot}` is too large"))?;
             predicate
                 .check_applicable(&ty)
                 .with_context(|| format!("predicate on `{slot}` is not applicable"))?;
@@ -267,6 +283,13 @@ impl ChainPolicy {
             "max_calls_per_batch must be between 1 and 4096"
         );
         validate_label(self.label.as_deref())?;
+        ensure!(
+            self.rules.len() <= MAX_RULES_PER_CHAIN,
+            "a chain carries more than {MAX_RULES_PER_CHAIN} rules"
+        );
+        self.native_value
+            .check_size()
+            .context("native_value predicate is too large")?;
         self.native_value
             .check_applicable(&DynSolType::Uint(256))
             .context("native_value predicate is not applicable")?;
@@ -442,6 +465,10 @@ impl WalletPolicy {
         if let Some(url) = self.schema.as_deref() {
             url::Url::parse(url).context("invalid policy schema URL")?;
         }
+        ensure!(
+            self.chains.len() <= MAX_CHAINS,
+            "a policy document governs more than {MAX_CHAINS} chains"
+        );
         for (chain_id, chain) in &self.chains {
             validate_chain_key(chain_id)?;
             chain

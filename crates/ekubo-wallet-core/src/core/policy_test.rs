@@ -977,3 +977,87 @@ mod admission_tests_belong_to_the_types {
         assert_eq!(policy.chains.len(), 1);
     }
 }
+
+mod admission_bounds_tests {
+    //! Admission does bounded work, and the bound belongs to the policy
+    //! language rather than to whichever parser delivered the document.
+
+    use crate::core::{
+        policy::WalletPolicy,
+        predicate::{MAX_PREDICATE_DEPTH, MAX_PREDICATE_NODES},
+    };
+    use serde_json::{Value, json};
+
+    /// `{"not": {"not": {... }}}`, `depth` levels of it.
+    fn nested(depth: usize) -> Value {
+        let mut predicate = json!("any_value");
+        for _ in 0..depth {
+            predicate = json!({ "not": predicate });
+        }
+        predicate
+    }
+
+    fn policy_with(calldata: &Value) -> Value {
+        json!({
+            "version": 1,
+            "chains": {"1": {"rules": [{"effect": "allow", "calldata": calldata}]}}
+        })
+    }
+
+    /// The stack was never actually unbounded -- `serde_json` refuses past 128
+    /// levels while parsing -- but that is a constant inside a dependency's
+    /// parser, not a fact about this type. It says nothing about a `Predicate`
+    /// reached any other way, and this crate would not notice it changing.
+    #[test]
+    fn a_predicate_nested_past_the_limit_is_refused() {
+        let error = format!(
+            "{:#}",
+            WalletPolicy::parse(policy_with(&nested(MAX_PREDICATE_DEPTH + 4)))
+                .expect_err("a tree nobody can review is not admissible")
+        );
+        assert!(error.contains("nests deeper"), "{error}");
+    }
+
+    /// And the limit is far enough above real documents that reaching it means
+    /// something is wrong. The deepest shipped example nests four.
+    #[test]
+    fn an_ordinarily_nested_predicate_is_admitted() {
+        WalletPolicy::parse(policy_with(&nested(4))).expect("four levels is an ordinary policy");
+    }
+
+    /// Depth alone would miss this: one level, enormous sideways. The node
+    /// budget is what bounds the work rather than the stack.
+    #[test]
+    fn a_predicate_that_is_wide_rather_than_deep_is_refused() {
+        let literals: Vec<String> = (0..=MAX_PREDICATE_NODES)
+            .map(|index| format!("{index}"))
+            .collect();
+        let error = format!(
+            "{:#}",
+            WalletPolicy::parse(policy_with(&json!({ "in": literals })))
+                .expect_err("a million-entry set is not a reviewable rule")
+        );
+        assert!(error.contains("more than"), "{error}");
+    }
+
+    /// The counts around the rules are bounded too, so admission cannot be
+    /// made expensive by repetition instead of by nesting.
+    #[test]
+    fn a_document_with_too_many_rules_is_refused() {
+        let rules: Vec<Value> = (0..2_000)
+            .map(|_| json!({"effect": "allow", "calldata": "any_value"}))
+            .collect();
+        assert!(
+            WalletPolicy::parse(json!({
+                "version": 1,
+                "chains": {"1": {"rules": rules}}
+            }))
+            .is_err()
+        );
+
+        let chains: serde_json::Map<String, Value> = (1..=300)
+            .map(|index| (index.to_string(), json!({"rules": []})))
+            .collect();
+        assert!(WalletPolicy::parse(json!({"version": 1, "chains": chains})).is_err());
+    }
+}
