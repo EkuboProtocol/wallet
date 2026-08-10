@@ -2286,7 +2286,12 @@ async fn run_transaction(
         }
         TransactionCommand::Discard { identifier } => {
             let record = pending.get_by_identifier(&identifier)?;
-            let network = config.network_by_chain_id(&record.chain_id)?;
+            // The one destructive lifecycle command: it drops tracking for an
+            // envelope that may still mine. Its whole basis is what the
+            // configured node says about the hash, so it must be the node the
+            // transaction was signed against and not whichever profile holds
+            // the chain id today.
+            let network = config.network_for_record(&record.chain_id, &record.network_name)?;
             // `signed` does not by itself mean "never sent". A submission whose
             // process died mid-send is recovered by returning the row to
             // `signed`, and that recovery turns on `transaction_known`, whose

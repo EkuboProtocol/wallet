@@ -624,6 +624,39 @@ impl ConfigStore {
             .with_context(|| format!("unknown network {requested}"))
     }
 
+    /// The network a pending transaction belongs to, refusing a profile that
+    /// has been replaced since the envelope was signed.
+    ///
+    /// One profile is configured per chain id, and `replace_configured_network`
+    /// takes a chain over: the endpoints behind a chain id can be swapped
+    /// wholesale while every pending row keeps pointing at that id. A chain id
+    /// is not an identity for a *node set* -- a stale, isolated, or forked
+    /// endpoint reports the same number -- so a lifecycle decision resolved
+    /// this way can be made against endpoints that never saw the transaction
+    /// they are being asked about.
+    ///
+    /// The row already records the name it was signed under, and nothing was
+    /// comparing it. Comparing it is not proof the endpoints are the same ones
+    /// -- nothing local can prove that -- but it catches the case the wallet
+    /// can see, and it fails closed: a caller is told the profile changed
+    /// rather than being given an answer from somewhere else.
+    ///
+    /// Aliases count, so renaming a network through an alias it already
+    /// carried is not treated as a replacement.
+    pub fn network_for_record(&self, chain_id: &str, network_name: &str) -> Result<NetworkConfig> {
+        let network = self.network_by_chain_id(chain_id)?;
+        ensure!(
+            network.name == network_name
+                || network.aliases.iter().any(|alias| alias == network_name),
+            "this transaction was signed against network `{network_name}`, but chain {chain_id} \
+             is now configured as `{}`. Its endpoints may never have seen the transaction, so \
+             nothing here can decide its fate. Restore the profile it was signed against, or \
+             cancel it on chain.",
+            network.name
+        );
+        Ok(network)
+    }
+
     pub fn network_by_chain_id(&self, chain_id: &str) -> Result<NetworkConfig> {
         ensure!(
             !chain_id.is_empty()

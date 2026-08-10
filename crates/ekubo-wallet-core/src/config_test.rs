@@ -565,3 +565,70 @@ fn an_explorer_base_is_a_base_and_nothing_else() {
     // And the scheme rule still stands.
     assert!(base("ftp://etherscan.io").is_err());
 }
+
+mod record_network_tests {
+    //! A chain id names a chain. It does not name a set of nodes.
+
+    use super::*;
+
+    fn store_with(name: &str, aliases: &[&str]) -> (tempfile::TempDir, ConfigStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        store
+            .update(|config| {
+                let mut network = config.networks[0].clone();
+                network.name = name.into();
+                network.aliases = aliases.iter().map(|alias| (*alias).to_string()).collect();
+                network.chain_id = 1;
+                config.networks.retain(|other| other.chain_id != 1);
+                config.networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+        (directory, store)
+    }
+
+    /// `replace_configured_network` takes a chain over, so the endpoints behind
+    /// a chain id can be swapped wholesale while every pending row keeps
+    /// pointing at that id. `transaction discard` then asks the new endpoints
+    /// whether they know the hash, and a node that never saw a transaction
+    /// answers exactly like one where it does not exist -- so a viable
+    /// envelope is untracked while it can still mine and consume its nonce.
+    #[test]
+    fn a_replaced_profile_cannot_decide_an_earlier_transactions_fate() {
+        let (_directory, store) = store_with("private-fork", &[]);
+        let error = format!(
+            "{:#}",
+            store
+                .network_for_record("1", "ethereum")
+                .expect_err("these are not the endpoints it was signed against")
+        );
+        assert!(
+            error.contains("signed against network `ethereum`"),
+            "{error}"
+        );
+        assert!(
+            error.contains("cancel it on chain"),
+            "the refusal has to say what can still be done: {error}"
+        );
+    }
+
+    /// The profile it was signed against still answers for it.
+    #[test]
+    fn the_signing_profile_still_resolves() {
+        let (_directory, store) = store_with("ethereum", &[]);
+        let network = store.network_for_record("1", "ethereum").unwrap();
+        assert_eq!(network.chain_id, 1);
+    }
+
+    /// And an alias is the same profile under another name, so renaming a
+    /// network through a name it already carried is not a replacement. Without
+    /// this the check would refuse ordinary configurations.
+    #[test]
+    fn an_alias_is_not_a_replacement() {
+        let (_directory, store) = store_with("mainnet", &["ethereum"]);
+        store
+            .network_for_record("1", "ethereum")
+            .expect("the same profile, under a name it already answered to");
+    }
+}
