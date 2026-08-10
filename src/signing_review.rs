@@ -37,8 +37,8 @@ use crate::{
         siwe_warnings,
     },
     typed_data::{
-        PendingTypedData, TypedDataStatus, TypedDataStore, interpret_permit_approvals,
-        parse_typed_data,
+        PendingTypedData, PermitApproval, TypedDataStatus, TypedDataStore,
+        interpret_permit_approvals, parse_typed_data,
     },
 };
 use anyhow::{Result, ensure};
@@ -303,15 +303,23 @@ pub async fn decide_typed_data(
     }
 
     if let Some(approvals) = &permit_approvals {
+        // A standing allowance and a one-time transfer authorization are not
+        // the same grant, and the decoder has always known which is which --
+        // `kind` says so. The renderer said "allow X to spend up to Y" for
+        // both. A SignatureTransfer creates nothing the owner can later
+        // inspect or revoke: the spender consumes it once, to a recipient
+        // chosen when they execute it, and there is no allowance to go and
+        // look at afterwards. Describing that as an allowance tells the reader
+        // to expect a thing that will not exist.
+        let mut any_transfer = false;
         for (index, permit) in approvals.iter().enumerate() {
+            let one_time = permit.kind == "permit2_signature_transfer";
+            any_transfer |= one_time;
+            let grant = permit_grant_sentence(permit, one_time);
             approval = approval.fact(
                 format!("Grants approval {}", index + 1),
                 format!(
-                    "{}: allow {} to spend up to {} of token {}{}{}",
-                    permit.kind,
-                    permit.spender,
-                    permit.amount,
-                    permit.token,
+                    "{grant}{}{}",
                     // Two different clocks, and calling both "deadline" is
                     // what made the shorter one look like the limit. For
                     // Permit2 this one bounds only how long the signature may
@@ -334,6 +342,13 @@ pub async fn decide_typed_data(
                             "; ALLOWANCE LASTS UNTIL {expiration}"
                         )),
                 ),
+            );
+        }
+        if any_transfer {
+            approval = approval.warning(
+                "A one-time transfer authorization is not an allowance: there is nothing to \
+                 inspect or revoke afterwards, and the recipient is chosen by whoever executes \
+                 it, not by this signature.",
             );
         }
         approval = approval.warning(
@@ -427,6 +442,33 @@ pub async fn reviewer_approved(
         crate::approve_tui::review_fullscreen(&request, payload).await?
             == ApprovalDecision::Approved,
     )
+}
+
+/// How one decoded permit reads in the review.
+///
+/// A standing allowance and a one-time transfer authorization are not the same
+/// grant, and the decoder has always known which is which — `kind` says so.
+/// The renderer described both as "allow X to spend up to Y". A Permit2
+/// `SignatureTransfer` creates nothing the owner can later inspect or revoke:
+/// the spender consumes it once, to a recipient chosen when they execute it.
+/// Calling that an allowance tells the reader to expect a thing that will not
+/// exist, and to look for a revocation that is not there.
+///
+/// Separate from the review so both sentences are testable without building a
+/// request, a wallet, and a configuration to reach them.
+pub(crate) fn permit_grant_sentence(permit: &PermitApproval, one_time: bool) -> String {
+    if one_time {
+        format!(
+            "{}: one-time transfer of up to {} of token {}, which {} may execute once to a \
+             recipient it chooses",
+            permit.kind, permit.amount, permit.token, permit.spender,
+        )
+    } else {
+        format!(
+            "{}: allow {} to spend up to {} of token {}",
+            permit.kind, permit.spender, permit.amount, permit.token,
+        )
+    }
 }
 
 /// Payload text for the full-screen review: every control or bidirectional

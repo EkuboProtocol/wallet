@@ -66,3 +66,46 @@ fn a_long_fact_is_truncated_with_a_pointer_to_the_complete_payload() {
     let short = "transfer 1 USDC";
     assert_eq!(terminal_safe_excerpt(short), short);
 }
+
+/// A standing allowance and a one-time transfer authorization are not the same
+/// grant, and `kind` has always said which is which. Both read as "allow X to
+/// spend up to Y", so a `SignatureTransfer` told the reader to expect an
+/// allowance they could inspect and revoke later -- when the spender instead
+/// consumes it once, to a recipient chosen at execution, leaving nothing
+/// behind to look at.
+#[test]
+fn a_one_time_transfer_does_not_read_as_an_allowance() {
+    let permit = PermitApproval {
+        kind: "permit2_signature_transfer".into(),
+        token: "0xToken".into(),
+        spender: "0xSpender".into(),
+        amount: "1000".into(),
+        deadline: Some("1900000000".into()),
+        expiration: None,
+    };
+    let sentence = permit_grant_sentence(&permit, true);
+    assert!(
+        sentence.contains("one-time transfer"),
+        "the grant has to name what it is: {sentence}"
+    );
+    assert!(
+        sentence.contains("recipient it chooses"),
+        "and that the recipient is not fixed by this signature: {sentence}"
+    );
+    assert!(
+        !sentence.contains("allow "),
+        "an allowance is exactly what this is not: {sentence}"
+    );
+
+    let standing = PermitApproval {
+        kind: "permit2_permit".into(),
+        expiration: Some("1900000000".into()),
+        ..permit
+    };
+    let sentence = permit_grant_sentence(&standing, false);
+    assert!(
+        sentence.contains("allow 0xSpender to spend up to 1000"),
+        "a standing allowance still reads as one: {sentence}"
+    );
+    assert!(!sentence.contains("one-time"));
+}
