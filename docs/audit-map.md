@@ -26,7 +26,8 @@ plans, calls the same `orchestrator` entry points a tool call does, and hands
 anything the policy queues to a `DappSurface` that either draws a review or
 waits for `ekubo-wallet review`. What an auditor should check there is the
 `DappSurface` seam: that neither implementation can produce a signature the
-orchestrator did not, and that the MCP one rejects a record atomically when it
+orchestrator did not, that `approve_plan` runs before `execute_automatic` and
+can only stop a plan, and that the MCP one rejects a record atomically when it
 gives up waiting rather than leaving it approvable.
 `tests/boundary.rs` trips when that claim erodes: `src/mcp.rs` may never
 reference an approval surface, `InteractiveProof::from_terminal` has exactly
@@ -107,6 +108,8 @@ broadcast.
 | Owner authentication call sites | `human_presence::PresenceRequest` variants; platform backends in `human_presence` |
 | A `WalletConnect` session's scope is built from what this wallet can serve, never from what the dapp asked for | `dapp::DappSession::negotiate` (the only producer of a session's chains and methods, called by both surfaces) and `dapp::DappSession::scope_for`; the per-request boundary in `walletconnect::session::check_in_scope` |
 | An unreviewed session adds a proposer, not an authority | `dapp::DappSession::execute_plan` calls `orchestrator::execute_automatic` unchanged and routes a `Queued` disposition through `DappSurface::resolve_queued`; `mcp_walletconnect::HeadlessSurface` cannot sign and only watches the store |
+| No dapp-proposed plan reaches the policy without the agent having read it | `dapp::DappSession::execute_plan` calls `DappSurface::approve_plan` between the simulation and `orchestrator::execute_automatic`; `mcp_walletconnect::HeadlessSurface::approve_plan` publishes the plan and its `SimulationResult` and returns `PlanVerdict::Proceed` on exactly one path, an explicit `decide_proposal` approval — silence, close, and expiry all refuse |
+| An agent verdict can stop a plan and never widen one | `dapp::PlanVerdict` has no variant that bypasses anything: `Proceed` only reaches `execute_automatic`, which applies the policy unchanged |
 | A dapp request the MCP session stops waiting for cannot be approved afterwards | `mcp_walletconnect::HeadlessSurface::await_decision`'s `give_up`, which calls `pending::PendingStore::reject` (and the message/typed-data equivalents) — each moves only a row still awaiting approval, so an owner approving concurrently wins and their signature is used |
 | Key custody: creation, load, export, removal | `custody` (Zeroize, no overwrite, export timestamp before key return) |
 

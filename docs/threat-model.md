@@ -28,12 +28,26 @@ itself and has no terminal to review on. It changes who may propose, and
 nothing about what a proposal can become. The session's scope is built by the
 same function the terminal review calls, from chains this wallet has configured
 and methods it implements; it is bound to one account for its whole life; and
-every request it carries takes the pipeline an MCP caller's would: simulated,
-policy-checked, signed only if the policy already permits it, otherwise queued
-for `ekubo-wallet review`, with every signature request queued unconditionally.
-So the set an unreviewed session reaches unattended is exactly the set the
-active policy already signs unattended — the same boundary that bounds the
-agent, unwidened. What is genuinely lost is the anti-impersonation screen: the
+every request it carries takes the pipeline an MCP caller's would.
+
+That pipeline has two parts, and both apply. The first is the one a policy
+cannot supply: an agent that produces a plan simulates it, reads what it does,
+and chooses to send. A dapp's calldata would otherwise reach the policy with
+nobody's judgement in between, so an obvious drainer would get exactly one
+check — whether some rule happened to match it — and a policy is a set of
+shapes rather than a reader. Every dapp-proposed plan is therefore stopped
+after simulation and before `execute_automatic` and published to the agent as
+the exact plan plus the same `SimulationResult` it reads before sending its
+own, and it is refused unless the agent answers. That gate cannot grant:
+approving releases the plan into the policy, which decides as it always did,
+and silence, a closed session, or an expired budget all refuse. The second part
+is the policy itself, unchanged — signed only if it already permits, otherwise
+queued for `ekubo-wallet review`, with every signature request queued
+unconditionally.
+
+So what an unreviewed session reaches unattended is the intersection of what
+the active policy signs unattended and what the agent read and approved, which
+is exactly where a plan the agent fetched from any producer already sits. What is genuinely lost is the anti-impersonation screen: the
 host, the https check, the foreign-icon check, and the name-spells-another-
 domain check are computed and returned to the agent, but nobody is made to read
 them, so a `wc:` link the agent was induced to use connects a dapp the owner
@@ -448,7 +462,8 @@ replenish because no such accounting exists.
 | RPC or network fails after send | Bytes/hash were stored first; status remains reconcilable and only exact bytes can be retried. |
 | Same-user process accesses credential APIs | Platform isolation and prompts vary; OS compromise or process injection is out of scope. |
 | Agent forges a token name or alias to misdescribe a transfer | Both are proposals; becoming a stored name takes terminal confirmation plus OS presence. Symbols are re-sanitized at render time and refused if they contain `0x`. An unnamed token renders by address in base units — readable, not trusted. |
-| Agent connects the wallet to a dapp the owner never saw | By design, and bounded by the policy rather than by a review: the session may propose, and anything the policy does not already permit still queues for `ekubo-wallet review`. What is lost is the impersonation screen — the dapp's claimed identity and every caution are returned to the agent rather than drawn, so a link the agent was induced to use pairs with nobody objecting. Residual risk is the automatic set of the active policy, exposed to a counterparty of the agent's choosing. Narrow the policy, or do not connect one. |
+| Agent connects the wallet to a dapp the owner never saw | By design. Two gates stand behind it and neither is the connection review: the agent must read the plan and its simulation and approve it, and the policy must then permit it or it queues for `ekubo-wallet review`. What is lost is the impersonation screen — the dapp's claimed identity and every caution are returned to the agent rather than drawn, so a link the agent was induced to use pairs with nobody objecting. Residual risk is the intersection of the policy's automatic set and what a compromised agent would approve, which is the same residual an injected agent already has through `wallet_send_transfers`. Narrow the policy, or do not connect one. |
+| Dapp proposes a drainer to an agent driving its UI | The plan and its simulation stop for the agent before the policy sees them, carrying `token_spends`, `balance_changes`, and `will_authorize_delegation` — a drainer does not resemble the action the agent asked the site to perform in any of them. This is judgement, not a rule, so it is only as good as the agent: an injected agent approves. It closes the gap between a dapp's transaction and the agent's own, and claims nothing more. |
 | Dapp request outlives the answer the dapp was given | A queued request from a session is rejected in the same atomic step that gives up waiting, so the row is terminal before the dapp is told. An owner approving in the same instant wins the race and their signature is used; there is no state where the dapp holds a refusal and the row is still approvable, which is what would let a later approval broadcast beside the agent's retry. Disconnecting rejects in flight the same way. |
 | Agent redirects the WalletConnect relay | No tool parameter names it; the relay is compiled into the release, and `--relay-url` is a flag on the owner's own command line. |
 | Agent points the wallet at an RPC it controls | It can only propose one. Endpoint admission refuses non-public and credential-bearing URLs, and acceptance takes a terminal confirmation naming the endpoint being replaced, a chain-ID verification, and an OS presence check. |

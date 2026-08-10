@@ -38,7 +38,7 @@ use crate::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     sanitize::terminal_safe_line,
-    simulation::simulate_execution,
+    simulation::{SimulationResult, simulate_execution},
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
     walletconnect::{
         identity::DappIdentity,
@@ -88,6 +88,14 @@ pub const SUPPORTED_METHODS: &[&str] = &[
 /// A dapp told the batch is too large can send smaller ones.
 pub const MAX_BATCH_CALLS: usize = 24;
 
+/// Whether a dapp's plan goes on to the policy.
+pub enum PlanVerdict {
+    /// Put it to the policy, which decides as it always did.
+    Proceed,
+    /// Stop here, and tell the dapp this.
+    Refuse(String),
+}
+
 /// How a session puts a request to the person who has to decide it, and how it
 /// reports what is happening.
 ///
@@ -107,6 +115,27 @@ pub trait DappSurface {
     fn closing(&self) -> bool {
         false
     }
+
+    /// Decide whether a plan a dapp proposed may be put to the policy at all.
+    ///
+    /// This is what makes a dapp-proposed transaction resemble an
+    /// agent-proposed one. An agent that produces a plan itself sees the
+    /// simulation and chooses whether to send; a dapp's plan used to go from
+    /// its calldata straight to the policy with nobody's judgement in between,
+    /// so an obvious drainer got exactly one check — whether some rule happened
+    /// to match it.
+    ///
+    /// Called after the simulation and before `execute_automatic`, so a verdict
+    /// here is a gate and never a grant: refusing stops the plan, and
+    /// proceeding only means it now faces the policy it always faced. Nothing a
+    /// surface returns can make something sign that the policy would have
+    /// queued.
+    async fn approve_plan(
+        &self,
+        plan: &ExecutionPlan,
+        simulation: &SimulationResult,
+        dapp: &AppMetadata,
+    ) -> Result<PlanVerdict>;
 
     /// Record something that happened, for whatever surface is showing it.
     ///
@@ -543,7 +572,7 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
         self.surface
             .log(&describe_dapp_request(request.dapp, &proposed));
         match self
-            .execute_plan(request.chain_id, &plan, &describe_plan_source(request.dapp))
+            .execute_plan(request.chain_id, &plan, request.dapp)
             .await?
         {
             Ok(record) => Ok(RequestOutcome::Result(json!(
@@ -648,7 +677,7 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
             batch.calls.len()
         )));
         match self
-            .execute_plan(batch.chain_id, &plan, &describe_plan_source(request.dapp))
+            .execute_plan(batch.chain_id, &plan, request.dapp)
             .await?
         {
             Ok(record) => {
@@ -811,7 +840,7 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
         &self,
         chain_id: u64,
         plan: &ExecutionPlan,
-        plan_source: &str,
+        dapp: &AppMetadata,
     ) -> Result<std::result::Result<PendingTransaction, RequestOutcome>> {
         let network = self.config.network_by_chain_id(&chain_id.to_string())?;
 
@@ -834,6 +863,18 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
         )
         .await?;
 
+        // The surface looks before the policy does. On a terminal that is the
+        // person who approved the connection and who will see the review for
+        // anything the policy does not cover; under the MCP server it is the
+        // agent, given the same simulation it reads before sending a plan of
+        // its own. Either way this only ever stops a plan.
+        if let PlanVerdict::Refuse(reason) =
+            self.surface.approve_plan(plan, &simulation, dapp).await?
+        {
+            return Ok(Err(RequestOutcome::rejected(reason)));
+        }
+
+        let plan_source = describe_plan_source(dapp);
         let pending = Mutex::new(PendingStore::production(&self.data_dir)?);
         let disposition = crate::orchestrator::execute_automatic(
             self.config,
@@ -843,7 +884,7 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
             &network,
             &stored_policy,
             plan,
-            Some(plan_source),
+            Some(plan_source.as_str()),
             &simulation,
         )
         .await?;

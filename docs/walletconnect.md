@@ -301,12 +301,29 @@ them, and they are the three that decide what can move:
   your policy, and either signed because your policy already permits it or
   left in the queue for `ekubo-wallet review`. A `personal_sign` or an EIP-712
   payload always waits for you; no policy authorizes a signature.
+- **And the agent has to read it first.** This is the part worth understanding,
+  because a policy cannot supply it. When the agent produces a transaction
+  itself it simulates it, sees what it does, and decides to send. A dapp's
+  transaction would otherwise go from its calldata to your policy with nobody
+  looking, so an obvious drainer would get one check: whether some rule
+  happened to match it. A policy is a set of shapes, not a reader. So every
+  transaction a dapp proposes stops after simulation, and the agent is handed
+  the exact plan and the same simulation it reads before sending its own —
+  what leaves the account, what the account looks like afterwards, and whether
+  the account's own code is being pointed somewhere new. It has to approve
+  before your policy is even consulted, and saying nothing refuses.
+
+  That gate can only ever stop something. Approving does not authorize
+  anything: it releases the plan into your policy, which then decides exactly
+  as it would for a transaction the agent sent itself.
 
 So the question "what can an agent's dapp session do without me?" has one
-answer: **exactly what your policy already signs without asking.** Nothing
-more becomes automatic because a dapp is the one proposing it. If that set is
-larger than you want an unreviewed website reaching, narrow the policy — that
-is the control, and it is the same control that bounds the agent itself.
+answer: **what your policy already signs without asking, and the agent also
+looked at and approved.** That is the same position a transaction the agent
+fetched from any other tool is already in. Nothing becomes automatic because a
+dapp is the one proposing it. If that set is larger than you want an
+unreviewed website reaching, narrow the policy — that is the control, and it
+is the same control that bounds the agent itself.
 
 What you lose is the fourth thing: the chance to look at the site before it is
 connected. The wallet still derives everything it can — the host parsed out of
@@ -319,18 +336,20 @@ caution it always did; nobody is made to read it.
 
 ### Requests that need you
 
-A dapp request your policy does not already permit becomes a normal queued
-request, and the agent is told the `ekubo-wallet review <request-id>` to give
-you. It appears under `awaiting_review` in
-`wallet_walletconnect_sessions` until it is decided.
+A dapp request the agent approved that your policy does not already permit
+becomes a normal queued request, and the agent is told the
+`ekubo-wallet review <request-id>` to give you. It appears under
+`awaiting_review` in `wallet_walletconnect_sessions` until it is decided.
 
-**It expires after four minutes, and expiring rejects it.** The protocol stops
+**One dapp request gets four minutes in total**, shared between the agent's
+decision and yours, **and running out rejects it.** The protocol stops
 carrying the answer to the dapp at five minutes, so a wait that ran longer
 would tell the dapp nothing while leaving a request you could approve
 afterwards — and approving it then would broadcast a transaction the dapp had
 already been told had failed, quite possibly after the agent retried and made
-a second one. So the wait ends at four minutes and moves the row to rejected
-in the same step. If you approve in the same instant, you win: the rejection
+a second one. So the budget ends at four minutes and moves the row to rejected
+in the same step. One budget rather than one each, because two would add up
+past the five minutes the protocol allows. If you approve in the same instant, you win: the rejection
 only applies to a row still awaiting approval, and your signature is used.
 
 Disconnecting has the same effect on anything in flight, for the same reason.

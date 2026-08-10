@@ -31,7 +31,9 @@
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. One of the two tools available before acceptance. |
 | `wallet_check_for_updates` | Whether a newer release than the running one has been published, and the command that installs it. Touches no wallet, key, or policy, and is the other tool available before acceptance — being told the build is stale should not require accepting anything. Installs nothing: the wallet has no tool that does, because replacing the binary would replace the approval surface that would have confirmed it. The command is the user's to run, or the agent's if the user asks; the running server keeps its version until it is restarted. |
 | `wallet_walletconnect_connect` | Pair with a dapp's own web interface from a `wc:` link and settle a session, **with no connection review and nobody asked**. The only tool in this server that grants a counterparty standing access without a human decision; see [walletconnect](walletconnect.md#sessions-an-agent-opens). Binds one account and one set of chains, narrowable with `chain_ids`, and returns the dapp's claimed identity plus every caution the review would have drawn. |
-| `wallet_walletconnect_sessions` | What each open session is with, exposes, and has done, plus the request IDs waiting for `ekubo-wallet review`. Live sessions only — one that ended is dropped rather than listed as finished. Reads only. |
+| `wallet_walletconnect_next_request` | Block until a dapp on this session proposes a transaction, and read the exact plan plus the same `SimulationResult` a plan of your own returns, before anything is put to the policy. |
+| `wallet_walletconnect_decide` | Approve or refuse the proposal you just read. Approving releases it into the policy, which decides as it always does; refusing ends it and tells the dapp. Deciding nothing refuses it. |
+| `wallet_walletconnect_sessions` | What each open session is with, exposes, and has done, plus any proposal awaiting your decision and the request IDs waiting for `ekubo-wallet review`. Live sessions only — one that ended is dropped rather than listed as finished. Reads only. |
 | `wallet_walletconnect_disconnect` | End a session, telling the dapp. Rejects anything still waiting rather than leaving it approvable. |
 | `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
 
@@ -134,24 +136,58 @@ interrupting anyone. Four things the review did, three survive:
 - **Whether to connect at all is not asked.** An agent that can call this tool
   can point the named account at any dapp.
 
-What that is worth depends entirely on the policy, because the policy is what
-the connection reaches. A session grants proposal rights and nothing else:
-every transaction is simulated, put to the same policy, and either signed
-automatically because the policy already permits it or left for
-`ekubo-wallet review`. So the blast radius of an unreviewed connection is
-exactly the set of transactions the owner's policy already signs without
-asking. Read it with `wallet_get_policy` before using this tool, and prefer a
-policy that covers the specific thing the user wants done over one that covers
-a shape of transaction.
+### You are the reader
 
-Requests that need a person appear in `wallet_walletconnect_sessions` under
-`awaiting_review`, with the `ekubo-wallet review <request-id>` the user has to
-run. Two rules about those ids:
+An unreviewed connection would not be survivable if that were the whole story,
+and the reason has nothing to do with how strong the policy is. When you
+produce a plan yourself you simulate it, read what it does, and choose to send
+it. A dapp's plan has no such step by default: its calldata would go straight
+to the policy, so an obvious drainer would get exactly one check — whether some
+rule happened to match it. A policy is a set of shapes, not a reader.
+
+So every dapp-proposed transaction stops and waits for you:
+
+```
+wallet_walletconnect_next_request   → the exact plan + the same SimulationResult
+                                       you get for a plan of your own
+wallet_walletconnect_decide         → approve (release it to the policy) or refuse
+```
+
+Call `next_request` right after you tell the dapp's page to do something. The
+wait is free: you were waiting for that page anyway, and this *is* that wait.
+
+Judge it exactly as you judge your own plans. `token_spends` says what leaves
+the account, `balance_changes` what it looks like afterwards,
+`will_authorize_delegation` and `replaces_delegated_implementation` whether the
+account's own code is being pointed somewhere new, and `policy_outcome` what
+happens if you approve. Compare all of it against what you asked the site to
+do — a drainer and the swap you requested do not resemble each other in any of
+those fields.
+
+Approving is not an authorization. It releases the plan into the policy, which
+decides exactly as it does for a plan you sent yourself, so one no rule covers
+still queues for `ekubo-wallet review`. Every other way out refuses: silence
+until the budget runs out, a closed session, an error. Refuse with a `reason`
+and the dapp shows it to its user.
+
+What the policy is still matters, because it decides what signs without the
+user after you approve. Read it with `wallet_get_policy` before connecting, and
+prefer a policy that covers the specific thing the user wants done over one
+that covers a shape of transaction.
+
+### Requests that need the user
+
+A transaction you approved that the policy does not cover appears in
+`wallet_walletconnect_sessions` under `awaiting_review`, with the
+`ekubo-wallet review <request-id>` the user has to run. Two rules about those
+ids:
 
 - **Wait; do not submit them.** The session broadcasts what it is waiting on.
   Passing one to `wallet_send_execution_plan` is an attempt at a second
   submission of the same request.
-- **They expire.** A request not approved within 240 seconds is *rejected* —
+- **They expire.** One dapp request gets 240 seconds in total, shared between
+  your decision and the user's, so a slow answer from you leaves the user less.
+  A request not approved inside it is *rejected* —
   the row is moved to a terminal state and the dapp is told the truth. This is
   not a timeout that leaves the decision open: the protocol stops carrying the
   answer after 300 seconds, and a row still approvable after that is a

@@ -478,6 +478,35 @@ struct WalletConnectInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct WalletConnectWaitInput {
+    session_id: uuid::Uuid,
+    /// How long this call blocks before returning nothing, in seconds: 1 to
+    /// 55, default 55. A wait that returns nothing has decided nothing; call
+    /// it again to keep waiting.
+    #[serde(default = "default_wait_seconds")]
+    #[schemars(range(min = 1, max = 55))]
+    timeout_seconds: u8,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WalletConnectDecisionInput {
+    session_id: uuid::Uuid,
+    /// The `proposal_id` from the proposal you actually read. An id that is
+    /// not the one currently waiting is refused rather than applied to
+    /// whatever is.
+    proposal_id: uuid::Uuid,
+    /// True releases the plan into the policy, which decides as it always
+    /// does; false refuses it and tells the dapp.
+    approve: bool,
+    /// Why, for the session log and for the sentence the dapp shows its user.
+    /// Worth giving on a refusal.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WalletConnectSessionInput {
     /// The `session_id` `wallet_walletconnect_connect` returned.
     session_id: uuid::Uuid,
@@ -2491,6 +2520,60 @@ impl WalletMcpServer {
                 })?
                 .list(),
         ))
+    }
+
+    #[tool(
+        name = "wallet_walletconnect_next_request",
+        description = "Wait for a dapp on this session to propose a transaction, and read it before it goes any further. THIS IS THE STEP THAT MAKES A DAPP'S TRANSACTION LIKE ONE OF YOUR OWN: you get the exact execution plan and the same simulation wallet_simulate_execution_plan returns for a plan you produced yourself, and nothing is put to the policy until you answer with wallet_walletconnect_decide. Call it immediately after telling the dapp's page to do something — the wait costs nothing, because you are waiting for that page anyway. Judge it as you judge your own plans: token_spends says what leaves the account, balance_changes what it looks like afterwards, will_authorize_delegation whether the account's own code is being pointed somewhere new, and policy_outcome what happens if you approve. Compare all of it against what you asked the site to do; a drainer and the swap you requested do not resemble each other in any of those fields. Returns nothing if the timeout elapses or the session has ended, which decides nothing — call again. This tool cannot approve or sign.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn wallet_walletconnect_next_request(
+        &self,
+        Parameters(input): Parameters<WalletConnectWaitInput>,
+    ) -> Result<Json<Option<mcp_walletconnect::ProposedTransaction>>, ErrorData> {
+        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        Ok(Json(
+            mcp_walletconnect::next_proposal(
+                &self.walletconnect,
+                input.session_id,
+                Duration::from_secs(u64::from(input.timeout_seconds)),
+            )
+            .await
+            .map_err(|error| tool_error(&error))?,
+        ))
+    }
+
+    #[tool(
+        name = "wallet_walletconnect_decide",
+        description = "Answer a proposal wallet_walletconnect_next_request returned. Approving does not authorize anything: it releases the plan into the policy, which decides exactly as it does for a plan you sent yourself, so one no rule covers still queues for `ekubo-wallet review` and every signature request still does. Refusing ends it and the dapp is told your reason. Deciding nothing refuses it too — a proposal expires with the request's own budget. Only the proposal currently waiting can be answered; an id that has already been decided or expired is refused rather than applied to whatever is waiting now, because your judgement was about one specific plan and one specific simulation.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    fn wallet_walletconnect_decide(
+        &self,
+        Parameters(input): Parameters<WalletConnectDecisionInput>,
+    ) -> Result<Json<serde_json::Value>, ErrorData> {
+        mcp_walletconnect::decide_proposal(
+            &self.walletconnect,
+            input.session_id,
+            input.proposal_id,
+            input.approve,
+            input.reason,
+        )
+        .map_err(|error| tool_error(&error))?;
+        Ok(Json(serde_json::json!({
+            "proposal_id": input.proposal_id,
+            "approved": input.approve,
+            "instruction": if input.approve {
+                "Released to the policy. Watch wallet_walletconnect_sessions: if it appears under awaiting_review the policy did not cover it and the user must run the `ekubo-wallet review` command named there."
+            } else {
+                "Refused. The dapp has been told, and nothing was signed."
+            },
+        })))
     }
 
     #[tool(

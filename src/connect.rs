@@ -22,7 +22,7 @@ use crate::{
     approval::{ApprovalDecision, ApprovalKind, ApprovalRequest},
     config::{ConfigStore, WalletMetadata},
     connect_screen::{IdleView, SessionState},
-    dapp::{DappSession, DappSurface},
+    dapp::{DappSession, DappSurface, PlanVerdict},
     legal,
     message::{MessageStore, PendingMessage},
     pending::PendingTransaction,
@@ -241,6 +241,26 @@ impl DappSurface for TerminalSurface<'_> {
 
     fn log(&self, text: &str) {
         self.note(crate::tui::Tone::Info, text);
+    }
+
+    /// A terminal session proceeds. The gate exists for a surface whose
+    /// operator is not present while the dapp is talking; here they are, they
+    /// read this dapp's identity and cautions on the connection review before
+    /// approving it, and they will see the full review for anything the policy
+    /// does not already cover. Adding a second question they would answer from
+    /// the same screen buys nothing.
+    ///
+    /// What that leaves standing is the pre-existing shape of `connect`: under
+    /// a policy that signs everything automatically, a dapp the person chose to
+    /// connect can act without another prompt. That is what approving the
+    /// connection meant before this seam existed and it is not changed here.
+    async fn approve_plan(
+        &self,
+        _plan: &crate::core::execution_plan::ExecutionPlan,
+        _simulation: &crate::simulation::SimulationResult,
+        _dapp: &crate::walletconnect::protocol::AppMetadata,
+    ) -> Result<PlanVerdict> {
+        Ok(PlanVerdict::Proceed)
     }
 
     /// Put a queued transaction through the same review `ekubo-wallet review`

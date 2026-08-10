@@ -419,7 +419,9 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_wait_for_message",
             "wallet_wait_for_typed_data",
             "wallet_walletconnect_connect",
+            "wallet_walletconnect_decide",
             "wallet_walletconnect_disconnect",
+            "wallet_walletconnect_next_request",
             "wallet_walletconnect_sessions",
         ]
         .into_iter()
