@@ -331,3 +331,41 @@ fn policy_validate_never_touches_wallet_state() {
         "validation wrote to the data directory"
     );
 }
+
+/// No document tells a reader to pipe an unverified script into a shell.
+///
+/// `01d13cb` signed `install.sh`, made the agent-facing `upgrade_command`
+/// verify it, and updated the release notes -- and left `README.md` and
+/// `docs/installation.md` saying
+/// `curl … raw.githubusercontent.com/…/main/install.sh | sh`. That is the
+/// construction the fix exists to remove, and worse than what it replaced,
+/// because it tracks a branch rather than a tag: no signature covers "whatever
+/// `main` says today".
+///
+/// The inconsistency was the real defect. The project paid the cost of a
+/// cosign-mandatory install in its documentation while keeping the unverified
+/// path as the one most people would follow.
+#[test]
+fn no_shipped_document_pipes_an_unverified_installer() {
+    for document in ["README.md", "docs/installation.md", "docs/releasing.md"] {
+        let text = fs::read_to_string(repository_root().join(document))
+            .unwrap_or_else(|error| panic!("{document} is readable: {error}"));
+        for (number, line) in text.lines().enumerate() {
+            let piped = line.contains("install.sh") && line.contains("| sh");
+            assert!(
+                !piped,
+                "{document}:{} pipes an installer into a shell: {line}",
+                number + 1
+            );
+            assert!(
+                !line.contains("raw.githubusercontent.com"),
+                "{document}:{} fetches from a branch, which no signature covers: {line}",
+                number + 1
+            );
+        }
+        assert!(
+            !text.contains("install.sh") || text.contains("cosign verify-blob"),
+            "{document} names the installer without showing how to verify it"
+        );
+    }
+}

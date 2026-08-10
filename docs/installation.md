@@ -12,11 +12,31 @@ Gemini CLI, Cursor, and opencode), and installs completion for your login
 shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
+tag=v1.0.0-rc.0   # the release you are installing
+base=https://github.com/EkuboProtocol/wallet-mcp-server/releases/download/$tag
+d=$(mktemp -d)
+curl -fsSL -o "$d/install.sh" "$base/install.sh"
+curl -fsSL -o "$d/install.sh.sigstore.json" "$base/install.sh.sigstore.json"
+cosign verify-blob \
+  --bundle "$d/install.sh.sigstore.json" \
+  --certificate-identity \
+  "https://github.com/EkuboProtocol/wallet-mcp-server/.github/workflows/release.yml@refs/tags/$tag" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$d/install.sh"
+sh "$d/install.sh"
 ```
 
-Read [`install.sh`](../install.sh) before piping it to a shell. Replace `main` with
-an exact release tag for a reproducible installation.
+The installer is verified before it runs, and that is the reason for the extra
+lines rather than a pipe. `install.sh` checks everything it downloads, but a
+shell begins executing a piped script as it arrives: an installer chosen by
+somebody else has already run to completion before any check written inside it
+could matter. Checks in a file the same party can replace are not checks. So
+the script is published as a release asset with a signature of its own, and the
+commands above verify it against the workflow that produced it.
+
+`install.sh` is pinned to a tag here for the same reason. Tracking `main` means
+installing whatever that branch says today, which is not a thing any signature
+covers.
 
 `cosign` is required. The checksum file travels the same path as the archive it
 describes, from the same host, so whoever can substitute one can substitute both

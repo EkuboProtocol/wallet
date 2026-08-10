@@ -27,14 +27,33 @@ simulated review attached.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/install.sh | sh
+tag=v1.0.0-rc.0   # the release you are installing
+base=https://github.com/EkuboProtocol/wallet-mcp-server/releases/download/$tag
+d=$(mktemp -d)
+curl -fsSL -o "$d/install.sh" "$base/install.sh"
+curl -fsSL -o "$d/install.sh.sigstore.json" "$base/install.sh.sigstore.json"
+cosign verify-blob \
+  --bundle "$d/install.sh.sigstore.json" \
+  --certificate-identity \
+  "https://github.com/EkuboProtocol/wallet-mcp-server/.github/workflows/release.yml@refs/tags/$tag" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$d/install.sh"
+sh "$d/install.sh"
 ```
 
-Read [`install.sh`](install.sh) before piping it to a shell. It verifies a
-Sigstore signature over `SHA256SUMS` and the archive's SHA-256 checksum against
-it before extracting anything, installs `ekubo-wallet`, registers it with every
-agent it finds (Claude Code, Codex, Gemini CLI, Cursor, opencode), and installs
-shell completion. Replace `main` with a release tag for a reproducible install.
+The installer is verified before it runs. It carries a Sigstore signature of
+its own, published with the release, and the commands above check that
+signature against the release workflow that produced it. This matters more than
+it looks: a shell begins executing a piped script as it arrives, so an
+installer nobody checked has already run by the time any check inside it could
+apply — and "read it before piping it to a shell" is advice a reader cannot act
+on when the bytes are executing as they download.
+
+Once verified, it downloads the archive for your platform, verifies a Sigstore
+signature over `SHA256SUMS` and the archive's checksum against it before
+extracting anything, installs `ekubo-wallet`, registers it with every agent it
+finds (Claude Code, Codex, Gemini CLI, Cursor, opencode), and installs shell
+completion.
 
 `cosign` is required. See [installation](docs/installation.md) to install
 without it, to use a release archive directly, or to register the MCP server by
