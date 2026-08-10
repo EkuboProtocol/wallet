@@ -927,6 +927,31 @@ impl PendingRow {
                 "stored signed transaction does not hash to its recorded hash"
             );
         }
+        // And the broadcast hash names that same envelope, because it is the
+        // only envelope this row has. `mark_broadcast` already refuses to
+        // write any other — its `UPDATE` matches on
+        // `signed_transaction_hash = ?2` — but a guard in one writer is not an
+        // invariant of the row, and this one is read by code that trusts it
+        // completely: `reconcile` looks a receipt up by
+        // `broadcast_transaction_hash` in preference to the signed hash, while
+        // `observe` takes the nonce from `serialized_transaction`. Those two
+        // disagreeing means some other transaction's receipt — or its absence
+        // — settles this plan as mined, reverted, or replaced, releasing the
+        // in-flight slot while the envelope that was actually signed is still
+        // out there and may yet mine.
+        //
+        // Checked here rather than in the writer for the same reason the pair
+        // above is: this is the boundary every reader crosses.
+        if let Some(broadcast) = &self.broadcast_transaction_hash {
+            let signed = self
+                .signed_transaction_hash
+                .as_ref()
+                .context("stored broadcast hash has no signed transaction to belong to")?;
+            ensure!(
+                broadcast == signed,
+                "stored broadcast hash names a different transaction than the signed envelope"
+            );
+        }
         let policy_revision =
             u64::try_from(self.policy_revision).context("stored policy revision is invalid")?;
         let approval_required = match self.approval_required {

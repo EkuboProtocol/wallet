@@ -945,3 +945,81 @@ fn a_mismatched_envelope_and_hash_never_reach_the_database() {
         "the row is still readable and still progressing"
     );
 }
+
+#[test]
+fn a_broadcast_hash_naming_another_transaction_is_refused_on_read() {
+    // `mark_broadcast` will only write the signed hash -- its UPDATE matches on
+    // `signed_transaction_hash = ?2` -- but a guard in one writer is not an
+    // invariant of the row, and this field is read by code that trusts it
+    // completely. `reconcile` looks a receipt up by `broadcast_transaction_hash`
+    // in preference to the signed hash while `observe` takes the nonce from
+    // `serialized_transaction`, so the two disagreeing means another
+    // transaction's receipt settles this plan and releases the in-flight slot
+    // while the envelope actually signed is still out there.
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+    let leased = store.claim_for_submission(signed.request_id).unwrap();
+    store
+        .mark_broadcast(
+            signed.request_id,
+            hash_of(ORIGINAL_BYTES).as_str(),
+            leased.generation,
+        )
+        .unwrap();
+    assert_eq!(
+        store.get(signed.request_id).unwrap().status,
+        PendingStatus::Broadcast
+    );
+
+    // The writer refuses an unrelated hash outright.
+    let leased = store.claim_for_submission(signed.request_id);
+    assert!(
+        leased.is_err(),
+        "a broadcast row is not claimable for submission again"
+    );
+
+    // So plant it the way an altered database would, and confirm the read is
+    // what catches it rather than reconciliation acting on it.
+    let other =
+        B256::from_str("0x4444444444444444444444444444444444444444444444444444444444444444")
+            .unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions SET broadcast_transaction_hash = ?2
+             WHERE request_id = ?1",
+            params![signed.request_id, Blob(other)],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(signed.request_id).unwrap_err());
+    assert!(error.contains("names a different transaction"), "{error}");
+
+    // A broadcast hash with no signed envelope behind it is refused too.
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET broadcast_transaction_hash = ?2, signed_transaction_hash = NULL,
+                 serialized_transaction = NULL
+             WHERE request_id = ?1",
+            params![signed.request_id, Blob(other)],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(signed.request_id).unwrap_err());
+    assert!(
+        error.contains("no signed transaction to belong to"),
+        "{error}"
+    );
+}
