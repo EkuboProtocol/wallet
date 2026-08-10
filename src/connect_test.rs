@@ -279,3 +279,194 @@ fn a_batch_status_is_reconciled_against_the_chain_before_it_is_reported() {
          reports as pending for as long as the dapp asks"
     );
 }
+
+mod legal_currency_tests {
+    //! Acceptance is live state, so a session cannot rest on having checked it.
+
+    /// The window this closes is the long one. `run` checks acceptance before
+    /// the session exists; a session then lasts as long as the dapp keeps it
+    /// open. Publishing new terms makes an existing acceptance stale -- the
+    /// status is derived from the current document digests -- so a session
+    /// opened this morning would keep signing all day under documents the
+    /// owner has not accepted, while the MCP server refuses every tool call
+    /// and every CLI command refuses on entry.
+    ///
+    /// Pinned in the source because standing this up behaviourally means a
+    /// paired relay, a settled session, and a dapp: the property is that the
+    /// check is in `dispatch`, before the method is looked at, so a method
+    /// added later is covered by having been dispatched rather than by someone
+    /// remembering.
+    #[test]
+    fn every_dapp_request_rechecks_acceptance_before_its_method_is_read() {
+        let source = include_str!("connect.rs");
+        let body = source
+            .split_once("async fn dispatch(&self, request: &DappRequest<'_>)")
+            .expect("dispatch is declared")
+            .1;
+        let checked = body
+            .find("legal::require_current_acceptance")
+            .expect("dispatch rechecks acceptance");
+        let matched = body.find("match request.method").expect("it dispatches");
+        assert!(
+            checked < matched,
+            "acceptance must be checked before the method is looked at, so a new method \
+             cannot be added without it"
+        );
+        let replaced = body
+            .find("refuse_replaced_account")
+            .expect("it also rechecks the account");
+        assert!(
+            checked < replaced,
+            "a wallet disabled by lapsed terms is refused for that reason, not for a \
+             later one"
+        );
+    }
+
+    /// And the claim in the kernel matches what the kernel does. The sentence
+    /// this replaces said the signing paths repeated the check as defense in
+    /// depth. They do not -- `load_matching_signer`, which every signature in
+    /// the process passes through, never sees it -- and a comment asserting a
+    /// security property the code does not have is worse than no comment,
+    /// because it is what a reader checks instead of the code.
+    #[test]
+    fn the_kernel_does_not_claim_a_check_it_does_not_make() {
+        let legal = include_str!("../crates/ekubo-wallet-core/src/legal.rs");
+        assert!(
+            !legal.contains("the signing paths repeat it as defense in depth"),
+            "the signing paths do not call this"
+        );
+        assert!(
+            legal.contains("It is **not** called by the signing paths themselves"),
+            "and the doc comment says so, with what closing that would take"
+        );
+    }
+}
+
+mod disconnect_intent_tests {
+    //! A disconnect asked for once stays asked for.
+
+    /// The flag has to belong to the session, not to the surface that happened
+    /// to be on screen when the key was pressed. `suspend_idle` drops the view
+    /// around every review and `enter_idle` builds a new one, so a `q`,
+    /// Escape, or Ctrl-C that lands while relay delivery wins the session
+    /// `select!` used to set a flag on a view that was then thrown away --
+    /// and the replacement started out saying no. The disconnect was not
+    /// delayed, it was gone, and the dapp stayed connected to a person who
+    /// believed they had left.
+    ///
+    /// Read from the source because standing the race up needs a relay, a
+    /// settled session, and a terminal. What is checkable is the ownership:
+    /// one flag, constructed once with the session, handed to each view.
+    #[test]
+    fn the_disconnect_flag_outlives_the_screen_that_recorded_it() {
+        let screen = include_str!("connect_screen.rs");
+        assert!(
+            !screen.contains("let quit = Arc::new(AtomicBool::new(false));"),
+            "an idle view must not mint its own disconnect flag; it is handed the session's"
+        );
+        assert!(
+            screen.contains("pub fn start(state: Arc<Mutex<SessionState>>, quit: Arc<AtomicBool>)"),
+            "the view takes the flag rather than making one"
+        );
+
+        let connect = include_str!("connect.rs");
+        assert_eq!(
+            connect.matches("Arc::new(AtomicBool::new(false))").count(),
+            1,
+            "exactly one disconnect flag exists, and the session owns it"
+        );
+        assert!(
+            connect.contains("IdleView::start(Arc::clone(&self.state), Arc::clone(&self.quit))"),
+            "every view started shares that one flag"
+        );
+    }
+
+    /// And a request arriving after the answer was given does not undo it. The
+    /// session loop selects between the relay and the quit future, so delivery
+    /// can win that race and reach dispatch with the disconnect already asked
+    /// for. The loop honours it on its next turn; this is what keeps the
+    /// interval from being one more signature.
+    #[test]
+    fn a_request_that_won_the_race_is_refused_rather_than_handled() {
+        let connect = include_str!("connect.rs");
+        let body = connect
+            .split_once("async fn dispatch(&self, request: &DappRequest<'_>)")
+            .expect("dispatch is declared")
+            .1;
+        let quit = body
+            .find("self.quit_pending()")
+            .expect("dispatch checks it");
+        let matched = body.find("match request.method").expect("it dispatches");
+        assert!(
+            quit < matched,
+            "the disconnect is honoured before the method is looked at"
+        );
+    }
+}
+
+mod fresh_input_tests {
+    //! A keystroke typed at one surface is not an answer to the next one.
+
+    /// `confirm_review` starts its decision on the safe answer, but a buffered
+    /// `Tab` toggles it and a buffered `Enter` returns it -- so two keystrokes
+    /// typed at whatever was previously on the terminal affirm a document
+    /// nobody saw. It is the shared confirmation behind legal acceptance,
+    /// policy proposals, network proposals, and direct network edits.
+    ///
+    /// `approve_tui` and the inline prompts already drained. The fix is not a
+    /// third call site but the one door: `Screen::enter` is the only route
+    /// into the alternate screen, so draining there covers every full-screen
+    /// surface that exists and every one added later.
+    #[test]
+    fn entering_the_alternate_screen_discards_earlier_keystrokes() {
+        let fullscreen = include_str!("fullscreen.rs");
+        let enter = fullscreen
+            .split_once("pub(crate) fn enter() -> Result<Self> {")
+            .expect("Screen::enter is declared")
+            .1;
+        let body = enter.split_once("\n    }").expect("its body ends").0;
+        let drained = body
+            .find("drain_type_ahead")
+            .expect("entering a screen drains what was typed at the last one");
+        let raw = body
+            .find("enable_raw_mode")
+            .expect("raw mode is enabled first");
+        let entered = body
+            .find("EnterAlternateScreen")
+            .expect("the screen is then entered");
+        assert!(
+            raw < drained,
+            "drain after enabling raw mode, or the keystrokes are still in the line discipline"
+        );
+        assert!(
+            drained < entered,
+            "drain before the screen exists, so nothing can be read at it first"
+        );
+    }
+
+    /// And that door is the only one. A surface that entered the alternate
+    /// screen by itself would skip the drain without changing this file.
+    #[test]
+    fn there_is_exactly_one_route_into_the_alternate_screen() {
+        let mut entries = 0;
+        for source in [
+            include_str!("fullscreen.rs"),
+            include_str!("approve_tui.rs"),
+            include_str!("pager.rs"),
+            include_str!("tx_browser.rs"),
+            include_str!("connect_screen.rs"),
+        ] {
+            entries += source
+                .lines()
+                .filter(|line| {
+                    line.contains("EnterAlternateScreen") && !line.trim_start().starts_with("//")
+                })
+                .filter(|line| !line.contains("terminal::{"))
+                .count();
+        }
+        assert_eq!(
+            entries, 1,
+            "every full-screen surface must take the terminal through `Screen::enter`"
+        );
+    }
+}

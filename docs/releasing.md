@@ -457,7 +457,31 @@ sudo sh -c '[ -f "$2" ] || { echo "not a regular file: $2" >&2; exit 1; }; t=$(m
 
 ## Verify a download
 
-First verify the checksum from the release directory:
+Start with `install.sh` itself, if that is how you are installing. It verifies
+everything it downloads, but a shell begins executing a piped script as it
+arrives, so those checks run only if whoever chose the script's bytes wanted
+them to — and verifying a payload with a script the same party can replace
+proves nothing. The installer is published as a release asset with a bundle of
+its own for exactly this reason. Do not pipe it from the raw source tree.
+
+```sh
+d=$(mktemp -d)
+base=https://github.com/EkuboProtocol/wallet-mcp-server/releases/download/<tag>
+curl -fsSL -o "$d/install.sh" "$base/install.sh"
+curl -fsSL -o "$d/install.sh.sigstore.json" "$base/install.sh.sigstore.json"
+cosign verify-blob \
+  --bundle "$d/install.sh.sigstore.json" \
+  --certificate-identity \
+  'https://github.com/EkuboProtocol/wallet-mcp-server/.github/workflows/release.yml@refs/tags/<tag>' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$d/install.sh"
+sh "$d/install.sh"
+```
+
+No `cosign`, no install: that is the same refusal `install.sh` already makes
+about its own downloads, applied one step earlier to itself.
+
+Then, for the artifacts. First verify the checksum from the release directory:
 
 ```sh
 sha256sum --check SHA256SUMS

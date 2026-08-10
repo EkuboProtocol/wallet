@@ -160,9 +160,22 @@ pub(crate) fn wrap_line_hanging(line: &Line, columns: usize, indent: usize) -> V
             lines.push(assemble(&flat[start..end]));
             break;
         }
-        // The space a line breaks at is dropped; everything else survives.
+        // The space a line breaks at stays on the row it ended.
+        //
+        // Dropping it is ordinary prose wrapping and was wrong here: this
+        // wrapper renders the complete EIP-712 payload a person reads before
+        // signing it, and a space inside a JSON string literal is part of the
+        // value the digest commits to. A requester that puts a meaningful
+        // space at a reachable wrap boundary had it vanish from every visual
+        // row, with no marker saying anything was removed -- so the string on
+        // screen was not the string being signed.
+        //
+        // Keeping it costs a trailing space at a line end, which no reader
+        // will notice, and buys the property that matters: the rendered
+        // document contains every character of its input. Layout is this
+        // function's job; editing the text is not.
         let (line_end, next_start) = match last_space {
-            Some(space) if space > start => (space, space + 1),
+            Some(space) if space > start => (space + 1, space + 1),
             _ => (end, end),
         };
         lines.push(assemble(&flat[start..line_end]));
@@ -1096,9 +1109,27 @@ pub(crate) struct Screen {
 }
 
 impl Screen {
+    /// Take the terminal, and throw away whatever was typed at whatever used
+    /// to be on it.
+    ///
+    /// The drain lives here rather than in each surface because this is the
+    /// one door into the alternate screen. `approve_tui` drained and the
+    /// inline prompts drained; `confirm_review` did not, and it is the shared
+    /// confirmation behind legal acceptance, policy proposals, network
+    /// proposals, and direct network edits. Its decision starts on the safe
+    /// answer, but a buffered `Tab` toggles it and a buffered `Enter` returns
+    /// it, so two queued keystrokes affirm a document nobody saw. Getting to
+    /// one of these screens takes RPC round trips or an authored review, and
+    /// the keys typed into that silence were meant for whatever the person
+    /// thought was in front of them.
+    ///
+    /// After `enable_raw_mode`, so the keystrokes are in the queue this drains
+    /// rather than in the line discipline, and before the first draw, so
+    /// nothing can be read before it runs.
     pub(crate) fn enter() -> Result<Self> {
         crate::render::note_interactive_surface();
         terminal::enable_raw_mode()?;
+        crate::tui::drain_type_ahead()?;
         execute!(io::stderr(), EnterAlternateScreen)?;
         Ok(Self {
             terminal: Terminal::new(CrosstermBackend::new(io::stderr()))?,

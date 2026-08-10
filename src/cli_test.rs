@@ -217,6 +217,7 @@ fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
         rpc_strategy: None,
         display_name: None,
         aliases: Vec::new(),
+        max_fee_per_gas: None,
         native_currency_name: None,
         native_currency_symbol: None,
         native_currency_decimals: None,
@@ -684,6 +685,262 @@ fn removing_the_wallet_from_cursor_leaves_the_companion_in_place() {
 }
 
 #[test]
+fn opencode_configuration_is_private_and_preserves_everything_else() {
+    let config = tempfile::tempdir().unwrap();
+    fs::write(
+        config.path().join("opencode.json"),
+        br#"{"$schema":"https://opencode.ai/config.json","mcp":{"other":{"type":"local","command":["other"]}},"model":"anthropic/claude-opus-4"}"#,
+    )
+    .unwrap();
+
+    let file = configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    // Nothing this wallet does not understand may be lost on the way through.
+    assert_eq!(document["$schema"], "https://opencode.ai/config.json");
+    assert_eq!(document["model"], "anthropic/claude-opus-4");
+    assert_eq!(
+        document["mcp"]["other"]["command"],
+        serde_json::json!(["other"])
+    );
+    // opencode's local form is a tagged union with an argv array, not Cursor's
+    // command string beside an `args` list.
+    let wallet = &document["mcp"][LOCAL_SERVER_NAME];
+    assert_eq!(wallet["type"], "local");
+    assert_eq!(
+        wallet["command"],
+        serde_json::json!(["/usr/local/bin/ekubo-wallet", "server"])
+    );
+    assert_eq!(wallet["enabled"], true);
+    assert!(wallet.get("args").is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn opencode_gets_the_companion_as_a_remote_entry_beside_the_wallet() {
+    // Writing the local shape for a remote endpoint would have opencode try to
+    // execute the URL as a command, so the discriminant is the thing to pin.
+    let config = tempfile::tempdir().unwrap();
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let file = configure_opencode_mcp_at(
+        config.path(),
+        COMPANION_SERVER_NAME,
+        &ServerTransport::Http(COMPANION_SERVER_URL),
+    )
+    .unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let companion = &document["mcp"][COMPANION_SERVER_NAME];
+    assert_eq!(companion["type"], "remote");
+    assert_eq!(companion["url"], COMPANION_SERVER_URL);
+    assert!(companion.get("command").is_none());
+    // Registering the second must not have displaced the first.
+    assert_eq!(document["mcp"][LOCAL_SERVER_NAME]["type"], "local");
+    // `opencode.json` is the file written even on a machine that has none,
+    // because it is the one a plain-JSON serializer can own outright.
+    assert_eq!(file, config.path().join("opencode.json"));
+}
+
+#[test]
+fn removing_the_wallet_from_opencode_leaves_the_companion_in_place() {
+    // `ekubo` is a prefix of `ekubo-wallet`, so a removal keyed on anything
+    // looser than an exact name would take both.
+    let config = tempfile::tempdir().unwrap();
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let file = configure_opencode_mcp_at(
+        config.path(),
+        COMPANION_SERVER_NAME,
+        &ServerTransport::Http(COMPANION_SERVER_URL),
+    )
+    .unwrap();
+
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert!(document["mcp"].get(LOCAL_SERVER_NAME).is_none());
+    assert_eq!(
+        document["mcp"][COMPANION_SERVER_NAME]["url"],
+        COMPANION_SERVER_URL
+    );
+}
+
+#[test]
+fn unregistering_opencode_without_a_configuration_is_not_an_error() {
+    // `meta-agent remove` with no agent named walks everything detected, so a
+    // machine where opencode was never configured must not fail the sweep.
+    let config = tempfile::tempdir().unwrap();
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+    remove_opencode_mcp_at(config.path(), COMPANION_SERVER_NAME).unwrap();
+}
+
+#[test]
+fn removing_from_opencode_sweeps_every_file_it_merges() {
+    // opencode merges all three of its global files, later ones winning, so an
+    // entry left behind in the legacy `config.json` would go on being the
+    // registration this command just said it had taken away.
+    let config = tempfile::tempdir().unwrap();
+    fs::write(
+        config.path().join("config.json"),
+        serde_json::json!({"mcp": {LOCAL_SERVER_NAME: {"type": "local", "command": ["/old/path", "server"]}}})
+            .to_string(),
+    )
+    .unwrap();
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+
+    for candidate in OPENCODE_CONFIG_FILES {
+        let file = config.path().join(candidate);
+        if !file.exists() {
+            continue;
+        }
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert!(
+            document["mcp"].get(LOCAL_SERVER_NAME).is_none(),
+            "{candidate} still registers the wallet"
+        );
+    }
+}
+
+#[test]
+fn a_commented_opencode_file_is_passed_over_unless_it_names_the_server() {
+    // `.jsonc` is a format this wallet can read only by accident, and
+    // rewriting one through a plain-JSON serializer would delete the comments
+    // that are the only reason to keep a file in it. So one that says nothing
+    // about these servers is left alone, and one that does is reported rather
+    // than quietly skipped.
+    let config = tempfile::tempdir().unwrap();
+    let jsonc = config.path().join("opencode.jsonc");
+    let untouched = "{\n  // my own notes\n  \"model\": \"anthropic/claude-opus-4\",\n}\n";
+    fs::write(&jsonc, untouched).unwrap();
+    remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
+    assert_eq!(fs::read_to_string(&jsonc).unwrap(), untouched);
+
+    fs::write(
+        &jsonc,
+        "{\n  // mine, by hand\n  \"mcp\": { \"ekubo-wallet\": { \"type\": \"local\", \"command\": [\"x\"] } },\n}\n",
+    )
+    .unwrap();
+    let error = remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("opencode.jsonc"), "{message}");
+    assert!(message.contains("by hand"), "{message}");
+}
+
+#[test]
+fn a_commented_opencode_json_is_refused_rather_than_replaced() {
+    // opencode parses every one of its files as JSONC, the `.json` included,
+    // so someone's settings may be commented under either name. Starting from
+    // an empty document there would silently reduce a whole configuration to
+    // one MCP entry, which is why this fails and says what to do instead.
+    let config = tempfile::tempdir().unwrap();
+    let file = config.path().join("opencode.json");
+    let original =
+        "{\n  // the model I actually want\n  \"model\": \"anthropic/claude-opus-4\"\n}\n";
+    fs::write(&file, original).unwrap();
+
+    let error = configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("by hand"), "{message}");
+    assert!(message.contains("opencode.json"), "{message}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+}
+
+#[test]
+fn opencode_detection_reads_every_file_and_tells_the_two_servers_apart() {
+    let config = tempfile::tempdir().unwrap();
+    // Nothing configured at all is a definite no, not an unanswerable
+    // question: `meta-agent list` has to be able to say "not registered".
+    let empty = opencode_registration_at(config.path()).unwrap();
+    assert!(!empty.wallet);
+    assert!(!empty.companion);
+
+    // The wallet alone must not read as the companion too — `ekubo` is a
+    // prefix of `ekubo-wallet`, which is the bug this shape is chosen against.
+    configure_opencode_mcp_at(
+        config.path(),
+        LOCAL_SERVER_NAME,
+        &ServerTransport::Stdio("/usr/local/bin/ekubo-wallet".into()),
+    )
+    .unwrap();
+    let wallet_only = opencode_registration_at(config.path()).unwrap();
+    assert!(wallet_only.wallet);
+    assert!(!wallet_only.companion);
+
+    // A registration in any file opencode merges counts, including one this
+    // wallet would never have written itself.
+    fs::write(
+        config.path().join("config.json"),
+        serde_json::json!({"mcp": {COMPANION_SERVER_NAME: {"type": "remote", "url": COMPANION_SERVER_URL}}})
+            .to_string(),
+    )
+    .unwrap();
+    let both = opencode_registration_at(config.path()).unwrap();
+    assert!(both.wallet);
+    assert!(both.companion);
+
+    // A file that will not parse and might be holding the answer makes the
+    // question unanswerable rather than answered wrongly.
+    fs::write(
+        config.path().join("opencode.jsonc"),
+        "{ // note\n  \"mcp\": { \"ekubo-wallet\": { \"type\": \"local\", \"command\": [\"x\"] } },\n}\n",
+    )
+    .unwrap();
+    assert!(opencode_registration_at(config.path()).is_none());
+}
+
+#[test]
+fn opencode_config_lives_under_xdg_rather_than_the_platform_convention() {
+    // opencode resolves this with `xdg-basedir`, so it is `~/.config/opencode`
+    // on macOS and Windows too. Reaching for the native config directory would
+    // write to `~/Library/Application Support` on macOS, where opencode would
+    // never look.
+    let directory = opencode_config_dir().unwrap();
+    assert!(directory.ends_with("opencode"));
+    if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+        assert!(
+            directory.ends_with(Path::new(".config").join("opencode")),
+            "{}",
+            directory.display()
+        );
+    }
+}
+
+#[test]
 fn a_registered_wallet_alone_does_not_read_as_a_registered_companion() {
     // The bug this exists for: `ekubo` is a prefix of `ekubo-wallet`, so the
     // obvious substring test reports both servers present when only the
@@ -730,9 +987,11 @@ fn every_agent_has_a_distinct_key_and_label() {
         assert!(keys.insert(agent.key()), "{agent:?} duplicates a key");
         assert!(!agent.label().is_empty());
     }
-    // Cursor is the one this wallet configures by writing the file itself,
-    // because it has no CLI that owns its MCP configuration.
+    // Cursor and opencode are the two this wallet configures by writing the
+    // file itself, because neither has a CLI that owns both halves of its MCP
+    // configuration — opencode can add a server and cannot remove one.
     assert!(AgentName::Cursor.binary().is_none());
+    assert!(AgentName::Opencode.binary().is_none());
     assert!(AgentName::Codex.binary().is_some());
 }
 
@@ -894,5 +1153,247 @@ fn two_characters_pick_out_any_alias() {
             rivals.is_empty(),
             "`{prefix}` does not reach the `{alias}` alias of `{owner}`: {rivals:?} share it"
         );
+    }
+}
+
+mod reviewed_wallet_tests {
+    //! A policy change lands on the wallet that was reviewed, or on none.
+
+    use super::super::ensure_reviewed_wallet;
+    use crate::config::{ConfigStore, WalletMetadata, WalletSource};
+    use alloy::primitives::Address;
+
+    fn metadata(id: &str, byte: u8) -> WalletMetadata {
+        WalletMetadata {
+            id: id.into(),
+            address: Address::repeat_byte(byte),
+            created_at: chrono::Utc::now(),
+            source: WalletSource::Created,
+            exported_at: None,
+        }
+    }
+
+    fn store_holding(wallet: &WalletMetadata) -> (tempfile::TempDir, ConfigStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        store
+            .update(|config| {
+                config.wallets.push(wallet.clone());
+                Ok(())
+            })
+            .unwrap();
+        (directory, store)
+    }
+
+    /// The ABA this closes. `account remove` purges the policy database by
+    /// name and `account create` under that name starts a wallet whose policy
+    /// numbering begins again at revision 1 -- so a review authorized against
+    /// the predecessor can land on the successor with every number matching,
+    /// precisely because the sequence restarted. The owner authorized a policy
+    /// for one key and it would govern another.
+    #[test]
+    fn a_wallet_replaced_during_authorization_is_refused() {
+        let replacement = metadata("primary", 0x22);
+        let (_directory, config) = store_holding(&replacement);
+
+        let reviewed = metadata("primary", 0x11);
+        let error = format!(
+            "{:#}",
+            ensure_reviewed_wallet(&config, &reviewed)
+                .expect_err("the reviewed wallet is gone; nothing may be applied")
+        );
+        assert!(error.contains("was replaced"), "{error}");
+        assert!(
+            error.contains("nothing was applied"),
+            "the refusal has to say the change did not happen: {error}"
+        );
+    }
+
+    /// A wallet gone entirely is refused too, and says why rather than
+    /// reporting a missing wallet as if the caller had asked for one.
+    #[test]
+    fn a_wallet_removed_during_authorization_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = ConfigStore::new(directory.path());
+        let error = format!(
+            "{:#}",
+            ensure_reviewed_wallet(&config, &metadata("primary", 0x11))
+                .expect_err("a wallet that is gone cannot have its policy replaced")
+        );
+        assert!(error.contains("nothing was applied"), "{error}");
+    }
+
+    /// And the ordinary case still applies, which is what a guard that refused
+    /// everything would fail.
+    #[test]
+    fn an_unchanged_wallet_still_applies_its_policy() {
+        let reviewed = metadata("primary", 0x11);
+        let (_directory, config) = store_holding(&reviewed);
+        ensure_reviewed_wallet(&config, &reviewed).expect("nothing changed");
+    }
+
+    /// Both policy-application paths consult it, and after owner
+    /// authentication rather than before: the window this is about is the one
+    /// that authentication opens.
+    #[test]
+    fn both_policy_paths_recheck_after_owner_authentication() {
+        let source = include_str!("cli.rs");
+        assert_eq!(
+            source
+                .matches("ensure_reviewed_wallet(config, &wallet)?;")
+                .count(),
+            2,
+            "the proposal review and the direct `policy set` both check"
+        );
+        // No newline in either needle. The checkout is CRLF on Windows, so a
+        // `\n` in the pattern matches nothing there and `split_once` returns
+        // `None` -- the test passed locally and failed only in CI, which is
+        // the failure mode a source-scanning test is most prone to.
+        for applying in [
+            "policies.consume_proposal(&proposal)?",
+            "let stored = policies.put(",
+        ] {
+            let before = source
+                .split_once(applying)
+                .expect("the application site exists")
+                .0;
+            let checked = before
+                .rfind("ensure_reviewed_wallet(config, &wallet)?;")
+                .expect("it is checked first");
+            let authenticated = before
+                .rfind("PresenceRequest::ReplacePolicy")
+                .expect("owner authentication precedes it");
+            assert!(
+                checked > authenticated,
+                "the recheck must follow the authentication it is protecting against"
+            );
+        }
+    }
+}
+
+mod removal_fencing_tests {
+    //! A wallet is not removed out from under a transaction that can still mine.
+
+    /// The ordering is the property, and what it protects changed shape.
+    ///
+    /// `purge` deletes every pending row under the name, including the exact
+    /// signed envelope and the cancellation state that are the only means of
+    /// stopping something already authorized and possibly already sent. Those
+    /// bytes do not stop being valid because the wallet was removed.
+    ///
+    /// It used to `bail!` on that. The maintainer's review called it what it
+    /// was: a wall in front of an approval screen the code already builds. An
+    /// owner whose node is gone and whose transaction will never mine is
+    /// entitled to remove the wallet, and refusing left them editing the
+    /// database -- the outcome the rest of this file works to avoid. So the
+    /// list is on the screen now, and the read still has to happen before the
+    /// screen is drawn, because afterwards there is no decision left to inform.
+    #[test]
+    fn removal_shows_live_transactions_on_the_approval_it_precedes() {
+        let source = include_str!("cli.rs");
+        let body = source
+            .split_once("AccountCommand::Remove { wallet_id } =>")
+            .expect("the removal arm exists")
+            .1;
+        let read = body
+            .find("in_flight_transactions")
+            .expect("removal asks what may still reach the chain");
+        let warned = body
+            .find("request = request.warning(")
+            .expect("and puts each one on the approval as a warning");
+        let approved = body
+            .find("require_approval(request)")
+            .expect("which is then shown to the owner");
+        let removed = body
+            .find("custody.remove(")
+            .expect("before the credential is destroyed");
+        assert!(
+            read < warned && warned < approved && approved < removed,
+            "read, warn, ask, then destroy -- in that order"
+        );
+        assert!(
+            !body[..removed].contains("anyhow::bail!"),
+            "nothing may refuse the removal outright before the owner is asked"
+        );
+    }
+}
+
+mod fee_ceiling_surface_tests {
+    //! The one bound on what a dishonest endpoint can charge is settable.
+
+    use super::*;
+
+    /// `docs/networks.md` calls `max_fee_per_gas` the protection for automatic
+    /// transactions -- their fee comes from an endpoint, no policy rule speaks
+    /// about it, and nobody reviews it -- and the CLI had no way to set it.
+    /// Every other field of a custom network was reachable; this one was
+    /// hard-coded to `None`.
+    #[test]
+    fn a_custom_network_can_be_given_a_fee_ceiling() {
+        let mut network = crate::config::NetworkConfig {
+            name: "custom".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: vec!["https://example.invalid/rpc".parse().unwrap()],
+            rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        };
+        set_network_field(&mut network, "--max-fee-per-gas", " 50000000000 ").unwrap();
+        assert_eq!(network.max_fee_per_gas.as_deref(), Some("50000000000"));
+    }
+
+    /// Parsed when it is set rather than when a transaction is due. A ceiling
+    /// that does not fit refuses every transaction on that chain, and finding
+    /// that out at signing time is finding out too late.
+    #[test]
+    fn a_ceiling_that_is_not_a_number_is_refused_at_the_prompt() {
+        let mut network = crate::config::NetworkConfig {
+            name: "custom".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: vec!["https://example.invalid/rpc".parse().unwrap()],
+            rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        };
+        for bad in ["50 gwei", "-1", "1e9"] {
+            assert!(
+                set_network_field(&mut network, "--max-fee-per-gas", bad).is_err(),
+                "`{bad}` is not a whole number of wei"
+            );
+        }
+        assert!(network.max_fee_per_gas.is_none(), "and nothing was written");
+
+        // Blank is not a bad value, it is the way to remove a ceiling: unset
+        // is unbounded, and an owner who set one has to be able to take it off
+        // without editing JSON by hand.
+        set_network_field(&mut network, "--max-fee-per-gas", "1").unwrap();
+        set_network_field(&mut network, "--max-fee-per-gas", "  ").unwrap();
+        assert!(
+            network.max_fee_per_gas.is_none(),
+            "blank clears the ceiling"
+        );
+    }
+
+    /// The interactive form offers it, and offers it as optional: unset is
+    /// unbounded and a number invented here would be wrong on most chains, so
+    /// it must not become a required answer.
+    #[test]
+    fn the_custom_network_form_offers_the_ceiling_without_demanding_one() {
+        let field = CUSTOM_NETWORK_FIELDS
+            .iter()
+            .find(|field| field.flag == "--max-fee-per-gas")
+            .expect("the form asks about the fee ceiling");
+        assert!(field.optional, "an unset ceiling is a valid answer");
+        assert!(field.default.is_none(), "and no number is invented for it");
     }
 }

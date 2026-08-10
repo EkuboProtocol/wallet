@@ -336,7 +336,7 @@ pub fn confirm(message: &str) -> Result<bool> {
 pub struct Confirmation {
     title: String,
     summary: String,
-    facts: Vec<(String, String)>,
+    facts: Vec<(String, Vec<String>)>,
     warnings: Vec<String>,
 }
 
@@ -356,7 +356,22 @@ impl Confirmation {
     /// what looks like another fact.
     #[must_use]
     pub fn fact(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
-        self.facts.push((label.into(), value.into()));
+        self.facts.push((label.into(), vec![value.into()]));
+        self
+    }
+
+    /// One label over several lines, each clamped like a fact's value.
+    ///
+    /// For the facts that are a list rather than a value — a permission diff,
+    /// most of all. Rendered as the label alone and then the lines indented
+    /// under it, because a diff joined onto one row is a diff nobody reads.
+    #[must_use]
+    pub fn fact_lines(
+        mut self,
+        label: impl Into<String>,
+        lines: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.facts.push((label.into(), lines.into_iter().collect()));
         self
     }
 
@@ -366,18 +381,40 @@ impl Confirmation {
         self
     }
 
+    /// Exactly what `ask` prints above the question, so a test can read it
+    /// without a terminal.
+    #[cfg(test)]
+    #[must_use]
+    pub fn rendered_body(&self) -> String {
+        self.body()
+    }
+
+    fn body(&self) -> String {
+        let mut body = crate::render::terminal_safe_line(&self.summary);
+        for (label, values) in &self.facts {
+            body.push('\n');
+            body.push_str(&crate::render::terminal_safe_line(label));
+            match values.as_slice() {
+                [single] => {
+                    body.push_str(": ");
+                    body.push_str(&crate::render::terminal_safe_line(single));
+                }
+                lines => {
+                    body.push(':');
+                    for line in lines {
+                        body.push_str("\n  ");
+                        body.push_str(&crate::render::terminal_safe_line(line));
+                    }
+                }
+            }
+        }
+        body
+    }
+
     /// Print the change, then ask. `Ok(false)` means it must not happen.
     pub fn ask(self, prompt: &str) -> Result<bool> {
         intro(crate::render::terminal_safe_line(&self.title));
-
-        let mut body = crate::render::terminal_safe_line(&self.summary);
-        for (label, value) in &self.facts {
-            body.push('\n');
-            body.push_str(&crate::render::terminal_safe_line(label));
-            body.push_str(": ");
-            body.push_str(&crate::render::terminal_safe_line(value));
-        }
-        detail(body);
+        detail(self.body());
         for text in &self.warnings {
             warning(crate::render::terminal_safe_line(text));
         }

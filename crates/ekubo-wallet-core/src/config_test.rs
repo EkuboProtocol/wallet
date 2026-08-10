@@ -175,7 +175,7 @@ fn cli_replacement_takes_over_the_name_or_the_chain_id() {
         .unwrap()
         .clone();
     ethereum.rpc_urls = vec!["https://rpc.example.invalid".parse().unwrap()];
-    replace_configured_network(&mut networks, ethereum.clone()).unwrap();
+    replace_configured_network(&mut networks, ethereum.clone(), None).unwrap();
     assert_eq!(
         networks
             .iter()
@@ -189,7 +189,7 @@ fn cli_replacement_takes_over_the_name_or_the_chain_id() {
     // the configuration holds one profile per chain ID either way.
     let mut renamed = ethereum;
     renamed.name = "custom".into();
-    replace_configured_network(&mut networks, renamed).unwrap();
+    replace_configured_network(&mut networks, renamed, None).unwrap();
     assert_eq!(networks.len(), count, "chain 1 was replaced, not added");
     assert!(networks.iter().all(|network| network.name != "ethereum"));
     assert_eq!(
@@ -216,7 +216,7 @@ fn a_replacement_never_evicts_a_chain_by_reusing_its_name() {
     candidate.name = "ethereum".into();
     candidate.aliases = vec!["unclaimed".into()];
     candidate.chain_id = 999_999;
-    assert!(replace_configured_network(&mut networks, candidate).is_err());
+    assert!(replace_configured_network(&mut networks, candidate, None).is_err());
     assert!(networks.iter().any(|network| network.chain_id == 1));
 }
 
@@ -231,7 +231,7 @@ fn cli_replacement_still_rejects_an_identifier_taken_by_another_chain() {
     candidate.name = "unclaimed".into();
     candidate.chain_id = 999_999;
     candidate.aliases = vec!["eth".into()];
-    assert!(replace_configured_network(&mut networks, candidate).is_err());
+    assert!(replace_configured_network(&mut networks, candidate, None).is_err());
 }
 
 #[test]
@@ -412,4 +412,374 @@ fn the_default_strategy_is_neither_required_nor_written() {
         serde_json::from_value::<crate::config::NetworkConfig>(written).unwrap(),
         agreeing
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_symlinked_data_directory_is_refused_rather_than_hardened() {
+    // `exists` and `metadata` both resolve the name, so a link planted at the
+    // data directory answered for its target and the 0700 was applied there.
+    // The wallet cannot promise privacy for a directory whose identity another
+    // process picks, so it declines to try.
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("elsewhere");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let link = directory.path().join("data");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let error = format!("{:#}", create_private_dir(&link).unwrap_err());
+    assert!(error.contains("symbolic link"), "{error}");
+    assert_eq!(
+        std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+        0o777,
+        "the link's target is left exactly as it was, not silently re-moded"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_private_file_is_opened_through_the_name_it_was_given() {
+    // The by-path chmod this replaced could be pointed at any file the owner
+    // could reach by swapping a link in after the open. O_NOFOLLOW makes the
+    // swap an error instead of a redirection.
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    std::fs::write(&target, b"secret").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let link = directory.path().join("database");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    assert!(
+        open_private_file(&link).is_err(),
+        "a link standing in for the file is refused"
+    );
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644,
+        "and its target keeps the mode it had"
+    );
+
+    let plain = directory.path().join("plain");
+    std::fs::write(&plain, b"secret").unwrap();
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let file = open_private_file(&plain).unwrap();
+    assert_eq!(
+        file.metadata().unwrap().permissions().mode() & 0o777,
+        0o600,
+        "a real file is narrowed through the handle that names it"
+    );
+}
+
+#[test]
+fn a_replacement_does_not_quietly_drop_the_owners_fee_ceiling() {
+    // The MCP candidate and the CLI form both leave `max_fee_per_gas` as
+    // `None`, each with a comment saying an agent does not get to choose the
+    // owner's fee ceiling. Whole-profile replacement turned both into the
+    // opposite: a routine endpoint edit deleted the ceiling, and an absent
+    // ceiling is unbounded -- `capped_fee` returns an endpoint's estimate
+    // unchanged when there is nothing to check it against, on the one path
+    // where nobody reviews the fee.
+    let mut networks = default_networks();
+    let chain_id = networks[0].chain_id;
+    networks[0].max_fee_per_gas = Some("1000000000".into());
+
+    let mut edited = networks[0].clone();
+    edited.rpc_urls = vec!["https://elsewhere.example.invalid/rpc".parse().unwrap()];
+    edited.max_fee_per_gas = None;
+    replace_configured_network(&mut networks, edited, None).unwrap();
+
+    let stored = networks
+        .iter()
+        .find(|network| network.chain_id == chain_id)
+        .unwrap();
+    assert_eq!(
+        stored.rpc_urls[0].as_str(),
+        "https://elsewhere.example.invalid/rpc",
+        "the edit the owner reviewed still applies"
+    );
+    assert_eq!(
+        stored.max_fee_per_gas.as_deref(),
+        Some("1000000000"),
+        "and the ceiling they never agreed to remove survives it"
+    );
+}
+
+#[test]
+fn a_replacement_that_names_a_ceiling_sets_it() {
+    // `None` means "not specified" everywhere it is constructed today, so
+    // inheriting is right -- but a profile that does name a ceiling is stating
+    // one, and must not be overridden by the value it replaces.
+    let mut networks = default_networks();
+    let chain_id = networks[0].chain_id;
+    networks[0].max_fee_per_gas = Some("1000000000".into());
+
+    let mut raised = networks[0].clone();
+    raised.max_fee_per_gas = Some("2000000000".into());
+    replace_configured_network(&mut networks, raised, None).unwrap();
+
+    assert_eq!(
+        networks
+            .iter()
+            .find(|network| network.chain_id == chain_id)
+            .unwrap()
+            .max_fee_per_gas
+            .as_deref(),
+        Some("2000000000")
+    );
+
+    // And a chain with no ceiling before still has none after.
+    let mut fresh = default_networks();
+    let mut edited = fresh[0].clone();
+    edited.max_fee_per_gas = None;
+    fresh[0].max_fee_per_gas = None;
+    replace_configured_network(&mut fresh, edited, None).unwrap();
+    assert!(fresh[0].max_fee_per_gas.is_none());
+}
+
+/// The explorer base is never fetched by the wallet; it is handed to whatever
+/// the desktop registered for `http`, as an argument to a process. On Windows
+/// that launcher used to be `cmd /C start`, which reparses `&` and friends as
+/// command syntax -- so an agent-proposed profile could run commands the first
+/// time the owner pressed `o` on a transaction. The launcher is fixed, and
+/// this narrows what can reach it.
+#[test]
+fn an_explorer_base_is_a_base_and_nothing_else() {
+    let base = |url: &str| {
+        let mut network = default_networks()[0].clone();
+        network.block_explorer_url = Some(url.parse().unwrap());
+        validate_network(&network)
+    };
+
+    assert!(base("https://etherscan.io").is_ok());
+    assert!(base("https://etherscan.io/").is_ok());
+
+    // A query is where an `&` legitimately lives, and a base with one produces
+    // nonsense once `/tx/{hash}` is appended to it regardless.
+    let error = format!("{:#}", base("https://etherscan.io/?a=1&calc").unwrap_err());
+    assert!(error.contains("no query string or fragment"), "{error}");
+    assert!(base("https://etherscan.io/#frag").is_err());
+
+    // And the scheme rule still stands.
+    assert!(base("ftp://etherscan.io").is_err());
+}
+
+mod record_network_tests {
+    //! A chain id names a chain. It does not name a set of nodes.
+
+    use super::*;
+
+    fn store_with(name: &str, aliases: &[&str]) -> (tempfile::TempDir, ConfigStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        store
+            .update(|config| {
+                let mut network = config.networks[0].clone();
+                network.name = name.into();
+                network.aliases = aliases.iter().map(|alias| (*alias).to_string()).collect();
+                network.chain_id = 1;
+                config.networks.retain(|other| other.chain_id != 1);
+                config.networks.push(network);
+                Ok(())
+            })
+            .unwrap();
+        (directory, store)
+    }
+
+    /// `replace_configured_network` takes a chain over, so the endpoints behind
+    /// a chain id can be swapped wholesale while every pending row keeps
+    /// pointing at that id. `transaction discard` then asks the new endpoints
+    /// whether they know the hash, and a node that never saw a transaction
+    /// answers exactly like one where it does not exist -- so a viable
+    /// envelope is untracked while it can still mine and consume its nonce.
+    #[test]
+    fn a_replaced_profile_cannot_decide_an_earlier_transactions_fate() {
+        let (_directory, store) = store_with("private-fork", &[]);
+        let error = format!(
+            "{:#}",
+            store
+                .network_for_record("1", "ethereum")
+                .expect_err("these are not the endpoints it was signed against")
+        );
+        assert!(
+            error.contains("signed against network `ethereum`"),
+            "{error}"
+        );
+        assert!(
+            error.contains("cancel it on chain"),
+            "the refusal has to say what can still be done: {error}"
+        );
+    }
+
+    /// The profile it was signed against still answers for it.
+    #[test]
+    fn the_signing_profile_still_resolves() {
+        let (_directory, store) = store_with("ethereum", &[]);
+        let network = store.network_for_record("1", "ethereum").unwrap();
+        assert_eq!(network.chain_id, 1);
+    }
+
+    /// And an alias is the same profile under another name, so renaming a
+    /// network through a name it already carried is not a replacement. Without
+    /// this the check would refuse ordinary configurations.
+    #[test]
+    fn an_alias_is_not_a_replacement() {
+        let (_directory, store) = store_with("mainnet", &["ethereum"]);
+        store
+            .network_for_record("1", "ethereum")
+            .expect("the same profile, under a name it already answered to");
+    }
+}
+
+mod plaintext_endpoint_tests {
+    //! An RPC connection carries what the wallet reads and what it signs.
+
+    use super::*;
+
+    fn network_with(url: &str) -> NetworkConfig {
+        NetworkConfig {
+            name: "custom".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: vec![url.parse().unwrap()],
+            rpc_strategy: RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        }
+    }
+
+    /// Over plaintext to a remote host, anything on the path reads the
+    /// addresses, calldata, and balances this wallet asks about -- and chooses
+    /// the fee estimate an automatic transaction is signed against, since
+    /// `capped_fee` leaves an estimate unchanged when no ceiling is set and the
+    /// shipped profiles set none.
+    #[test]
+    fn a_remote_plaintext_endpoint_is_not_admissible() {
+        for remote in [
+            "http://rpc.example.com/v1",
+            "http://192.168.1.5:8545",
+            "http://10.0.0.1:8545",
+            "http://[2001:db8::1]:8545",
+        ] {
+            let error = format!(
+                "{:#}",
+                validate_admissible_endpoints(&network_with(remote), None)
+                    .expect_err("{remote} is plaintext to somewhere else")
+            );
+            assert!(error.contains("plaintext http"), "{remote}: {error}");
+        }
+    }
+
+    /// A node on this machine is the case the allowance exists for: a path
+    /// with nothing on it. A LAN address is not that -- it is a network an
+    /// attacker can be on.
+    #[test]
+    fn a_node_on_this_machine_is_still_reachable_in_plaintext() {
+        for local in [
+            "http://localhost:8545",
+            "http://127.0.0.1:8545",
+            "http://[::1]:8545",
+            "http://node.localhost:8545",
+        ] {
+            validate_admissible_endpoints(&network_with(local), None)
+                .unwrap_or_else(|error| panic!("{local} is a local node: {error:#}"));
+        }
+        validate_admissible_endpoints(&network_with("https://rpc.example.com/v1"), None)
+            .expect("https anywhere is the ordinary case");
+    }
+
+    /// The rule is on admission, not on `load`. A configuration that already
+    /// holds a plaintext endpoint has to keep loading: refusing would take the
+    /// wallet roster and every other network with it, and leave no way to run
+    /// the edit that would fix it.
+    #[test]
+    fn an_existing_configuration_still_loads() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        let config = WalletConfig {
+            version: 2,
+            wallets: Vec::new(),
+            networks: vec![network_with("http://rpc.example.com/v1")],
+        };
+        validate_config(&config).expect("a stored profile is not refused on the way in");
+        store
+            .update(|current| {
+                current.networks = config.networks.clone();
+                Ok(())
+            })
+            .expect("and it can be written back, so the profile can be repaired");
+        assert_eq!(store.load().unwrap().networks.len(), 1);
+    }
+}
+
+mod owner_witness_tests {
+    //! "The agent cannot do X" has to mean "not without the owner saying so".
+
+    use super::*;
+    use crate::approval::InteractiveProof;
+
+    fn lan_node() -> NetworkConfig {
+        NetworkConfig {
+            name: "lab".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: vec!["http://192.168.1.10:8545".parse().unwrap()],
+            rpc_strategy: RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        }
+    }
+
+    /// A self-hosted node behind a private address is a configuration the
+    /// operator is entitled to accept, and the human `network add` flow already
+    /// prints the complete RPC URLs on a full-screen review before writing
+    /// anything. The refusal used to fire before that screen, so the answer was
+    /// no and there was nowhere to say otherwise.
+    #[test]
+    fn the_owner_may_configure_a_node_on_their_own_network() {
+        let owner = InteractiveOwner::at_terminal(&InteractiveProof::for_tests());
+        validate_admissible_endpoints(&lan_node(), Some(&owner))
+            .expect("the owner is shown the URL and asked");
+
+        let mut networks = default_networks();
+        add_configured_network(&mut networks, lan_node(), Some(&owner))
+            .expect("and the write goes through on that path");
+    }
+
+    /// Every path that cannot present one still refuses, which is the half that
+    /// must not regress: an agent's proposal crosses the same helpers, so a
+    /// flag threaded through them would have handed it the bypass.
+    #[test]
+    fn a_path_without_the_witness_still_refuses() {
+        assert!(validate_admissible_endpoints(&lan_node(), None).is_err());
+        let mut networks = default_networks();
+        assert!(add_configured_network(&mut networks, lan_node(), None).is_err());
+        assert!(replace_configured_network(&mut networks, lan_node(), None).is_err());
+    }
+
+    /// And the predicate the refusal uses is the one the warning uses, so the
+    /// screen cannot describe a different set of URLs than the rule judges.
+    #[test]
+    fn one_predicate_decides_both_the_refusal_and_the_warning() {
+        for remote in ["http://rpc.example.com", "http://192.168.1.10:8545"] {
+            assert!(is_remote_plaintext(&remote.parse().unwrap()), "{remote}");
+        }
+        for fine in [
+            "https://rpc.example.com",
+            "http://localhost:8545",
+            "http://127.0.0.1:8545",
+        ] {
+            assert!(!is_remote_plaintext(&fine.parse().unwrap()), "{fine}");
+        }
+    }
 }

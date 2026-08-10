@@ -199,3 +199,67 @@ fn a_recorded_result_names_the_policy_revision_it_was_evaluated_under() {
         default_networks()[0].chain_id.to_string()
     );
 }
+
+/// The TTL is wall-clock arithmetic on a value the host can move backwards --
+/// an NTP correction, a manual change, a laptop resuming with a stale RTC.
+/// Compared against a later wall-clock reading alone, a rollback makes a
+/// recorded simulation look younger than it is and keeps it sendable past the
+/// window it was given, so an automatic send can sign against chain state the
+/// simulation no longer describes.
+#[test]
+fn a_clock_that_moved_backwards_does_not_refresh_a_simulation() {
+    let at = "2026-01-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let built = plan("1");
+    let outcome = result(&built);
+
+    // Inside the window and moving forward: usable, as before.
+    let mut store = SimulationStore::default();
+    let recorded = store.record("primary", "1", built.clone(), None, outcome.clone(), at);
+    assert!(
+        store
+            .take(recorded.simulation_id, at + TimeDelta::seconds(60))
+            .is_ok()
+    );
+
+    // The clock moved behind the moment it was recorded. Elapsed time is no
+    // longer knowable, and the safe reading of that is "too long", not "fresh".
+    let mut store = SimulationStore::default();
+    let recorded = store.record("primary", "1", built, None, outcome, at);
+    let error = format!(
+        "{:#}",
+        store
+            .take(recorded.simulation_id, at - TimeDelta::seconds(1))
+            .unwrap_err()
+    );
+    assert!(error.contains("expired simulation"), "{error}");
+}
+
+/// And the ordinary boundary is unchanged: the deadline still ends it.
+#[test]
+fn the_ordinary_expiry_boundary_is_unchanged() {
+    let at = "2026-01-01T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+    let built = plan("1");
+    let outcome = result(&built);
+
+    let mut store = SimulationStore::default();
+    let recorded = store.record("primary", "1", built.clone(), None, outcome.clone(), at);
+    assert!(
+        store
+            .take(
+                recorded.simulation_id,
+                at + TimeDelta::seconds(SIMULATION_TTL_SECONDS - 1)
+            )
+            .is_ok()
+    );
+
+    let mut store = SimulationStore::default();
+    let recorded = store.record("primary", "1", built, None, outcome, at);
+    assert!(
+        store
+            .take(
+                recorded.simulation_id,
+                at + TimeDelta::seconds(SIMULATION_TTL_SECONDS)
+            )
+            .is_err()
+    );
+}

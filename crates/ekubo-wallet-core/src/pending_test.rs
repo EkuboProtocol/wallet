@@ -318,7 +318,10 @@ fn ambiguous_broadcast_can_only_reclaim_the_same_signed_bytes() {
         .unwrap();
     let reclaimed = store.claim_broadcast_retry(signed.request_id).unwrap();
     assert_eq!(reclaimed.status, PendingStatus::Submitting);
-    assert_eq!(reclaimed.serialized_transaction.as_deref(), Some("0x0102"));
+    assert_eq!(
+        reclaimed.serialized_transaction.as_deref(),
+        Some(ORIGINAL_BYTES)
+    );
     assert_eq!(reclaimed.signed_transaction_hash.as_deref(), Some(hash));
     assert!(store.claim_broadcast_retry(signed.request_id).is_err());
 }
@@ -413,10 +416,21 @@ fn hash_of(serialized: &str) -> String {
     format!("{:#x}", alloy::primitives::keccak256(bytes))
 }
 
-const ORIGINAL_BYTES: &str = "0x0102";
-const CANCEL_BYTES_ONE: &str = "0x0304";
-const CANCEL_BYTES_TWO: &str = "0x0506";
-const CANCEL_BYTES_THREE: &str = "0x0708";
+// Real signed EIP-1559 envelopes, differing only in nonce. They used to be
+// `0x0102`, `0x0304`, and so on: bytes paired with their own keccak, which
+// satisfied every check the row parser made and could not occur in production,
+// where the bytes are always something this wallet signed. `PendingRow::parse`
+// now decodes what it reads -- a hash agrees with whatever it was taken over,
+// so hashing correctly says the two columns agree about the bytes and nothing
+// about the bytes being a transaction -- and these fixtures had to become
+// transactions for the tests to keep meaning what they said.
+//
+// Generated once with the same construction `sign_prepared` uses, from the key
+// `0x1111…11`, chain 1, nonces 0 to 3.
+const ORIGINAL_BYTES: &str = "0x02f86a0180843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a0179e0e4ffd0fe7f5c13b483a7d47be35f1d7d20919724a2ff4c44fd93804dc90a07d7160f72aa22229680c207433e9615a12e805e301d368a3e8a61f725a61324c";
+const CANCEL_BYTES_ONE: &str = "0x02f86a0101843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a078a611bc68dbf7d8b8c7934fe99d0159e6d5eb63ae5eb0aca5c49bfc894f38bca06e6f49aa2a067ce8c35ccaecbc1c235311e3fbabb8cc0f30bc02c0b249319a0a";
+const CANCEL_BYTES_TWO: &str = "0x02f86a0102843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a0032c9b0e183e38094d411c6b7b8d4acf2ff361f5ce4733fe9f70de38ce67c295a01fb5907a94320e39860297ea2d20160534f10950a96cd88db6f1c3693c5f73eb";
+const CANCEL_BYTES_THREE: &str = "0x02f86a0103843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a05e9bc29265b16802653fd6e68488b7af3d69bd77649f67d6027d9e7ad5405486a07157d705413b14993118ada56d0a17e25756247798ba911b0444b0412e4bc7e1";
 
 fn broadcast_original(store: &mut PendingStore) -> Uuid {
     let signed = store
@@ -508,7 +522,7 @@ fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
         .unwrap();
     assert_eq!(
         repriced.cancel_serialized_transaction.as_deref(),
-        Some("0x0506")
+        Some(CANCEL_BYTES_TWO)
     );
     assert_eq!(
         repriced.cancel_transaction_hashes,
@@ -528,7 +542,11 @@ fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
             request_id,
             Some(hash_of(CANCEL_BYTES_ONE).as_str()),
             CANCEL_BYTES_THREE,
-            "0x3333333333333333333333333333333333333333333333333333333333333333",
+            // Its own hash, not an arbitrary one. The envelope and the hash
+            // are validated as a pair before anything else now, so a junk hash
+            // here would be rejected for the wrong reason and this assertion
+            // would stop testing what it names.
+            hash_of(CANCEL_BYTES_THREE).as_str(),
         )
         .unwrap_err()
         .to_string();
@@ -872,5 +890,454 @@ fn a_reclaim_within_one_millisecond_still_invalidates_a_replacement_verdict() {
     assert_eq!(
         store.get(signed.request_id).unwrap().status,
         PendingStatus::Submitting
+    );
+}
+
+#[test]
+fn a_mismatched_envelope_and_hash_never_reach_the_database() {
+    // The pair used to be checked only by `PendingRow::parse`, on the way back
+    // out. A well-formed but mismatched pair therefore committed, and only the
+    // `self.get` after the commit failed -- leaving a durable row that every
+    // read rejects while `signed` and `cancelling` both hold the wallet's one
+    // in-flight slot through the partial unique index. `reconcile_all`
+    // swallows the read error to keep a listing rendering, so the slot stays
+    // held and nothing further can be signed for that wallet on that chain.
+    let (_directory, mut store) = store();
+    let wrong = hash_of(CANCEL_BYTES_ONE);
+
+    let error = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            wrong.as_str(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("do not hash to"), "{error}");
+
+    // Nothing was written, so the in-flight slot is still free and the honest
+    // pair goes in.
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .expect("the slot was never taken by the rejected write");
+
+    // And the same on the cancellation writer, which is the worse one to wedge
+    // -- the owner is trying to stop a transaction.
+    let leased = store.claim_for_submission(signed.request_id).unwrap();
+    store
+        .mark_broadcast(
+            signed.request_id,
+            hash_of(ORIGINAL_BYTES).as_str(),
+            leased.generation,
+        )
+        .unwrap();
+    let error = store
+        .store_cancellation(
+            signed.request_id,
+            None,
+            CANCEL_BYTES_ONE,
+            hash_of(CANCEL_BYTES_TWO).as_str(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("do not hash to"), "{error}");
+    assert_eq!(
+        store.get(signed.request_id).unwrap().status,
+        PendingStatus::Broadcast,
+        "the row is still readable and still progressing"
+    );
+}
+
+#[test]
+fn a_broadcast_hash_naming_another_transaction_is_refused_on_read() {
+    // `mark_broadcast` will only write the signed hash -- its UPDATE matches on
+    // `signed_transaction_hash = ?2` -- but a guard in one writer is not an
+    // invariant of the row, and this field is read by code that trusts it
+    // completely. `reconcile` looks a receipt up by `broadcast_transaction_hash`
+    // in preference to the signed hash while `observe` takes the nonce from
+    // `serialized_transaction`, so the two disagreeing means another
+    // transaction's receipt settles this plan and releases the in-flight slot
+    // while the envelope actually signed is still out there.
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+    let leased = store.claim_for_submission(signed.request_id).unwrap();
+    store
+        .mark_broadcast(
+            signed.request_id,
+            hash_of(ORIGINAL_BYTES).as_str(),
+            leased.generation,
+        )
+        .unwrap();
+    assert_eq!(
+        store.get(signed.request_id).unwrap().status,
+        PendingStatus::Broadcast
+    );
+
+    // The writer refuses an unrelated hash outright.
+    let leased = store.claim_for_submission(signed.request_id);
+    assert!(
+        leased.is_err(),
+        "a broadcast row is not claimable for submission again"
+    );
+
+    // So plant it the way an altered database would, and confirm the read is
+    // what catches it rather than reconciliation acting on it.
+    let other =
+        B256::from_str("0x4444444444444444444444444444444444444444444444444444444444444444")
+            .unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions SET broadcast_transaction_hash = ?2
+             WHERE request_id = ?1",
+            params![signed.request_id, Blob(other)],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(signed.request_id).unwrap_err());
+    assert!(error.contains("names a different transaction"), "{error}");
+
+    // A broadcast hash with no signed envelope behind it is refused too.
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET broadcast_transaction_hash = ?2, signed_transaction_hash = NULL,
+                 serialized_transaction = NULL
+             WHERE request_id = ?1",
+            params![signed.request_id, Blob(other)],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(signed.request_id).unwrap_err());
+    assert!(
+        error.contains("no signed transaction to belong to"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_in_flight_row_without_its_envelope_is_refused_rather_than_wedging_the_slot() {
+    // An envelope is not optional decoration on an in-flight row; it is the
+    // thing the row is about. Without one, nothing can move the row on:
+    // `claim_for_submission` leases any `signed` row without looking,
+    // `submit_claimed` then fails building `SignedExecution` before reaching
+    // its lease-release handling, and reconciliation cannot take a nonce from
+    // a record that has no bytes. `reconcile_all` keeps the record on error,
+    // so the wallet's one in-flight slot for that chain is held until someone
+    // repairs the database by hand.
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET serialized_transaction = NULL, signed_transaction_hash = NULL
+             WHERE request_id = ?1",
+            params![signed.request_id],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(signed.request_id).unwrap_err());
+    assert!(error.contains("must carry the signed envelope"), "{error}");
+}
+
+#[test]
+fn a_rejected_row_carrying_signed_bytes_is_refused() {
+    // The quiet direction. `rejected` is reachable only from
+    // `awaiting_approval`, which never had an envelope, so signed bytes on one
+    // are bytes that should not exist -- and they are readable through the
+    // ordinary transaction reads.
+    let (_directory, mut store) = store();
+    let request = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    store.reject(request.request_id).unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET serialized_transaction = ?2, signed_transaction_hash = ?3
+             WHERE request_id = ?1",
+            params![
+                request.request_id,
+                Blob(Bytes::from_str(ORIGINAL_BYTES).unwrap()),
+                Blob(B256::from_str(hash_of(ORIGINAL_BYTES).as_str()).unwrap()),
+            ],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(request.request_id).unwrap_err());
+    assert!(error.contains("must not carry signed bytes"), "{error}");
+}
+
+#[test]
+fn a_cancelled_row_is_accepted_from_either_origin() {
+    // `discard_unsent` cancels a `signed` row that was never submitted, which
+    // has its envelope. Removing a wallet's state cancels its
+    // `awaiting_approval` rows, which never had one. Both are the wallet's own
+    // writes, so the invariant above has to admit both rather than picking the
+    // origin it happened to be written against.
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+    let discarded = store.discard_unsent(signed.request_id).unwrap();
+    assert_eq!(discarded.status, PendingStatus::Cancelled);
+    assert!(discarded.serialized_transaction.is_some());
+}
+
+#[test]
+fn a_cancelled_row_from_wallet_removal_never_had_an_envelope() {
+    // The other origin, and the one that caught an over-strict first attempt
+    // at the invariant above: removing a wallet's state cancels its
+    // `awaiting_approval` rows, which have no envelope and never did.
+    let (_directory, mut store) = store();
+    let awaiting = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    store.database.delete("primary", 1).unwrap();
+    let cancelled = store.get(awaiting.request_id).unwrap();
+    assert_eq!(cancelled.status, PendingStatus::Cancelled);
+    assert!(cancelled.serialized_transaction.is_none());
+}
+
+#[test]
+fn terminal_statuses_match_the_enum() {
+    // The pruning runs in SQL against `TERMINAL_STATUSES`, so that list is
+    // what actually decides which history is reclaimed. `is_terminal` decides
+    // the same question for a parsed value. Adding a lifecycle state to one
+    // and forgetting the other would either leak history forever or delete a
+    // row the lifecycle still needs, and neither shows up until it matters.
+    for status in PendingStatus::ALL {
+        assert_eq!(
+            TERMINAL_STATUSES.contains(&status.column()),
+            status.is_terminal(),
+            "{} is classified inconsistently",
+            status.column()
+        );
+    }
+}
+
+#[test]
+fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
+    // Nothing bounded what queued and in-flight rows *become*. Every automatic
+    // signature writes a durable row before it broadcasts, so repeated valid
+    // requests grow the shared database until writes fail -- for every wallet
+    // in the store, not just the noisy one.
+    let (_directory, mut store) = store();
+
+    // One row that must survive whatever else happens: still awaiting a
+    // decision, so it is live lifecycle state rather than history.
+    let live = store
+        .create("primary", "ethereum", &plan_with_value("7"), None, 1)
+        .unwrap();
+
+    // Terminal rows are written directly: driving 1_001 transactions through
+    // the real lifecycle would take far longer than the invariant is worth.
+    let connection = &store.database.connection;
+    for index in 0..(MAX_TERMINAL_HISTORY_PER_WALLET + 5) {
+        connection
+            .execute(
+                "INSERT INTO pending_transactions(
+                    request_id, wallet_id, network_name, chain_id, plan_json,
+                    plan_digest, policy_revision, status, created_at, updated_at,
+                    decided_at, approval_required
+                 ) VALUES (?1, 'primary', 'ethereum', 1, '{}', ?2, 1, 'confirmed', ?3, ?3, ?3, 1)",
+                params![
+                    uuid::Uuid::new_v4(),
+                    Blob(B256::repeat_byte(1)),
+                    Millis(sql::now() + chrono::Duration::milliseconds(index)),
+                ],
+            )
+            .unwrap();
+    }
+    let terminal: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pending_transactions WHERE status = 'confirmed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(terminal, MAX_TERMINAL_HISTORY_PER_WALLET + 5);
+
+    // The next insert reclaims the excess.
+    store
+        .create("primary", "ethereum", &plan_with_value("9"), None, 1)
+        .unwrap();
+    let terminal: i64 = store
+        .database
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM pending_transactions WHERE status = 'confirmed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        terminal, MAX_TERMINAL_HISTORY_PER_WALLET,
+        "the oldest finished rows past the bound are dropped"
+    );
+    assert_eq!(
+        store.get(live.request_id).unwrap().status,
+        PendingStatus::AwaitingApproval,
+        "a row the lifecycle still needs is never history"
+    );
+}
+
+#[test]
+fn only_a_missing_row_invites_the_next_queue_to_be_searched() {
+    // A request id does not say which of the three signing queues owns it, so
+    // the CLI tries each in turn -- and treated every failure as "not here".
+    // A row that has already been decided, an envelope that no longer parses,
+    // a database that cannot be read: each sent the search onward, where the
+    // rejection path could terminally close whatever the next queue held under
+    // that id while the request the owner meant stayed awaiting a decision.
+    let (_directory, mut store) = store();
+
+    // Genuinely absent: the only answer that means "look elsewhere".
+    let missing = store.get(uuid::Uuid::new_v4()).unwrap_err();
+    assert!(
+        is_unknown_request(&missing),
+        "a row that is not there is not there: {missing:#}"
+    );
+
+    // Present but already decided. The request exists in *this* queue, so the
+    // search must stop here even though the operation failed.
+    let request = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    store.reject(request.request_id).unwrap();
+    let decided = store.reject(request.request_id).unwrap_err();
+    assert!(
+        !is_unknown_request(&decided),
+        "an already-decided request is this queue's answer, not an absence: {decided:#}"
+    );
+
+    // Present but unreadable, which is the case that used to look identical to
+    // absence and is the reason the distinction is worth a function.
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan_with_value("3"),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions SET signed_transaction_hash = ?2 WHERE request_id = ?1",
+            params![signed.request_id, Blob(B256::repeat_byte(7))],
+        )
+        .unwrap();
+    let unreadable = store.get(signed.request_id).unwrap_err();
+    assert!(
+        !is_unknown_request(&unreadable),
+        "a row this queue holds but cannot read must not read as absent: {unreadable:#}"
+    );
+}
+
+/// A row whose bytes hash correctly but are not a transaction wedges its
+/// wallet and chain for good.
+///
+/// The hash check says the two columns agree about the bytes. It says nothing
+/// about the bytes being an envelope, because a hash agrees with whatever it
+/// was taken over. Every reader that does anything with one decodes it --
+/// `signed_transaction_nonce` is how reconciliation recovers the nonce -- and
+/// that decode failing is the one error `reconcile_all` swallows so a listing
+/// still renders. The row then holds the single in-flight slot its wallet and
+/// chain are allowed, reconciliation cannot settle it, and `execute_automatic`
+/// reconciles the in-flight row before signing, so nothing further can be
+/// signed there either. Only editing the database frees it.
+#[test]
+fn a_row_whose_envelope_does_not_decode_is_refused_on_read() {
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+
+    // Exactly what a restored or hand-edited database can hold: bytes that are
+    // not an envelope, and the hash they really do have.
+    let corrupt = "0x0102";
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET serialized_transaction = ?2, signed_transaction_hash = ?3
+             WHERE request_id = ?1",
+            rusqlite::params![
+                signed.request_id,
+                hex::decode("0102").unwrap(),
+                hex::decode(hash_of(corrupt).trim_start_matches("0x")).unwrap()
+            ],
+        )
+        .unwrap();
+
+    let error = format!(
+        "{:#}",
+        store
+            .get(signed.request_id)
+            .expect_err("bytes that are not a transaction are not a signed row")
+    );
+    assert!(error.contains("not a decodable envelope"), "{error}");
+    // And it names the request, which is what turns a silent wedge into
+    // something an owner can act on.
+    assert!(
+        store.get(signed.request_id).is_err(),
+        "the read fails every time rather than intermittently"
     );
 }

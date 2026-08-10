@@ -8,6 +8,14 @@
 # additionally verifies the keyless Sigstore bundle for SHA256SUMS against the
 # release workflow identity before any file is extracted or made executable.
 #
+# None of that says anything about this script, which is why it is published as
+# a release asset with a Sigstore bundle of its own. Verify it before running
+# it: a shell begins executing a piped script as it arrives, so a substituted
+# installer runs to completion before any check inside it could apply, and
+# checks written in a file the same party can replace are not checks. See
+# `Verify a download` in docs/releasing.md for the exact command; the wallet's
+# own `check_for_updates` emits it.
+#
 # Set EKUBO_WALLET_LOCAL_SOURCE to a checkout of this repository to build with
 # `cargo build --locked --release` and install that build instead of a release
 # download; agent registration and completions work identically.

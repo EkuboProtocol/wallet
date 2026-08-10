@@ -458,12 +458,25 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Download release archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
+
+      # install.sh ships as a signed release asset rather than being fetched
+      # from the raw source tree. The script verifies everything it downloads,
+      # but nothing verified the script: a client piping it into a shell ran it
+      # before any of its own checks could apply, so whoever could choose those
+      # bytes chose what executed. Published here, it gets a Sigstore bundle
+      # from the same identity as the archives it installs.
+      - name: Stage the installer for signing
+        shell: bash
+        run: install -m 0755 install.sh dist/install.sh
 
       - name: Generate checksums
         shell: bash
@@ -486,7 +499,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS; do
+          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS dist/install.sh; do
             cosign sign-blob --yes --bundle "$artifact.sigstore.json" "$artifact"
           done
 
@@ -495,7 +508,7 @@ jobs:
         run: |
           set -euo pipefail
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
-          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS; do
+          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS dist/install.sh; do
             case "$artifact" in
               *.sigstore.json) continue ;;
             esac
@@ -570,10 +583,19 @@ jobs:
             printf '%s\n' '- Linux: unsigned by platform convention; verify the checksum and Sigstore bundle.'
             printf '\n%s\n' 'Install with:'
             printf '\n%s\n' '```sh'
+            base='https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}'
+            identity='https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}'
+            printf 'd=$(mktemp -d)\n'
+            printf 'curl -fsSL -o "$d/install.sh" %s/install.sh\n' "$base"
+            printf 'curl -fsSL -o "$d/install.sh.sigstore.json" %s/install.sh.sigstore.json\n' "$base"
+            printf 'cosign verify-blob --bundle "$d/install.sh.sigstore.json" \\\n'
+            printf '  --certificate-identity %s \\\n' "$identity"
+            printf '  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\\n'
+            printf '  "$d/install.sh"\n'
             if [ "$prerelease" = true ]; then
-              printf 'curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/install.sh | EKUBO_WALLET_VERSION=%s sh\n' "$VERSION"
+              printf 'EKUBO_WALLET_VERSION=%s sh "$d/install.sh"\n' "$VERSION"
             else
-              printf '%s\n' 'curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/install.sh | sh'
+              printf '%s\n' 'sh "$d/install.sh"'
             fi
             printf '%s\n\n' '```'
             printf '%s\n' 'Verification instructions: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/releasing.md#verify-a-download'

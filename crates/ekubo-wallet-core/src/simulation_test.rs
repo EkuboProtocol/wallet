@@ -456,3 +456,106 @@ fn the_agreement_projection_covers_everything_an_endpoint_asserts() {
         differing(|result| result.simulation_id = Some(uuid::Uuid::nil()))
     );
 }
+
+#[test]
+fn a_failed_batch_says_the_delegation_was_never_observed() {
+    // A setup failure can happen before `get_code_at(wallet)` is ever read, so
+    // a failure result knows nothing about the account's delegation. It still
+    // reported `will_authorize_delegation: true` from the execution mode alone
+    // and left `replaces_delegated_implementation` empty -- and the review
+    // document draws its replacement warning from exactly that empty field.
+    //
+    // A failed simulation is the case a human is asked to override, so the
+    // combination signed an authorization that could silently replace a
+    // delegation the document never mentioned. Empty because nobody looked is
+    // not the same as empty because there is nothing there, and the result now
+    // says which one it is.
+    let wallet = WalletMetadata {
+        id: "failed-batch".into(),
+        address: Address::repeat_byte(0x11),
+        created_at: Utc::now(),
+        source: WalletSource::Created,
+        exported_at: None,
+    };
+    let policy = StoredPolicy {
+        wallet_id: wallet.id.clone(),
+        policy: crate::core::policy::WalletPolicy::allow_all_with_approval(),
+        revision: 1,
+        updated_at: Utc::now(),
+    };
+    let result = setup_failure_result_at_block(
+        &plan(2),
+        &policy,
+        &context(&wallet),
+        ExecutionMode::CaliburBatch,
+        "the endpoint refused eth_simulateV1",
+        100,
+    );
+
+    assert!(result.will_authorize_delegation);
+    assert!(result.replaces_delegated_implementation.is_none());
+    let disclosure = result
+        .policy_findings
+        .iter()
+        .find(|finding| finding.code == DELEGATION_AUTHORIZED_CODE)
+        .expect("a batch that would sign an authorization has to say so");
+    assert!(
+        disclosure.message.contains("could be observed"),
+        "the message must say the delegation was not observed: {}",
+        disclosure.message
+    );
+
+    // A direct call signs no authorization, so it must not carry the warning.
+    let direct = setup_failure_result_at_block(
+        &plan(1),
+        &policy,
+        &context(&wallet),
+        ExecutionMode::Direct,
+        "the endpoint refused eth_simulateV1",
+        100,
+    );
+    assert!(!direct.will_authorize_delegation);
+    assert!(
+        !direct
+            .policy_findings
+            .iter()
+            .any(|finding| finding.code == DELEGATION_AUTHORIZED_CODE)
+    );
+}
+
+#[test]
+fn a_token_that_answers_neither_probe_is_named_rather_than_dropped() {
+    // The gap an adversarial token walks through. `token_balance_results`
+    // turns a reverted or undecodable `balanceOf` into `None`, and with no
+    // standard `Transfer` log to fall back on `token_balance_changes` drops
+    // the token from the change set entirely -- so the review document
+    // rendered an empty set as "none detected" for a transaction that moved
+    // it, and the automatic path had no number to hold the policy's limit
+    // against.
+    let quiet = Address::repeat_byte(0xaa);
+    let readable = Address::repeat_byte(0xbb);
+    let tracked = vec![quiet, readable];
+
+    let before: BTreeMap<Address, Option<U256>> = [(quiet, None), (readable, Some(U256::from(10)))]
+        .into_iter()
+        .collect();
+    let after: BTreeMap<Address, Option<U256>> = [(quiet, None), (readable, Some(U256::from(4)))]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        unverified_token_probes(&tracked, &before, &after),
+        vec![quiet],
+        "only the token with no number on either side is unverifiable"
+    );
+
+    // One side present is enough to put the token in the change set, where a
+    // reader will see it -- that is not the silent case.
+    let half: BTreeMap<Address, Option<U256>> = [(quiet, Some(U256::from(1))), (readable, None)]
+        .into_iter()
+        .collect();
+    assert!(unverified_token_probes(&tracked, &half, &after).is_empty());
+    assert!(unverified_token_probes(&tracked, &before, &half).is_empty());
+
+    // A token nothing tracks is not the policy's business and is not reported.
+    assert!(unverified_token_probes(&[], &before, &after).is_empty());
+}

@@ -21,8 +21,9 @@ use crate::{
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{
-            DELEGATION_REPLACED_CODE, FindingSeverity, PolicyFinding, PolicyOutcome,
-            SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
+            DELEGATION_AUTHORIZED_CODE, DELEGATION_REPLACED_CODE, FindingSeverity, PolicyFinding,
+            PolicyOutcome, SIMULATION_FAILED_CODE, TOKEN_BALANCE_UNVERIFIED_CODE, evaluate_policy,
+            policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
     },
@@ -308,7 +309,7 @@ pub async fn simulate_execution(
     // is asked to. Left as `None` under the single-answer strategies, where the
     // endpoint that runs the simulation reads its own head and there is no
     // quorum for a stale one to drag backwards.
-    let mut pin = if fork.is_none() {
+    let pin = if fork.is_none() {
         crate::rpc::median_head(network).await?
     } else {
         None
@@ -334,15 +335,26 @@ pub async fn simulate_execution(
             &mut observed_parent,
         )
         .await?;
-        // Under a single-answer strategy the height is still whatever the
-        // first endpoint that read a header reported — there is one answer and
-        // it is that endpoint's, so there is nothing here to protect. Under
-        // `m_of_n` the pin was already set from the median head above, and
-        // this cannot move it. Either way the endpoint has by now been shown
-        // to be on the chain it was asked about.
-        if pin.is_none() && fork.is_none() {
-            pin = observed_parent.map(|parent| parent.number);
-        }
+        // Nothing is promoted to `pin` here, and the promotion that used to be
+        // is the whole of finding 201318.
+        //
+        // It could only ever fire under a single-answer strategy: `m_of_n`
+        // sets `pin` from `median_head` before the loop, and a fork pins its
+        // own parent. The reasoning was that under one answer the height is
+        // that endpoint's anyway, so there is nothing to protect — true only
+        // while that endpoint's answer is the one used. It is not, when the
+        // endpoint reads a header and *then* fails: the loop fails over, the
+        // answer is discarded, and the height it chose stays behind and is
+        // forced on the healthy endpoint that follows. An endpoint could
+        // report an old header, fail the request on purpose, and pick the
+        // state a later honest endpoint simulates against without ever having
+        // produced a simulation at all.
+        //
+        // So a failover reads its own head, which is what a single-answer
+        // strategy says it does. There is no cross-endpoint comparison here
+        // for two different heights to disturb — that concern belongs to
+        // `m_of_n`, which pins ahead of the loop precisely so it does not
+        // arise.
 
         if required <= 1 {
             let retryable = result
@@ -370,18 +382,37 @@ pub async fn simulate_execution(
             last = Some(result);
             continue;
         }
+        // No early return at the threshold. Stopping as soon as `required`
+        // endpoints agreed made the contradiction branch below unreachable
+        // precisely when a contradiction existed: under `m_of_n(2)` over three
+        // endpoints, the third — the one about to disagree — was never asked.
+        // A quorum that stops listening once it has heard what it needs is not
+        // a quorum, and this one decides what an automatic signature is
+        // evaluated against.
         let witness = SimulationAgreement::of(&result, parent);
         if let Some(slot) = agreed.iter_mut().find(|(seen, _, _)| *seen == witness) {
             slot.1.push(endpoint.to_string());
-            if slot.1.len() >= required {
-                return Ok(slot.2.clone());
-            }
         } else {
             agreed.push((witness, vec![endpoint.to_string()], result));
         }
     }
 
     if required > 1 {
+        // The same rule the generic read quorum uses, from the same function,
+        // so the two cannot drift apart again.
+        let counts: Vec<usize> = agreed
+            .iter()
+            .map(|(_, witnesses, _)| witnesses.len())
+            .collect();
+        if let crate::rpc::QuorumVerdict::Agreed(index) =
+            crate::rpc::quorum_verdict(&counts, required)
+        {
+            return Ok(agreed
+                .into_iter()
+                .nth(index)
+                .map(|(_, _, result)| result)
+                .expect("the bucket the verdict names is still there"));
+        }
         // Endpoints that answered and contradicted each other. This is
         // reported as a simulation failure rather than an error so it lands
         // in front of a human with the reason on the screen: a contradiction
@@ -919,6 +950,38 @@ async fn simulate_execution_through(
     };
 
     let mut findings = evaluate_policy(plan, &stored_policy.policy, context);
+    // A tracked token that did not answer `balanceOf` is a limit that cannot
+    // be enforced. `token_balance_results` turns a reverted or undecodable
+    // probe into `None`, and with no `Transfer` log to fall back on
+    // `token_balance_changes` then drops the token from the change set
+    // altogether — so the review said "none detected" for a transaction that
+    // moved it, and the automatic path had no number to hold the policy's
+    // limit against.
+    //
+    // Named individually: "a token could not be read" is not actionable, and
+    // which token it was is the whole question.
+    let unverified = unverified_token_probes(&tracked_tokens, &balances_before, &balances_after);
+    if !unverified.is_empty() {
+        findings.push(PolicyFinding {
+            severity: FindingSeverity::Error,
+            code: TOKEN_BALANCE_UNVERIFIED_CODE.into(),
+            message: format!(
+                "the balance of {} could not be read before and after this plan, so how much of \
+                 it moved is unknown and the policy's limit on it cannot be checked: {}",
+                if unverified.len() == 1 {
+                    "a token the policy limits"
+                } else {
+                    "tokens the policy limits"
+                },
+                unverified
+                    .iter()
+                    .map(|token| format!("{token:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            step: None,
+        });
+    }
     let simulation = execution_output(plan, main, simulated_header.gas_limit());
     // A plan that does not execute is never allowed, whatever the policy says
     // about its calls: there is no policy setting that turns a revert into an
@@ -944,6 +1007,29 @@ async fn simulate_execution_through(
                  {CANONICAL_CALIBUR:#x}, which persists whether or not the batch succeeds and \
                  may leave the previous implementation's storage under one that reads it \
                  differently"
+            ),
+            step: None,
+        });
+    } else if will_authorize {
+        // Whether the finding above fires is decided by one `get_code_at`
+        // answer. An endpoint that reports empty code for an account that is
+        // actually delegated elsewhere takes the `None if is_empty` branch:
+        // the authorization is still signed and the replacement still happens
+        // on chain, but `replaces` is None, so nothing above says so and the
+        // automatic path never draws a document to say it in.
+        //
+        // Disclosing the authorization itself does not depend on that answer
+        // being honest. A warning rather than an error because a first
+        // delegation is what every account's first batch does, and refusing it
+        // would mean no unattended batch could ever run.
+        findings.push(PolicyFinding {
+            severity: FindingSeverity::Warning,
+            code: DELEGATION_AUTHORIZED_CODE.into(),
+            message: format!(
+                "this batch would sign an EIP-7702 authorization delegating the account to \
+                 {CANONICAL_CALIBUR:#x}, which persists whether or not the batch succeeds; the \
+                 account was observed to have no delegation, and if that observation is wrong \
+                 this authorization replaces whatever is actually there"
             ),
             step: None,
         });
@@ -1143,6 +1229,32 @@ fn balance_probe_address(plan: &ExecutionPlan) -> Address {
     material.extend_from_slice(plan.digest().as_slice());
     let digest = keccak256(material);
     Address::from_slice(&digest.as_slice()[12..])
+}
+
+/// The tracked tokens whose balance could not be established on either side.
+///
+/// A probe answers or it does not; `None` on both sides means the wallet has
+/// no number for this token at all, which is the case that used to vanish from
+/// the review. One side present is enough to place the token in the change set
+/// where a reader will see it, so only the doubly-absent ones are reported
+/// here.
+///
+/// Separate from the reporting so the rule is testable on its own: the branch
+/// that mattered needs an adversarial token to reach, and none of the fixtures
+/// have one.
+pub(crate) fn unverified_token_probes(
+    tracked: &[Address],
+    before: &BTreeMap<Address, Option<U256>>,
+    after: &BTreeMap<Address, Option<U256>>,
+) -> Vec<Address> {
+    tracked
+        .iter()
+        .copied()
+        .filter(|token| {
+            before.get(token).copied().flatten().is_none()
+                && after.get(token).copied().flatten().is_none()
+        })
+        .collect()
 }
 
 fn token_balance_results(
@@ -1522,6 +1634,30 @@ fn base_failure_result(
         message: "eth_simulateV1 simulation did not succeed".into(),
         step: None,
     });
+    // A failure can happen before the wallet's code was ever read, so this
+    // result knows nothing about the account's delegation — and it says so
+    // rather than letting `replaces_delegated_implementation: None` be read as
+    // "there is nothing to replace". It is not: the field is empty because
+    // nobody looked.
+    //
+    // The distinction matters because a failed simulation is exactly the case
+    // a human is asked to override, and the review document draws its
+    // replacement warning from that same empty field. Overriding the failure
+    // would then sign an authorization that silently replaces a delegation the
+    // document never mentioned.
+    if mode == ExecutionMode::CaliburBatch {
+        findings.push(PolicyFinding {
+            severity: FindingSeverity::Warning,
+            code: DELEGATION_AUTHORIZED_CODE.into(),
+            message: format!(
+                "this batch would sign an EIP-7702 authorization delegating the account to \
+                 {CANONICAL_CALIBUR:#x}, and the simulation failed before the account's current \
+                 delegation could be observed; if it is already delegated elsewhere, this \
+                 replaces that, and the replacement persists whether or not the batch succeeds"
+            ),
+            step: None,
+        });
+    }
     SimulationResult {
         simulation_id: None,
         digest: format!("{:#x}", plan.digest()),

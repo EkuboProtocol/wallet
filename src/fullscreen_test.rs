@@ -108,7 +108,9 @@ fn wrapping_respects_width_preserves_tones_and_loses_no_hash_digits() {
 fn wrapping_prefers_a_space_and_keeps_blank_lines() {
     let line: Line = vec![Span::plain("alpha beta gamma")];
     let wrapped = wrap_line(&line, 11);
-    assert_eq!(text_of(&wrapped), "alpha beta\ngamma");
+    // The break space stays on the row it ended. This wrapper renders the
+    // payload a person signs, so it lays text out and never removes any of it.
+    assert_eq!(text_of(&wrapped), "alpha beta \ngamma");
     assert_eq!(wrap_line(&Vec::new(), 10), vec![Vec::new()]);
 }
 
@@ -285,4 +287,57 @@ fn stored_text_in_a_review_cannot_draw_its_own_facts() {
         "{text}"
     );
     assert_eq!(text.lines().count(), 3);
+}
+
+/// The wrapper renders the complete EIP-712 payload a person reads before
+/// signing, so it may lay text out but must never remove any of it. A space
+/// inside a JSON string literal is part of the value the digest commits to,
+/// and dropping the one a line happened to break at meant the string on the
+/// screen was not the string being signed -- with no marker saying anything
+/// had gone.
+#[test]
+fn wrapping_never_drops_a_character_of_what_is_signed() {
+    for columns in 4..40_usize {
+        for text in [
+            "alpha beta gamma",
+            r#""memo": "pay  alice  now""#,
+            "a b c d e f g h i j k l m n o p",
+            "trailing space ",
+            " leading space",
+            "double  space",
+        ] {
+            let line: Line = vec![Span::plain(text)];
+            let wrapped = wrap_line(&line, columns);
+            assert_eq!(
+                text_of(&wrapped).replace('\n', ""),
+                text,
+                "every character survives wrapping {text:?} at {columns} columns"
+            );
+        }
+    }
+}
+
+/// The same guarantee for the hanging-indent form, minus the indent it adds.
+#[test]
+fn hanging_wrapping_never_drops_a_character_either() {
+    let text = "label: a value with  several  spaces in it";
+    for columns in 12..40_usize {
+        let line: Line = vec![Span::plain(text)];
+        let wrapped = wrap_line_hanging(&line, columns, 2);
+        let rejoined: String = text_of(&wrapped)
+            .split('\n')
+            .enumerate()
+            .map(|(index, row)| {
+                if index == 0 {
+                    row.to_owned()
+                } else {
+                    row.strip_prefix("  ").unwrap_or(row).to_owned()
+                }
+            })
+            .collect();
+        assert_eq!(
+            rejoined, text,
+            "every character survives hanging-wrapping at {columns} columns"
+        );
+    }
 }
