@@ -307,15 +307,32 @@ pub async fn decide_typed_data(
             approval = approval.fact(
                 format!("Grants approval {}", index + 1),
                 format!(
-                    "{}: allow {} to spend up to {} of token {}{}",
+                    "{}: allow {} to spend up to {} of token {}{}{}",
                     permit.kind,
                     permit.spender,
                     permit.amount,
                     permit.token,
+                    // Two different clocks, and calling both "deadline" is
+                    // what made the shorter one look like the limit. For
+                    // Permit2 this one bounds only how long the signature may
+                    // be submitted; the allowance it grants then lasts until
+                    // `expiration`, which can be far later or maximal.
                     permit
                         .deadline
                         .as_deref()
-                        .map_or_else(String::new, |deadline| format!("; deadline {deadline}")),
+                        .map_or_else(String::new, |deadline| {
+                            if permit.expiration.is_some() {
+                                format!("; signature usable until {deadline}")
+                            } else {
+                                format!("; deadline {deadline}")
+                            }
+                        }),
+                    permit
+                        .expiration
+                        .as_deref()
+                        .map_or_else(String::new, |expiration| format!(
+                            "; ALLOWANCE LASTS UNTIL {expiration}"
+                        )),
                 ),
             );
         }

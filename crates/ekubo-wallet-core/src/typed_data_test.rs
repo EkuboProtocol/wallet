@@ -540,3 +540,76 @@ fn every_part_of_a_reviewed_payload_is_covered_by_the_signature() {
     }))
     .expect("a type reached only through an array member is still reached");
 }
+
+/// Permit2 carries two clocks and the review reported one of them under a name
+/// that fits the other. `sigDeadline` bounds only how long the signature may be
+/// submitted; `PermitDetails.expiration` is how long the allowance it grants
+/// stays usable, per token. The decoder read the first and dropped the second,
+/// so a permit could show a deadline minutes away while granting a standing
+/// authority that lasts until the maximum `uint48`.
+#[test]
+fn a_permit2_allowance_reports_its_own_lifetime() {
+    let (typed, _, _) = parse_typed_data(&permit2_payload(
+        "0x000000000022d473030f116ddee9f6b43ac78ba3",
+    ))
+    .unwrap();
+    let approvals = interpret_permit_approvals(&typed, Address::repeat_byte(0x11))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        approvals[0].expiration.as_deref(),
+        Some("1900000000"),
+        "the allowance lifetime has to survive the decode"
+    );
+    assert_eq!(
+        approvals[0].deadline.as_deref(),
+        Some("1900000000"),
+        "and the signature deadline is still reported, separately"
+    );
+}
+
+/// An ERC-2612 permit has one clock, and it is the deadline: the allowance is
+/// granted at submission and lasts until spent. Reporting an `expiration` for
+/// it would invent a limit that does not exist.
+#[test]
+fn a_permit_with_one_clock_reports_no_separate_expiration() {
+    let typed = serde_json::json!({
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"}
+            ],
+            "Permit": [
+                {"name": "owner", "type": "address"},
+                {"name": "spender", "type": "address"},
+                {"name": "value", "type": "uint256"},
+                {"name": "nonce", "type": "uint256"},
+                {"name": "deadline", "type": "uint256"}
+            ]
+        },
+        "primaryType": "Permit",
+        "domain": {
+            "name": "USD Coin",
+            "chainId": 1,
+            "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+        },
+        "message": {
+            "owner": "0x1111111111111111111111111111111111111111",
+            "spender": "0x3333333333333333333333333333333333333333",
+            "value": "1000000",
+            "nonce": "0",
+            "deadline": "1900000000"
+        }
+    });
+    let (parsed, _, _) = parse_typed_data(&typed).unwrap();
+    let approvals = interpret_permit_approvals(&parsed, Address::repeat_byte(0x11))
+        .unwrap()
+        .unwrap();
+    assert_eq!(approvals[0].kind, "erc2612_permit");
+    assert_eq!(approvals[0].deadline.as_deref(), Some("1900000000"));
+    assert!(
+        approvals[0].expiration.is_none(),
+        "one clock stays one clock"
+    );
+}
