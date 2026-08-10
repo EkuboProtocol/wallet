@@ -20,8 +20,8 @@ file follows in the appendix. Regenerate this document with
 - eth-keystore 0.5.0 — Rohit Narurkar <rohit.narurkar@protonmail.com> — https://github.com/roynalnaruto/eth-keystore-rs
 - parity-scale-codec 3.7.5 — Parity Technologies <admin@parity.io> — https://github.com/paritytech/parity-scale-codec
 - parity-scale-codec-derive 3.7.5 — Parity Technologies <admin@parity.io> — https://github.com/paritytech/parity-scale-codec
-- rmcp 3.1.0 — https://github.com/modelcontextprotocol/rust-sdk/
-- rmcp-macros 3.1.0 — https://github.com/modelcontextprotocol/rust-sdk/
+- rmcp 3.1.1 — https://github.com/modelcontextprotocol/rust-sdk/
+- rmcp-macros 3.1.2 — https://github.com/modelcontextprotocol/rust-sdk/
 - sync_wrapper 1.0.2 — Actyx AG <developer@actyx.io> — https://github.com/Actyx/sync_wrapper
 
 ## Apache-2.0 AND ISC
@@ -368,9 +368,9 @@ file follows in the appendix. Regenerate this document with
 - chrono 0.4.45 — https://github.com/chronotope/chrono
 - cipher 0.4.4 — RustCrypto Developers — https://github.com/RustCrypto/traits
 - cipher 0.5.2 — RustCrypto Developers — https://github.com/RustCrypto/traits
-- clap 4.6.5 — https://github.com/clap-rs/clap
-- clap_builder 4.6.5 — https://github.com/clap-rs/clap
-- clap_complete 4.6.8 — https://github.com/clap-rs/clap
+- clap 4.6.6 — https://github.com/clap-rs/clap
+- clap_builder 4.6.6 — https://github.com/clap-rs/clap
+- clap_complete 4.6.9 — https://github.com/clap-rs/clap
 - clap_derive 4.6.4 — https://github.com/clap-rs/clap
 - clap_lex 1.1.0 — https://github.com/clap-rs/clap
 - clear-signing 0.1.0 — Bartosz Rozwarski — https://github.com/llbartekll/clear-signing
@@ -770,8 +770,8 @@ file follows in the appendix. Regenerate this document with
 - r-efi 5.3.0: MIT OR Apache-2.0 OR LGPL-2.1-or-later — MIT License: https://opensource.org/license/mit
 - r-efi 6.0.0: MIT OR Apache-2.0 OR LGPL-2.1-or-later — MIT License: https://opensource.org/license/mit
 - rlp 0.5.2: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
-- rmcp 3.1.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
-- rmcp-macros 3.1.0: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- rmcp 3.1.1: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+- rmcp-macros 3.1.2: Apache-2.0 — Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
 - ruint 1.20.0: MIT — MIT License: https://opensource.org/license/mit
 - ruint-macro 1.2.1: MIT — MIT License: https://opensource.org/license/mit
 - rustls-platform-verifier-android 0.1.1: MIT OR Apache-2.0 — MIT License: https://opensource.org/license/mit
@@ -904,7 +904,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-## License text for: anstream 1.0.0, anstyle 1.0.14, anstyle-parse 1.0.0, anstyle-query 1.1.5, anstyle-wincon 3.0.11, assert_cmd 2.2.2, clap 4.6.5, clap_builder 4.6.5, clap_complete 4.6.8, clap_derive 4.6.4, clap_lex 1.1.0, colorchoice 1.0.5, is_terminal_polyfill 1.70.2, once_cell_polyfill 1.70.2, predicates 3.1.4, predicates-core 1.0.10, predicates-tree 1.0.13, termtree 0.5.1, toml_datetime 1.1.1+spec-1.1.0, toml_edit 0.25.13+spec-1.1.0, toml_parser 1.1.3+spec-1.1.0
+## License text for: anstream 1.0.0, anstyle 1.0.14, anstyle-parse 1.0.0, anstyle-query 1.1.5, anstyle-wincon 3.0.11, assert_cmd 2.2.2, clap 4.6.6, clap_builder 4.6.6, clap_complete 4.6.9, clap_derive 4.6.4, clap_lex 1.1.0, colorchoice 1.0.5, is_terminal_polyfill 1.70.2, once_cell_polyfill 1.70.2, predicates 3.1.4, predicates-core 1.0.10, predicates-tree 1.0.13, termtree 0.5.1, toml_datetime 1.1.1+spec-1.1.0, toml_edit 0.25.13+spec-1.1.0, toml_parser 1.1.3+spec-1.1.0
 
 ```text
 Copyright (c) Individual contributors

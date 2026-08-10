@@ -52,12 +52,12 @@ hkdf = "0.13.0"
 sha2 = "0.11.0"
 bs58 = "0.5.1"
 rand = "0.10.2"
-base64 = "0.22.1"
+base64 = "0.23.0"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots", "url"] }
 
 [dev-dependencies]
 assert_cmd = "2.1.1"
-base64 = "0.22.1"
+base64 = "0.23.0"
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core", features = ["test-hooks"] }
 
 # Unoptimized MSVC frames for the deeply generic alloy, rmcp, and schemars call
