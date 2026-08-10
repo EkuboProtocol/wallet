@@ -13,6 +13,7 @@ use crate::{
     fork::{ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
     input_validation::{parse_chain_id, validate_timeout_seconds},
     legal::{self, LegalDocument, LegalStatus, LegalStore},
+    mcp_walletconnect::{self, SessionRegistry, SessionReport},
     message::{
         MessageDisplay, MessageStatus, MessageStore, PendingMessage, SiweMessage, describe_message,
         parse_message_input, parse_siwe, siwe_warnings,
@@ -106,6 +107,11 @@ struct WalletMcpServer {
     /// Simulation results a send may consume instead of simulating again.
     /// In-process only for the same reasons, and short-lived besides.
     simulations: Arc<Mutex<SimulationStore>>,
+    /// `WalletConnect` sessions this process is holding open for the caller.
+    /// In-process only, and deliberately not persisted: a session is a live
+    /// relay connection, and one that did not survive a restart never
+    /// reconnects silently.
+    walletconnect: Arc<Mutex<SessionRegistry>>,
     /// Where private keys live. Production uses the OS credential store;
     /// tests substitute an in-memory store so no real keychain is touched.
     keys: Arc<dyn KeyStore>,
@@ -173,6 +179,7 @@ impl WalletMcpServer {
             address_book: Arc::new(Mutex::new(address_book)),
             forks: Arc::new(Mutex::new(ForkStore::new())),
             simulations: Arc::new(Mutex::new(SimulationStore::new())),
+            walletconnect: Arc::new(Mutex::new(SessionRegistry::new())),
             keys,
         })
     }
@@ -439,6 +446,41 @@ struct ApprovalWaitInput {
     #[serde(default = "default_wait_seconds")]
     #[schemars(range(min = 1, max = 55))]
     timeout_seconds: u8,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WalletConnectInput {
+    /// Which account the dapp gets. A session exposes exactly one, fixed for
+    /// its lifetime, and every request naming another address is refused.
+    wallet_id: String,
+    /// The `wc:` pairing link from the dapp's own connect dialog. It is a
+    /// secret and it is short-lived: the symmetric key is in the link, so
+    /// anyone who reads one can impersonate the dapp for as long as it is
+    /// valid. Use each link once, immediately after the page produced it.
+    uri: String,
+    /// CAIP-2 chain ids (`eip155:1`) or decimal chain ids to confine this
+    /// session to. Omitted, the session covers every chain the dapp asked for
+    /// that this wallet has configured. This can only narrow: a chain the dapp
+    /// did not ask for is not added by naming it, and a chain the dapp cannot
+    /// work without being left out refuses the connection rather than settling
+    /// a session that fails on its first request.
+    #[serde(default)]
+    chain_ids: Option<Vec<String>>,
+    /// How long to wait for the dapp to settle the session, in seconds: 1 to
+    /// 55, default 30. A dapp that has just been handed a link settles within
+    /// a second or two; a wait that elapses returns a `pairing` report rather
+    /// than an error, and the session stays open.
+    #[serde(default = "default_pairing_seconds")]
+    #[schemars(range(min = 1, max = 55))]
+    timeout_seconds: u8,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WalletConnectSessionInput {
+    /// The `session_id` `wallet_walletconnect_connect` returned.
+    session_id: uuid::Uuid,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2402,6 +2444,75 @@ impl WalletMcpServer {
         }
         Ok(Json(output))
     }
+
+    #[tool(
+        name = "wallet_walletconnect_connect",
+        description = "Connect this wallet to a dapp's own web interface over WalletConnect, from a `wc:` pairing link you obtained from that interface, so the dapp can propose transactions and signatures when it has no MCP server of its own. THE USER IS NOT ASKED WHETHER TO CONNECT: unlike `ekubo-wallet connect`, no connection review is shown and no keystroke is required, so calling this points the named account at whatever dapp the link belongs to. Use it only for a site the user asked you to use, and repeat the returned dapp identity and cautions to them. The connection grants proposal rights and nothing else: every transaction is still simulated, still checked against the wallet's policy, and still either signed automatically because the policy already permits it or held for `ekubo-wallet review`; every signature request is always held for review, and anything not approved within 240 seconds is rejected and the dapp told so. Read the policy with wallet_get_policy first, because what a policy already permits is exactly what this connection can spend without anyone being asked. Narrow the session with chain_ids when the dapp only needs one chain. At most 4 sessions are held open at once. Returns once the dapp has settled the session or the wait elapses.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_walletconnect_connect(
+        &self,
+        Parameters(input): Parameters<WalletConnectInput>,
+    ) -> Result<Json<SessionReport>, ErrorData> {
+        validate_timeout_seconds(input.timeout_seconds).map_err(|error| tool_error(&error))?;
+        Ok(Json(
+            mcp_walletconnect::open(
+                &self.walletconnect,
+                &self.config,
+                &input.wallet_id,
+                &input.uri,
+                input.chain_ids,
+                Duration::from_secs(u64::from(input.timeout_seconds)),
+            )
+            .await
+            .map_err(|error| tool_error(&error))?,
+        ))
+    }
+
+    #[tool(
+        name = "wallet_walletconnect_sessions",
+        description = "List the WalletConnect sessions this server is holding open: which dapp each is with, which account and chains it exposes, what it has done recently, and which of its requests are waiting for the user. A request under awaiting_review needs the user to run `ekubo-wallet review <request_id>` in their own terminal (never invoke that CLI for them); tell them, and wait. Do not submit those ids with wallet_send_execution_plan — the session broadcasts what it is waiting on, and a second submission is a second transaction. A request not approved within 240 seconds is rejected and the dapp is told so. This tool changes nothing.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn wallet_walletconnect_sessions(&self) -> Result<Json<Vec<SessionReport>>, ErrorData> {
+        Ok(Json(
+            self.walletconnect
+                .lock()
+                .map_err(|_| {
+                    ErrorData::internal_error(
+                        "WalletConnect session registry lock was poisoned",
+                        None,
+                    )
+                })?
+                .list(),
+        ))
+    }
+
+    #[tool(
+        name = "wallet_walletconnect_disconnect",
+        description = "Close a WalletConnect session this server opened, telling the dapp the session is over. Needs no confirmation from the user, exactly as opening one does not. Any request still waiting for the user is rejected rather than left approvable, so the dapp is told the truth and nothing can be signed for it afterwards. Close a session as soon as the work on that dapp is finished: a session left open keeps proposal rights the user never reviewed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
+    )]
+    async fn wallet_walletconnect_disconnect(
+        &self,
+        Parameters(input): Parameters<WalletConnectSessionInput>,
+    ) -> Result<Json<SessionReport>, ErrorData> {
+        Ok(Json(
+            mcp_walletconnect::close(&self.walletconnect, input.session_id)
+                .await
+                .map_err(|error| tool_error(&error))?,
+        ))
+    }
 }
 
 impl WalletMcpServer {
@@ -3039,6 +3150,13 @@ const fn default_true() -> bool {
 
 const fn default_wait_seconds() -> u8 {
     55
+}
+
+/// A dapp handed a pairing link proposes within a second or two, so a shorter
+/// default than the general wait: the interesting outcome here is "it did not",
+/// and hearing that at thirty seconds beats hearing it at fifty-five.
+const fn default_pairing_seconds() -> u8 {
+    30
 }
 
 const fn default_confirmations() -> u16 {

@@ -10,24 +10,43 @@ fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Every file that makes up the MCP server's own surface.
+///
+/// `src/mcp_walletconnect.rs` is here because it is the one part of that
+/// surface that runs unattended for minutes at a time and holds a queued
+/// request while a person decides. That is exactly the position from which an
+/// approval capability would be tempting — draw the review, take the answer,
+/// sign — and exactly the position where it must not exist: the session waits
+/// for `ekubo-wallet review` to decide and reads the row afterwards, and it
+/// has no way to be the thing that decided.
+const MCP_SURFACE: &[&str] = &["src/mcp.rs", "src/mcp_walletconnect.rs"];
+
 /// The MCP server must never gain an approval capability: no reference to
 /// the terminal presenter, the TUI, or the interactive-proof constructor.
 #[test]
 fn mcp_server_cannot_reach_an_approval_surface() {
-    let mcp = fs::read_to_string(repository_root().join("src/mcp.rs")).unwrap();
-    for forbidden in [
-        "TerminalApprovalUi",
-        "approve_tui",
-        "crate::tui",
-        "from_terminal",
-        "InteractiveProof",
-        "ReviewPresenter",
-    ] {
-        assert!(
-            !mcp.contains(forbidden),
-            "src/mcp.rs references {forbidden}; the MCP server must never reach an approval \
-             surface"
-        );
+    for file in MCP_SURFACE {
+        let source = fs::read_to_string(repository_root().join(file)).unwrap();
+        for forbidden in [
+            "TerminalApprovalUi",
+            "approve_tui",
+            "crate::tui",
+            "from_terminal",
+            "InteractiveProof",
+            "ReviewPresenter",
+            // Both draw a review and then sign. A dapp session under the MCP
+            // server reaches its signature only by watching the store, so
+            // naming either of these here would be the whole defect.
+            "decide_message",
+            "decide_typed_data",
+            "approve_transaction",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{file} references {forbidden}; the MCP server must never reach an approval \
+                 surface"
+            );
+        }
     }
 }
 
@@ -377,19 +396,21 @@ fn the_mcp_server_cannot_write_stored_metadata() {
     // through the stores — standing in for the CLI while read-only tools are
     // checked against the state — live in `mcp_test.rs` and `pipeline_test.rs`,
     // which this never reads. That is what the `_test.rs` split bought here.
-    let mcp = fs::read_to_string(repository_root().join("src/mcp.rs")).unwrap();
-    for forbidden in [
-        "add_configured_network",
-        "replace_configured_network",
-        "remove_configured_network",
-        "insert_if_absent",
-        "upsert",
-    ] {
-        assert!(
-            !mcp.contains(forbidden),
-            "src/mcp.rs references {forbidden}; an agent proposes metadata and the owner \
-             confirms it, so no tool body writes it"
-        );
+    for file in MCP_SURFACE {
+        let source = fs::read_to_string(repository_root().join(file)).unwrap();
+        for forbidden in [
+            "add_configured_network",
+            "replace_configured_network",
+            "remove_configured_network",
+            "insert_if_absent",
+            "upsert",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{file} references {forbidden}; an agent proposes metadata and the owner \
+                 confirms it, so no tool body writes it"
+            );
+        }
     }
 }
 

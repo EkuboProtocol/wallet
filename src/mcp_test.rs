@@ -418,11 +418,46 @@ fn tool_inventory_exposes_implemented_parity_surface() {
             "wallet_wait_for_execution",
             "wallet_wait_for_message",
             "wallet_wait_for_typed_data",
+            "wallet_walletconnect_connect",
+            "wallet_walletconnect_disconnect",
+            "wallet_walletconnect_sessions",
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
     );
+}
+
+/// The one tool that connects a dapp without asking anybody says so in the
+/// sentence an agent actually reads.
+///
+/// Every other write tool in this server ends at a policy or at a person. This
+/// one settles a `WalletConnect` session with no review at all, and an agent
+/// that does not know that will use it as casually as it uses
+/// `wallet_get_balances`. The description is the only place that difference can
+/// be stated, so it is asserted rather than left to whoever edits it next.
+#[test]
+fn the_unreviewed_connection_is_declared_in_its_own_description() {
+    let tool = WalletMcpServer::tool_router()
+        .list_all()
+        .into_iter()
+        .find(|tool| tool.name == "wallet_walletconnect_connect")
+        .expect("the connect tool is registered");
+    let description = tool
+        .description
+        .as_deref()
+        .expect("the connect tool has a description");
+    assert!(
+        description.contains("THE USER IS NOT ASKED WHETHER TO CONNECT"),
+        "the description does not say the connection is unreviewed: {description}"
+    );
+    // And what still holds, because "unreviewed" alone reads as "unchecked".
+    for kept in ["policy", "ekubo-wallet review"] {
+        assert!(
+            description.contains(kept),
+            "the description does not say {kept} still applies: {description}"
+        );
+    }
 }
 
 #[test]

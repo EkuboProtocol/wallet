@@ -30,6 +30,9 @@
 | `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only and confirmed in the terminal. |
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. One of the two tools available before acceptance. |
 | `wallet_check_for_updates` | Whether a newer release than the running one has been published, and the command that installs it. Touches no wallet, key, or policy, and is the other tool available before acceptance — being told the build is stale should not require accepting anything. Installs nothing: the wallet has no tool that does, because replacing the binary would replace the approval surface that would have confirmed it. The command is the user's to run, or the agent's if the user asks; the running server keeps its version until it is restarted. |
+| `wallet_walletconnect_connect` | Pair with a dapp's own web interface from a `wc:` link and settle a session, **with no connection review and nobody asked**. The only tool in this server that grants a counterparty standing access without a human decision; see [walletconnect](walletconnect.md#sessions-an-agent-opens). Binds one account and one set of chains, narrowable with `chain_ids`, and returns the dapp's claimed identity plus every caution the review would have drawn. |
+| `wallet_walletconnect_sessions` | What each open session is with, exposes, and has done, plus the request IDs waiting for `ekubo-wallet review`. Reads only. |
+| `wallet_walletconnect_disconnect` | End a session, telling the dapp. Rejects anything still waiting rather than leaving it approvable. |
 | `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
 
 MCP operations select networks only with canonical decimal `chain_id` strings
@@ -104,6 +107,62 @@ data, and a recommended action. Retry identical calldata only for
 `retry_same_plan`, which normally means a transient RPC failure; for
 `reprepare_plan`, including any revert or slippage, return to the originating
 tool for freshly prepared calldata.
+
+## Driving a dapp that has no MCP server
+
+`wallet_walletconnect_connect` exists for the case the rest of this table
+cannot serve: a protocol whose only interface is its own website. The agent
+opens the page, clicks connect, takes the `wc:` link out of the dialog, and
+hands it here; the dapp then proposes transactions and signatures the way any
+producer does.
+
+**Nobody is asked whether to connect.** `ekubo-wallet connect` shows a
+full-screen review, names the site, lists what the session would expose, and
+waits for a keystroke. This tool does none of that, by design — there is no
+terminal for it, and the whole point is that the agent can pair without
+interrupting anyone. Four things the review did, three survive:
+
+- The scope is still narrowed to chains this wallet has configured and methods
+  it implements, by the same code the review calls. `chain_ids` narrows it
+  further, and only ever further.
+- The session is still bound to the one account `wallet_id` names, for its
+  whole life. Every request naming another address is refused.
+- What the wallet can tell about the dapp is still produced — the host parsed
+  from its claimed URL, its claims, and every caution, including the one that
+  matters most: a name spelling a domain the dapp does not serve from. It is
+  returned to the agent instead of drawn, to be repeated to the user.
+- **Whether to connect at all is not asked.** An agent that can call this tool
+  can point the named account at any dapp.
+
+What that is worth depends entirely on the policy, because the policy is what
+the connection reaches. A session grants proposal rights and nothing else:
+every transaction is simulated, put to the same policy, and either signed
+automatically because the policy already permits it or left for
+`ekubo-wallet review`. So the blast radius of an unreviewed connection is
+exactly the set of transactions the owner's policy already signs without
+asking. Read it with `wallet_get_policy` before using this tool, and prefer a
+policy that covers the specific thing the user wants done over one that covers
+a shape of transaction.
+
+Requests that need a person appear in `wallet_walletconnect_sessions` under
+`awaiting_review`, with the `ekubo-wallet review <request-id>` the user has to
+run. Two rules about those ids:
+
+- **Wait; do not submit them.** The session broadcasts what it is waiting on.
+  Passing one to `wallet_send_execution_plan` is an attempt at a second
+  submission of the same request.
+- **They expire.** A request not approved within 240 seconds is *rejected* —
+  the row is moved to a terminal state and the dapp is told the truth. This is
+  not a timeout that leaves the decision open: the protocol stops carrying the
+  answer after 300 seconds, and a row still approvable after that is a
+  transaction the owner could sign long after the dapp gave up and the agent
+  retried. Tell the user promptly, or close the session and try again when
+  they are at the keyboard.
+
+Close a session with `wallet_walletconnect_disconnect` as soon as the work on
+that dapp is done. A session left open keeps proposal rights nobody reviewed,
+and at most four are held at once.
+
 
 ## Token database and portfolio
 

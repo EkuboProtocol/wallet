@@ -19,6 +19,26 @@ The supported server is one `ekubo-wallet server` stdio process. There is no
 privileged daemon or custom IPC. CLI management commands are local, interactive
 processes and expose no generic signing primitive.
 
+A dapp reached over `WalletConnect` is one more untrusted proposer, and the MCP
+server can pair with one *without a human decision* (`wallet_walletconnect_connect`).
+That is the only place a counterparty gains standing access without the owner
+being asked, and it is a deliberate reduction: an agent driving a dapp's own
+website — because that protocol has no MCP server — holds the pairing link
+itself and has no terminal to review on. It changes who may propose, and
+nothing about what a proposal can become. The session's scope is built by the
+same function the terminal review calls, from chains this wallet has configured
+and methods it implements; it is bound to one account for its whole life; and
+every request it carries takes the pipeline an MCP caller's would: simulated,
+policy-checked, signed only if the policy already permits it, otherwise queued
+for `ekubo-wallet review`, with every signature request queued unconditionally.
+So the set an unreviewed session reaches unattended is exactly the set the
+active policy already signs unattended — the same boundary that bounds the
+agent, unwidened. What is genuinely lost is the anti-impersonation screen: the
+host, the https check, the foreign-icon check, and the name-spells-another-
+domain check are computed and returned to the agent, but nobody is made to read
+them, so a `wc:` link the agent was induced to use connects a dapp the owner
+never saw. See [walletconnect](walletconnect.md#sessions-an-agent-opens).
+
 Execution plans arrive by caller-named URL, which adds one outbound request
 that is not a configured chain RPC and the only SSRF-shaped surface here: the
 other non-RPC requests, the WalletConnect relay and the release check, go to
@@ -428,6 +448,9 @@ replenish because no such accounting exists.
 | RPC or network fails after send | Bytes/hash were stored first; status remains reconcilable and only exact bytes can be retried. |
 | Same-user process accesses credential APIs | Platform isolation and prompts vary; OS compromise or process injection is out of scope. |
 | Agent forges a token name or alias to misdescribe a transfer | Both are proposals; becoming a stored name takes terminal confirmation plus OS presence. Symbols are re-sanitized at render time and refused if they contain `0x`. An unnamed token renders by address in base units — readable, not trusted. |
+| Agent connects the wallet to a dapp the owner never saw | By design, and bounded by the policy rather than by a review: the session may propose, and anything the policy does not already permit still queues for `ekubo-wallet review`. What is lost is the impersonation screen — the dapp's claimed identity and every caution are returned to the agent rather than drawn, so a link the agent was induced to use pairs with nobody objecting. Residual risk is the automatic set of the active policy, exposed to a counterparty of the agent's choosing. Narrow the policy, or do not connect one. |
+| Dapp request outlives the answer the dapp was given | A queued request from a session is rejected in the same atomic step that gives up waiting, so the row is terminal before the dapp is told. An owner approving in the same instant wins the race and their signature is used; there is no state where the dapp holds a refusal and the row is still approvable, which is what would let a later approval broadcast beside the agent's retry. Disconnecting rejects in flight the same way. |
+| Agent redirects the WalletConnect relay | No tool parameter names it; the relay is compiled into the release, and `--relay-url` is a flag on the owner's own command line. |
 | Agent points the wallet at an RPC it controls | It can only propose one. Endpoint admission refuses non-public and credential-bearing URLs, and acceptance takes a terminal confirmation naming the endpoint being replaced, a chain-ID verification, and an OS presence check. |
 
 Any future stateful allowance or daily accounting requires a new threat model

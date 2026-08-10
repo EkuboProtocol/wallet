@@ -4,6 +4,12 @@
 WalletConnect link, so a dapp can propose transactions and signatures the way
 an MCP agent does.
 
+An agent can also open a session by itself, without asking you, so that it can
+drive a dapp's own interface when the dapp has no MCP server. Everything from
+here to [Limits](#limits) describes both, because both run the same code; what
+differs is only who decides, and that is
+[Sessions an agent opens](#sessions-an-agent-opens) at the end.
+
 ```sh
 ekubo-wallet connect 'wc:a1b2…@2?relay-protocol=irn&symKey=…'
 ```
@@ -255,10 +261,92 @@ reads as an invitation to press it.
 
 ## Limits
 
-- One session per `connect` run. A second proposal on the same pairing is
-  refused, because reviewing it would need a second terminal.
-- One account per session, chosen on the connection review. It is fixed once
-  the session settles: the account is part of what the session advertised to
-  the dapp, so changing it means disconnecting and reconnecting.
+- One session per pairing. A second proposal on the same pairing is refused;
+  on `connect` because reviewing it would need a second terminal, and on an
+  agent's session because a pairing settles one session and no more.
+- One account per session. On `connect` it is chosen on the connection review;
+  on an agent's session it is the account the agent named. Either way it is
+  fixed once the session settles: the account is part of what the session
+  advertised to the dapp, so changing it means disconnecting and reconnecting.
 - The session ends if the relay connection drops; the dapp will show it as
   disconnected and you reconnect with a fresh link.
+
+
+## Sessions an agent opens
+
+The MCP server has three tools — `wallet_walletconnect_connect`,
+`wallet_walletconnect_sessions`, `wallet_walletconnect_disconnect` — that let
+an agent pair with a dapp, watch what it asks for, and disconnect. They exist
+because plenty of protocols have no MCP server and only a website: the agent
+opens the page, clicks connect, copies the `wc:` link out of the dialog, and
+pairs.
+
+**You are not asked.** There is no review screen, no keystroke, and no
+notification. An agent that can call the tool can connect the account it names
+to any dapp it likes. That is what the tool is for, and it is the one place in
+this wallet where a counterparty gains standing access without a decision of
+yours.
+
+### What you still have
+
+The connection review does four things. An agent's session keeps three of
+them, and they are the three that decide what can move:
+
+- **The scope is narrowed the same way.** Chains you have configured, methods
+  this wallet implements, and nothing else — the same function the review
+  calls before it draws. The agent can narrow further and cannot widen.
+- **One account, fixed.** Every request naming a different address is refused,
+  and a session whose account has since been replaced refuses everything.
+- **Every request takes the same path.** A transaction is simulated, put to
+  your policy, and either signed because your policy already permits it or
+  left in the queue for `ekubo-wallet review`. A `personal_sign` or an EIP-712
+  payload always waits for you; no policy authorizes a signature.
+
+So the question "what can an agent's dapp session do without me?" has one
+answer: **exactly what your policy already signs without asking.** Nothing
+more becomes automatic because a dapp is the one proposing it. If that set is
+larger than you want an unreviewed website reaching, narrow the policy — that
+is the control, and it is the same control that bounds the agent itself.
+
+What you lose is the fourth thing: the chance to look at the site before it is
+connected. The wallet still derives everything it can — the host parsed out of
+the URL the dapp claims, whether that URL is https, whether the icons come
+from somewhere else, and whether the name spells a domain the dapp does not
+serve from — but it hands those to the agent instead of drawing them, and the
+agent is expected to repeat them to you. A dapp claiming to be
+`app.uniswap.org` while serving from `claim-rewards.example` produces the same
+caution it always did; nobody is made to read it.
+
+### Requests that need you
+
+A dapp request your policy does not already permit becomes a normal queued
+request, and the agent is told the `ekubo-wallet review <request-id>` to give
+you. It appears under `awaiting_review` in
+`wallet_walletconnect_sessions` until it is decided.
+
+**It expires after four minutes, and expiring rejects it.** The protocol stops
+carrying the answer to the dapp at five minutes, so a wait that ran longer
+would tell the dapp nothing while leaving a request you could approve
+afterwards — and approving it then would broadcast a transaction the dapp had
+already been told had failed, quite possibly after the agent retried and made
+a second one. So the wait ends at four minutes and moves the row to rejected
+in the same step. If you approve in the same instant, you win: the rejection
+only applies to a row still awaiting approval, and your signature is used.
+
+Disconnecting has the same effect on anything in flight, for the same reason.
+
+### What is not exposed
+
+The relay is the compiled-in default and no tool parameter can change it.
+`--relay-url` stays a flag on your own command line: the relay sees which
+topics talk to which and when, and who observes that is not an agent's
+decision to make.
+
+Sessions live in the MCP server process and are never written to disk. At most
+four are open at once. Nothing reconnects after a restart — a session that
+vanished is a session the dapp will show as disconnected, which is the honest
+outcome.
+
+`ekubo-wallet transaction list` shows what any of these sessions queued or
+signed, with the dapp's own account of itself behind `WalletConnect: ` in the
+plan source, exactly as for a session you opened yourself.

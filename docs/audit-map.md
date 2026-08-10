@@ -16,6 +16,18 @@ refused until the end of the document has been on screen).
 Everything else in the binary crate is presentation and adaptation — CLI
 argument handling, the MCP tool surface and its DTOs, TUI browsers, tables,
 paging — and can change without moving what the wallet is able to sign.
+
+One binary-crate module is worth reading even though it is outside that scope,
+because it decides *who may propose*: `src/dapp.rs` holds everything a
+`WalletConnect` dapp may ask for and every refusal between, shared by the
+terminal command (`src/connect.rs`) and the MCP server's unreviewed sessions
+(`src/mcp_walletconnect.rs`). It signs nothing and widens nothing — it builds
+plans, calls the same `orchestrator` entry points a tool call does, and hands
+anything the policy queues to a `DappSurface` that either draws a review or
+waits for `ekubo-wallet review`. What an auditor should check there is the
+`DappSurface` seam: that neither implementation can produce a signature the
+orchestrator did not, and that the MCP one rejects a record atomically when it
+gives up waiting rather than leaving it approvable.
 `tests/boundary.rs` trips when that claim erodes: `src/mcp.rs` may never
 reference an approval surface, `InteractiveProof::from_terminal` has exactly
 one production call site, and the core crate's manifest may not name a
@@ -93,6 +105,9 @@ broadcast.
 | Schema changes underneath a live server refuse requests | `policy_store::PolicyStore::assert_schema_current`, called from the MCP `tool_gate` |
 | Legal acceptance gates every tool | MCP `tool_gate` (binary crate) over `legal::require_status_allows_use` (core) |
 | Owner authentication call sites | `human_presence::PresenceRequest` variants; platform backends in `human_presence` |
+| A `WalletConnect` session's scope is built from what this wallet can serve, never from what the dapp asked for | `dapp::DappSession::negotiate` (the only producer of a session's chains and methods, called by both surfaces) and `dapp::DappSession::scope_for`; the per-request boundary in `walletconnect::session::check_in_scope` |
+| An unreviewed session adds a proposer, not an authority | `dapp::DappSession::execute_plan` calls `orchestrator::execute_automatic` unchanged and routes a `Queued` disposition through `DappSurface::resolve_queued`; `mcp_walletconnect::HeadlessSurface` cannot sign and only watches the store |
+| A dapp request the MCP session stops waiting for cannot be approved afterwards | `mcp_walletconnect::HeadlessSurface::await_decision`'s `give_up`, which calls `pending::PendingStore::reject` (and the message/typed-data equivalents) — each moves only a row still awaiting approval, so an owner approving concurrently wins and their signature is used |
 | Key custody: creation, load, export, removal | `custody` (Zeroize, no overwrite, export timestamp before key return) |
 
 ## Residual risks the docs accept
