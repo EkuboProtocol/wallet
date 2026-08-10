@@ -3036,6 +3036,38 @@ async fn replace_policy(
             |value| value.revision.to_string(),
         ),
     )
+    .fact("New policy digest", &digest)
+    // The change itself, which this prompt did not show. The proposal review
+    // has always rendered `diff_policies` and called it authoritative; the
+    // direct route asked the same authority question -- `policy set`,
+    // `allow-all`, `require-approval` all land here -- and answered it with a
+    // wallet name, a revision number, and a generic warning. An owner could
+    // approve a materially more permissive policy without being shown a single
+    // chain, call, or value that was gaining unattended signing authority.
+    //
+    // Against the fail-closed baseline when there is no current policy, since
+    // that is what "no policy" means to every signing path: nothing is
+    // permitted. A diff against it reads as what this policy grants.
+    .fact_lines(
+        if current.is_some() {
+            "Changes"
+        } else {
+            "Grants (this wallet has no policy today)"
+        },
+        {
+            let baseline = current
+                .as_ref()
+                .map_or_else(WalletPolicy::require_approval_for_everything, |stored| {
+                    stored.policy.clone()
+                });
+            let lines = crate::core::policy::diff_policies(&baseline, policy);
+            if lines.is_empty() {
+                vec!["no change to what this wallet may sign".to_owned()]
+            } else {
+                lines
+            }
+        },
+    )
     .warning(
         "A more permissive policy can authorize transactions without an exceptional approval.",
     );
