@@ -20,18 +20,15 @@ fn token() -> Address {
     Address::from_str("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48").unwrap()
 }
 
-/// The zero address is not a recipient. Sending the native token there
-/// destroys it, and a great many ERC-20s burn the amount rather than refusing
-/// the call -- so whether the value survives depends on which contract was
-/// named, which is not a thing to leave to chance in a signed plan.
+/// The native leg is refused, and it is refused by the plan rather than here.
 ///
-/// Refused here rather than left to the policy, because no policy rule speaks
-/// about it: an ordinary allowlist for the token authorizes this plan, and
-/// `ExecutionPlan::validate` checks calldata bounds, step ordering, chain, and
-/// sender -- everything about the shape of the request except where the value
-/// is going.
+/// The check used to sit in `transfer_plan`, which only `wallet_send_transfers`
+/// reaches. `wallet_send_execution_plan` reaches the same send with a plan any
+/// producer authored, so the check covered the honest door and left the general
+/// one open. It is on `ExecutionPlan::validate` now; this test stays to prove
+/// the transfer path still gets the refusal through it.
 #[test]
-fn a_transfer_to_the_zero_address_is_refused() {
+fn a_native_transfer_to_the_zero_address_is_refused() {
     let native = transfer_plan(
         &chain(),
         sender(),
@@ -44,6 +41,42 @@ fn a_transfer_to_the_zero_address_is_refused() {
     let error = format!("{:#}", native.unwrap_err());
     assert!(error.contains("cannot be undone"), "{error}");
 
+    // One bad recipient in a batch refuses the batch: the plan is signed as a
+    // unit, so admitting the others would sign the destruction alongside them.
+    let batch = transfer_plan(
+        &chain(),
+        sender(),
+        vec![
+            Transfer {
+                token: Address::ZERO,
+                to: Address::repeat_byte(0x22),
+                amount: DecimalU256::new("1").unwrap(),
+            },
+            Transfer {
+                token: Address::ZERO,
+                to: Address::ZERO,
+                amount: DecimalU256::new("1").unwrap(),
+            },
+        ],
+    );
+    assert!(batch.is_err());
+}
+
+/// And an ERC-20 transfer naming zero is *not* refused, which is a deliberate
+/// narrowing rather than an oversight.
+///
+/// Its recipient rides in calldata; the transaction's `to` is the token. A
+/// plan-level check sees the token and nothing else, and decoding every
+/// `transfer(address,uint256)` to find a recipient is a different feature from
+/// checking where a transaction is addressed.
+///
+/// What that gives up is small. The destructive case is native value: sent to
+/// `0x0` it is gone and nothing can undo it. An ERC-20 `transfer` to zero
+/// reverts on `OpenZeppelin` and on most implementations, so the token refuses it
+/// without help -- the original claim that "a great many burn the amount" was
+/// stronger than the evidence for it.
+#[test]
+fn an_erc20_transfer_naming_zero_is_left_to_the_token() {
     let erc20 = transfer_plan(
         &chain(),
         sender(),
@@ -52,31 +85,9 @@ fn a_transfer_to_the_zero_address_is_refused() {
             to: Address::ZERO,
             amount: DecimalU256::new("1000").unwrap(),
         }],
-    );
-    assert!(
-        erc20.is_err(),
-        "an ERC-20 transfer to zero burns on many contracts and is refused too"
-    );
-
-    // One bad recipient in a batch refuses the batch: the plan is signed as a
-    // unit, so admitting the others would sign the destruction alongside them.
-    let batch = transfer_plan(
-        &chain(),
-        sender(),
-        vec![
-            Transfer {
-                token: token(),
-                to: Address::repeat_byte(0x22),
-                amount: DecimalU256::new("1").unwrap(),
-            },
-            Transfer {
-                token: token(),
-                to: Address::ZERO,
-                amount: DecimalU256::new("1").unwrap(),
-            },
-        ],
-    );
-    assert!(batch.is_err());
+    )
+    .expect("the transaction is addressed to the token, which is a real recipient");
+    assert_eq!(erc20.ordered_steps[0].transaction.to, token());
 }
 
 /// And an ordinary recipient still builds the plan it always did, so the check

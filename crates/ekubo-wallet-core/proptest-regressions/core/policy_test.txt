@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 097e10a87664052ec439d4a3347ac6cb14cb27cb3974121f979f9956d6a19f31 # shrinks to rules = [], extra = Object {"effect": String("allow")}, call = (0x0000000000000000000000000000000000000000, "0x", "0")
+cc 6ade4f234268a6ed8f8c4ec743ba1dad9244115f6674f4f3436f2e08c88fe823 # shrinks to rules = [], call = (0x0000000000000000000000000000000000000000, "0x", "0")
+cc 703eff6ce89bd7ac9be388849b7e84a9ceac1fb38d2d370109e9ec03b3b3becc # shrinks to rules = [Object {"effect": String("allow")}], index = 0, call = (0x0000000000000000000000000000000000000000, "0x", "0")
+cc ca19a3dd63521cdaa09e33c8161911d67f9de63b705687956e4f0204d8a2087f # shrinks to call = (0x0000000000000000000000000000000000000000, "0x", "0")
+cc 406fb41a1e22a5cf8195d821e8e7c348f50c9b1d874ba9c00d0a7f3874f1945d # shrinks to rules = [], call = (0x0000000000000000000000000000000000000000, "0x", "0"), rotation = 0

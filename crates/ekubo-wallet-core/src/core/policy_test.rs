@@ -483,9 +483,17 @@ fn rule_strategy() -> impl Strategy<Value = serde_json::Value> {
         })
 }
 
+/// An address no rule in these tests names.
+const STRANGER: Address = alloy::primitives::address!("3333333333333333333333333333333333333333");
+
 fn call_strategy() -> impl Strategy<Value = (Address, String, String)> {
     (
-        prop::sample::select(vec![TOKEN, ROUTER, WALLET, Address::ZERO]),
+        // A fourth address no rule names, so the strategy covers "matches
+        // nothing" as well as the three it does name. It used to be
+        // `Address::ZERO`; a plan cannot carry that recipient any more --
+        // `ExecutionPlan::validate` refuses it -- so the stranger has to be an
+        // address that is merely unknown rather than one that is forbidden.
+        prop::sample::select(vec![TOKEN, ROUTER, WALLET, STRANGER]),
         prop::sample::select(vec!["0x", "0xdeadbeef"]),
         prop::sample::select(vec!["0", "1", "1000"]),
     )
