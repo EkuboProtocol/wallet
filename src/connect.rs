@@ -256,6 +256,7 @@ impl DappSurface for TerminalSurface<'_> {
     /// connection meant before this seam existed and it is not changed here.
     async fn approve_plan(
         &self,
+        _method: &str,
         _plan: &crate::core::execution_plan::ExecutionPlan,
         _simulation: &crate::simulation::SimulationResult,
         _dapp: &crate::walletconnect::protocol::AppMetadata,

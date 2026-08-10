@@ -317,6 +317,11 @@ them, and they are the three that decide what can move:
   anything: it releases the plan into your policy, which then decides exactly
   as it would for a transaction the agent sent itself.
 
+  Signatures skip it, and nothing is lost by that: the gate closes an
+  asymmetry only transactions had — a route to being signed that reached no
+  reader — and a `personal_sign` or an EIP-712 payload never had one. They come
+  to you, as they always did.
+
 So the question "what can an agent's dapp session do without me?" has one
 answer: **what your policy already signs without asking, and the agent also
 looked at and approved.** That is the same position a transaction the agent

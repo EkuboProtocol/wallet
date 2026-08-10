@@ -423,7 +423,7 @@ mod agent_gate_tests {
             .expect("execute_plan is declared")
             .1;
         let gate = body
-            .find("self.surface.approve_plan(")
+            .find(".approve_plan(")
             .expect("execute_plan gates the plan");
         let policy = body
             .find("orchestrator::execute_automatic(")

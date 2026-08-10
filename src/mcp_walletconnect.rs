@@ -916,16 +916,12 @@ impl DappSurface for HeadlessSurface {
     /// always faced.
     async fn approve_plan(
         &self,
+        method: &str,
         plan: &ExecutionPlan,
         simulation: &SimulationResult,
         dapp: &crate::walletconnect::protocol::AppMetadata,
     ) -> Result<PlanVerdict> {
         let proposal_id = Uuid::new_v4();
-        let method = if plan.ordered_steps.len() > 1 {
-            "wallet_sendCalls"
-        } else {
-            "eth_sendTransaction"
-        };
         let mut simulation = simulation.clone();
         // A dapp's plan is never sendable by identifier: this simulation was
         // performed by the session for the session, and was never recorded in
@@ -936,7 +932,7 @@ impl DappSurface for HeadlessSurface {
         let proposal = ProposedTransaction {
             session_id: self.session_id,
             proposal_id,
-            method: method.to_owned(),
+            method: terminal_safe_line(method),
             chain_id: plan.chain_id.as_str().to_owned(),
             dapp: DappSummary::of(dapp),
             execution_plan: plan.clone(),

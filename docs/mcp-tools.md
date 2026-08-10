@@ -31,7 +31,7 @@
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. One of the two tools available before acceptance. |
 | `wallet_check_for_updates` | Whether a newer release than the running one has been published, and the command that installs it. Touches no wallet, key, or policy, and is the other tool available before acceptance — being told the build is stale should not require accepting anything. Installs nothing: the wallet has no tool that does, because replacing the binary would replace the approval surface that would have confirmed it. The command is the user's to run, or the agent's if the user asks; the running server keeps its version until it is restarted. |
 | `wallet_walletconnect_connect` | Pair with a dapp's own web interface from a `wc:` link and settle a session, **with no connection review and nobody asked**. The only tool in this server that grants a counterparty standing access without a human decision; see [walletconnect](walletconnect.md#sessions-an-agent-opens). Binds one account and one set of chains, narrowable with `chain_ids`, and returns the dapp's claimed identity plus every caution the review would have drawn. |
-| `wallet_walletconnect_next_request` | Block until a dapp on this session proposes a transaction, and read the exact plan plus the same `SimulationResult` a plan of your own returns, before anything is put to the policy. |
+| `wallet_walletconnect_next_request` | Block until a dapp on this session proposes a *transaction*, and read the exact plan plus the same `SimulationResult` a plan of your own returns, before anything is put to the policy. Signature requests never appear here — they go straight to the user. |
 | `wallet_walletconnect_decide` | Approve or refuse the proposal you just read. Approving releases it into the policy, which decides as it always does; refusing ends it and tells the dapp. Deciding nothing refuses it. |
 | `wallet_walletconnect_sessions` | What each open session is with, exposes, and has done, plus any proposal awaiting your decision and the request IDs waiting for `ekubo-wallet review`. Live sessions only — one that ended is dropped rather than listed as finished. Reads only. |
 | `wallet_walletconnect_disconnect` | End a session, telling the dapp. Rejects anything still waiting rather than leaving it approvable. |
@@ -170,6 +170,15 @@ still queues for `ekubo-wallet review`. Every other way out refuses: silence
 until the budget runs out, a closed session, an error. Refuse with a `reason`
 and the dapp shows it to its user.
 
+**Signatures are not yours to decide.** `personal_sign` and
+`eth_signTypedData` never reach `next_request`, and that is not an omission:
+the gate above exists to close an asymmetry that only transactions had — a path
+to being signed that reached no reader. A signature never had one. No policy
+has ever authorized one, so every dapp signature request goes straight to the
+user and appears under `awaiting_review`. After a site asks you to sign in or
+sign a permit, watch `wallet_walletconnect_sessions`, not `next_request`, or
+you will wait out your timeout for something that was never coming.
+
 What the policy is still matters, because it decides what signs without the
 user after you approve. Read it with `wallet_get_policy` before connecting, and
 prefer a policy that covers the specific thing the user wants done over one
@@ -177,7 +186,8 @@ that covers a shape of transaction.
 
 ### Requests that need the user
 
-A transaction you approved that the policy does not cover appears in
+Two things reach the user: a transaction you approved that the policy does not
+cover, and every signature request. Both appear in
 `wallet_walletconnect_sessions` under `awaiting_review`, with the
 `ekubo-wallet review <request-id>` the user has to run. Two rules about those
 ids:

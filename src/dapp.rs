@@ -132,6 +132,7 @@ pub trait DappSurface {
     /// queued.
     async fn approve_plan(
         &self,
+        method: &str,
         plan: &ExecutionPlan,
         simulation: &SimulationResult,
         dapp: &AppMetadata,
@@ -571,10 +572,7 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
         )?;
         self.surface
             .log(&describe_dapp_request(request.dapp, &proposed));
-        match self
-            .execute_plan(request.chain_id, &plan, request.dapp)
-            .await?
-        {
+        match self.execute_plan(request.chain_id, &plan, request).await? {
             Ok(record) => Ok(RequestOutcome::Result(json!(
                 record
                     .broadcast_transaction_hash
@@ -676,10 +674,7 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
             DappIdentity::of(request.dapp).headline(),
             batch.calls.len()
         )));
-        match self
-            .execute_plan(batch.chain_id, &plan, request.dapp)
-            .await?
-        {
+        match self.execute_plan(batch.chain_id, &plan, request).await? {
             Ok(record) => {
                 self.submitted_batches
                     .borrow_mut()
@@ -840,7 +835,7 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
         &self,
         chain_id: u64,
         plan: &ExecutionPlan,
-        dapp: &AppMetadata,
+        request: &DappRequest<'_>,
     ) -> Result<std::result::Result<PendingTransaction, RequestOutcome>> {
         let network = self.config.network_by_chain_id(&chain_id.to_string())?;
 
@@ -868,13 +863,21 @@ impl<'a, S: DappSurface> DappSession<'a, S> {
         // anything the policy does not cover; under the MCP server it is the
         // agent, given the same simulation it reads before sending a plan of
         // its own. Either way this only ever stops a plan.
-        if let PlanVerdict::Refuse(reason) =
-            self.surface.approve_plan(plan, &simulation, dapp).await?
+        // The method the dapp actually called travels with the plan rather
+        // than being inferred from its shape. A one-call `wallet_sendCalls`
+        // batch and an `eth_sendTransaction` produce the same single-step
+        // plan, and the field exists for the agent to reconcile the proposal
+        // against what it just asked the page to do — a guess there is a lie
+        // in the one payload whose whole job is being accurate.
+        if let PlanVerdict::Refuse(reason) = self
+            .surface
+            .approve_plan(&request.method, plan, &simulation, request.dapp)
+            .await?
         {
             return Ok(Err(RequestOutcome::rejected(reason)));
         }
 
-        let plan_source = describe_plan_source(dapp);
+        let plan_source = describe_plan_source(request.dapp);
         let pending = Mutex::new(PendingStore::production(&self.data_dir)?);
         let disposition = crate::orchestrator::execute_automatic(
             self.config,
