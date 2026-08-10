@@ -518,6 +518,34 @@ impl PolicyStore {
             current == expected_revision,
             "policy revision conflict: expected {expected_revision:?}, found {current:?}"
         );
+        // Installing where there was no policy clears whatever else the name
+        // still holds.
+        //
+        // `purge` runs at wallet creation, but only after a *successful*
+        // custody create; and the repair route -- `ekubo-wallet policy
+        // require-approval <id>`, the command the error message points a
+        // half-provisioned wallet at -- reaches here through `put` without it.
+        // So a removal whose purge failed, or a creation interrupted between
+        // the credential and the policy, left the queues and any proposal in
+        // place under a name that a different key now answers to. A wallet
+        // with no policy cannot sign anything, so it has no queue of its own
+        // to lose: everything here belongs to whatever held the name before.
+        //
+        // In the same transaction as the policy write, so the name is either
+        // clear or unchanged.
+        if current.is_none() {
+            for table in [
+                "policy_proposals",
+                "pending_transactions",
+                "pending_typed_data",
+                "pending_messages",
+            ] {
+                transaction.execute(
+                    &format!("DELETE FROM {table} WHERE wallet_id = ?1"),
+                    params![wallet_id],
+                )?;
+            }
+        }
         let revision = current.map_or(1, |value| value + 1);
         transaction.execute(
             "INSERT INTO wallet_policies(wallet_id, policy_json, revision, updated_at)
