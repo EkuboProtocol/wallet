@@ -550,8 +550,46 @@ fn hex_payload_rows(message_hex: &str) -> Vec<String> {
         .collect()
 }
 
+/// One line rewritten with every non-ASCII character as its code point, or
+/// `None` when the line is pure ASCII and so has only one possible reading.
+///
+/// `escape_payload_line` shows the characters that are invisible or that
+/// reorder what follows them. It cannot show the ones whose whole trick is
+/// that they look exactly like something else: Cyrillic `а` renders as Latin
+/// `a`, Greek `ο` as `o`, and a payload naming `USDС` with a Cyrillic Es is a
+/// different string than one naming `USDC`, signed by a digest that knows the
+/// difference even though the terminal does not.
+///
+/// A confusable list is the wrong answer to that — it is a denylist, it has to
+/// be maintained, and the character it does not know about is the one an
+/// attacker picks. What the reviewer needs is not a warning about particular
+/// characters but the exact ones, so this states them: any non-ASCII at all
+/// gets written out. The rendered line stays as it was, since a reviewer who
+/// reads Japanese should still be shown Japanese; the escape sits under it as
+/// the thing that decides.
+fn code_point_line(line: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    if line.is_ascii() {
+        return None;
+    }
+    let mut exact = String::with_capacity(line.len());
+    for character in line.chars() {
+        if character.is_ascii() {
+            exact.push(character);
+        } else {
+            let _ = write!(exact, "\\u{{{:04x}}}", character as u32);
+        }
+    }
+    Some(exact)
+}
+
 /// The complete EIP-712 payload, pretty-printed, for the scrollable review
 /// document.
+///
+/// The digest commits to the exact code points, so the review has to show them
+/// wherever the rendering alone would not. Every line that is not pure ASCII
+/// carries its exact form underneath; a payload that is all ASCII — nearly all
+/// of them — reads exactly as it did.
 #[must_use]
 pub fn typed_data_payload_lines(typed_data: &serde_json::Value) -> Vec<crate::fullscreen::Line> {
     use crate::fullscreen::Span;
@@ -562,11 +600,26 @@ pub fn typed_data_payload_lines(typed_data: &serde_json::Value) -> Vec<crate::fu
         Vec::new(),
         vec![Span::toned("Complete EIP-712 payload", Tone::Emphasis)],
     ];
-    lines.extend(
-        pretty
-            .split('\n')
-            .map(|line| vec![Span::plain(escape_payload_line(line))]),
-    );
+    let mut annotated = false;
+    for line in pretty.split('\n') {
+        lines.push(vec![Span::plain(escape_payload_line(line))]);
+        if let Some(exact) = code_point_line(line) {
+            annotated = true;
+            lines.push(vec![Span::toned(
+                format!("  exactly: {exact}"),
+                Tone::Warning,
+            )]);
+        }
+    }
+    if annotated {
+        lines.push(Vec::new());
+        lines.push(vec![Span::toned(
+            "This payload contains characters outside ASCII. Each such line is followed by its \
+             exact code points, because two different strings can render identically and the \
+             signature commits to the one written here, not to what it looks like.",
+            Tone::Warning,
+        )]);
+    }
     lines
 }
 
