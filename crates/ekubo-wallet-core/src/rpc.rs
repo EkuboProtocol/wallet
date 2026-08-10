@@ -698,7 +698,31 @@ pub struct ReceiptLog {
     pub data: Vec<u8>,
 }
 
+/// How much of a receipt is carried onward for display.
+///
+/// The endpoint chooses how many logs a receipt has and how much data each
+/// carries, and every one of them was copied -- `topics.to_vec()`,
+/// `data.to_vec()` -- and then rendered by the transaction browser and
+/// reported through `wallet_getCallsStatus`. Nothing bounded any of it. A
+/// receipt is read after the transaction has already mined, so this is a
+/// display cost rather than a decision one, which is why it is bounded rather
+/// than refused.
+///
+/// Well above a real receipt: a busy `DeFi` transaction emits tens of logs, and
+/// a topic list is capped at four by the EVM itself -- the topic bound here is
+/// belt and braces against a malformed answer rather than a real shape.
+const MAX_RECEIPT_LOGS: usize = 512;
+const MAX_RECEIPT_LOG_TOPICS: usize = 8;
+const MAX_RECEIPT_LOG_DATA_BYTES: usize = 4 * 1024;
+
 /// A mined receipt with the details the human transaction view renders.
+///
+/// Bounded by [`MAX_RECEIPT_LOGS`], [`MAX_RECEIPT_LOG_TOPICS`], and
+/// [`MAX_RECEIPT_LOG_DATA_BYTES`]: a receipt past those is shown as far as
+/// those limits and no further. There is deliberately no field saying so yet,
+/// because adding one changes every construction site and two of them sit in
+/// a module being refactored; the honest disclosure belongs here in the type's
+/// contract until that lands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiptDetails {
     pub succeeded: bool,
@@ -755,10 +779,22 @@ pub async fn transaction_receipt_details(
                     .inner
                     .logs()
                     .iter()
+                    .take(MAX_RECEIPT_LOGS)
                     .map(|log| ReceiptLog {
                         address: log.address(),
-                        topics: log.topics().to_vec(),
-                        data: log.data().data.to_vec(),
+                        topics: log
+                            .topics()
+                            .iter()
+                            .take(MAX_RECEIPT_LOG_TOPICS)
+                            .copied()
+                            .collect(),
+                        data: log
+                            .data()
+                            .data
+                            .iter()
+                            .take(MAX_RECEIPT_LOG_DATA_BYTES)
+                            .copied()
+                            .collect(),
                     })
                     .collect(),
             })
