@@ -8,6 +8,64 @@
 use super::*;
 
 #[test]
+fn a_closed_prompt_leaves_the_cursor_where_its_first_row_started() {
+    // The answered line is an ordinary `eprintln!` immediately after the
+    // prompt closes, so wherever the close leaves the cursor is where that
+    // line begins. `Terminal::clear` puts the cursor back where the last draw
+    // left the caret — mid-row — and without the explicit move afterwards the
+    // answered line was indented by the width of the prompt just erased.
+    let mut backend = ratatui::backend::TestBackend::new(40, 6);
+    backend
+        .set_cursor_position(Position { x: 0, y: 2 })
+        .unwrap();
+    let mut terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(2),
+        },
+    )
+    .unwrap();
+
+    let caret = 27;
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            frame.render_widget(Paragraph::new("◆ Replace the policy? (y/N)"), area);
+            frame.set_cursor_position(Position {
+                x: caret,
+                y: area.y,
+            });
+        })
+        .unwrap();
+
+    let origin = terminal.get_frame().area().as_position();
+    assert_eq!(
+        terminal.backend().cursor_position(),
+        Position {
+            x: caret,
+            y: origin.y
+        },
+        "the draw is only a fair test of the close if it leaves the caret mid-row"
+    );
+
+    release(&mut terminal).unwrap();
+
+    assert_eq!(
+        terminal.backend().cursor_position(),
+        origin,
+        "the answered line would start indented by the erased prompt's width"
+    );
+    terminal.backend().assert_buffer_lines([
+        "                                        ",
+        "                                        ",
+        "                                        ",
+        "                                        ",
+        "                                        ",
+        "                                        ",
+    ]);
+}
+
+#[test]
 fn the_caret_sits_under_the_character_being_typed() {
     // The prompt draws marker + message + one space, then places the caret
     // at that width plus what has been typed. The bug this pins was a

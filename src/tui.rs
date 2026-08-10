@@ -25,7 +25,7 @@ use crossterm::style::Stylize;
 use crossterm::terminal as raw;
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::Position,
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -237,10 +237,33 @@ impl Inline {
     }
 
     fn close(mut self) -> Result<()> {
-        self.terminal.clear()?;
-        self.terminal.show_cursor()?;
+        release(&mut self.terminal)?;
         Ok(())
     }
+}
+
+/// Erase the prompt's rows and leave the cursor at the top left of where they
+/// were, so the answered line printed next starts at the start of a line.
+///
+/// The cursor move is not redundant with the clear. `Terminal::clear` reads
+/// the cursor, clears from the viewport origin, and then puts the cursor back
+/// where it found it — and where it found it is wherever the last `draw` left
+/// the caret: past the end of the question in `confirm` and `pick`, and past
+/// the last typed character in a text prompt. Printing from there indented
+/// every answered line by the width of the prompt that had just been erased —
+/// far enough on the masked private-key prompt to wrap — and in `pick` left it
+/// rows below the blank space instead of in it. Earlier ratatui left the
+/// cursor at the origin after a clear, which is the behavior this restores and
+/// [`Inline`]'s "leaves one answered line in the scrollback" contract assumes.
+fn release<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+    // Read after the last draw rather than remembered from `open`: a resize
+    // mid-prompt moves the inline viewport, and the stale row would put the
+    // answered line somewhere the prompt no longer was.
+    let origin = terminal.get_frame().area().as_position();
+    terminal.clear()?;
+    terminal.set_cursor_position(origin)?;
+    terminal.show_cursor()?;
+    Ok(())
 }
 
 impl Drop for Inline {
