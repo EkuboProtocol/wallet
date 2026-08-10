@@ -318,7 +318,10 @@ fn ambiguous_broadcast_can_only_reclaim_the_same_signed_bytes() {
         .unwrap();
     let reclaimed = store.claim_broadcast_retry(signed.request_id).unwrap();
     assert_eq!(reclaimed.status, PendingStatus::Submitting);
-    assert_eq!(reclaimed.serialized_transaction.as_deref(), Some("0x0102"));
+    assert_eq!(
+        reclaimed.serialized_transaction.as_deref(),
+        Some(ORIGINAL_BYTES)
+    );
     assert_eq!(reclaimed.signed_transaction_hash.as_deref(), Some(hash));
     assert!(store.claim_broadcast_retry(signed.request_id).is_err());
 }
@@ -413,10 +416,21 @@ fn hash_of(serialized: &str) -> String {
     format!("{:#x}", alloy::primitives::keccak256(bytes))
 }
 
-const ORIGINAL_BYTES: &str = "0x0102";
-const CANCEL_BYTES_ONE: &str = "0x0304";
-const CANCEL_BYTES_TWO: &str = "0x0506";
-const CANCEL_BYTES_THREE: &str = "0x0708";
+// Real signed EIP-1559 envelopes, differing only in nonce. They used to be
+// `0x0102`, `0x0304`, and so on: bytes paired with their own keccak, which
+// satisfied every check the row parser made and could not occur in production,
+// where the bytes are always something this wallet signed. `PendingRow::parse`
+// now decodes what it reads -- a hash agrees with whatever it was taken over,
+// so hashing correctly says the two columns agree about the bytes and nothing
+// about the bytes being a transaction -- and these fixtures had to become
+// transactions for the tests to keep meaning what they said.
+//
+// Generated once with the same construction `sign_prepared` uses, from the key
+// `0x1111…11`, chain 1, nonces 0 to 3.
+const ORIGINAL_BYTES: &str = "0x02f86a0180843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a0179e0e4ffd0fe7f5c13b483a7d47be35f1d7d20919724a2ff4c44fd93804dc90a07d7160f72aa22229680c207433e9615a12e805e301d368a3e8a61f725a61324c";
+const CANCEL_BYTES_ONE: &str = "0x02f86a0101843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a078a611bc68dbf7d8b8c7934fe99d0159e6d5eb63ae5eb0aca5c49bfc894f38bca06e6f49aa2a067ce8c35ccaecbc1c235311e3fbabb8cc0f30bc02c0b249319a0a";
+const CANCEL_BYTES_TWO: &str = "0x02f86a0102843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a0032c9b0e183e38094d411c6b7b8d4acf2ff361f5ce4733fe9f70de38ce67c295a01fb5907a94320e39860297ea2d20160534f10950a96cd88db6f1c3693c5f73eb";
+const CANCEL_BYTES_THREE: &str = "0x02f86a0103843b9aca00843b9aca008252089422222222222222222222222222222222222222228080c080a05e9bc29265b16802653fd6e68488b7af3d69bd77649f67d6027d9e7ad5405486a07157d705413b14993118ada56d0a17e25756247798ba911b0444b0412e4bc7e1";
 
 fn broadcast_original(store: &mut PendingStore) -> Uuid {
     let signed = store
@@ -508,7 +522,7 @@ fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
         .unwrap();
     assert_eq!(
         repriced.cancel_serialized_transaction.as_deref(),
-        Some("0x0506")
+        Some(CANCEL_BYTES_TWO)
     );
     assert_eq!(
         repriced.cancel_transaction_hashes,
@@ -1265,5 +1279,65 @@ fn only_a_missing_row_invites_the_next_queue_to_be_searched() {
     assert!(
         !is_unknown_request(&unreadable),
         "a row this queue holds but cannot read must not read as absent: {unreadable:#}"
+    );
+}
+
+/// A row whose bytes hash correctly but are not a transaction wedges its
+/// wallet and chain for good.
+///
+/// The hash check says the two columns agree about the bytes. It says nothing
+/// about the bytes being an envelope, because a hash agrees with whatever it
+/// was taken over. Every reader that does anything with one decodes it --
+/// `signed_transaction_nonce` is how reconciliation recovers the nonce -- and
+/// that decode failing is the one error `reconcile_all` swallows so a listing
+/// still renders. The row then holds the single in-flight slot its wallet and
+/// chain are allowed, reconciliation cannot settle it, and `execute_automatic`
+/// reconciles the in-flight row before signing, so nothing further can be
+/// signed there either. Only editing the database frees it.
+#[test]
+fn a_row_whose_envelope_does_not_decode_is_refused_on_read() {
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+
+    // Exactly what a restored or hand-edited database can hold: bytes that are
+    // not an envelope, and the hash they really do have.
+    let corrupt = "0x0102";
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET serialized_transaction = ?2, signed_transaction_hash = ?3
+             WHERE request_id = ?1",
+            rusqlite::params![
+                signed.request_id,
+                hex::decode("0102").unwrap(),
+                hex::decode(hash_of(corrupt).trim_start_matches("0x")).unwrap()
+            ],
+        )
+        .unwrap();
+
+    let error = format!(
+        "{:#}",
+        store
+            .get(signed.request_id)
+            .expect_err("bytes that are not a transaction are not a signed row")
+    );
+    assert!(error.contains("not a decodable envelope"), "{error}");
+    // And it names the request, which is what turns a silent wedge into
+    // something an owner can act on.
+    assert!(
+        store.get(signed.request_id).is_err(),
+        "the read fails every time rather than intermittently"
     );
 }
