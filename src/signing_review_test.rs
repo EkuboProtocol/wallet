@@ -195,3 +195,96 @@ mod confusable_disclosure_tests {
         );
     }
 }
+
+mod settled_account_tests {
+    //! A session's account is a specific key, not a name that key answers to.
+
+    use super::super::SigningAccount;
+    use crate::config::{WalletMetadata, WalletSource};
+    use alloy::primitives::Address;
+
+    fn wallet(byte: u8) -> WalletMetadata {
+        WalletMetadata {
+            id: "primary".into(),
+            address: Address::repeat_byte(byte),
+            created_at: chrono::Utc::now(),
+            source: WalletSource::Created,
+            exported_at: None,
+        }
+    }
+
+    /// The defect, stated as the two values it is about. A `WalletConnect`
+    /// session settles on an account, tells the dapp that address, and
+    /// measures every request against it -- but it stores the request under a
+    /// wallet id and then waits for a person. `account remove` followed by
+    /// `account create` under the same name during that wait gives the id a
+    /// different key. The session's checks then measure the old address and
+    /// the signature comes from the new one, so a payload naming the old
+    /// address as its RPC signer passes scope while carrying a permit whose
+    /// owner is the account that actually signs it.
+    #[test]
+    fn a_session_refuses_a_wallet_id_that_now_names_another_account() {
+        let settled = wallet(0x11);
+        let replacement = wallet(0x22);
+        assert_eq!(settled.id, replacement.id, "the id is what is reusable");
+
+        let error = format!(
+            "{:#}",
+            SigningAccount::Settled(&settled)
+                .check(&replacement)
+                .expect_err("the name is the same; the account is not")
+        );
+        assert!(error.contains("no longer configured"), "{error}");
+        assert!(
+            error.contains(&settled.address.to_checksum(None)),
+            "the refusal names the account the dapp was told about: {error}"
+        );
+        assert!(
+            error.contains("reconnect"),
+            "and says what to do about it: {error}"
+        );
+
+        SigningAccount::Settled(&settled)
+            .check(&settled)
+            .expect("the account it settled on still signs");
+    }
+
+    /// The CLI review has nothing but the request, so the id is the whole
+    /// context and following it is correct there. The orchestrator re-reads
+    /// the configuration at signing time, which is what covers the window
+    /// between this review and that signature.
+    #[test]
+    fn a_cli_review_follows_the_recorded_wallet_id() {
+        SigningAccount::AsRecorded
+            .check(&wallet(0x22))
+            .expect("the CLI signs for whatever the id names");
+    }
+
+    /// The check decides nothing if it is not reached. Both reviewers load the
+    /// wallet by id and must consult the account immediately, before any
+    /// payload is interpreted against that address and before anything is
+    /// drawn for a person to approve.
+    #[test]
+    fn both_reviewers_check_the_account_as_soon_as_they_resolve_it() {
+        let source = include_str!("signing_review.rs");
+        assert_eq!(
+            source.matches("account.check(&wallet)?;").count(),
+            2,
+            "each reviewer consults the account it was given"
+        );
+        for reviewer in ["decide_message", "decide_typed_data"] {
+            let body = source
+                .split_once(&format!("pub async fn {reviewer}("))
+                .expect("the reviewer is declared")
+                .1;
+            let resolved = body
+                .find("config.wallet(&request.wallet_id)?")
+                .expect("it resolves the wallet by id");
+            let checked = body.find("account.check(&wallet)?").expect("it checks");
+            assert!(
+                checked > resolved && checked - resolved < 80,
+                "{reviewer} must check the account where it resolves it, not later"
+            );
+        }
+    }
+}

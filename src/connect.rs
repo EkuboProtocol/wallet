@@ -38,7 +38,9 @@ use crate::{
     pending::{PendingStatus, PendingStore, PendingTransaction},
     policy_store::PolicyStore,
     sanitize::terminal_safe_line,
-    signing_review::{MessageDecision, TypedDataDecision, decide_message, decide_typed_data},
+    signing_review::{
+        MessageDecision, SigningAccount, TypedDataDecision, decide_message, decide_typed_data,
+    },
     simulation::simulate_execution,
     token_store::TokenStore,
     typed_data::{TypedDataStore, parse_typed_data},
@@ -807,7 +809,16 @@ impl DappSession<'_> {
         let policies = PolicyStore::production(&self.data_dir)?;
         // Every message is reviewed by a person, so this one always draws.
         self.suspend_idle().await;
-        match decide_message(self.config, &policies, store, record, false).await? {
+        match decide_message(
+            self.config,
+            &policies,
+            store,
+            record,
+            &SigningAccount::Settled(self.wallet()),
+            false,
+        )
+        .await?
+        {
             MessageDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this message.",
             )),
@@ -851,7 +862,16 @@ impl DappSession<'_> {
         // Every typed-data payload is reviewed by a person, so this one always
         // draws.
         self.suspend_idle().await;
-        match decide_typed_data(self.config, &policies, store, record, false).await? {
+        match decide_typed_data(
+            self.config,
+            &policies,
+            store,
+            record,
+            &SigningAccount::Settled(self.wallet()),
+            false,
+        )
+        .await?
+        {
             TypedDataDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this payload.",
             )),

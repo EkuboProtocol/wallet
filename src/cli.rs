@@ -2936,8 +2936,15 @@ async fn approve_typed_data(
     no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    match crate::signing_review::decide_typed_data(config, policies, store, request, no_confirm)
-        .await?
+    match crate::signing_review::decide_typed_data(
+        config,
+        policies,
+        store,
+        request,
+        &crate::signing_review::SigningAccount::AsRecorded,
+        no_confirm,
+    )
+    .await?
     {
         crate::signing_review::TypedDataDecision::Rejected(rejected) => emit_rejected(
             mode,
@@ -2979,8 +2986,15 @@ async fn approve_message(
     no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    match crate::signing_review::decide_message(config, policies, store, request, no_confirm)
-        .await?
+    match crate::signing_review::decide_message(
+        config,
+        policies,
+        store,
+        request,
+        &crate::signing_review::SigningAccount::AsRecorded,
+        no_confirm,
+    )
+    .await?
     {
         crate::signing_review::MessageDecision::Rejected(rejected) => emit_rejected(
             mode,

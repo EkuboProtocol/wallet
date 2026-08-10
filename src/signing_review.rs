@@ -70,11 +70,62 @@ pub enum TypedDataDecision {
 /// `no_confirm` skips only the interactive review. Owner authentication still
 /// follows, and the transcript is still printed, so the reviewer sees the
 /// subject even on the path that answers the question for them.
+/// Which account a queued signature has to be for.
+///
+/// A request row keeps `wallet_id`, and a wallet id is reusable: `account
+/// remove` then `account create` under the same name gives it a different key
+/// and a different address. Reloading the wallet by id at review time
+/// therefore answers "whichever account holds that name now", which is the
+/// right answer in one caller and the wrong one in the other.
+///
+/// The CLI review has nothing but the request, so the id is the whole context
+/// and [`Self::AsRecorded`] is correct — the orchestrator still re-reads the
+/// configuration at signing time, so the wallet cannot change between review
+/// and signature.
+///
+/// A `WalletConnect` session has more: it settled on a specific account during
+/// the connection review, told the dapp that address, and measures every
+/// request against it. But it stored a request under an id and then waited for
+/// a person, and those two bindings can come apart while it waits. The
+/// session's own `refuse_replaced_account` catches that at dispatch and does
+/// not run again, so the account could be replaced during the review — leaving
+/// the session's checks measuring the old address and the signature produced
+/// by the new key. A payload naming the old address as its RPC signer would
+/// pass the session's scope while carrying a permit whose owner is the new
+/// account, which is the key that would sign it. [`Self::Settled`] is the
+/// session saying which account it meant, so the review can refuse rather than
+/// follow the name.
+pub enum SigningAccount<'a> {
+    /// Whatever `wallet_id` names now.
+    AsRecorded,
+    /// The account a live session settled on and advertised.
+    Settled(&'a crate::config::WalletMetadata),
+}
+
+impl SigningAccount<'_> {
+    /// Refuse a wallet that is no longer the account this decision is for.
+    fn check(&self, wallet: &crate::config::WalletMetadata) -> Result<()> {
+        let Self::Settled(settled) = self else {
+            return Ok(());
+        };
+        ensure!(
+            wallet == *settled,
+            "the account this session connected with ({}) is no longer configured under {}, so \
+             this request would be signed by a different key than the one the session \
+             advertised. Disconnect and reconnect to use the account that is.",
+            settled.address.to_checksum(None),
+            settled.id
+        );
+        Ok(())
+    }
+}
+
 pub async fn decide_message(
     config: &ConfigStore,
     policies: &PolicyStore,
     mut store: MessageStore,
     request: PendingMessage,
+    account: &SigningAccount<'_>,
     no_confirm: bool,
 ) -> Result<MessageDecision> {
     ensure!(
@@ -82,6 +133,7 @@ pub async fn decide_message(
         "message request is not awaiting approval"
     );
     let wallet = config.wallet(&request.wallet_id)?;
+    account.check(&wallet)?;
     if let Some(chain_id) = &request.chain_id {
         config.network_by_chain_id(chain_id)?;
     }
@@ -244,6 +296,7 @@ pub async fn decide_typed_data(
     policies: &PolicyStore,
     mut store: TypedDataStore,
     request: PendingTypedData,
+    account: &SigningAccount<'_>,
     no_confirm: bool,
 ) -> Result<TypedDataDecision> {
     ensure!(
@@ -251,6 +304,7 @@ pub async fn decide_typed_data(
         "typed-data request is not awaiting approval"
     );
     let wallet = config.wallet(&request.wallet_id)?;
+    account.check(&wallet)?;
     config.network_by_chain_id(&request.chain_id)?;
     let (typed, chain_id, digest) = parse_typed_data(&request.typed_data)?;
     ensure!(
