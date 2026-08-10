@@ -22,6 +22,27 @@ use uuid::Uuid;
 
 const MAX_AWAITING_APPROVALS_PER_WALLET: i64 = 64;
 
+/// Terminal lifecycle rows kept per wallet.
+///
+/// `MAX_AWAITING_APPROVALS_PER_WALLET` bounds the queue and the partial unique
+/// index bounds what is in flight, but nothing bounded what those rows become.
+/// Every automatic signature writes a durable row before it broadcasts, so a
+/// caller making repeated *valid* requests grows the shared `SQLCipher` database
+/// and its indexes without limit — and when writes finally fail they fail for
+/// every wallet in the store, taking signing, reconciliation, policy changes
+/// and recovery with them.
+///
+/// Generous, because this is history a person may want to read and the cost of
+/// keeping it is small next to the cost of losing a record someone needed.
+const MAX_TERMINAL_HISTORY_PER_WALLET: i64 = 1_000;
+
+/// The statuses a row never leaves, as the column spells them.
+///
+/// Kept beside [`PendingStatus::is_terminal`], which decides the same question
+/// for a parsed value; `terminal_statuses_match_the_enum` holds the two to each
+/// other so a new state cannot be added to one and forgotten in the other.
+const TERMINAL_STATUSES: [&str; 5] = ["rejected", "confirmed", "reverted", "cancelled", "replaced"];
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingStatus {
@@ -60,6 +81,96 @@ impl PendingStatus {
             _ => anyhow::bail!("stored pending transaction has invalid status {value}"),
         }
     }
+
+    /// Whether this row is finished and will not move again.
+    ///
+    /// Exhaustive on purpose: a new lifecycle state has to be classified here,
+    /// where the answer decides whether history for it is ever reclaimed.
+    ///
+    /// Test-only because the pruning itself runs in SQL, against
+    /// [`TERMINAL_STATUSES`]. This is the second opinion the SQL list is held
+    /// to, and holding it there rather than in production code keeps the
+    /// production path a single statement.
+    #[cfg(test)]
+    const fn is_terminal(self) -> bool {
+        match self {
+            Self::Rejected
+            | Self::Confirmed
+            | Self::Reverted
+            | Self::Cancelled
+            | Self::Replaced => true,
+            Self::AwaitingApproval
+            | Self::Signed
+            | Self::Submitting
+            | Self::Broadcast
+            | Self::Cancelling => false,
+        }
+    }
+
+    #[cfg(test)]
+    const fn column(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => "awaiting_approval",
+            Self::Rejected => "rejected",
+            Self::Signed => "signed",
+            Self::Submitting => "submitting",
+            Self::Broadcast => "broadcast",
+            Self::Confirmed => "confirmed",
+            Self::Reverted => "reverted",
+            Self::Cancelled => "cancelled",
+            Self::Replaced => "replaced",
+            Self::Cancelling => "cancelling",
+        }
+    }
+
+    /// Every variant, so a test can walk them.
+    #[cfg(test)]
+    const ALL: [Self; 10] = [
+        Self::AwaitingApproval,
+        Self::Rejected,
+        Self::Signed,
+        Self::Submitting,
+        Self::Broadcast,
+        Self::Confirmed,
+        Self::Reverted,
+        Self::Cancelled,
+        Self::Replaced,
+        Self::Cancelling,
+    ];
+}
+
+/// Drop this wallet's oldest finished rows past the retention bound.
+///
+/// Only terminal rows, and only the oldest beyond the cap: anything still
+/// awaiting a decision, signed, in flight, or cancelling is live lifecycle
+/// state that reconciliation and submission still need, and deleting one would
+/// lose an envelope the chain may yet mine.
+///
+/// Runs inside the caller's transaction, on the insert paths, so history is
+/// reclaimed by the same activity that produces it rather than by a sweep
+/// somebody has to remember to run.
+fn prune_terminal_history(
+    transaction: &rusqlite::Transaction<'_>,
+    wallet_id: &str,
+) -> Result<usize> {
+    let placeholders = TERMINAL_STATUSES
+        .iter()
+        .map(|status| format!("'{status}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let removed = transaction.execute(
+        &format!(
+            "DELETE FROM pending_transactions
+             WHERE request_id IN (
+                 SELECT request_id FROM pending_transactions
+                 WHERE wallet_id = ?1 AND status IN ({placeholders})
+                 ORDER BY created_at DESC, request_id DESC
+                 LIMIT -1 OFFSET ?2
+             )"
+        ),
+        params![wallet_id, MAX_TERMINAL_HISTORY_PER_WALLET],
+    )?;
+    Ok(removed)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -195,6 +306,8 @@ impl PendingStore {
             "wallet already has {MAX_AWAITING_APPROVALS_PER_WALLET} requests awaiting approval"
         );
 
+        prune_terminal_history(&transaction, wallet_id)?;
+
         let request_id = Uuid::new_v4();
         let plan_json = serde_json::to_string(plan)?;
         transaction.execute(
@@ -254,6 +367,8 @@ impl PendingStore {
             active_revision == Some(policy_revision),
             "active policy revision changed before signed transaction persistence"
         );
+
+        prune_terminal_history(&transaction, wallet_id)?;
 
         let request_id = Uuid::new_v4();
         let created_at = sql::now();

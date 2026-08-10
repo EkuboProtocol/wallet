@@ -1127,3 +1127,86 @@ fn a_cancelled_row_from_wallet_removal_never_had_an_envelope() {
     assert_eq!(cancelled.status, PendingStatus::Cancelled);
     assert!(cancelled.serialized_transaction.is_none());
 }
+
+#[test]
+fn terminal_statuses_match_the_enum() {
+    // The pruning runs in SQL against `TERMINAL_STATUSES`, so that list is
+    // what actually decides which history is reclaimed. `is_terminal` decides
+    // the same question for a parsed value. Adding a lifecycle state to one
+    // and forgetting the other would either leak history forever or delete a
+    // row the lifecycle still needs, and neither shows up until it matters.
+    for status in PendingStatus::ALL {
+        assert_eq!(
+            TERMINAL_STATUSES.contains(&status.column()),
+            status.is_terminal(),
+            "{} is classified inconsistently",
+            status.column()
+        );
+    }
+}
+
+#[test]
+fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
+    // Nothing bounded what queued and in-flight rows *become*. Every automatic
+    // signature writes a durable row before it broadcasts, so repeated valid
+    // requests grow the shared database until writes fail -- for every wallet
+    // in the store, not just the noisy one.
+    let (_directory, mut store) = store();
+
+    // One row that must survive whatever else happens: still awaiting a
+    // decision, so it is live lifecycle state rather than history.
+    let live = store
+        .create("primary", "ethereum", &plan_with_value("7"), None, 1)
+        .unwrap();
+
+    // Terminal rows are written directly: driving 1_001 transactions through
+    // the real lifecycle would take far longer than the invariant is worth.
+    let connection = &store.database.connection;
+    for index in 0..(MAX_TERMINAL_HISTORY_PER_WALLET + 5) {
+        connection
+            .execute(
+                "INSERT INTO pending_transactions(
+                    request_id, wallet_id, network_name, chain_id, plan_json,
+                    plan_digest, policy_revision, status, created_at, updated_at,
+                    decided_at, approval_required
+                 ) VALUES (?1, 'primary', 'ethereum', 1, '{}', ?2, 1, 'confirmed', ?3, ?3, ?3, 1)",
+                params![
+                    uuid::Uuid::new_v4(),
+                    Blob(B256::repeat_byte(1)),
+                    Millis(sql::now() + chrono::Duration::milliseconds(index)),
+                ],
+            )
+            .unwrap();
+    }
+    let terminal: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pending_transactions WHERE status = 'confirmed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(terminal, MAX_TERMINAL_HISTORY_PER_WALLET + 5);
+
+    // The next insert reclaims the excess.
+    store
+        .create("primary", "ethereum", &plan_with_value("9"), None, 1)
+        .unwrap();
+    let terminal: i64 = store
+        .database
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM pending_transactions WHERE status = 'confirmed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        terminal, MAX_TERMINAL_HISTORY_PER_WALLET,
+        "the oldest finished rows past the bound are dropped"
+    );
+    assert_eq!(
+        store.get(live.request_id).unwrap().status,
+        PendingStatus::AwaitingApproval,
+        "a row the lifecycle still needs is never history"
+    );
+}
