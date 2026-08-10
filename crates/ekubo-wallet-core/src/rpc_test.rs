@@ -717,3 +717,88 @@ async fn median_fee_estimate_refuses_a_witness_serving_another_chain() {
         "a fee from another chain must not enter the median"
     );
 }
+
+/// A stub endpoint that answers `eth_getTransactionReceipt` with a receipt for
+/// whichever hash the caller chose, regardless of which one was asked about.
+/// That mismatch is the whole point: the receipt lookup used to take the
+/// endpoint's word that a response was an answer to the request.
+fn receipt_stub(chain_id: u64, receipt_for: B256) -> (Url, std::thread::JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stub endpoint");
+    let address = listener.local_addr().expect("stub endpoint address");
+    let handle = std::thread::spawn(move || {
+        use std::io::{Read as _, Write as _};
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut buffer = [0_u8; 4096];
+            let Ok(read) = stream.read(&mut buffer) else {
+                continue;
+            };
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let body = if request.contains("eth_chainId") {
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{chain_id:#x}\"}}")
+            } else {
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\
+                       \"transactionHash\":\"{receipt_for:#x}\",\
+                       \"transactionIndex\":\"0x0\",\
+                       \"blockHash\":\"0x{}\",\
+                       \"blockNumber\":\"0x64\",\
+                       \"from\":\"0x1111111111111111111111111111111111111111\",\
+                       \"to\":\"0x2222222222222222222222222222222222222222\",\
+                       \"cumulativeGasUsed\":\"0x5208\",\
+                       \"gasUsed\":\"0x5208\",\
+                       \"effectiveGasPrice\":\"0x1\",\
+                       \"logs\":[],\
+                       \"logsBloom\":\"0x{}\",\
+                       \"status\":\"0x1\",\
+                       \"type\":\"0x2\"\
+                     }}}}",
+                    "22".repeat(32),
+                    "00".repeat(256)
+                )
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (
+        format!("http://{address}/").parse().expect("stub URL"),
+        handle,
+    )
+}
+
+/// Every terminal settlement in the wallet runs through `transaction_receipt`,
+/// and none of the states it produces is ever reconciled again -- reaching one
+/// releases the wallet's in-flight slot for that chain. The request named a
+/// hash and the response was taken as the answer to it on the endpoint's word
+/// alone, so an endpoint returning an unrelated receipt could settle a
+/// still-live envelope as confirmed, and the real one would go on to mine with
+/// nothing watching it.
+#[tokio::test]
+async fn a_receipt_for_another_transaction_is_not_an_answer() {
+    let asked_about = B256::repeat_byte(0xaa);
+    let unrelated = B256::repeat_byte(0xbb);
+    let (endpoint, _handle) = receipt_stub(7, unrelated);
+    let network = network_with(7, vec![endpoint]);
+
+    let error = format!(
+        "{:#}",
+        transaction_receipt(&network, &format!("{asked_about:#x}"))
+            .await
+            .expect_err("a receipt for a different transaction settles nothing")
+    );
+    assert!(error.contains("rather than the requested"), "{error}");
+
+    // The honest case still works, so the check is not simply refusing.
+    let (honest, _handle) = receipt_stub(7, asked_about);
+    let network = network_with(7, vec![honest]);
+    let receipt = transaction_receipt(&network, &format!("{asked_about:#x}"))
+        .await
+        .unwrap()
+        .expect("the endpoint answered about the transaction that was asked about");
+    assert!(receipt.succeeded);
+    assert_eq!(receipt.block_number, 100);
+}

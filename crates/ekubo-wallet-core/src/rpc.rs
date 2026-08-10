@@ -655,6 +655,25 @@ pub async fn transaction_receipt(
         // rather than the whole lookup failing on its word.
         receipt
             .map(|receipt| {
+                // The receipt has to be the receipt for the hash that was
+                // asked about. Nothing else here establishes that: the request
+                // names a hash, and the response is taken as the answer to it
+                // on the endpoint's word alone.
+                //
+                // Every terminal settlement in the wallet runs through this
+                // one function. `observe` treats any receipt as `Mined`,
+                // `reconcile_cancelling` finalizes the original or marks the
+                // request cancelled from one, and none of those states is ever
+                // reconciled again — leaving them releases the wallet's
+                // in-flight slot for that chain. So an endpoint returning some
+                // unrelated transaction's receipt settles a still-live
+                // envelope as confirmed, reverted, or cancelled, and the real
+                // one goes on to mine with the wallet no longer watching it.
+                ensure!(
+                    receipt.transaction_hash == hash,
+                    "RPC returned a receipt for {:#x} rather than the requested {hash:#x}",
+                    receipt.transaction_hash
+                );
                 let block_number = receipt
                     .block_number
                     .context("RPC returned a receipt without a block number")?;
