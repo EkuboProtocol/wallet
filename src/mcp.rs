@@ -2229,6 +2229,8 @@ impl WalletMcpServer {
             .config
             .wallet(&input.wallet_id)
             .map_err(|error| tool_error(&error))?;
+        self.require_provisioned_wallet(&wallet.id)
+            .map_err(|error| tool_error(&error))?;
         let (typed, chain_id, digest) =
             parse_typed_data(&input.typed_data).map_err(|error| tool_error(&error))?;
         self.config
@@ -2305,6 +2307,8 @@ impl WalletMcpServer {
         let wallet = self
             .config
             .wallet(&input.wallet_id)
+            .map_err(|error| tool_error(&error))?;
+        self.require_provisioned_wallet(&wallet.id)
             .map_err(|error| tool_error(&error))?;
         let (message, encoding) =
             parse_message_input(input.message_text.as_deref(), input.message_hex.as_deref())
@@ -3237,6 +3241,37 @@ impl WalletMcpServer {
             .map_err(|_| anyhow::anyhow!("legal state lock was poisoned"))?
             .status()?;
         legal::require_status_allows_use(&status)
+    }
+
+    /// Refuse to enqueue anything for a wallet that has no policy.
+    ///
+    /// `new` walks the configured wallets once and refuses to start if any of
+    /// them lacks one, which covers the wallets that existed at startup and no
+    /// others. Wallets appear afterwards: `account create` and `account import`
+    /// write `config.json` before initializing the policy, and every request
+    /// here resolves its wallet from that file as it stands now. So a wallet
+    /// half-provisioned under a running server was a wallet the startup check
+    /// had never seen.
+    ///
+    /// The signature itself is refused by the kernel regardless — see
+    /// `orchestrator::require_provisioned_wallet`, which is where the invariant
+    /// actually lives. This is the earlier, kinder half: say no when the
+    /// request is made rather than after a person has read the payload and
+    /// authenticated to sign it.
+    fn require_provisioned_wallet(&self, wallet_id: &str) -> Result<()> {
+        let present = self
+            .policies
+            .lock()
+            .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
+            .get(wallet_id)?
+            .is_some();
+        anyhow::ensure!(
+            present,
+            "wallet {wallet_id} has no policy, so nothing it holds can be signed. Tell the user to \
+             run `ekubo-wallet policy require-approval {wallet_id}` in their own terminal, or to \
+             remove the wallet with `ekubo-wallet account remove {wallet_id}`."
+        );
+        Ok(())
     }
 
     /// The generated router with schemars' nonstandard integer `format`

@@ -36,6 +36,7 @@ use crate::{
         MessageStatus, MessageStore, PendingMessage, describe_message, message_digest, parse_siwe,
         siwe_warnings,
     },
+    policy_store::PolicyStore,
     typed_data::{
         PendingTypedData, PermitApproval, TypedDataStatus, TypedDataStore,
         interpret_permit_approvals, parse_typed_data,
@@ -222,6 +223,7 @@ pub async fn decide_message(
     Ok(MessageDecision::Signed(
         crate::orchestrator::sign_reviewed_message(
             config,
+            &PolicyStore::production(config.data_dir())?,
             &mut store,
             &request,
             &wallet,
@@ -380,6 +382,7 @@ pub async fn decide_typed_data(
     Ok(TypedDataDecision::Signed(
         crate::orchestrator::sign_reviewed_typed_data(
             config,
+            &PolicyStore::production(config.data_dir())?,
             &mut store,
             &request,
             &wallet,

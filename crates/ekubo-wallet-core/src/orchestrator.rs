@@ -35,7 +35,7 @@ use crate::{
     human_presence::{HumanPresence, PresenceRequest},
     message::{MessageStatus, MessageStore, PendingMessage},
     pending::{PendingStatus, PendingStore, PendingTransaction},
-    policy_store::StoredPolicy,
+    policy_store::{PolicyStore, StoredPolicy},
     simulation::{SimulationResult, simulate_execution},
     typed_data::{PendingTypedData, TypedDataStatus, TypedDataStore},
 };
@@ -749,6 +749,40 @@ async fn transaction_approval_request(
     Ok(request)
 }
 
+/// Refuse a wallet that has no policy, whatever it is being asked to sign.
+///
+/// "No policy" is the half-provisioned state: `account create` and
+/// `account import` write the wallet into `config.json` and only then
+/// initialize its policy, so a failure between the two leaves a wallet whose
+/// key exists and whose authority was never described. The CLI tells the owner
+/// that state fails closed — "it has no policy, so signing fails closed and the
+/// MCP server refuses to start until it has one" — and for transactions it
+/// does, because grading a plan needs a policy to grade it against.
+///
+/// Off-chain signing consulted no policy at all, by design: a policy cannot
+/// score what a permit authorizes, so a person reads every payload. But
+/// "consults no policy" quietly became "does not need one to exist", and the
+/// only enforcement of the invariant was a loop over the wallets present when
+/// the server started. A wallet half-provisioned afterwards was invisible to
+/// it, and a running server would queue and sign that wallet's EIP-712
+/// payloads — a permit, an order, a delegation — for a human who was told the
+/// wallet was inert.
+///
+/// So the check sits on the signature rather than on startup, and it is a
+/// separate question from what a policy *says*: this asks only whether the
+/// wallet was ever finished. A wallet is either provisioned or it is not, and
+/// nothing it holds may be signed until it is.
+fn require_provisioned_wallet(policies: &PolicyStore, wallet_id: &str) -> Result<()> {
+    ensure!(
+        policies.get(wallet_id)?.is_some(),
+        "wallet {wallet_id} has no policy, so nothing it holds can be signed. It was created or \
+         imported while policy initialization failed. Give it one with `ekubo-wallet policy \
+         require-approval {wallet_id}`, or remove it with `ekubo-wallet account remove \
+         {wallet_id}`."
+    );
+    Ok(())
+}
+
 /// Confirm owner presence and sign one reviewed EIP-191 message.
 ///
 /// The caller has already drawn the review and taken the reviewer's decision;
@@ -764,6 +798,7 @@ async fn transaction_approval_request(
 /// repeats the digest and status checks inside its own transaction.
 pub async fn sign_reviewed_message(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: &mut MessageStore,
     request: &PendingMessage,
     wallet: &WalletMetadata,
@@ -771,6 +806,8 @@ pub async fn sign_reviewed_message(
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
 ) -> Result<PendingMessage> {
+    require_provisioned_wallet(policies, &wallet.id)?;
+
     presence
         .confirm(&PresenceRequest::SignMessage {
             wallet: wallet.id.clone(),
@@ -812,6 +849,7 @@ pub async fn sign_reviewed_message(
 /// the same reasons; only the queue and the presence reason differ.
 pub async fn sign_reviewed_typed_data(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: &mut TypedDataStore,
     request: &PendingTypedData,
     wallet: &WalletMetadata,
@@ -819,6 +857,8 @@ pub async fn sign_reviewed_typed_data(
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
 ) -> Result<PendingTypedData> {
+    require_provisioned_wallet(policies, &wallet.id)?;
+
     presence
         .confirm(&PresenceRequest::SignTypedData {
             wallet: wallet.id.clone(),
@@ -861,3 +901,7 @@ mod calldata_display_tests;
 #[cfg(test)]
 #[path = "orchestrator_rejection_test.rs"]
 mod rejection_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_provisioning_test.rs"]
+mod provisioning_tests;
