@@ -823,3 +823,28 @@ fn authorizing_a_first_delegation_is_disclosed_without_blocking_the_batch() {
     let both = [finding, replaced];
     assert_eq!(policy_outcome(&both), PolicyOutcome::RequiresApproval);
 }
+
+#[test]
+fn an_unreadable_token_balance_stops_the_automatic_path() {
+    // Deliberately an error rather than a warning, unlike
+    // `delegation_authorized` above. The two are different questions: a first
+    // delegation is a thing the wallet knows it is doing and discloses, while
+    // this is the wallet saying it does not know how much of a limited token
+    // moved. Enforcing a spending limit against a number nobody has is not
+    // something an unattended signature should do.
+    let finding = PolicyFinding {
+        severity: FindingSeverity::Error,
+        code: TOKEN_BALANCE_UNVERIFIED_CODE.into(),
+        message: "balance of 0xaa.. could not be read".into(),
+        step: None,
+    };
+    assert!(!policy_allows(std::slice::from_ref(&finding)));
+    assert_eq!(
+        policy_outcome(std::slice::from_ref(&finding)),
+        PolicyOutcome::RequiresApproval,
+        "a human can still override it; the policy has no rule to edit that would help"
+    );
+    // Not a denial: `denial_reasons` names rules the owner could change, and
+    // there is no rule that makes an unreadable token readable.
+    assert!(denial_reasons(std::slice::from_ref(&finding)).is_empty());
+}

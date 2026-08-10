@@ -560,6 +560,20 @@ pub const CALL_NOT_ALLOWED_CODE: &str = "call_not_allowed";
 /// transfers were allowlisted.
 pub const DELEGATION_REPLACED_CODE: &str = "delegation_replaced";
 
+/// A token the policy sets a limit on did not answer `balanceOf`, so how much
+/// of it this plan moves could not be established.
+///
+/// An error, because the alternative is enforcing a spending limit against a
+/// number the wallet does not have. A token that reverts its probe and emits
+/// no standard `Transfer` log used to disappear from the review entirely — the
+/// change set came back empty and the document said "none detected" for a
+/// transaction that moved it. Silence is the one thing this must not be.
+///
+/// Scoped to tokens the *policy* speaks about, which is what makes failing
+/// closed proportionate: these are the ones an owner wrote a limit for, and an
+/// unreadable balance is exactly the case where that limit cannot be honoured.
+pub const TOKEN_BALANCE_UNVERIFIED_CODE: &str = "token_balance_unverified";
+
 /// This plan's EIP-7702 authorization would give the account a delegation it
 /// does not currently have.
 ///
