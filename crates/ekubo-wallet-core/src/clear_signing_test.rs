@@ -234,6 +234,56 @@ mod vendored_embedding_tests {
             );
         }
     }
+
+    /// A filename reaches the generated source twice — as the table's key and
+    /// as the staged path the `include_str!` names — and only the key was ever
+    /// written as a Rust string literal. The other was pasted into the middle
+    /// of one, so `weird".json` closed the literal and everything after it
+    /// became source the build script did not intend and nobody reviewed. Unix
+    /// permits the quote, and a committed tree entry is the threat this file
+    /// already defends against everywhere else.
+    ///
+    /// Pinned in the source because the checkout holds no such file and adding
+    /// one to exercise it would commit the attack. What is checkable is that
+    /// every value interpolated into the generated line is formatted with
+    /// `{:?}`, which escapes quotes, backslashes, and control characters.
+    #[test]
+    fn every_filename_in_the_generated_source_is_written_as_a_literal() {
+        let build = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+            .expect("build.rs is readable");
+        let generated: Vec<&str> = build
+            .lines()
+            .filter(|line| line.contains("include_str!(concat!"))
+            .collect();
+        assert!(!generated.is_empty(), "the build must still embed the tree");
+        for line in generated {
+            for placeholder in interpolations(line) {
+                assert!(
+                    placeholder.ends_with(":?"),
+                    "`{{{placeholder}}}` is pasted into the generated source unescaped; a \
+                     filename holding a quote would stop being a filename there: {line}"
+                );
+            }
+        }
+    }
+
+    /// The `{…}` placeholders of one format string, without their braces.
+    /// `{{` and `}}` are escaped braces rather than a placeholder.
+    fn interpolations(line: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut rest = line;
+        while let Some(open) = rest.find('{') {
+            rest = &rest[open + 1..];
+            if let Some(stripped) = rest.strip_prefix('{') {
+                rest = stripped;
+                continue;
+            }
+            let Some(close) = rest.find('}') else { break };
+            found.push(rest[..close].to_owned());
+            rest = &rest[close + 1..];
+        }
+        found
+    }
 }
 
 mod token_reference_bound_tests {

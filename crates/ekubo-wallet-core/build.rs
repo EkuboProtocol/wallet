@@ -65,9 +65,18 @@ fn main() {
         fs::create_dir_all(staged.parent().expect("a staged file has a parent"))
             .expect("create the staged clearsign directory");
         fs::write(&staged, &contents).expect("stage a vendored clearsign file");
+        // Both halves of this line are the same filename, so both are written
+        // as Rust string literals rather than one of them being pasted into
+        // the middle of one. A descriptor named `weird".json` — legal on unix,
+        // and the only thing standing between a committed tree entry and this
+        // build script is review — would otherwise close the `concat!`
+        // argument and continue as source. The table key was already escaped;
+        // the staged path beside it was not, which is the same value formatted
+        // two ways on one line.
+        let staged_suffix = format!("/clearsign/{relative}");
         let _ = writeln!(
             generated,
-            "    ({relative:?}, include_str!(concat!(env!(\"OUT_DIR\"), \"/clearsign/{relative}\"))),"
+            "    ({relative:?}, include_str!(concat!(env!(\"OUT_DIR\"), {staged_suffix:?}))),"
         );
     }
     generated.push_str("];\n");
