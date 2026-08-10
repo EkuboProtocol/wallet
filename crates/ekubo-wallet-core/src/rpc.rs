@@ -305,13 +305,21 @@ pub async fn median_fee_estimate(
     // Every configured endpoint votes, not the first `required` to answer.
     // See `median_head` below for why stopping early defeats the median.
     for endpoint in endpoint_order(network) {
-        match tokio::time::timeout(
-            FEE_ESTIMATE_TIMEOUT,
-            provider_for(endpoint).estimate_eip1559_fees(),
-        )
+        let provider = provider_for(endpoint);
+        // The chain is asked about in the same round trip as the estimate, for
+        // the reason spelled out in `median_head`: an endpoint serving some
+        // other chain is not a witness to this one's fees, and a vote it casts
+        // cannot be taken back once it is inside the median.
+        match tokio::time::timeout(FEE_ESTIMATE_TIMEOUT, async {
+            tokio::try_join!(provider.get_chain_id(), provider.estimate_eip1559_fees())
+        })
         .await
         {
-            Ok(Ok(estimate)) => {
+            Ok(Ok((chain_id, _))) if chain_id != network.chain_id => failures.push((
+                endpoint,
+                anyhow::anyhow!("RPC reports chain {chain_id}, not {}", network.chain_id),
+            )),
+            Ok(Ok((_, estimate))) => {
                 max_fees.push(estimate.max_fee_per_gas);
                 priority_fees.push(estimate.max_priority_fee_per_gas);
             }
@@ -363,12 +371,23 @@ pub async fn median_head(network: &NetworkConfig) -> Result<Option<u64>> {
     //
     // This is the same mistake `agree_across_endpoints` made, fixed the same
     // way and at the same cost: one request per configured endpoint.
+    //
+    // Each head is asked for together with the chain it belongs to. Nothing
+    // requires every configured endpoint to serve the configured chain —
+    // `validate_network` checks the shape of the list, not its identity — and
+    // an endpoint on some other chain reports that chain's height. Its vote
+    // enters the median here, and `simulate_execution_through`'s own chain
+    // check comes far too late to help: it disqualifies the endpoint from
+    // *simulating*, long after that endpoint's height became the pin every
+    // honest endpoint is held to. A vote cannot be taken back out of a median
+    // once it is in, so it has to be refused at the door.
     for endpoint in endpoint_order(network) {
-        if let Ok(Ok(number)) = tokio::time::timeout(
-            FEE_ESTIMATE_TIMEOUT,
-            provider_for(endpoint).get_block_number(),
-        )
+        let provider = provider_for(endpoint);
+        if let Ok(Ok((chain_id, number))) = tokio::time::timeout(FEE_ESTIMATE_TIMEOUT, async {
+            tokio::try_join!(provider.get_chain_id(), provider.get_block_number())
+        })
         .await
+            && chain_id == network.chain_id
         {
             heads.push(u128::from(number));
         }

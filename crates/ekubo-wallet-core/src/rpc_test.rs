@@ -416,14 +416,25 @@ async fn median_head_excludes_a_dead_endpoint_from_the_median() {
 }
 
 /// A blocking stub `eth_feeHistory` responder, built the same way as
-/// [`stub_endpoint`] and for the same reason. `median_fee_estimate` never
-/// checks `eth_chainId`, so this answers only the one method it calls.
+/// [`stub_endpoint`] and for the same reason. It answers `eth_chainId` too:
+/// `median_fee_estimate` now refuses a witness that is not on the configured
+/// chain, so a stub that stayed silent about its chain would be skipped.
 ///
 /// `base_fee_per_gas` is repeated so [`alloy::providers::Provider::estimate_eip1559_fees`]'s
 /// `latest_block_base_fee` (the second-to-last element) reads it back, and the
 /// single reward bucket is what alloy's default estimator takes as this
 /// endpoint's priority-fee vote.
 fn fee_history_stub(base_fee_per_gas: u128, reward: u128) -> (Url, std::thread::JoinHandle<()>) {
+    fee_history_stub_on_chain(7, base_fee_per_gas, reward)
+}
+
+/// The same stub, on a chain the caller picks, so a wrong-chain endpoint can
+/// be put in front of `median_fee_estimate` and `median_head`.
+fn fee_history_stub_on_chain(
+    chain_id: u64,
+    base_fee_per_gas: u128,
+    reward: u128,
+) -> (Url, std::thread::JoinHandle<()>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stub endpoint");
     let address = listener.local_addr().expect("stub endpoint address");
     let handle = std::thread::spawn(move || {
@@ -431,12 +442,17 @@ fn fee_history_stub(base_fee_per_gas: u128, reward: u128) -> (Url, std::thread::
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { return };
             let mut buffer = [0_u8; 4096];
-            let Ok(_read) = stream.read(&mut buffer) else {
+            let Ok(read) = stream.read(&mut buffer) else {
                 continue;
             };
-            let body = format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"baseFeePerGas\":[\"{base_fee_per_gas:#x}\",\"{base_fee_per_gas:#x}\"],\"gasUsedRatio\":[0.5],\"oldestBlock\":\"0x1\",\"reward\":[[\"{reward:#x}\"]]}}}}"
-            );
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let body = if request.contains("eth_chainId") {
+                format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{chain_id:#x}\"}}")
+            } else {
+                format!(
+                    "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"baseFeePerGas\":[\"{base_fee_per_gas:#x}\",\"{base_fee_per_gas:#x}\"],\"gasUsedRatio\":[0.5],\"oldestBlock\":\"0x1\",\"reward\":[[\"{reward:#x}\"]]}}}}"
+                )
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
@@ -649,5 +665,55 @@ async fn median_fee_estimate_samples_every_endpoint_not_the_first_to_answer() {
         median_fee_estimate(&network, 0, 0).await.unwrap(),
         (2100, 100),
         "one endpoint answering below the market must not choose the fee two others disagree with"
+    );
+}
+
+/// A vote cannot be taken back out of a median once it is in.
+///
+/// Nothing requires every configured endpoint to serve the configured chain --
+/// `validate_network` checks the shape of the RPC list, not its identity -- and
+/// an endpoint on another chain reports that chain's height. `median_head` took
+/// it. `simulate_execution_through` does check the chain, but far too late: by
+/// then the wrong-chain height is already the pin every honest endpoint is held
+/// to, and disqualifying that endpoint from simulating does not unmake the pin
+/// it chose.
+#[tokio::test]
+async fn median_head_refuses_a_witness_serving_another_chain() {
+    let (impostor, _a) = stub_endpoint(999, 100);
+    let (honest, _b) = stub_endpoint(7, 300);
+    let (also_honest, _c) = stub_endpoint(7, 300);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![impostor, honest, also_honest],
+    );
+    assert_eq!(
+        median_head(&network).await.unwrap(),
+        Some(300),
+        "a height from another chain must not enter the median"
+    );
+
+    // And it is not counted toward the quorum either: two endpoints, one of
+    // them on the wrong chain, is one witness.
+    let (impostor, _d) = stub_endpoint(999, 100);
+    let (lonely, _e) = stub_endpoint(7, 300);
+    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![impostor, lonely]);
+    let error = format!("{:#}", median_head(&network).await.unwrap_err());
+    assert!(error.contains("only 1"), "{error}");
+}
+
+/// The same door, on the fee path.
+#[tokio::test]
+async fn median_fee_estimate_refuses_a_witness_serving_another_chain() {
+    let (impostor, _a) = fee_history_stub_on_chain(999, 10, 1); // max_fee 21
+    let (honest, _b) = fee_history_stub(1_000, 100); // max_fee 2100
+    let (also_honest, _c) = fee_history_stub(1_000, 100);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![impostor, honest, also_honest],
+    );
+    assert_eq!(
+        median_fee_estimate(&network, 0, 0).await.unwrap(),
+        (2100, 100),
+        "a fee from another chain must not enter the median"
     );
 }
