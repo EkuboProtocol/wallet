@@ -621,3 +621,70 @@ fn a_legacy_database_claiming_schema_one_is_refused() {
     assert!(error.contains("schema 1 is not the schema"), "{error}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+mod in_flight_tests {
+    //! Removing a wallet must not throw away a transaction that can still mine.
+
+    use super::*;
+
+    /// The set this reports and the set the schema's uniqueness index treats
+    /// as live have to be the same set. A status counted as in flight by the
+    /// index but not here would let a wallet be removed out from under a
+    /// transaction the schema considers live -- which is the whole defect,
+    /// reintroduced by a one-word edit in a list.
+    #[test]
+    fn the_in_flight_set_matches_the_schema_index() {
+        let schema = include_str!("policy_store.rs");
+        let index = schema
+            .split_once("pending_transactions_wallet_chain_in_flight")
+            .expect("the index exists")
+            .1;
+        let predicate = index
+            .split_once("WHERE status IN (")
+            .expect("it has a status predicate")
+            .1
+            .split_once(')')
+            .expect("which closes")
+            .0;
+        for status in IN_FLIGHT_STATUSES {
+            assert!(
+                predicate.contains(&format!("'{status}'")),
+                "`{status}` is in flight here but not in the index"
+            );
+        }
+        assert_eq!(
+            predicate.matches('\'').count() / 2,
+            IN_FLIGHT_STATUSES.len(),
+            "the index names a status this set does not"
+        );
+    }
+
+    /// A queued request is not in flight: nothing is signed, so nothing can
+    /// reach the chain and removal is free to discard it. This is the boundary
+    /// the set draws, and drawing it too wide would make every pending review
+    /// block a removal.
+    #[test]
+    fn a_request_awaiting_approval_is_not_in_flight() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let key = DatabaseKey::new([3; 32]);
+        let mut database = PolicyStore::open(&path, &key).unwrap();
+        database
+            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .unwrap();
+        assert!(
+            database
+                .in_flight_transactions("primary")
+                .unwrap()
+                .is_empty(),
+            "a wallet with nothing queued has nothing in flight"
+        );
+        assert!(
+            database
+                .in_flight_transactions("absent")
+                .unwrap()
+                .is_empty(),
+            "and a wallet with no rows at all answers the same way rather than failing"
+        );
+    }
+}

@@ -1269,3 +1269,42 @@ mod reviewed_wallet_tests {
         }
     }
 }
+
+mod removal_fencing_tests {
+    //! A wallet is not removed out from under a transaction that can still mine.
+
+    /// The ordering is the property. `purge` deletes every pending row under
+    /// the name, including the exact signed envelope and the cancellation
+    /// state that are the only means of observing or stopping something
+    /// already authorized and possibly already sent -- and those bytes do not
+    /// stop being valid because the wallet was removed.
+    ///
+    /// So the question has to be asked before the credential is destroyed.
+    /// Asked afterwards, refusing helps nobody: the key is already gone.
+    #[test]
+    fn removal_checks_for_live_transactions_before_destroying_the_key() {
+        let source = include_str!("cli.rs");
+        let body = source
+            .split_once("AccountCommand::Remove { wallet_id } =>")
+            .expect("the removal arm exists")
+            .1;
+        let checked = body
+            .find("in_flight_transactions")
+            .expect("removal asks what may still reach the chain");
+        let approved = body
+            .find("require_approval")
+            .expect("it then asks the owner");
+        let removed = body
+            .find("custody.remove(")
+            .expect("and only then destroys the credential");
+        let purged = body.find(".purge(").expect("and clears the name");
+        assert!(
+            checked < approved,
+            "ask before the approval, so the owner is not asked to authorize a refusal"
+        );
+        assert!(
+            checked < removed && removed < purged,
+            "and long before the key is destroyed: afterwards, refusing helps nobody"
+        );
+    }
+}

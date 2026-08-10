@@ -1191,6 +1191,42 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
         }
         AccountCommand::Remove { wallet_id } => {
             let wallet = config.wallet(&wallet_id)?;
+            // Before the approval, and long before the key is destroyed.
+            // Removal ends in `purge`, which deletes every pending row under
+            // the name -- including the exact signed envelope, the hashes and
+            // the cancellation state that are the only means of observing,
+            // rebroadcasting or cancelling something already authorized and
+            // possibly already sent. Those bytes do not stop being valid
+            // because the wallet was removed: the transaction can still mine
+            // and consume its nonce, with nothing left locally that knows it
+            // exists.
+            //
+            // Asked here rather than after `custody.remove` because by then
+            // the key is gone and refusing is no longer an option that helps
+            // anyone.
+            let in_flight =
+                PolicyStore::production(config.data_dir())?.in_flight_transactions(&wallet.id)?;
+            if !in_flight.is_empty() {
+                let described = in_flight
+                    .iter()
+                    .map(|transaction| {
+                        format!(
+                            "{} ({} on chain {})",
+                            transaction.request_id, transaction.status, transaction.chain_id
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "wallet {} has {} transaction(s) that may still reach the chain: {described}. \
+                     Removing it would delete the only copy of their signed bytes, so they could \
+                     mine with nothing here able to see or cancel them. Settle them with \
+                     `ekubo-wallet transaction show`, cancel them with `ekubo-wallet transaction \
+                     cancel`, then remove the wallet.",
+                    wallet.id,
+                    in_flight.len()
+                );
+            }
             require_approval(
                 ApprovalRequest::new(
                     ApprovalKind::RemoveWallet,

@@ -168,6 +168,24 @@ pub(crate) enum SeedDefaults {
     No,
 }
 
+/// The statuses in which an envelope may still reach the chain.
+///
+/// The same set the `pending_transactions_wallet_chain_in_flight` index uses,
+/// and held to it by a test: a status that counts as in flight for the
+/// uniqueness rule but not for this one would let a wallet be removed out from
+/// under a transaction the schema considers live.
+pub(crate) const IN_FLIGHT_STATUSES: [&str; 4] =
+    ["signed", "submitting", "broadcast", "cancelling"];
+
+/// One transaction that may still execute, named well enough for a person to
+/// go and settle it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InFlightTransaction {
+    pub request_id: uuid::Uuid,
+    pub chain_id: String,
+    pub status: String,
+}
+
 impl PolicyStore {
     /// Opens the production policy database, creating its credential-store key
     /// only when no database exists. A missing key for an existing database is
@@ -803,6 +821,48 @@ impl PolicyStore {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Every transaction under this wallet whose bytes may still reach the
+    /// chain.
+    ///
+    /// Removal consults this *before* destroying the credential. `purge`
+    /// deletes these rows unconditionally, which is right where it is called
+    /// at creation time -- the previous wallet's key is already gone and the
+    /// name has to become usable again -- and wrong as the second half of a
+    /// removal: it throws away the exact signed envelope, the hashes, and the
+    /// cancellation state that are the only means of observing, rebroadcasting
+    /// or cancelling something already authorized and possibly already sent.
+    ///
+    /// So this is not a check inside `purge`. The two callers want different
+    /// things, and the one that must refuse is the one that is about to
+    /// destroy a key.
+    pub fn in_flight_transactions(&self, wallet_id: &str) -> Result<Vec<InFlightTransaction>> {
+        validate_wallet_id(wallet_id)?;
+        let placeholders = IN_FLIGHT_STATUSES
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT request_id, chain_id, status FROM pending_transactions
+             WHERE wallet_id = ?1 AND status IN ({placeholders})
+             ORDER BY created_at"
+        ))?;
+        let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&wallet_id];
+        for status in &IN_FLIGHT_STATUSES {
+            parameters.push(status);
+        }
+        let rows = statement
+            .query_map(parameters.as_slice(), |row| {
+                Ok(InFlightTransaction {
+                    request_id: row.get(0)?,
+                    chain_id: row.get::<_, i64>(1)?.to_string(),
+                    status: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Deletes a policy only if it still has the revision reviewed by the
