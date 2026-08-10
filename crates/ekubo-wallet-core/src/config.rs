@@ -510,8 +510,19 @@ impl ConfigStore {
         // the one permission change in this file that resolved a path instead
         // of a handle — on the configuration, immediately after publishing it.
         //
-        // `sync_parent` stays best-effort: the durability it buys is bounded by
-        // what the platform offers anyway.
+        // `sync_parent`'s result is discarded on purpose, and the reason is the
+        // paragraph above rather than anything about how much durability it
+        // buys. The rename has already committed. A caller told "the update
+        // failed" about a write that landed rolls back something that
+        // happened, and `custody::add` doing that deletes the only copy of a
+        // private key -- run 6207's critical, and run 6304's 203740 and
+        // 203742, all of which are that mistake.
+        //
+        // So the residual is real and is accepted knowingly: a power loss
+        // between the rename and this fsync can lose a configuration the
+        // caller was told was saved. Making it an error would trade a rare
+        // lost row for a reachable destroyed key. Do not "fix" this by adding
+        // a `?`.
         let _ = sync_parent(&self.data_dir);
         Ok(())
     }

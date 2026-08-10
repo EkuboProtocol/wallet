@@ -403,3 +403,70 @@ mod disconnect_intent_tests {
         );
     }
 }
+
+mod fresh_input_tests {
+    //! A keystroke typed at one surface is not an answer to the next one.
+
+    /// `confirm_review` starts its decision on the safe answer, but a buffered
+    /// `Tab` toggles it and a buffered `Enter` returns it -- so two keystrokes
+    /// typed at whatever was previously on the terminal affirm a document
+    /// nobody saw. It is the shared confirmation behind legal acceptance,
+    /// policy proposals, network proposals, and direct network edits.
+    ///
+    /// `approve_tui` and the inline prompts already drained. The fix is not a
+    /// third call site but the one door: `Screen::enter` is the only route
+    /// into the alternate screen, so draining there covers every full-screen
+    /// surface that exists and every one added later.
+    #[test]
+    fn entering_the_alternate_screen_discards_earlier_keystrokes() {
+        let fullscreen = include_str!("fullscreen.rs");
+        let enter = fullscreen
+            .split_once("pub(crate) fn enter() -> Result<Self> {")
+            .expect("Screen::enter is declared")
+            .1;
+        let body = enter.split_once("\n    }").expect("its body ends").0;
+        let drained = body
+            .find("drain_type_ahead")
+            .expect("entering a screen drains what was typed at the last one");
+        let raw = body
+            .find("enable_raw_mode")
+            .expect("raw mode is enabled first");
+        let entered = body
+            .find("EnterAlternateScreen")
+            .expect("the screen is then entered");
+        assert!(
+            raw < drained,
+            "drain after enabling raw mode, or the keystrokes are still in the line discipline"
+        );
+        assert!(
+            drained < entered,
+            "drain before the screen exists, so nothing can be read at it first"
+        );
+    }
+
+    /// And that door is the only one. A surface that entered the alternate
+    /// screen by itself would skip the drain without changing this file.
+    #[test]
+    fn there_is_exactly_one_route_into_the_alternate_screen() {
+        let mut entries = 0;
+        for source in [
+            include_str!("fullscreen.rs"),
+            include_str!("approve_tui.rs"),
+            include_str!("pager.rs"),
+            include_str!("tx_browser.rs"),
+            include_str!("connect_screen.rs"),
+        ] {
+            entries += source
+                .lines()
+                .filter(|line| {
+                    line.contains("EnterAlternateScreen") && !line.trim_start().starts_with("//")
+                })
+                .filter(|line| !line.contains("terminal::{"))
+                .count();
+        }
+        assert_eq!(
+            entries, 1,
+            "every full-screen surface must take the terminal through `Screen::enter`"
+        );
+    }
+}
