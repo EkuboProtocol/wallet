@@ -321,3 +321,72 @@ fn rejects_a_chain_id_that_is_not_a_number() {
     let error = parse_token_list(body.as_bytes()).unwrap_err().to_string();
     assert!(error.contains("is not a chain ID"), "{error}");
 }
+
+mod declared_metadata_tests {
+    //! A curator writes these and a transcript keeps them.
+
+    use super::*;
+
+    fn list_with(timestamp: &str, name: &str) -> String {
+        serde_json::json!({
+            "name": name,
+            "timestamp": timestamp,
+            "tokens": [{
+                "chainId": 1,
+                "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "symbol": "USDC",
+                "name": "USD Coin",
+                "decimals": 6
+            }]
+        })
+        .to_string()
+    }
+
+    /// `tool_error` caps what it hands back precisely because "an RPC or a
+    /// plan producer chose it". A token list is the same kind of text on the
+    /// path that succeeds, and nothing capped it: a curator could put most of
+    /// an allowed body into `timestamp` and still ship one valid token.
+    #[test]
+    fn an_oversized_timestamp_is_bounded_before_it_is_carried_onward() {
+        let flood = "9".repeat(MAX_DECLARED_TEXT_CHARS * 100);
+        let parsed = parse_token_list(list_with(&flood, "Fine").as_bytes()).unwrap();
+        assert_eq!(
+            parsed.declared_timestamp.as_deref().map(str::len),
+            Some(MAX_DECLARED_TEXT_CHARS)
+        );
+        assert_eq!(parsed.tokens.len(), 1, "the list itself still imports");
+    }
+
+    /// The name too, and the characters as well as the length: the publisher
+    /// picked both, and these strings are displayed.
+    #[test]
+    fn a_declared_name_is_bounded_and_stripped() {
+        let hostile = format!("Real List{}{}", '\u{202e}', "x".repeat(500));
+        let parsed =
+            parse_token_list(list_with("2026-01-01T00:00:00Z", &hostile).as_bytes()).unwrap();
+        let name = parsed.declared_name.expect("the list names itself");
+        assert!(name.chars().count() <= MAX_DECLARED_TEXT_CHARS);
+        assert!(
+            !name.contains('\u{202e}'),
+            "a right-to-left override is not a name"
+        );
+        assert!(name.starts_with("Real List"));
+    }
+
+    /// An ordinary list is untouched, which is what a cap set too low would
+    /// fail.
+    #[test]
+    fn an_ordinary_list_keeps_its_metadata() {
+        let parsed =
+            parse_token_list(list_with("2026-01-01T00:00:00Z", "Uniswap Labs Default").as_bytes())
+                .unwrap();
+        assert_eq!(
+            parsed.declared_timestamp.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            parsed.declared_name.as_deref(),
+            Some("Uniswap Labs Default")
+        );
+    }
+}
