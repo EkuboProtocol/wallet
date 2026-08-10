@@ -4400,6 +4400,22 @@ async fn review_one_network_proposal(
         let (title, summary) = if let Some(existing) = &existing {
             facts.push(("Replaces endpoints", endpoint_list(existing)));
             facts.push(("Configured name", vec![existing.name.clone()]));
+            // The one setting on this screen that bounds what an automatic
+            // transaction can spend, and it was not on it. A proposal never
+            // names a ceiling — an agent does not choose one — so a reviewer
+            // seeing only endpoints could not tell whether the profile they
+            // were about to accept still had theirs. It does: the replacement
+            // inherits it. Saying so is what makes that checkable rather than
+            // something the reviewer has to know.
+            facts.push((
+                "Fee ceiling",
+                vec![match existing.max_fee_per_gas.as_deref() {
+                    Some(ceiling) => format!("{ceiling} wei per gas, unchanged by this edit"),
+                    None => {
+                        "none — automatic transactions accept whatever fee the RPC names".to_owned()
+                    }
+                }],
+            ));
             (
                 "Accept an edited network",
                 "An agent suggested changing how this wallet reaches a chain it already uses.",

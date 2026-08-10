@@ -472,3 +472,69 @@ fn a_private_file_is_opened_through_the_name_it_was_given() {
         "a real file is narrowed through the handle that names it"
     );
 }
+
+#[test]
+fn a_replacement_does_not_quietly_drop_the_owners_fee_ceiling() {
+    // The MCP candidate and the CLI form both leave `max_fee_per_gas` as
+    // `None`, each with a comment saying an agent does not get to choose the
+    // owner's fee ceiling. Whole-profile replacement turned both into the
+    // opposite: a routine endpoint edit deleted the ceiling, and an absent
+    // ceiling is unbounded -- `capped_fee` returns an endpoint's estimate
+    // unchanged when there is nothing to check it against, on the one path
+    // where nobody reviews the fee.
+    let mut networks = default_networks();
+    let chain_id = networks[0].chain_id;
+    networks[0].max_fee_per_gas = Some("1000000000".into());
+
+    let mut edited = networks[0].clone();
+    edited.rpc_urls = vec!["https://elsewhere.example.invalid/rpc".parse().unwrap()];
+    edited.max_fee_per_gas = None;
+    replace_configured_network(&mut networks, edited).unwrap();
+
+    let stored = networks
+        .iter()
+        .find(|network| network.chain_id == chain_id)
+        .unwrap();
+    assert_eq!(
+        stored.rpc_urls[0].as_str(),
+        "https://elsewhere.example.invalid/rpc",
+        "the edit the owner reviewed still applies"
+    );
+    assert_eq!(
+        stored.max_fee_per_gas.as_deref(),
+        Some("1000000000"),
+        "and the ceiling they never agreed to remove survives it"
+    );
+}
+
+#[test]
+fn a_replacement_that_names_a_ceiling_sets_it() {
+    // `None` means "not specified" everywhere it is constructed today, so
+    // inheriting is right -- but a profile that does name a ceiling is stating
+    // one, and must not be overridden by the value it replaces.
+    let mut networks = default_networks();
+    let chain_id = networks[0].chain_id;
+    networks[0].max_fee_per_gas = Some("1000000000".into());
+
+    let mut raised = networks[0].clone();
+    raised.max_fee_per_gas = Some("2000000000".into());
+    replace_configured_network(&mut networks, raised).unwrap();
+
+    assert_eq!(
+        networks
+            .iter()
+            .find(|network| network.chain_id == chain_id)
+            .unwrap()
+            .max_fee_per_gas
+            .as_deref(),
+        Some("2000000000")
+    );
+
+    // And a chain with no ceiling before still has none after.
+    let mut fresh = default_networks();
+    let mut edited = fresh[0].clone();
+    edited.max_fee_per_gas = None;
+    fresh[0].max_fee_per_gas = None;
+    replace_configured_network(&mut fresh, edited).unwrap();
+    assert!(fresh[0].max_fee_per_gas.is_none());
+}

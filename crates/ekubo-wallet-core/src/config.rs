@@ -949,6 +949,33 @@ pub fn replace_configured_network(
             existing.chain_id
         );
     }
+    // The owner's fee ceiling survives a replacement it did not ask to change.
+    //
+    // Both constructors of a candidate profile leave `max_fee_per_gas` as
+    // `None` and say why: the MCP one because "an agent does not choose the
+    // owner's fee ceiling", the CLI form because a ceiling is a judgement
+    // about what the owner's transactions are worth rather than a property of
+    // the chain. Both are right about intent and both achieved the opposite,
+    // because this function replaces the whole profile — so a routine endpoint
+    // edit deleted the ceiling, and an absent ceiling is unbounded. Nothing
+    // downstream notices: no policy rule speaks about fees, no reviewer sees
+    // them, and `capped_fee` returns an endpoint's estimate unchanged when
+    // there is nothing to check it against.
+    //
+    // Carried rather than required, because `None` here has only ever meant
+    // "not specified". Nothing in the CLI or MCP surface sets a ceiling at
+    // all; the owner writes one into the configuration by hand, and the
+    // owner's own `network edit` path clones the existing profile, so a
+    // deliberate change arrives as `Some`. A future affordance for *removing*
+    // one needs to say so explicitly rather than by omission.
+    let inherited = networks
+        .iter()
+        .find(|network| network.chain_id == next.chain_id)
+        .and_then(|existing| existing.max_fee_per_gas.clone());
+    let next = NetworkConfig {
+        max_fee_per_gas: next.max_fee_per_gas.or(inherited),
+        ..next
+    };
     networks.retain(|network| network.chain_id != next.chain_id);
     networks.push(next);
     Ok(())
