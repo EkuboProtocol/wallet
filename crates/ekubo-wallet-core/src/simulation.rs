@@ -1409,6 +1409,56 @@ fn signed_delta(before: U256, after: U256) -> String {
 /// not one.
 const MAX_RPC_MESSAGE_BYTES: usize = 4_096;
 
+/// Longest endpoint-authored byte string carried into a result.
+///
+/// `return_data` and the revert bytes are copied, hex-encoded, stored in the
+/// simulation cache, and serialized into the MCP result -- which is to say
+/// into the agent's context window, the thing `MAX_TOOL_ERROR_CHARS` exists to
+/// protect on the path that fails. Nothing protected it on the path that
+/// succeeds.
+///
+/// Generous: a real return value is a few words, and a revert reason is a
+/// short string. This bounds what a dishonest endpoint can spend, not what an
+/// honest one needs.
+const MAX_RPC_DATA_BYTES: usize = 64 * 1024;
+
+/// Endpoint bytes as `0x` hex, disclosed rather than silently cut.
+///
+/// The disclosure follows `orchestrator::calldata_rows`, which solved this for
+/// calldata a reviewer reads: show the head, say how much was dropped, and
+/// give the keccak of the whole thing so the complete value is still
+/// identifiable. The result deliberately stops being parseable as hex when it
+/// truncates -- something that still looks like return data but is not is the
+/// worse failure, and a reader that decodes a prefix believing it complete is
+/// exactly what this is guarding against.
+fn bounded_hex(bytes: &[u8]) -> String {
+    if bytes.len() <= MAX_RPC_DATA_BYTES {
+        return format!("0x{}", hex::encode(bytes));
+    }
+    format!(
+        "0x{}… ({} of {} bytes not shown; keccak256 of the complete value is {:#x})",
+        hex::encode(&bytes[..MAX_RPC_DATA_BYTES]),
+        bytes.len() - MAX_RPC_DATA_BYTES,
+        bytes.len(),
+        alloy::primitives::keccak256(bytes)
+    )
+}
+
+/// Revert bytes as `0x` hex, truncated to a prefix that is still hex.
+///
+/// Unlike `output`, this one is read: `inspect_revert` takes the selector from
+/// the first four bytes and decodes a standard `Error(string)` or
+/// `Panic(uint256)` payload, all of which sit at the head. So the value stays
+/// parseable and the truncation is said in the message instead, where a person
+/// reads it.
+fn bounded_revert_hex(bytes: &[u8]) -> (String, bool) {
+    let shown = bytes.len().min(MAX_RPC_DATA_BYTES);
+    (
+        format!("0x{}", hex::encode(&bytes[..shown])),
+        shown < bytes.len(),
+    )
+}
+
 /// One endpoint-authored message, bounded and honest about it.
 ///
 /// Truncated on a character boundary rather than by byte, so the result is
@@ -1438,7 +1488,7 @@ fn execution_output(
     // maxUsedGas is the high-water mark before refunds. It is the safer input
     // to the wallet's bounded gas multiplier when the RPC provides it.
     let gas_used = Some(result.max_used_gas.unwrap_or(result.gas_used).to_string());
-    let output = Some(format!("0x{}", hex::encode(&result.return_data)));
+    let output = Some(bounded_hex(&result.return_data));
     let block_gas_limit = Some(block_gas_limit.to_string());
     if result.status {
         return SimulationExecution {
@@ -1466,8 +1516,21 @@ fn execution_output(
         .and_then(|error| error.data.as_ref())
         .filter(|data| !data.is_empty())
         .unwrap_or(&result.return_data);
-    let revert_data =
-        (!revert_bytes.is_empty()).then(|| format!("0x{}", hex::encode(revert_bytes)));
+    let (revert_data, revert_truncated) = if revert_bytes.is_empty() {
+        (None, false)
+    } else {
+        let (hex, truncated) = bounded_revert_hex(revert_bytes);
+        (Some(hex), truncated)
+    };
+    let message = if revert_truncated {
+        format!(
+            "{message} (the endpoint's revert data was {} bytes; only the first \
+             {MAX_RPC_DATA_BYTES} are shown)",
+            revert_bytes.len()
+        )
+    } else {
+        message
+    };
     let failure = failure(
         plan,
         SimulationFailureCategory::ExecutionReverted,
