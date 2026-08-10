@@ -1202,53 +1202,47 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
         }
         AccountCommand::Remove { wallet_id } => {
             let wallet = config.wallet(&wallet_id)?;
-            // Before the approval, and long before the key is destroyed.
-            // Removal ends in `purge`, which deletes every pending row under
-            // the name -- including the exact signed envelope, the hashes and
-            // the cancellation state that are the only means of observing,
-            // rebroadcasting or cancelling something already authorized and
-            // possibly already sent. Those bytes do not stop being valid
-            // because the wallet was removed: the transaction can still mine
-            // and consume its nonce, with nothing left locally that knows it
-            // exists.
+            // Read before the approval is drawn, so the owner decides with
+            // this in front of them. Removal ends in `purge`, which deletes
+            // every pending row under the name -- including the exact signed
+            // envelope, the hashes and the cancellation state that are the
+            // only means of observing, rebroadcasting or cancelling something
+            // already authorized and possibly already sent. Those bytes do not
+            // stop being valid because the wallet was removed: the transaction
+            // can still mine and consume its nonce, with nothing left locally
+            // that knows it exists.
             //
-            // Asked here rather than after `custody.remove` because by then
-            // the key is gone and refusing is no longer an option that helps
-            // anyone.
+            // Read here rather than after `custody.remove` because by then the
+            // key is gone and there is no decision left to inform.
             let in_flight =
                 PolicyStore::production(config.data_dir())?.in_flight_transactions(&wallet.id)?;
-            if !in_flight.is_empty() {
-                let described = in_flight
-                    .iter()
-                    .map(|transaction| {
-                        format!(
-                            "{} ({} on chain {})",
-                            transaction.request_id, transaction.status, transaction.chain_id
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                anyhow::bail!(
-                    "wallet {} has {} transaction(s) that may still reach the chain: {described}. \
-                     Removing it would delete the only copy of their signed bytes, so they could \
-                     mine with nothing here able to see or cancel them. Settle them with \
-                     `ekubo-wallet transaction show`, cancel them with `ekubo-wallet transaction \
-                     cancel`, then remove the wallet.",
-                    wallet.id,
-                    in_flight.len()
-                );
-            }
-            require_approval(
-                ApprovalRequest::new(
-                    ApprovalKind::RemoveWallet,
-                    "Remove wallet",
-                    "Delete this wallet's platform credential and local metadata.",
-                )
-                .fact("Wallet", &wallet.id)
-                .fact("Address", format!("{:#x}", wallet.address))
-                .warning("This operation cannot be undone unless a separate key backup exists."),
+            let mut request = ApprovalRequest::new(
+                ApprovalKind::RemoveWallet,
+                "Remove wallet",
+                "Delete this wallet's platform credential and local metadata.",
             )
-            .await?;
+            .fact("Wallet", &wallet.id)
+            .fact("Address", format!("{:#x}", wallet.address))
+            .warning("This operation cannot be undone unless a separate key backup exists.");
+            // On the screen rather than in front of it. An owner whose node is
+            // gone, whose transaction will never mine, and who wants this
+            // wallet off this machine is entitled to say so -- and refusing
+            // left them editing the database, which is the outcome the rest of
+            // this file works to avoid.
+            for transaction in &in_flight {
+                request = request.warning(format!(
+                    "Transaction {} is {} on chain {} and may still reach the chain. Removing \
+                     this wallet deletes the only copy of its signed bytes, so it could mine \
+                     with nothing here able to see or cancel it. `ekubo-wallet transaction show \
+                     {}` settles it; `ekubo-wallet transaction cancel {}` stops it.",
+                    transaction.request_id,
+                    transaction.status,
+                    transaction.chain_id,
+                    transaction.request_id,
+                    transaction.request_id
+                ));
+            }
+            require_approval(request).await?;
 
             let progress = crate::tui::Progress::start("Waiting for owner authentication");
             let result = custody.remove(&wallet_id).await;

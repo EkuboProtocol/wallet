@@ -1274,38 +1274,46 @@ mod reviewed_wallet_tests {
 mod removal_fencing_tests {
     //! A wallet is not removed out from under a transaction that can still mine.
 
-    /// The ordering is the property. `purge` deletes every pending row under
-    /// the name, including the exact signed envelope and the cancellation
-    /// state that are the only means of observing or stopping something
-    /// already authorized and possibly already sent -- and those bytes do not
-    /// stop being valid because the wallet was removed.
+    /// The ordering is the property, and what it protects changed shape.
     ///
-    /// So the question has to be asked before the credential is destroyed.
-    /// Asked afterwards, refusing helps nobody: the key is already gone.
+    /// `purge` deletes every pending row under the name, including the exact
+    /// signed envelope and the cancellation state that are the only means of
+    /// stopping something already authorized and possibly already sent. Those
+    /// bytes do not stop being valid because the wallet was removed.
+    ///
+    /// It used to `bail!` on that. The maintainer's review called it what it
+    /// was: a wall in front of an approval screen the code already builds. An
+    /// owner whose node is gone and whose transaction will never mine is
+    /// entitled to remove the wallet, and refusing left them editing the
+    /// database -- the outcome the rest of this file works to avoid. So the
+    /// list is on the screen now, and the read still has to happen before the
+    /// screen is drawn, because afterwards there is no decision left to inform.
     #[test]
-    fn removal_checks_for_live_transactions_before_destroying_the_key() {
+    fn removal_shows_live_transactions_on_the_approval_it_precedes() {
         let source = include_str!("cli.rs");
         let body = source
             .split_once("AccountCommand::Remove { wallet_id } =>")
             .expect("the removal arm exists")
             .1;
-        let checked = body
+        let read = body
             .find("in_flight_transactions")
             .expect("removal asks what may still reach the chain");
+        let warned = body
+            .find("request = request.warning(")
+            .expect("and puts each one on the approval as a warning");
         let approved = body
-            .find("require_approval")
-            .expect("it then asks the owner");
+            .find("require_approval(request)")
+            .expect("which is then shown to the owner");
         let removed = body
             .find("custody.remove(")
-            .expect("and only then destroys the credential");
-        let purged = body.find(".purge(").expect("and clears the name");
+            .expect("before the credential is destroyed");
         assert!(
-            checked < approved,
-            "ask before the approval, so the owner is not asked to authorize a refusal"
+            read < warned && warned < approved && approved < removed,
+            "read, warn, ask, then destroy -- in that order"
         );
         assert!(
-            checked < removed && removed < purged,
-            "and long before the key is destroyed: afterwards, refusing helps nobody"
+            !body[..removed].contains("anyhow::bail!"),
+            "nothing may refuse the removal outright before the owner is asked"
         );
     }
 }
