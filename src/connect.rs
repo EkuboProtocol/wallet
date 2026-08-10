@@ -718,6 +718,26 @@ impl DappSession<'_> {
     }
 
     async fn dispatch(&self, request: &DappRequest<'_>) -> Result<RequestOutcome> {
+        // Acceptance is live state, not a fact established at startup. A
+        // session lasts as long as the dapp keeps it, and `legal accept`
+        // records a digest: publishing new terms makes an existing acceptance
+        // stale without anything here noticing. `run` checks once before the
+        // session exists and never again, so a session opened this morning
+        // would keep signing all day under documents the owner has not
+        // accepted -- and it is the only surface with a window that long, since
+        // the MCP dispatch re-checks per tool call and each CLI command
+        // re-checks on entry.
+        //
+        // So it is checked here, where the MCP server checks it: once per
+        // request, before the method is even looked at, so a method added
+        // later is covered by having been dispatched rather than by having
+        // remembered.
+        if let Err(error) = legal::require_current_acceptance(self.config.data_dir()) {
+            return Ok(RequestOutcome::Error {
+                code: error_code::UNSUPPORTED_METHODS,
+                message: format!("{error:#}"),
+            });
+        }
         if let Some(refusal) = self.refuse_replaced_account() {
             return Ok(refusal);
         }

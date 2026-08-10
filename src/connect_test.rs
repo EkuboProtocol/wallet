@@ -279,3 +279,65 @@ fn a_batch_status_is_reconciled_against_the_chain_before_it_is_reported() {
          reports as pending for as long as the dapp asks"
     );
 }
+
+mod legal_currency_tests {
+    //! Acceptance is live state, so a session cannot rest on having checked it.
+
+    /// The window this closes is the long one. `run` checks acceptance before
+    /// the session exists; a session then lasts as long as the dapp keeps it
+    /// open. Publishing new terms makes an existing acceptance stale -- the
+    /// status is derived from the current document digests -- so a session
+    /// opened this morning would keep signing all day under documents the
+    /// owner has not accepted, while the MCP server refuses every tool call
+    /// and every CLI command refuses on entry.
+    ///
+    /// Pinned in the source because standing this up behaviourally means a
+    /// paired relay, a settled session, and a dapp: the property is that the
+    /// check is in `dispatch`, before the method is looked at, so a method
+    /// added later is covered by having been dispatched rather than by someone
+    /// remembering.
+    #[test]
+    fn every_dapp_request_rechecks_acceptance_before_its_method_is_read() {
+        let source = include_str!("connect.rs");
+        let body = source
+            .split_once("async fn dispatch(&self, request: &DappRequest<'_>)")
+            .expect("dispatch is declared")
+            .1;
+        let checked = body
+            .find("legal::require_current_acceptance")
+            .expect("dispatch rechecks acceptance");
+        let matched = body.find("match request.method").expect("it dispatches");
+        assert!(
+            checked < matched,
+            "acceptance must be checked before the method is looked at, so a new method \
+             cannot be added without it"
+        );
+        let replaced = body
+            .find("refuse_replaced_account")
+            .expect("it also rechecks the account");
+        assert!(
+            checked < replaced,
+            "a wallet disabled by lapsed terms is refused for that reason, not for a \
+             later one"
+        );
+    }
+
+    /// And the claim in the kernel matches what the kernel does. The sentence
+    /// this replaces said the signing paths repeated the check as defense in
+    /// depth. They do not -- `load_matching_signer`, which every signature in
+    /// the process passes through, never sees it -- and a comment asserting a
+    /// security property the code does not have is worse than no comment,
+    /// because it is what a reader checks instead of the code.
+    #[test]
+    fn the_kernel_does_not_claim_a_check_it_does_not_make() {
+        let legal = include_str!("../crates/ekubo-wallet-core/src/legal.rs");
+        assert!(
+            !legal.contains("the signing paths repeat it as defense in depth"),
+            "the signing paths do not call this"
+        );
+        assert!(
+            legal.contains("It is **not** called by the signing paths themselves"),
+            "and the doc comment says so, with what closing that would take"
+        );
+    }
+}
