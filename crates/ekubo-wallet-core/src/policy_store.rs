@@ -7,8 +7,7 @@
 
 use crate::{
     config::{
-        NetworkConfig, create_private_dir, open_private_file, set_private_handle_permissions,
-        validate_network, validate_wallet_id,
+        NetworkConfig, create_private_dir, open_private_file, validate_network, validate_wallet_id,
     },
     core::policy::WalletPolicy,
     sql::{Millis, RowExt},
@@ -19,7 +18,7 @@ use fs2::FileExt;
 use keyring::{Entry, Error as KeyringError};
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::{fs::OpenOptions, path::Path};
+use std::path::Path;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The shape of the encrypted database. There is one, and this build creates
@@ -193,14 +192,18 @@ impl PolicyStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
         create_private_dir(data_dir)?;
         let lock_path = data_dir.join(DATABASE_LOCK_FILE);
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .with_context(|| format!("failed to open {}", lock_path.display()))?;
-        set_private_handle_permissions(&lock)?;
+        // `open_private_file`, not a bare `OpenOptions`: it carries
+        // `O_NOFOLLOW`, so this handle refers to that name or to nothing.
+        //
+        // A lock taken by pathname serializes two processes only if both of
+        // them locked the same inode. A symlink at `policies.lock` gives them
+        // different ones, and the first-use path below is what that costs:
+        // both see no database, both generate a key, the second `set_secret`
+        // wins, and the first creates a database encrypted under a key the
+        // credential store no longer holds. The readback there is the
+        // arbiter for the residual window; this removes the way the two locks
+        // came apart in the first place.
+        let lock = open_private_file(&lock_path)?;
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
         let path = data_dir.join(DATABASE_FILE);

@@ -688,3 +688,59 @@ mod in_flight_tests {
         );
     }
 }
+
+mod database_lock_tests {
+    //! A lock taken by pathname serializes two processes only if both of them
+    //! locked the same inode.
+
+    use super::*;
+
+    /// A symlink at `policies.lock` gave two processes different inodes, and
+    /// the first-use path is what that costs: both see no database, both
+    /// generate a key, the second `set_secret` wins, and the first creates a
+    /// database encrypted under a key the credential store no longer holds.
+    /// Nothing can open it afterwards.
+    ///
+    /// `open_private_file` carries `O_NOFOLLOW`, so the handle refers to that
+    /// name or to nothing. Tested through the helper rather than through
+    /// `production`, which needs the real credential store.
+    #[cfg(unix)]
+    #[test]
+    fn the_database_lock_refuses_a_symlinked_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let elsewhere = directory.path().join("elsewhere.lock");
+        std::fs::write(&elsewhere, b"").unwrap();
+        let planted = directory.path().join("policies.lock");
+        std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
+
+        assert!(
+            crate::config::open_private_file(&planted).is_err(),
+            "a lock reached through a link is a lock on somebody else's inode"
+        );
+
+        // And an ordinary path still opens, so the refusal is of links rather
+        // than of locking.
+        let real = directory.path().join("real.lock");
+        crate::config::open_private_file(&real).expect("a real path locks as before");
+    }
+
+    /// The readback stays, and it is what covers the window this cannot: two
+    /// processes that legitimately raced before either created the file.
+    #[test]
+    fn the_key_readback_is_still_the_arbiter() {
+        let source = include_str!("policy_store.rs");
+        let body = source
+            .split_once("Err(KeyringError::NoEntry)")
+            .expect("the first-use branch exists")
+            .1;
+        let wrote = body.find("set_secret(").expect("it writes a key");
+        let read = body.find("get_secret()").expect("and reads it back");
+        let created = body
+            .find("another process initialized")
+            .expect("and refuses when the store no longer holds what it wrote");
+        assert!(
+            wrote < read && read < created,
+            "write, read back, then decide -- the credential store is the arbiter"
+        );
+    }
+}
