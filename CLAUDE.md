@@ -60,10 +60,14 @@ files as explicit `paths` to opt them back in when that is what you want.
 
 ## Commits land on `main`
 
-Push to `main` directly. Do not open a branch or a pull request for ordinary
-changes, and do not wait to be asked to commit. Commit early and often: each
-self-contained change — a fix, a doc edit, a small refactor — is its own
-commit, pushed as soon as it builds and its tests pass.
+Work happens in a worktree, so it starts on its own branch — but the branch is
+a workspace, not a review gate. Land it on `main` as soon as it builds and its
+tests pass, and push. Do not open a pull request for ordinary changes, and do
+not wait to be asked to commit.
+
+Commit early and often: each self-contained change — a fix, a doc edit, a small
+refactor — is its own commit. Prefer several small pushes over one large one;
+holding changes back only makes the next push bigger.
 
 Reserve a long-lived branch for work genuinely large or risky enough that
 landing it half-finished would break the build for someone else.
