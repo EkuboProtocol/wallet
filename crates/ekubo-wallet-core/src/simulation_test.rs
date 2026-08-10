@@ -559,3 +559,109 @@ fn a_token_that_answers_neither_probe_is_named_rather_than_dropped() {
     // A token nothing tracks is not the policy's business and is not reported.
     assert!(unverified_token_probes(&[], &before, &after).is_empty());
 }
+
+mod bounded_rpc_message_tests {
+    //! A revert reason is written by the endpoint and read by a person.
+
+    use super::*;
+
+    /// Nothing bounded it. The string was copied into the failure, into the
+    /// stored simulation result, and onto the approval screen at whatever
+    /// length arrived -- from the one party in the exchange with an interest
+    /// in the person not reading it.
+    #[test]
+    fn an_oversized_message_is_bounded_and_says_so() {
+        let flood = "A".repeat(MAX_RPC_MESSAGE_BYTES * 4);
+        let bounded = bounded_rpc_message(&flood);
+        assert!(bounded.len() < flood.len());
+        assert!(
+            bounded.contains("more bytes from the endpoint, not shown"),
+            "truncation is disclosed rather than silent: {}",
+            &bounded[bounded.len().saturating_sub(80)..]
+        );
+    }
+
+    /// A real revert reason is a sentence and passes through untouched. The
+    /// ceiling exists to have one, not to edit diagnostics.
+    #[test]
+    fn an_ordinary_message_is_unchanged() {
+        for message in [
+            "execution reverted: ERC20: transfer amount exceeds balance",
+            "",
+            "insufficient funds for gas * price + value",
+        ] {
+            assert_eq!(bounded_rpc_message(message), message);
+        }
+    }
+
+    /// Truncation lands on a character boundary, so the result is still a
+    /// `String` a terminal can render. Cutting by byte through a multi-byte
+    /// character would panic on the slice.
+    #[test]
+    fn truncation_does_not_split_a_character() {
+        let multibyte = "é".repeat(MAX_RPC_MESSAGE_BYTES);
+        let bounded = bounded_rpc_message(&multibyte);
+        assert!(bounded.starts_with('é'));
+        assert!(bounded.contains("not shown"));
+    }
+}
+
+mod bounded_rpc_data_tests {
+    //! Endpoint bytes end up in a cache and in an agent's context window.
+
+    use super::*;
+
+    /// `MAX_TOOL_ERROR_CHARS` bounds what an endpoint can write into a
+    /// transcript on the path that fails, "because an RPC or a plan producer
+    /// chose it". `return_data` is the same text on the path that succeeds,
+    /// and nothing bounded it.
+    #[test]
+    fn oversized_return_data_is_bounded_and_identifiable() {
+        let flood = vec![0xab_u8; MAX_RPC_DATA_BYTES * 3];
+        let rendered = bounded_hex(&flood);
+        assert!(rendered.len() < flood.len() * 2);
+        assert!(rendered.contains("not shown"), "the drop is disclosed");
+        assert!(
+            rendered.contains(&format!("{:#x}", alloy::primitives::keccak256(&flood))),
+            "and the complete value stays identifiable"
+        );
+        // Deliberately no longer parseable as hex: a value that still looks
+        // like return data but is not is the worse failure.
+        assert!(rendered.contains('…'));
+    }
+
+    /// An ordinary return value is untouched and still plain hex.
+    #[test]
+    fn ordinary_return_data_is_unchanged() {
+        let small = [0x01_u8, 0x02, 0x03];
+        assert_eq!(bounded_hex(&small), "0x010203");
+        assert_eq!(bounded_hex(&[]), "0x");
+    }
+
+    /// Revert bytes are read rather than only shown: `inspect_revert` takes
+    /// the selector from the first four bytes and decodes a standard payload
+    /// at the head. So this one stays parseable and says so in the message.
+    #[test]
+    fn oversized_revert_data_stays_parseable_at_the_head() {
+        let mut flood = vec![0x08, 0xc3, 0x79, 0xa0];
+        flood.extend(std::iter::repeat_n(0x00, MAX_RPC_DATA_BYTES * 2));
+        let (rendered, truncated) = bounded_revert_hex(&flood);
+        assert!(truncated);
+        assert!(
+            rendered.starts_with("0x08c379a0"),
+            "the selector survives, which is what reads it"
+        );
+        assert!(
+            rendered.len() % 2 == 0 && rendered[2..].chars().all(|c| c.is_ascii_hexdigit()),
+            "and the value is still hex a decoder can take"
+        );
+    }
+
+    /// A revert that fits is returned whole and reports no truncation.
+    #[test]
+    fn ordinary_revert_data_reports_no_truncation() {
+        let (rendered, truncated) = bounded_revert_hex(&[0x08, 0xc3, 0x79, 0xa0]);
+        assert_eq!(rendered, "0x08c379a0");
+        assert!(!truncated);
+    }
+}

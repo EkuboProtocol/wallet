@@ -210,7 +210,7 @@ struct RawDecoded {
 #[derive(Debug)]
 struct DecodeFailure(StructuredDecodeError);
 
-struct DecodeBudget {
+pub struct DecodeBudget {
     collection_items_remaining: usize,
     /// Nested decodes left before the whole request is abandoned.
     ///
@@ -254,10 +254,7 @@ pub(crate) fn decode_abi_error(data: &[u8], input_abi: &[Value]) -> Option<Decod
     if DynSolValue::Tuple(decoded.body.clone()).abi_encode_params() != data[4..] {
         return None;
     }
-    let mut budget = DecodeBudget {
-        collection_items_remaining: MAX_COLLECTION_ITEMS,
-        decodes_remaining: MAX_TOTAL_DECODES,
-    };
+    let mut budget = DecodeBudget::for_request();
     let args = error
         .inputs
         .iter()
@@ -271,17 +268,58 @@ pub(crate) fn decode_abi_error(data: &[u8], input_abi: &[Value]) -> Option<Decod
     })
 }
 
+impl DecodeBudget {
+    /// One request's allowance.
+    ///
+    /// Named for the request rather than the call, because that is the unit
+    /// the ceiling was always described in: the field above says "a budget
+    /// shared across the entire request is what makes the two caps compose
+    /// instead of multiply".
+    #[must_use]
+    pub const fn for_request() -> Self {
+        Self {
+            collection_items_remaining: MAX_COLLECTION_ITEMS,
+            decodes_remaining: MAX_TOTAL_DECODES,
+        }
+    }
+}
+
+/// Decode one result, charged against a budget the caller owns.
+///
+/// The batch route needs this. `decode_abi_result` makes a fresh allowance per
+/// call, and a batch admits `MAX_BATCH_CALLS` of them, so the documented
+/// request-wide ceiling was multiplied by the number of calls rather than
+/// shared between them -- the two caps composing was the whole point of having
+/// a total, and on the one route that can send many plans at once they went
+/// back to multiplying.
+///
+/// A caller that runs out mid-batch gets the decoder's ordinary budget
+/// refusal for the remaining calls, which is a reported decode failure rather
+/// than an error for the request: the reads still happened and their raw
+/// results are still returned.
+#[must_use]
+pub fn decode_abi_result_within(
+    return_data: &str,
+    plan: &AbiDecodePlan,
+    include_raw: bool,
+    budget: &mut DecodeBudget,
+) -> AbiDecodeResult {
+    decode_at_depth(return_data, plan, include_raw, 0, budget)
+}
+
+/// Decode one result on its own allowance.
 #[must_use]
 pub fn decode_abi_result(
     return_data: &str,
     plan: &AbiDecodePlan,
     include_raw: bool,
 ) -> AbiDecodeResult {
-    let mut budget = DecodeBudget {
-        collection_items_remaining: MAX_COLLECTION_ITEMS,
-        decodes_remaining: MAX_TOTAL_DECODES,
-    };
-    decode_at_depth(return_data, plan, include_raw, 0, &mut budget)
+    decode_abi_result_within(
+        return_data,
+        plan,
+        include_raw,
+        &mut DecodeBudget::for_request(),
+    )
 }
 
 /// One decode, charged against the request's shared budget.

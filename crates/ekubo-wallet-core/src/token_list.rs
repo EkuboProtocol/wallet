@@ -132,6 +132,14 @@ enum RawList {
     Bare(Vec<RawEntry>),
 }
 
+/// Longest publisher-authored name or timestamp this carries onward.
+///
+/// A list name is a few words and a timestamp is an ISO-8601 instant; this is
+/// far above both, which is the point. It is a ceiling on what an untrusted
+/// curator can put into a response somebody's context window has to hold, not
+/// an opinion about how lists should be labelled.
+const MAX_DECLARED_TEXT_CHARS: usize = 128;
+
 /// What one token-list body turned out to contain.
 #[derive(Debug)]
 pub struct ParsedTokenList {
@@ -243,6 +251,25 @@ fn parse_selecting(
         ),
         RawList::Bare(tokens) => (None, None, None, tokens),
     };
+    // The publisher chose these and they are returned verbatim in a successful
+    // import response, which a model reads and a transcript keeps. Nothing
+    // bounded them: `tool_error` caps what it hands back at
+    // `MAX_TOOL_ERROR_CHARS` precisely because "an RPC or a plan producer
+    // chose it", and a token list is the same kind of text on the path that
+    // succeeds. A curator could put most of an allowed body into `timestamp`
+    // and still ship one valid token.
+    //
+    // `stripped_capped` is the helper that already existed for this, and it
+    // does the other half too: these strings are displayed, and the publisher
+    // picked the characters as well as the length.
+    //
+    // Bounded here rather than at the response, so every reader of a
+    // `ParsedTokenList` gets the same value -- the review that shows a list's
+    // name before an owner accepts it, not only the MCP output.
+    let declared_name =
+        declared_name.map(|name| crate::sanitize::stripped_capped(&name, MAX_DECLARED_TEXT_CHARS));
+    let declared_timestamp = declared_timestamp
+        .map(|stamp| crate::sanitize::stripped_capped(&stamp, MAX_DECLARED_TEXT_CHARS));
     ensure!(!entries.is_empty(), "the token list lists no tokens");
     // The two callers bound different things with this, so it says which.
     // Without a selection the structural cap *is* the import cap; with one it

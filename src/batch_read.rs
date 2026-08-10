@@ -1,7 +1,6 @@
 use crate::{
     abi_decoder::{
         AbiDecodePlan, AbiDecodeResult, DecodeStatus, MAX_RETURN_DATA_BYTES, StructuredDecodeError,
-        decode_abi_result,
     },
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
@@ -120,7 +119,61 @@ pub struct ReadCallsBody {
     pub block_parameter: String,
     #[serde(default)]
     pub from: Option<String>,
+    #[serde(deserialize_with = "bounded_calls")]
     pub calls: Vec<BatchReadCall>,
+}
+
+/// Stop reading the array at the limit rather than after it.
+///
+/// The transport cap bounds a fetched bundle's *bytes*, and 16 MiB of small
+/// calls is a great many calls. `validate_input` refuses anything over
+/// `MAX_BATCH_CALLS` -- but only once `serde_json::from_slice` has built the
+/// whole vector, so a bundle destined to be refused was materialized in full
+/// first, every time it was offered.
+///
+/// Bounded here instead, which is the same move the policy types made: the
+/// limit belongs to the type, so no parse can produce a value that breaks it
+/// and `validate_input`'s check becomes a restatement rather than the only
+/// enforcement. Deserialization now stops on the call after the limit, so the
+/// work is proportional to the limit rather than to the body.
+fn bounded_calls<'de, D>(deserializer: D) -> std::result::Result<Vec<BatchReadCall>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error as _, SeqAccess, Visitor};
+
+    struct Bounded;
+
+    impl<'de> Visitor<'de> for Bounded {
+        type Value = Vec<BatchReadCall>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "at most {MAX_BATCH_CALLS} read calls")
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut calls = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or_default()
+                    .min(MAX_BATCH_CALLS),
+            );
+            while let Some(call) = sequence.next_element()? {
+                if calls.len() == MAX_BATCH_CALLS {
+                    return Err(A::Error::custom(format!(
+                        "read-call bundle carries more than {MAX_BATCH_CALLS} calls"
+                    )));
+                }
+                calls.push(call);
+            }
+            Ok(calls)
+        }
+    }
+
+    deserializer.deserialize_seq(Bounded)
 }
 
 /// Settle the `reference` envelope surface into an effective inline input.
@@ -335,6 +388,11 @@ async fn batch_eth_call_through(
     // without Multicall3 still completes, in a handful of round trips instead
     // of one burst the configured endpoint never agreed to.
     let mut results = Vec::with_capacity(calls.len());
+    // One allowance for the request, not one per call. `decode_abi_result`
+    // mints a fresh budget every time, and this route sends up to
+    // `MAX_BATCH_CALLS` plans, so the documented total was multiplied by the
+    // number of calls instead of shared between them.
+    let mut budget = ekubo_wallet_core::abi_decoder::DecodeBudget::for_request();
     for (chunk_index, chunk) in calls.chunks(MAX_CONCURRENT_INDIVIDUAL_CALLS).enumerate() {
         let offset = chunk_index * MAX_CONCURRENT_INDIVIDUAL_CALLS;
         results.extend(
@@ -351,18 +409,28 @@ async fn batch_eth_call_through(
                     )
                     .await
                     {
-                        Ok(Ok(bytes)) => format_result(call, index, true, &bytes, None),
-                        Ok(Err(_)) | Err(_) => format_result(
-                            call,
+                        // Fetched concurrently, decoded afterwards: the
+                        // decode budget is one allowance for the whole
+                        // request, and a `&mut` to it cannot cross a
+                        // `join_all`. Separating them also puts the network
+                        // fan-out and the CPU work in the right shapes --
+                        // parallel and sequential respectively.
+                        Ok(Ok(bytes)) => (index, true, bytes, None),
+                        Ok(Err(_)) | Err(_) => (
                             index,
                             false,
-                            &Bytes::new(),
+                            Bytes::new(),
                             Some("eth_call failed or reverted".into()),
                         ),
                     }
                 }
             }))
-            .await,
+            .await
+            .into_iter()
+            .map(|(index, success, bytes, error)| {
+                format_result(&calls[index], index, success, &bytes, error, &mut budget)
+            })
+            .collect::<Vec<_>>(),
         );
     }
     Ok(BatchEthCallOutput {
@@ -448,12 +516,20 @@ async fn fork_batch_eth_call(
             decoded.len() == calls.len(),
             "fork Multicall3 returned an unexpected result count"
         );
+        let mut budget = ekubo_wallet_core::abi_decoder::DecodeBudget::for_request();
         decoded
             .iter()
             .zip(calls)
             .enumerate()
             .map(|(index, (result, call))| {
-                format_result(call, index, result.success, &result.returnData, None)
+                format_result(
+                    call,
+                    index,
+                    result.success,
+                    &result.returnData,
+                    None,
+                    &mut budget,
+                )
             })
             .collect()
     } else {
@@ -461,6 +537,7 @@ async fn fork_batch_eth_call(
             outcome.results.len() == calls.len(),
             "fork eth_simulateV1 returned an unexpected result count"
         );
+        let mut budget = ekubo_wallet_core::abi_decoder::DecodeBudget::for_request();
         outcome
             .results
             .iter()
@@ -473,6 +550,7 @@ async fn fork_batch_eth_call(
                     result.status,
                     &result.return_data,
                     (!result.status).then(|| "call failed or reverted on the fork".into()),
+                    &mut budget,
                 )
             })
             .collect()
@@ -575,13 +653,21 @@ async fn try_multicall<P: Provider>(
     if decoded.len() != calls.len() {
         return None;
     }
+    let mut budget = ekubo_wallet_core::abi_decoder::DecodeBudget::for_request();
     Some(
         decoded
             .iter()
             .zip(calls)
             .enumerate()
             .map(|(index, (result, call))| {
-                format_result(call, index, result.success, &result.returnData, None)
+                format_result(
+                    call,
+                    index,
+                    result.success,
+                    &result.returnData,
+                    None,
+                    &mut budget,
+                )
             })
             .collect(),
     )
@@ -593,6 +679,7 @@ fn format_result(
     success: bool,
     bytes: &Bytes,
     error: Option<String>,
+    budget: &mut ekubo_wallet_core::abi_decoder::DecodeBudget,
 ) -> BatchCallResult {
     // The endpoint chooses this length, and hex-encoding doubles it before it
     // is handed back. `validate_return_data` applies the same ceiling on the
@@ -640,10 +727,11 @@ fn format_result(
         decode_errors,
         semantic_errors,
         return_data,
-    } = decode_abi_result(
+    } = ekubo_wallet_core::abi_decoder::decode_abi_result_within(
         &raw,
         call.decode.as_ref().expect("checked above"),
         call.include_raw,
+        budget,
     );
     BatchCallResult {
         index,

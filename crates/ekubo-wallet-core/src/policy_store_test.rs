@@ -742,3 +742,103 @@ mod database_lock_tests {
         );
     }
 }
+
+mod first_policy_clears_residue_tests {
+    //! A name that had no policy has no queue of its own to lose.
+
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, PolicyStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("policies.db");
+        let database = PolicyStore::open(&path, &DatabaseKey::new([5; 32])).unwrap();
+        (directory, database)
+    }
+
+    /// `purge` runs at wallet creation, but only after a *successful* custody
+    /// create -- and the repair route the half-provisioned error message points
+    /// at, `ekubo-wallet policy require-approval <id>`, reaches `put` without
+    /// it. So a removal whose purge failed, or a creation interrupted between
+    /// the credential and the policy, left the queues and any proposal in place
+    /// under a name that a different key now answers to. The replacement could
+    /// then be shown its predecessor's message or typed-data request and sign
+    /// it after an ordinary review.
+    ///
+    /// A wallet with no policy cannot sign anything, so nothing here belongs to
+    /// it: everything under the name is the predecessor's.
+    #[test]
+    fn installing_a_first_policy_clears_what_the_name_still_held() {
+        let (_directory, mut database) = store();
+        database
+            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .unwrap();
+        database
+            .put_proposal(
+                "primary",
+                1,
+                &WalletPolicy::require_approval_for_everything(),
+                "tighten it",
+            )
+            .unwrap();
+        assert!(database.proposal("primary").unwrap().is_some());
+
+        // The wallet is retired, but the purge that should follow does not
+        // land -- a database that would not open, a commit that failed.
+        database
+            .connection
+            .execute(
+                "DELETE FROM wallet_policies WHERE wallet_id = ?1",
+                ["primary"],
+            )
+            .unwrap();
+        assert!(
+            database.proposal("primary").unwrap().is_some(),
+            "the proposal outlived the policy, which is the state this is about"
+        );
+
+        // A replacement takes the name and its policy is installed -- through
+        // the repair route, which does not purge.
+        database
+            .put(
+                "primary",
+                &WalletPolicy::require_approval_for_everything(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            database.proposal("primary").unwrap().is_none(),
+            "the predecessor's proposal must not survive into the replacement"
+        );
+    }
+
+    /// And an ordinary policy update leaves everything alone. Clearing on
+    /// every write would discard the queues of a wallet that is merely
+    /// tightening its own policy, which is the common case.
+    #[test]
+    fn replacing_an_existing_policy_keeps_the_wallets_own_state() {
+        let (_directory, mut database) = store();
+        let first = database
+            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .unwrap();
+        database
+            .put_proposal(
+                "primary",
+                first.revision,
+                &WalletPolicy::require_approval_for_everything(),
+                "tighten it",
+            )
+            .unwrap();
+
+        database
+            .put(
+                "primary",
+                &WalletPolicy::require_approval_for_everything(),
+                Some(first.revision),
+            )
+            .unwrap();
+        assert!(
+            database.proposal("primary").unwrap().is_some(),
+            "a wallet updating its own policy keeps its own pending state"
+        );
+    }
+}

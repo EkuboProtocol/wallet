@@ -385,3 +385,48 @@ async fn an_unwritable_data_directory_still_answers() {
     assert!(check.update_available);
     assert_eq!(check.latest_version.as_deref(), Some("v1.5.0"));
 }
+
+mod bounded_body_tests {
+    //! `content_length` is a courtesy the server extends, not a fact.
+
+    /// The header check refuses the honest oversized case before a byte is
+    /// read, which is worth keeping. It says nothing about a server that omits
+    /// the header -- chunked encoding does -- or states one length and sends
+    /// another, and `text()` then buffered whatever arrived.
+    ///
+    /// Read from the source because standing up a lying HTTP server for a
+    /// best-effort update check is a great deal of machinery for one loop.
+    /// What is checkable is that the body is accumulated against the ceiling
+    /// rather than handed to `text()`.
+    #[test]
+    fn the_body_is_read_against_the_ceiling_rather_than_buffered() {
+        let source = include_str!("release_check.rs");
+        let fetch = source
+            .split_once("async fn fetch_latest_tag")
+            .expect("the fetch exists")
+            .1;
+        let body = fetch.split_once("\n}").expect("its body ends").0;
+        assert!(
+            !body.contains(".text().await"),
+            "an unbounded read is what this replaced"
+        );
+        assert!(
+            body.contains("bounded_body(response)"),
+            "the body goes through the ceiling"
+        );
+
+        let bounded = source
+            .split_once("async fn bounded_body")
+            .expect("the helper exists")
+            .1;
+        assert!(
+            bounded.contains("MAX_RESPONSE_BYTES"),
+            "and the ceiling is the one already declared for this"
+        );
+        assert!(
+            bounded.contains("return None"),
+            "an oversized body is abandoned rather than truncated: a partial \
+             JSON document is not a release"
+        );
+    }
+}

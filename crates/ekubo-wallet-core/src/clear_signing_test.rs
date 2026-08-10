@@ -235,3 +235,51 @@ mod vendored_embedding_tests {
         }
     }
 }
+
+mod token_reference_bound_tests {
+    //! What a review looks up follows the calldata, so it needs a ceiling.
+
+    use super::*;
+
+    /// The provider recorded every callback into a `Vec` while the caller
+    /// deduplicated afterwards, so a descriptor walking dynamic arrays --
+    /// `swaps.[].route.[].poolKey.token0` is three levels of them -- turned
+    /// attacker-chosen calldata into unbounded recording, and the
+    /// deduplication happened after the allocation rather than instead of it.
+    #[tokio::test]
+    async fn recording_deduplicates_and_stops_at_the_ceiling() {
+        let recorder = RecordingProvider::default();
+
+        // The same address a thousand times is one token.
+        let repeated = format!("{:#x}", Address::repeat_byte(0x11));
+        for _ in 0..1_000 {
+            let _ = recorder.resolve_token(1, &repeated).await;
+        }
+        assert_eq!(
+            recorder.0.lock().unwrap().len(),
+            1,
+            "a set records one address once"
+        );
+
+        // Distinct addresses are as cheap for an attacker to produce, so they
+        // are bounded too.
+        for index in 0..(MAX_TOKEN_REFERENCES as u64 * 2) {
+            let address = Address::from_word(alloy::primitives::U256::from(index).into());
+            let _ = recorder.resolve_token(1, &format!("{address:#x}")).await;
+        }
+        assert_eq!(
+            recorder.0.lock().unwrap().len(),
+            MAX_TOKEN_REFERENCES,
+            "recording stops at the ceiling rather than following the calldata"
+        );
+    }
+
+    /// Unparseable addresses are ignored rather than recorded, which is the
+    /// behaviour that was already there and must survive the change to a set.
+    #[tokio::test]
+    async fn an_unparseable_address_records_nothing() {
+        let recorder = RecordingProvider::default();
+        let _ = recorder.resolve_token(1, "not-an-address").await;
+        assert!(recorder.0.lock().unwrap().is_empty());
+    }
+}

@@ -287,3 +287,84 @@ fn serializes_named_tuple_as_object() {
         Some(json!({"owner": address.to_checksum(None), "amount": "7"}))
     );
 }
+
+mod shared_budget_tests {
+    //! The total is a total, on the route that can send many plans at once.
+
+    use super::*;
+
+    /// `decode_abi_result` mints a fresh allowance every call, and the batch
+    /// route sends up to `MAX_BATCH_CALLS` of them, so the documented
+    /// request-wide ceiling was multiplied by the number of calls rather than
+    /// shared between them. The budget's own doc comment says a shared budget
+    /// "is what makes the two caps compose instead of multiply" -- true of one
+    /// call, and not of a batch.
+    #[test]
+    fn a_shared_budget_is_spent_across_calls_rather_than_reset() {
+        let plan = AbiDecodePlan::AbiParameters {
+            parameters: Vec::new(),
+            semantic_codecs: Vec::new(),
+            required: false,
+        };
+
+        // Every decode charges the shared allowance, so the total is reached
+        // by enough calls even though no single one comes near it.
+        let mut shared = DecodeBudget::for_request();
+        for _ in 0..MAX_TOTAL_DECODES {
+            let _ = decode_abi_result_within("0x", &plan, false, &mut shared);
+        }
+        let exhausted = decode_abi_result_within("0x", &plan, false, &mut shared);
+        assert!(
+            exhausted
+                .decode_error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("decode budget")),
+            "the allowance runs out: {:?}",
+            exhausted.decode_error
+        );
+
+        // A fresh request starts with its own, which is what every call in a
+        // batch used to get for free.
+        let mut fresh = DecodeBudget::for_request();
+        let first = decode_abi_result_within("0x", &plan, false, &mut fresh);
+        assert!(
+            first
+                .decode_error
+                .as_ref()
+                .is_none_or(|error| !error.message.contains("decode budget")),
+            "a new request has its own allowance"
+        );
+    }
+
+    /// Exhaustion is a reported decode failure rather than an error for the
+    /// request: the reads still happened, and their raw results still come
+    /// back.
+    #[test]
+    fn running_out_reports_rather_than_fails() {
+        let plan = AbiDecodePlan::AbiParameters {
+            parameters: Vec::new(),
+            semantic_codecs: Vec::new(),
+            required: false,
+        };
+        let mut spent = DecodeBudget::for_request();
+        for _ in 0..=MAX_TOTAL_DECODES {
+            let _ = decode_abi_result_within("0x", &plan, true, &mut spent);
+        }
+        let result = decode_abi_result_within("0x", &plan, true, &mut spent);
+        assert!(
+            result
+                .decode_error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("decode budget")),
+            "the refusal is reported on the result"
+        );
+        // And the read itself is still returned. Running out of decode
+        // allowance is not a reason to withhold what the endpoint answered:
+        // `usable` stays true for an optional decode, which is the decoder's
+        // existing semantics rather than anything this changed.
+        assert!(
+            result.return_data.is_some(),
+            "the raw result survives a decode that could not run"
+        );
+    }
+}

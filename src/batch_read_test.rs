@@ -102,7 +102,14 @@ fn inline_decoder_omits_raw_only_after_success() {
         }),
         include_raw: false,
     };
-    let result = format_result(&normalized, 0, true, &raw.into(), None);
+    let result = format_result(
+        &normalized,
+        0,
+        true,
+        &raw.into(),
+        None,
+        &mut ekubo_wallet_core::abi_decoder::DecodeBudget::for_request(),
+    );
     assert_eq!(result.decode_status, BatchDecodeStatus::Decoded);
     assert_eq!(result.decoded, Some(Value::String("7".into())));
     assert!(result.return_data.is_none());
@@ -290,4 +297,54 @@ async fn live_multicall_is_block_pinned_and_decoded_locally() {
             .parse::<U256>()
             .is_ok()
     );
+}
+
+mod bounded_bundle_tests {
+    //! A fetched bundle's size is bounded by the limit, not by the transport.
+
+    use super::*;
+
+    fn bundle(calls: usize) -> String {
+        let call = serde_json::json!({
+            "to": "0x2222222222222222222222222222222222222222",
+            "data": "0x"
+        });
+        serde_json::json!({
+            "chain_id": "1",
+            "calls": vec![call; calls]
+        })
+        .to_string()
+    }
+
+    /// The transport cap bounds bytes, and 16 MiB of small calls is a great
+    /// many calls. `validate_input` refuses anything over the limit -- but
+    /// only after `from_slice` has built the whole vector, so a bundle
+    /// destined to be refused was materialized in full first, every time it
+    /// was offered.
+    #[test]
+    fn a_bundle_over_the_limit_is_refused_while_being_read() {
+        let error = serde_json::from_str::<ReadCallsBody>(&bundle(MAX_BATCH_CALLS + 1))
+            .expect_err("a bundle this size is not one this tool accepts");
+        assert!(
+            error.to_string().contains("more than"),
+            "the refusal names the limit: {error}"
+        );
+    }
+
+    /// A bundle at the limit still parses, so the bound is the documented one
+    /// rather than one off it.
+    #[test]
+    fn a_bundle_at_the_limit_is_still_read() {
+        let body = serde_json::from_str::<ReadCallsBody>(&bundle(MAX_BATCH_CALLS))
+            .expect("the limit is inclusive");
+        assert_eq!(body.calls.len(), MAX_BATCH_CALLS);
+    }
+
+    /// And the ordinary case is untouched.
+    #[test]
+    fn an_ordinary_bundle_reads_as_before() {
+        let body = serde_json::from_str::<ReadCallsBody>(&bundle(3)).unwrap();
+        assert_eq!(body.calls.len(), 3);
+        assert_eq!(body.chain_id, "1");
+    }
 }
