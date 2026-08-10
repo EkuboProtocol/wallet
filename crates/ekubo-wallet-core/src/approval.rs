@@ -118,20 +118,45 @@ pub enum ApprovalDecision {
     Rejected,
 }
 
-/// Proof that a live human is present at an interactive terminal.
+/// Evidence that this process is attached to a terminal.
 ///
-/// This is a capability, not a flag: it cannot be cloned, has no default,
-/// and its only production constructor requires stdin, stdout, and stderr to
-/// all be terminals. [`crate::execution::SigningOverrides::human`] — the only
-/// way to sign a plan no policy rule covers, or one whose simulation failed —
-/// demands one, so
-/// no headless caller (the MCP server runs over stdio pipes) can mint the
-/// overrides at all. Grep for `from_terminal` to enumerate every place a
-/// human override can originate.
+/// A capability rather than a flag: it cannot be cloned, has no default, and
+/// its only production constructor requires stdin, stdout, and stderr to all
+/// be terminals. [`crate::execution::SigningOverrides::human`] — the only way
+/// to sign a plan no policy rule covers, or one whose simulation failed —
+/// demands one. Grep for `from_terminal` to enumerate every place a human
+/// override can originate.
+///
+/// # What this does not prove
+///
+/// It used to say that no headless caller could mint the overrides at all.
+/// That is not true, and V12 run 6304 (finding 203267) is the correction: any
+/// local process can allocate a pseudoterminal, attach all three descriptors
+/// to it, and satisfy every check below. The MCP server cannot — it runs over
+/// stdio pipes — but "runs over pipes" is a property of that one caller, not a
+/// property this type enforces.
+///
+/// So the honest reading is: this establishes that the three standard
+/// descriptors are terminals. It does not establish that a person is reading
+/// them, and nothing in this crate can. What still stands between a
+/// pseudoterminal-backed process and an exceptional signature is the platform
+/// owner-authentication prompt in [`crate::human_presence`], which is a real
+/// human gate — but it names the wallet and the operation, not the target,
+/// value, calldata, or simulation findings the review document carries.
+///
+/// The remaining gap is behavioural and is recorded as known work in
+/// `audits/v12-run-6304.md`: `ekubo-wallet review --decision approve` prints
+/// the document and then answers its own question, so the exceptional path can
+/// complete without any decision being collected from the terminal this type
+/// insists on. Closing that means requiring a keystroke there, which removes a
+/// documented affordance and is the maintainer's call.
 pub struct InteractiveProof(());
 
 impl InteractiveProof {
     /// The only production constructor.
+    ///
+    /// See the type's own documentation for what these three checks establish
+    /// and what they do not: a pseudoterminal satisfies all of them.
     pub fn from_terminal() -> Result<Self> {
         ensure!(
             std::io::stdin().is_terminal()
