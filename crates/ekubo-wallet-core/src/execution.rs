@@ -6,7 +6,7 @@ use crate::{
     },
     custody::{KeyStore, load_matching_signer},
     rpc::{rpc_error, transaction_receipt},
-    simulation::{CANONICAL_CALIBUR, ExecutionMode, SimulationResult, planned_call},
+    simulation::{CANONICAL_CALIBUR, ExecutionMode, PlannedCall, SimulationResult, planned_call},
 };
 use alloy::{
     consensus::{
@@ -264,7 +264,23 @@ pub async fn prepare_execution(
     // cared to name.
     let max_fee_per_gas = capped_fee(network, max_fee_per_gas)?;
     let max_priority_fee_per_gas = max_priority_fee_per_gas.min(max_fee_per_gas);
-    if simulation.will_authorize_delegation {
+    // The delegation the authorization is decided against is read here, not
+    // taken from the simulation.
+    //
+    // A recorded simulation can be sent minutes after it was produced, and
+    // nothing between the two rereads the account's code: `validate_send`
+    // checks the wallet, the chain, the policy revision, the plan digest, and
+    // the fork flag, and none of those move when a delegation does. So the
+    // batch could be signed against an implementation that was never simulated
+    // and never reviewed — or, if the delegation had been removed, spend a
+    // nonce on a batch that cannot execute.
+    //
+    // A failed simulation is worse still: `base_failure_result` asserts
+    // `will_authorize_delegation` from the execution mode alone, having
+    // observed nothing at all, and that result is exactly the one a human is
+    // asked to override.
+    let authorize_delegation = delegation_at_send(wallet, network, &planned, simulation).await?;
+    if authorize_delegation {
         prepared
             .1
             .checked_add(1)
@@ -278,9 +294,77 @@ pub async fn prepare_execution(
         max_fee_per_gas,
         max_priority_fee_per_gas,
         planned,
-        authorize_delegation: simulation.will_authorize_delegation,
+        authorize_delegation,
         plan_digest: simulation.digest.clone(),
     })
+}
+
+/// Whether this send should carry an EIP-7702 authorization, decided against
+/// the account's delegation as it is now rather than as it was simulated.
+///
+/// Returns the authorization decision, and refuses outright when the *reviewed*
+/// delegation context has changed: a plan simulated against no delegation, or
+/// against one particular implementation, was reviewed on that basis, and a
+/// different one at send time is a different transaction than the one anybody
+/// agreed to. Recomputing the flag silently would sign it anyway.
+async fn delegation_at_send(
+    wallet: &WalletMetadata,
+    network: &NetworkConfig,
+    planned: &PlannedCall,
+    simulation: &SimulationResult,
+) -> Result<bool> {
+    if planned.mode != ExecutionMode::CaliburBatch {
+        // A direct call never authorizes anything, and `sign_prepared` refuses
+        // the combination outright.
+        return Ok(false);
+    }
+    let code = crate::rpc::try_endpoints(network, |provider| async move {
+        tokio::time::timeout(RPC_TIMEOUT, provider.get_code_at(wallet.address))
+            .await
+            .context("delegation recheck RPC timed out")?
+            .map_err(|error| rpc_error(&error))
+    })
+    .await?;
+    authorization_for_send(
+        &code,
+        wallet.address,
+        simulation.replaces_delegated_implementation.as_deref(),
+    )
+}
+
+/// The decision [`delegation_at_send`] makes, without the request that feeds
+/// it: given the account's code as it is now and the delegation the simulation
+/// was evaluated against, whether to authorize — or whether the context moved
+/// far enough that nothing should be signed.
+///
+/// Separate so every branch is testable without a stub endpoint. The branch
+/// that mattered had no test at all, because it only exists between a
+/// simulation and a send that happen at different times.
+pub(crate) fn authorization_for_send(
+    code: &alloy::primitives::Bytes,
+    wallet: alloy::primitives::Address,
+    recorded_replaces: Option<&str>,
+) -> Result<bool> {
+    let (authorize, replaces) = match crate::rpc::delegated_implementation(code) {
+        // Already delegated to the implementation this batch targets, so the
+        // authorization would be a no-op that still consumes a nonce.
+        Some(address) if address == CANONICAL_CALIBUR => (false, None),
+        Some(address) => (true, Some(format!("{address:#x}"))),
+        None if code.is_empty() => (true, None),
+        None => bail!(
+            "wallet {wallet} has code that is not an EIP-7702 delegation designator, so this \
+             batch cannot be sent"
+        ),
+    };
+    ensure!(
+        replaces.as_deref() == recorded_replaces,
+        "the account's EIP-7702 delegation changed after this plan was simulated: the simulation \
+         was evaluated against {}, and the account now has {}. Simulate the plan again and send \
+         the new simulation.",
+        recorded_replaces.unwrap_or("no delegation to replace"),
+        replaces.as_deref().unwrap_or("no delegation to replace")
+    );
+    Ok(authorize)
 }
 
 /// Load the key and sign exactly the already-reviewed preparation fields.

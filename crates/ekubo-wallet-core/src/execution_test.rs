@@ -408,3 +408,58 @@ fn a_configured_fee_ceiling_refuses_an_endpoint_that_names_more() {
     network.max_fee_per_gas = Some("not a number".into());
     assert!(capped_fee(&network, 1).is_err());
 }
+
+/// The window between recording a simulation and sending it. Nothing in
+/// `validate_send` moves when a delegation does -- it checks the wallet, the
+/// chain, the policy revision, the plan digest, and the fork flag -- so the
+/// batch used to be signed against whatever `will_authorize_delegation` said
+/// minutes earlier.
+#[test]
+fn a_delegation_that_moved_after_simulation_refuses_the_send() {
+    use alloy::primitives::{Address, Bytes};
+
+    let wallet = Address::repeat_byte(0x11);
+    let other = Address::repeat_byte(0x22);
+    let designator = |address: Address| {
+        let mut bytes = vec![0xef, 0x01, 0x00];
+        bytes.extend_from_slice(address.as_slice());
+        Bytes::from(bytes)
+    };
+    let empty = Bytes::new();
+
+    // Undelegated at simulation and still undelegated: authorize, as before.
+    assert!(authorization_for_send(&empty, wallet, None).unwrap());
+
+    // Already delegated to the implementation this batch targets. The
+    // authorization would be a no-op that still consumes a nonce.
+    assert!(
+        !authorization_for_send(&designator(CANONICAL_CALIBUR), wallet, None).unwrap(),
+        "an account already delegated to Calibur must not pay for a second authorization"
+    );
+
+    // Simulated against no delegation, but the account acquired one in the
+    // meantime. The batch would replace an implementation nobody reviewed.
+    let error = format!(
+        "{:#}",
+        authorization_for_send(&designator(other), wallet, None)
+            .expect_err("a delegation that appeared after simulation must stop the send")
+    );
+    assert!(error.contains("delegation changed"), "{error}");
+    assert!(error.contains("Simulate the plan again"), "{error}");
+
+    // And the reverse: reviewed as replacing `other`, but it is gone now.
+    let error = format!(
+        "{:#}",
+        authorization_for_send(&empty, wallet, Some(&format!("{other:#x}")))
+            .expect_err("a delegation that vanished after simulation must stop the send")
+    );
+    assert!(error.contains("delegation changed"), "{error}");
+
+    // Reviewed as replacing `other`, and that is still what is there.
+    assert!(
+        authorization_for_send(&designator(other), wallet, Some(&format!("{other:#x}"))).unwrap()
+    );
+
+    // Code that is not a designator at all is not something to sign against.
+    assert!(authorization_for_send(&Bytes::from(vec![0x60, 0x00]), wallet, None).is_err());
+}
