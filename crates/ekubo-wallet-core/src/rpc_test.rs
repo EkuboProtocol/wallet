@@ -602,3 +602,52 @@ fn a_quorum_verdict_refuses_any_tally_that_contains_a_contradiction() {
     assert_eq!(quorum_verdict(&[1], 2), QuorumVerdict::TooFewWitnesses(1));
     assert_eq!(quorum_verdict(&[], 2), QuorumVerdict::TooFewWitnesses(0));
 }
+
+/// The pin the whole quorum simulates against, chosen by one stale endpoint.
+///
+/// `median_head` stopped sampling at `required`, so with `m_of_n(2)` over
+/// three endpoints the first two answers *were* the sample. One stale endpoint
+/// answering alongside one current endpoint is half of it, the lower median
+/// takes the stale height, and the honest third endpoint never contributes.
+/// Every remaining endpoint is then held to that height and agrees honestly
+/// about it -- a real quorum over the attacker's choice of state.
+#[tokio::test]
+async fn median_head_samples_every_endpoint_not_the_first_to_answer() {
+    let (stale, _a) = stub_endpoint(7, 100);
+    let (current, _b) = stub_endpoint(7, 300);
+    let (also_current, _c) = stub_endpoint(7, 300);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![stale, current, also_current],
+    );
+    assert_eq!(
+        median_head(&network).await.unwrap(),
+        Some(300),
+        "a single stale endpoint must not choose the height two honest ones disagree with"
+    );
+}
+
+/// The same sampling bug on the fee path, where the number reaches the chain
+/// rather than the screen: `gas_limit x max_fee_per_gas` is what an automatic
+/// transaction can lose to an endpoint that answers dishonestly.
+#[tokio::test]
+async fn median_fee_estimate_samples_every_endpoint_not_the_first_to_answer() {
+    // The liar answers low and answers first. `median` takes the lower of the
+    // two middle values, so in a truncated two-endpoint sample the low answer
+    // *is* the median -- and the honest third endpoint, which would have
+    // carried it, was never asked. A fee estimate driven under the market
+    // leaves an automatic transaction stuck in the mempool holding the
+    // wallet's one in-flight slot for that chain.
+    let (understated, _a) = fee_history_stub(10, 1); // max_fee 21, priority 1
+    let (market, _b) = fee_history_stub(1_000, 100); // max_fee 2100, priority 100
+    let (also_market, _c) = fee_history_stub(1_000, 100);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![understated, market, also_market],
+    );
+    assert_eq!(
+        median_fee_estimate(&network, 0, 0).await.unwrap(),
+        (2100, 100),
+        "one endpoint answering below the market must not choose the fee two others disagree with"
+    );
+}

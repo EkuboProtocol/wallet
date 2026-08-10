@@ -302,10 +302,9 @@ pub async fn median_fee_estimate(
     let mut failures = Vec::new();
     let mut max_fees = Vec::new();
     let mut priority_fees = Vec::new();
+    // Every configured endpoint votes, not the first `required` to answer.
+    // See `median_head` below for why stopping early defeats the median.
     for endpoint in endpoint_order(network) {
-        if max_fees.len() >= required {
-            break;
-        }
         match tokio::time::timeout(
             FEE_ESTIMATE_TIMEOUT,
             provider_for(endpoint).estimate_eip1559_fees(),
@@ -350,10 +349,21 @@ pub async fn median_head(network: &NetworkConfig) -> Result<Option<u64>> {
         return Ok(None);
     }
     let mut heads = Vec::new();
+    // Every configured endpoint votes, not the first `required` to answer.
+    //
+    // "A median with a majority honest is a height an honest endpoint
+    // reported, and one liar moves it by at most a position" is only true of a
+    // median over the whole set. Stopping at `required` made the sample the
+    // first responders, and a liar is fast — with `m_of_n(2)` over three
+    // endpoints, one stale endpoint answering alongside one current endpoint
+    // is half the sample, the lower median takes the stale height, and the
+    // honest third endpoint is never asked. Every other endpoint then
+    // simulates against the state the liar chose, agrees honestly about it,
+    // and the quorum is real while the thing agreed on is the attacker's.
+    //
+    // This is the same mistake `agree_across_endpoints` made, fixed the same
+    // way and at the same cost: one request per configured endpoint.
     for endpoint in endpoint_order(network) {
-        if heads.len() >= required {
-            break;
-        }
         if let Ok(Ok(number)) = tokio::time::timeout(
             FEE_ESTIMATE_TIMEOUT,
             provider_for(endpoint).get_block_number(),
