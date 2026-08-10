@@ -78,3 +78,35 @@ fn unicode_line_separators_do_not_survive_a_one_line_value() {
     assert!(!'\u{2028}'.is_control());
     assert!(!'\u{2029}'.is_control());
 }
+
+/// The hand-maintained list had gaps, and each gap is a character that occupies
+/// no width or changes the glyph of the one before it -- in text a person reads
+/// to decide whether to sign.
+#[test]
+fn the_invisible_set_covers_the_glyph_changers_too() {
+    for character in [
+        '\u{034f}',  // combining grapheme joiner
+        '\u{2065}',  // unassigned, inside the format block
+        '\u{206a}',  // deprecated: inhibit symmetric swapping
+        '\u{206f}',  // deprecated: nominal digit shapes
+        '\u{fe00}',  // variation selector-1
+        '\u{fe0f}',  // variation selector-16, the emoji presentation selector
+        '\u{fff9}',  // interlinear annotation anchor
+        '\u{fffb}',  // interlinear annotation terminator
+        '\u{e0100}', // variation selector-17
+    ] {
+        assert!(
+            is_invisible_format(character),
+            "U+{:04X} renders as nothing of its own and must not survive",
+            character as u32
+        );
+        assert!(is_disallowed(character));
+    }
+
+    // A variation selector can give a familiar label an unfamiliar face
+    // without adding a visible character, so the label a person recognises and
+    // the bytes that were stored are no longer the same thing.
+    assert_eq!(terminal_safe_line("USDC\u{fe0f}"), "USDC ");
+    // And a grapheme joiner splits a run that still reads as one word.
+    assert_eq!(terminal_safe_line("US\u{034f}DC"), "US DC");
+}

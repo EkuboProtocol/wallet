@@ -37,17 +37,35 @@ pub const fn is_bidirectional_control(character: char) -> bool {
 /// Excluding the zero-width joiners costs correct rendering of scripts that
 /// need them and of emoji sequences. That is a real loss, taken deliberately:
 /// these helpers guard identifiers, amounts, and addresses — text where being
-/// unable to see a character is the whole attack — not prose.
+/// unable to see a character is the whole attack — not prose. The variation
+/// selectors are excluded for the same reason and at the same cost: they
+/// choose which glyph a preceding character wears, so two byte-distinct
+/// values can be made to render identically or a familiar label given an
+/// unfamiliar face, and neither is visible as a character of its own.
+///
+/// This is a denylist, which is the standing weakness of it: everything here
+/// was added because somebody noticed. `std` exposes no Unicode general
+/// category, so the honest alternatives are this list or a `unicode-*`
+/// dependency that carries the Cf and Mn tables. If the list grows again,
+/// that dependency is the better answer — the characters that matter here are
+/// exactly general categories Cf and Mn, and enumerating them by hand will
+/// keep losing to the next revision of the standard.
 #[must_use]
 pub const fn is_invisible_format(character: char) -> bool {
     matches!(
         character,
         '\u{00ad}'                  // soft hyphen
+            | '\u{034f}'            // combining grapheme joiner
             | '\u{180e}'            // Mongolian vowel separator
             | '\u{200b}'..='\u{200d}' // zero-width space, non-joiner, joiner
             | '\u{2060}'..='\u{2064}' // word joiner and invisible operators
+            | '\u{2065}'            // unassigned, but inside the format block
+            | '\u{206a}'..='\u{206f}' // deprecated format characters
+            | '\u{fe00}'..='\u{fe0f}' // variation selectors
             | '\u{feff}'            // zero-width no-break space / BOM
+            | '\u{fff9}'..='\u{fffb}' // interlinear annotation
             | '\u{e0000}'..='\u{e007f}' // tag characters
+            | '\u{e0100}'..='\u{e01ef}' // variation selectors supplement
     )
 }
 

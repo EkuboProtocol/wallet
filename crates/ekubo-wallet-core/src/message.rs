@@ -239,6 +239,15 @@ pub fn describe_message(message: &[u8]) -> MessageDisplay {
                         .into(),
                 );
             }
+            if text.chars().any(crate::sanitize::is_invisible_format) {
+                warnings.push(
+                    "The message contains invisible or glyph-changing Unicode characters. \
+                     They are shown escaped here; rendered raw they occupy no width, or \
+                     change how the character before them looks, without changing a byte \
+                     of what gets signed."
+                        .into(),
+                );
+            }
             if looks_hexadecimal(text) {
                 warnings.push(
                     "The message is a bare hexadecimal string. The EIP-191 prefix keeps it \
@@ -266,7 +275,14 @@ fn looks_hexadecimal(text: &str) -> bool {
 fn escape_for_display(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control() || is_bidirectional_control(character) {
+        // The shared predicate, not a narrower copy of part of it. This one
+        // tested controls and bidi only, so every invisible-format character
+        // -- a zero-width space splitting a word, a variation selector
+        // changing a glyph, a tag block encoding a whole ASCII string --
+        // passed through unescaped into the text a person reads before
+        // signing it. That is the display where being unable to see a
+        // character is the entire attack.
+        if crate::sanitize::is_disallowed(character) {
             // Infallible: writing to a String never fails.
             let _ = write!(escaped, "\\u{{{:04x}}}", character as u32);
         } else {
