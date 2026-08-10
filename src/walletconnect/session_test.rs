@@ -154,7 +154,7 @@ fn namespace(chains: Option<&[&str]>, methods: &[&str], events: &[&str]) -> Prop
 /// narrows what gets settled.
 #[test]
 fn a_proposal_nobody_could_read_is_refused_rather_than_trimmed() {
-    let many: Vec<String> = (0..MAX_PROPOSAL_ENTRIES)
+    let many: Vec<String> = (0..MAX_PROPOSAL_CHARACTERS / 8)
         .map(|n| format!("eth_{n}"))
         .collect();
     let borrowed: Vec<&str> = many.iter().map(String::as_str).collect();
@@ -164,7 +164,7 @@ fn a_proposal_nobody_could_read_is_refused_rather_than_trimmed() {
     );
     let refusal = oversized_refusal(&flood).expect("a flood was accepted for review");
     assert!(
-        refusal.contains(&MAX_PROPOSAL_ENTRIES.to_string()),
+        refusal.contains(&MAX_PROPOSAL_CHARACTERS.to_string()),
         "{refusal}"
     );
 
@@ -181,6 +181,53 @@ fn a_proposal_nobody_could_read_is_refused_rather_than_trimmed() {
         Vec::new(),
     );
     assert!(oversized_refusal(&ordinary).is_none());
+
+    // And neither is the wordiest legitimate shape: a multichain dapp naming
+    // every chain as its own namespace key, repeating its method list under
+    // each one. Sixty-four of those is the compatibility edge this bound was
+    // chosen against, so it is pinned here rather than asserted in a comment.
+    let keys: Vec<String> = (0..64).map(|n| format!("eip155:{}", 40_000 + n)).collect();
+    let aggregator: Vec<(&str, ProposalNamespace)> = keys
+        .iter()
+        .map(|key| {
+            (
+                key.as_str(),
+                namespace(
+                    None,
+                    &[
+                        "eth_sendTransaction",
+                        "personal_sign",
+                        "eth_signTypedData_v4",
+                        "wallet_switchEthereumChain",
+                        "wallet_sendCalls",
+                    ],
+                    &["chainChanged", "accountsChanged"],
+                ),
+            )
+        })
+        .collect();
+    assert!(oversized_refusal(&proposal(aggregator, Vec::new())).is_none());
+}
+
+/// The dapp chooses how many strings it sends *and* how long each one is, so a
+/// bound on either alone is a bound on neither. A handful of enormous method
+/// names is the same wall of text as ten thousand short ones, and counting
+/// entries admits it: the second proposal here holds four methods.
+#[test]
+fn a_few_enormous_names_are_as_unreadable_as_many_small_ones() {
+    let enormous = "eth_".to_owned() + &"a".repeat(MAX_PROPOSAL_CHARACTERS / 2);
+    let padded = proposal(
+        vec![(
+            "eip155",
+            namespace(
+                Some(&["eip155:1"]),
+                &[&enormous, &enormous, &enormous, &enormous],
+                &["chainChanged"],
+            ),
+        )],
+        Vec::new(),
+    );
+    assert!(oversized_refusal(&padded).is_some());
 }
 
 /// The count is over the whole proposal rather than per field, so spreading
@@ -188,8 +235,8 @@ fn a_proposal_nobody_could_read_is_refused_rather_than_trimmed() {
 /// does not get under it.
 #[test]
 fn the_count_is_over_everything_a_proposal_asks_for() {
-    // Each namespace is itself, one chain, one method, and one event.
-    let keys: Vec<String> = (0..=MAX_PROPOSAL_ENTRIES / 4)
+    // Each namespace draws its key, one chain, one method, and one event.
+    let keys: Vec<String> = (0..MAX_PROPOSAL_CHARACTERS / 8)
         .map(|n| format!("eip155:{n}"))
         .collect();
     let spread: Vec<(&str, ProposalNamespace)> = keys
@@ -204,7 +251,7 @@ fn the_count_is_over_everything_a_proposal_asks_for() {
     assert!(oversized_refusal(&proposal(spread, Vec::new())).is_some());
 
     let mut icons = proposal(Vec::new(), Vec::new());
-    icons.proposer.metadata.icons = (0..=MAX_PROPOSAL_ENTRIES)
+    icons.proposer.metadata.icons = (0..MAX_PROPOSAL_CHARACTERS / 8)
         .map(|n| format!("https://cdn{n}.example.com/icon.png"))
         .collect();
     assert!(oversized_refusal(&icons).is_some());

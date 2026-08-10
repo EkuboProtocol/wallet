@@ -37,25 +37,38 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 /// real.
 const MAX_ANSWERED_IDS: usize = 4_096;
 
-/// How much a single proposal may ask for, counted across every namespace it
-/// carries: the namespaces themselves, their chains, their methods, their
-/// events, and the icons in the proposer's metadata.
+/// How much of a proposal may reach the screen that approves it, in the
+/// characters the review would draw.
 ///
 /// The envelope that delivers a proposal is capped at a megabyte, which bounds
-/// the memory but not the *screen*: a megabyte of JSON is tens of thousands of
-/// method names, and every one of them is joined into the review a person reads
-/// before deciding which account to expose. Burying the account and the chains
-/// under a wall of text is the same outcome as lying about them, reached
-/// differently, and this is the last point before that review where the whole
-/// proposal is still one value.
+/// the memory but not the *screen*: everything a proposal names — namespace
+/// keys, chains, methods, events, and the proposer's icons — is joined into the
+/// review a person reads before deciding which account to expose. Burying the
+/// account and the chains under a wall of text is the same outcome as lying
+/// about them, reached differently, and this is the last point before that
+/// review where the whole proposal is still one value.
 ///
-/// Five hundred is two orders of magnitude above any real dapp — the largest
-/// legitimate proposals ask for a few dozen optional chains and a handful of
-/// methods — and it is a refusal rather than a truncation on purpose. A
-/// truncated proposal would either hide part of what the dapp asked for from
-/// the person approving it, or quietly narrow the scope that gets settled, and
-/// both are worse than telling the dapp to ask for less.
-const MAX_PROPOSAL_ENTRIES: usize = 512;
+/// **Characters rather than entries, because the dapp chooses both.** A count
+/// of entries bounds a thousand short method names and admits a hundred
+/// eight-kilobyte ones, which is the same wall of text with a different shape.
+/// Each string is charged its own length plus the two characters the separator
+/// costs beside it, so neither axis has a cheap side.
+///
+/// Sixteen kilobytes is generous by a wide margin against anything real. An
+/// ordinary proposal draws a few hundred characters; the wordiest legitimate
+/// shape — a multichain dapp that names each chain as its own namespace key and
+/// repeats its method list under every one — reaches a few thousand at sixty-odd
+/// chains. It is also sixty times below the megabyte the envelope permits.
+///
+/// A refusal rather than a truncation, on purpose. A trimmed proposal either
+/// hides part of what the dapp asked for from the person approving it, or
+/// quietly narrows the scope that gets settled; telling the dapp to ask for less
+/// is honest about both.
+const MAX_PROPOSAL_CHARACTERS: usize = 16_384;
+
+/// What one string costs on the review: itself, and the separator drawn beside
+/// it.
+const SEPARATOR_CHARACTERS: usize = 2;
 
 /// The CAIP-2 namespace this wallet implements. Anything else is somebody
 /// else's chain family.
@@ -1061,35 +1074,50 @@ fn namespace_chains(key: &str, namespace: &ProposalNamespace) -> Vec<String> {
     namespace.chains.clone().unwrap_or_default()
 }
 
-/// Everything a proposal asks for, counted as one number.
+/// Everything a proposal names, as the number of characters a review drawing
+/// all of it would hold.
 ///
-/// One count rather than a limit per field, because the reviewer's screen does
-/// not care which list the ten thousandth string came from, and a rule with one
-/// number has one thing to get wrong.
-fn proposal_entries(proposal: &SessionProposeParams) -> usize {
+/// One number rather than a limit per field, because the reviewer's screen does
+/// not care which list a string came from, and a rule with one number has one
+/// thing to get wrong.
+fn proposal_characters(proposal: &SessionProposeParams) -> usize {
+    let drawn = |value: &String| value.chars().count() + SEPARATOR_CHARACTERS;
     let namespaces = proposal
         .required_namespaces
-        .values()
-        .chain(proposal.optional_namespaces.values());
+        .iter()
+        .chain(proposal.optional_namespaces.iter());
     let asked: usize = namespaces
-        .map(|namespace| {
-            1 + namespace.chains.as_ref().map_or(0, Vec::len)
-                + namespace.methods.len()
-                + namespace.events.len()
+        .map(|(key, namespace)| {
+            drawn(key)
+                + namespace
+                    .chains
+                    .iter()
+                    .flatten()
+                    .chain(&namespace.methods)
+                    .chain(&namespace.events)
+                    .map(drawn)
+                    .sum::<usize>()
         })
         .sum();
-    asked + proposal.proposer.metadata.icons.len()
+    asked
+        + proposal
+            .proposer
+            .metadata
+            .icons
+            .iter()
+            .map(drawn)
+            .sum::<usize>()
 }
 
-/// The refusal for a proposal that asks for more than [`MAX_PROPOSAL_ENTRIES`]
-/// things, or `None` for one a person could read.
+/// The refusal for a proposal too long to review, or `None` for one a person
+/// could read.
 fn oversized_refusal(proposal: &SessionProposeParams) -> Option<String> {
-    let asked = proposal_entries(proposal);
-    (asked > MAX_PROPOSAL_ENTRIES).then(|| {
+    let asked = proposal_characters(proposal);
+    (asked > MAX_PROPOSAL_CHARACTERS).then(|| {
         format!(
-            "This proposal asks for {asked} chains, methods, and events. This wallet reviews a \
-             proposal on one screen and refuses anything above {MAX_PROPOSAL_ENTRIES}; ask for \
-             the scope the dapp actually needs."
+            "This proposal names {asked} characters of chains, methods, and events. This wallet \
+             reviews a proposal on a screen a person reads and refuses anything above \
+             {MAX_PROPOSAL_CHARACTERS}; ask for the scope the dapp actually needs."
         )
     })
 }
