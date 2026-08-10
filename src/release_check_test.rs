@@ -104,11 +104,52 @@ async fn an_available_update_carries_the_command_that_installs_it() {
     assert_eq!(check.source, CheckSource::Network);
     // Pinned to the resolved tag, not to `main`: the script and the release it
     // installs have to agree about what the binary's subcommands are called.
+    //
+    // And the installer is verified before it runs. `install.sh` checks
+    // everything it downloads, but a shell starts executing a piped script as
+    // it arrives, so those checks only ever ran if whoever chose the script's
+    // bytes wanted them to. Verifying a payload with a script the same party
+    // can replace proves nothing.
+    let command = check.upgrade_command.clone().expect("an update installs");
     assert_eq!(
-        check.upgrade_command.as_deref(),
-        Some(
-            "curl -fsSL https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/v1.5.0/install.sh | sh"
-        )
+        command,
+        "d=$(mktemp -d) && \
+curl -fsSL -o \"$d/install.sh\" https://github.com/EkuboProtocol/wallet-mcp-server/releases/download/v1.5.0/install.sh && \
+curl -fsSL -o \"$d/install.sh.sigstore.json\" https://github.com/EkuboProtocol/wallet-mcp-server/releases/download/v1.5.0/install.sh.sigstore.json && \
+cosign verify-blob --bundle \"$d/install.sh.sigstore.json\" \
+--certificate-identity https://github.com/EkuboProtocol/wallet-mcp-server/.github/workflows/release.yml@refs/tags/v1.5.0 \
+--certificate-oidc-issuer https://token.actions.githubusercontent.com \
+\"$d/install.sh\" && \
+sh \"$d/install.sh\""
+    );
+    // The properties that matter, stated separately so a future rewording of
+    // the command cannot quietly drop one of them.
+    assert!(
+        !command.contains("raw.githubusercontent.com"),
+        "the installer must come from the signed release assets, not the raw source tree"
+    );
+    assert!(
+        !command.contains("| sh") && !command.contains("|sh"),
+        "nothing may pipe an unverified script into a shell: {command}"
+    );
+    assert!(
+        command.contains("cosign verify-blob"),
+        "the installer's signature must be checked before it runs"
+    );
+    assert!(
+        command
+            .split("cosign verify-blob")
+            .nth(1)
+            .is_some_and(|rest| rest.contains("sh \"$d/install.sh\"")),
+        "the run has to come after the verification, not before it"
+    );
+    assert!(
+        !command.contains("; sh") && !command.contains("|| "),
+        "a failed download or verification must stop the sequence: {command}"
+    );
+    assert!(
+        command.contains("@refs/tags/v1.5.0"),
+        "the signature is checked against this tag's release workflow, not any workflow"
     );
     assert_eq!(
         check.release_url.as_deref(),
@@ -257,9 +298,24 @@ async fn a_cache_from_another_repository_is_not_reused() {
 
     assert_eq!(elsewhere.source, CheckSource::Network);
     assert_eq!(elsewhere.latest_version.as_deref(), Some("v1.5.0"));
+    let elsewhere_command = elsewhere
+        .upgrade_command
+        .clone()
+        .expect("the fork offers an upgrade too");
+    // What this test is about is that the command names the fork rather than
+    // the cached repository, and it names it in both places that decide: where
+    // the installer comes from, and whose workflow must have signed it.
+    assert!(
+        elsewhere_command
+            .contains("https://github.com/someone/fork/releases/download/v1.5.0/install.sh")
+            && elsewhere_command.contains(
+                "https://github.com/someone/fork/.github/workflows/release.yml@refs/tags/v1.5.0"
+            ),
+        "{elsewhere_command}"
+    );
     assert_eq!(
-        elsewhere.upgrade_command.as_deref(),
-        Some("curl -fsSL https://raw.githubusercontent.com/someone/fork/v1.5.0/install.sh | sh")
+        elsewhere.release_url.as_deref(),
+        Some("https://github.com/someone/fork/releases/tag/v1.5.0")
     );
 }
 
