@@ -35,6 +35,24 @@ pub fn transfer_plan(
     transfers: Vec<Transfer>,
 ) -> Result<ExecutionPlan> {
     ensure!(!transfers.is_empty(), "at least one transfer is required");
+    // The zero address is not a recipient. For the native token this builds a
+    // value-bearing transaction to `0x0`, which nothing can undo; for an
+    // ERC-20 it encodes a `transfer` whose effect depends entirely on whether
+    // that particular contract happens to refuse it, and a great many burn the
+    // amount instead.
+    //
+    // Refused here rather than left to the policy, because no policy rule
+    // speaks about it: a plan whose recipient is zero can be authorized by an
+    // ordinary allowlist for the token, and `ExecutionPlan::validate` checks
+    // calldata bounds, step ordering, chain, and sender -- everything about
+    // the shape of the request except where the value is going.
+    for transfer in &transfers {
+        ensure!(
+            !transfer.to.is_zero(),
+            "a transfer to the zero address cannot be undone: the native token is destroyed and \
+             many ERC-20s burn the amount, so it is refused rather than signed"
+        );
+    }
     make_plan(
         chain_id,
         sender,
@@ -93,3 +111,7 @@ fn make_plan(
     plan.validate()?;
     Ok(plan)
 }
+
+#[cfg(test)]
+#[path = "transfers_test.rs"]
+mod tests;
