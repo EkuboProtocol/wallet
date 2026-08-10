@@ -141,6 +141,36 @@ pub trait KeyStore: crate::sealed::SealedKeyStore + Send + Sync {
     fn delete_matching(&self, wallet_id: &str, expected: Address) -> Result<Deletion>;
 }
 
+/// What a credential-store write that reported an error actually did.
+///
+/// Separate from the code that produces it so the four answers can be tested
+/// without a platform credential store: the whole defect was a flow that only
+/// ever considered one of them.
+#[derive(Debug)]
+pub(crate) enum FailedWrite {
+    /// The secret is there and is the one that was being written. The error
+    /// was reported after the write committed.
+    Committed,
+    /// Nothing is there. The write really did fail.
+    NotWritten,
+    /// Something else is there under this name.
+    Conflicting,
+    /// The store could not be re-read, so nothing is known.
+    Unknown(anyhow::Error),
+}
+
+/// Decide what a failed write did from a readback: `Ok(None)` for no entry,
+/// `Ok(Some(matches))` for an entry that does or does not hold the intended
+/// secret, `Err` when the store could not answer.
+pub(crate) fn classify_failed_write(readback: Result<Option<bool>>) -> FailedWrite {
+    match readback {
+        Ok(Some(true)) => FailedWrite::Committed,
+        Ok(Some(false)) => FailedWrite::Conflicting,
+        Ok(None) => FailedWrite::NotWritten,
+        Err(unreadable) => FailedWrite::Unknown(unreadable),
+    }
+}
+
 /// What [`KeyStore::delete_matching`] found when it looked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Deletion {
@@ -196,9 +226,45 @@ impl KeyStore for OsKeyStore {
                     return Err(error).context("failed to inspect platform credential store");
                 }
             }
-            entry
-                .set_secret(key.as_bytes())
-                .context("failed to save private key in platform credential store")
+            let Err(error) = entry.set_secret(key.as_bytes()) else {
+                return Ok(());
+            };
+            // An error from `set_secret` is not proof that nothing was
+            // written, and treating it as proof is how a key ended up in the
+            // credential store with no configuration row naming it: `add`
+            // returned here, before it could write the metadata or run any
+            // rollback, and the next attempt to create the same wallet was
+            // refused as a duplicate by the very credential it had orphaned.
+            //
+            // The same readback `load_or_create_database_key` uses, for the
+            // same reason — the store itself is the only honest witness to
+            // what it did.
+            let readback = match entry.get_secret() {
+                Ok(mut stored) => {
+                    let outcome = Ok(Some(stored == key.as_bytes()));
+                    stored.zeroize();
+                    outcome
+                }
+                Err(KeyringError::NoEntry) => Ok(None),
+                Err(unreadable) => Err(anyhow::Error::new(unreadable)),
+            };
+            match classify_failed_write(readback) {
+                // It landed. Reporting the error would strand it.
+                FailedWrite::Committed => Ok(()),
+                FailedWrite::NotWritten => {
+                    Err(error).context("failed to save private key in platform credential store")
+                }
+                FailedWrite::Conflicting => Err(error).context(format!(
+                    "failed to save the private key for wallet {wallet_id}, and the credential \
+                     store now holds a different secret under that name; resolve it there before \
+                     retrying"
+                )),
+                FailedWrite::Unknown(unreadable) => Err(error).context(format!(
+                    "failed to save the private key for wallet {wallet_id}, and the credential \
+                     store could not be re-read to establish whether it was written anyway; \
+                     check for an entry named {wallet_id} before retrying: {unreadable:#}"
+                )),
+            }
         })
     }
 

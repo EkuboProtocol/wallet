@@ -425,3 +425,28 @@ async fn a_creation_that_loses_the_configuration_race_keeps_the_winners_key() {
         winner.address
     );
 }
+
+#[test]
+fn a_write_that_reported_an_error_is_classified_by_what_the_store_holds() {
+    // `set_secret` returning an error was read as "nothing was written", so
+    // `add` returned before writing metadata or running any rollback. A key
+    // the backend had committed was left in the credential store with no row
+    // naming it -- invisible to `account list`, and enough to make the next
+    // creation of that wallet fail as a duplicate.
+    assert!(matches!(
+        classify_failed_write(Ok(Some(true))),
+        FailedWrite::Committed
+    ));
+    assert!(matches!(
+        classify_failed_write(Ok(None)),
+        FailedWrite::NotWritten
+    ));
+    assert!(matches!(
+        classify_failed_write(Ok(Some(false))),
+        FailedWrite::Conflicting
+    ));
+    assert!(matches!(
+        classify_failed_write(Err(anyhow::anyhow!("unreachable"))),
+        FailedWrite::Unknown(_)
+    ));
+}
