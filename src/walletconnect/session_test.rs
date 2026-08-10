@@ -142,6 +142,74 @@ fn namespace(chains: Option<&[&str]>, methods: &[&str], events: &[&str]) -> Prop
     }
 }
 
+/// A dapp says how long its own lists are, and every entry in them is joined
+/// into the review a person reads before choosing which account to expose. The
+/// megabyte cap on the envelope bounds the memory and not the screen: a
+/// megabyte of JSON is tens of thousands of method names, and burying the
+/// account and the chains under them is the same outcome as misdescribing
+/// them.
+///
+/// Refused rather than truncated, because a truncated proposal either hides
+/// part of what the dapp asked for from the person approving it or quietly
+/// narrows what gets settled.
+#[test]
+fn a_proposal_nobody_could_read_is_refused_rather_than_trimmed() {
+    let many: Vec<String> = (0..MAX_PROPOSAL_ENTRIES)
+        .map(|n| format!("eth_{n}"))
+        .collect();
+    let borrowed: Vec<&str> = many.iter().map(String::as_str).collect();
+    let flood = proposal(
+        vec![("eip155", namespace(Some(&["eip155:1"]), &borrowed, &[]))],
+        Vec::new(),
+    );
+    let refusal = oversized_refusal(&flood).expect("a flood was accepted for review");
+    assert!(
+        refusal.contains(&MAX_PROPOSAL_ENTRIES.to_string()),
+        "{refusal}"
+    );
+
+    // What a real dapp sends is nowhere near it.
+    let ordinary = proposal(
+        vec![(
+            "eip155",
+            namespace(
+                Some(&["eip155:1", "eip155:8453"]),
+                &["eth_sendTransaction", "personal_sign"],
+                &["chainChanged"],
+            ),
+        )],
+        Vec::new(),
+    );
+    assert!(oversized_refusal(&ordinary).is_none());
+}
+
+/// The count is over the whole proposal rather than per field, so spreading
+/// the same flood across namespaces, chains, events, and the proposer's icons
+/// does not get under it.
+#[test]
+fn the_count_is_over_everything_a_proposal_asks_for() {
+    // Each namespace is itself, one chain, one method, and one event.
+    let keys: Vec<String> = (0..=MAX_PROPOSAL_ENTRIES / 4)
+        .map(|n| format!("eip155:{n}"))
+        .collect();
+    let spread: Vec<(&str, ProposalNamespace)> = keys
+        .iter()
+        .map(|key| {
+            (
+                key.as_str(),
+                namespace(Some(&["eip155:1"]), &["personal_sign"], &["chainChanged"]),
+            )
+        })
+        .collect();
+    assert!(oversized_refusal(&proposal(spread, Vec::new())).is_some());
+
+    let mut icons = proposal(Vec::new(), Vec::new());
+    icons.proposer.metadata.icons = (0..=MAX_PROPOSAL_ENTRIES)
+        .map(|n| format!("https://cdn{n}.example.com/icon.png"))
+        .collect();
+    assert!(oversized_refusal(&icons).is_some());
+}
+
 #[test]
 fn a_summary_keeps_required_and_optional_apart() {
     let proposal = proposal(

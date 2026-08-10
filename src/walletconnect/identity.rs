@@ -33,6 +33,15 @@ use url::Url;
 /// cannot push the warnings below it off a small screen.
 const MAX_CLAIM_CHARACTERS: usize = 120;
 
+/// How many distinct icon hosts are named on screen.
+///
+/// A dapp says how many icons it has, so a proposal can name thousands of
+/// hosts, and each one is a line of the review a person reads before exposing
+/// an account. Eight is more than any real dapp uses and few enough to stay
+/// beside the warnings rather than pushing them off the screen. What is above
+/// the cap is counted and said, never dropped quietly.
+const MAX_ICON_HOSTS: usize = 8;
+
 /// The site a dapp says it is, once its URL has been parsed.
 pub struct Site {
     /// The host, lowercased. The part worth comparing against an address bar.
@@ -58,8 +67,11 @@ pub struct DappIdentity {
     pub url: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
-    /// Hosts the icons are served from, deduplicated. Not fetched — this
-    /// wallet draws no images and makes no request a dapp could observe.
+    /// Hosts the icons are served from: deduplicated, sorted, and no more than
+    /// [`MAX_ICON_HOSTS`] of them, because a dapp chooses how many icons it
+    /// lists and every distinct host among them would otherwise be drawn. When
+    /// some are left out, a caution says how many. Not fetched — this wallet
+    /// draws no images and makes no request a dapp could observe.
     pub icon_hosts: Vec<String>,
     /// Things a reviewer should weigh. Never a verdict, and never a reason to
     /// refuse on its own: a legitimate dapp can trip any of these.
@@ -74,14 +86,20 @@ impl DappIdentity {
         let url = claim(&metadata.url);
         let site = url.as_deref().and_then(parse_site);
 
-        let mut icon_hosts: Vec<String> = Vec::new();
-        for icon in &metadata.icons {
-            if let Some(host) = parse_site(icon).map(|site| site.host)
-                && !icon_hosts.contains(&host)
-            {
-                icon_hosts.push(host);
-            }
-        }
+        // Every distinct host first, because whether *any* icon comes from
+        // somewhere other than the site is the caution below and dropping one
+        // early would answer that question wrong. Only what is drawn is
+        // bounded.
+        let all_icon_hosts: std::collections::BTreeSet<String> = metadata
+            .icons
+            .iter()
+            .filter_map(|icon| parse_site(icon).map(|site| site.host))
+            .collect();
+        let icon_hosts: Vec<String> = all_icon_hosts
+            .iter()
+            .take(MAX_ICON_HOSTS)
+            .cloned()
+            .collect();
 
         let mut cautions = Vec::new();
         match (&url, &site) {
@@ -109,18 +127,14 @@ impl DappIdentity {
                         site.host
                     ));
                 }
-                let foreign: Vec<&String> = icon_hosts
+                let foreign: Vec<&String> = all_icon_hosts
                     .iter()
                     .filter(|host| !same_site(host, &site.host))
                     .collect();
                 if !foreign.is_empty() {
                     cautions.push(format!(
                         "Its icons are served from {}, not from {}.",
-                        foreign
-                            .iter()
-                            .map(|host| host.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                        listed(&foreign),
                         site.host
                     ));
                 }
@@ -128,6 +142,16 @@ impl DappIdentity {
         }
         if name.is_none() {
             cautions.push("This dapp did not give itself a name.".to_owned());
+        }
+        // Said rather than silently dropped: a review that shows eight of forty
+        // hosts without saying so is describing a different dapp than the one
+        // proposing.
+        if all_icon_hosts.len() > icon_hosts.len() {
+            cautions.push(format!(
+                "It lists icons on {} different hosts; the {MAX_ICON_HOSTS} above are the ones \
+                 shown.",
+                all_icon_hosts.len()
+            ));
         }
 
         Self {
@@ -174,6 +198,22 @@ impl DappIdentity {
 pub fn claim(value: &str) -> Option<String> {
     let safe = crate::sanitize::stripped_capped(value.trim(), MAX_CLAIM_CHARACTERS);
     (!safe.trim().is_empty()).then_some(safe)
+}
+
+/// At most [`MAX_ICON_HOSTS`] hosts as a sentence fragment, with a count
+/// standing in for the rest. The count is the point: a caution that listed
+/// eight of forty would read as a complete list of eight.
+fn listed(hosts: &[&String]) -> String {
+    let shown: Vec<&str> = hosts
+        .iter()
+        .take(MAX_ICON_HOSTS)
+        .map(|host| host.as_str())
+        .collect();
+    let joined = shown.join(", ");
+    match hosts.len() - shown.len() {
+        0 => joined,
+        rest => format!("{joined} and {rest} more"),
+    }
 }
 
 /// The host and scheme of a URL, lowercased.

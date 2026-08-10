@@ -37,6 +37,26 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 /// real.
 const MAX_ANSWERED_IDS: usize = 4_096;
 
+/// How much a single proposal may ask for, counted across every namespace it
+/// carries: the namespaces themselves, their chains, their methods, their
+/// events, and the icons in the proposer's metadata.
+///
+/// The envelope that delivers a proposal is capped at a megabyte, which bounds
+/// the memory but not the *screen*: a megabyte of JSON is tens of thousands of
+/// method names, and every one of them is joined into the review a person reads
+/// before deciding which account to expose. Burying the account and the chains
+/// under a wall of text is the same outcome as lying about them, reached
+/// differently, and this is the last point before that review where the whole
+/// proposal is still one value.
+///
+/// Five hundred is two orders of magnitude above any real dapp — the largest
+/// legitimate proposals ask for a few dozen optional chains and a handful of
+/// methods — and it is a refusal rather than a truncation on purpose. A
+/// truncated proposal would either hide part of what the dapp asked for from
+/// the person approving it, or quietly narrow the scope that gets settled, and
+/// both are worse than telling the dapp to ask for less.
+const MAX_PROPOSAL_ENTRIES: usize = 512;
+
 /// The CAIP-2 namespace this wallet implements. Anything else is somebody
 /// else's chain family.
 pub const EIP155: &str = "eip155";
@@ -655,6 +675,14 @@ impl<'a> Session<'a> {
                     .await;
             }
         };
+        // Before anything reads the proposal for content, and before the review
+        // it leads to: everything below this line either summarizes the
+        // proposal or draws it, and a person has to be able to read the result.
+        if let Some(refusal) = oversized_refusal(&proposal) {
+            return self
+                .reject_proposal(id, error_code::INVALID_METHOD, refusal)
+                .await;
+        }
         if let Some(refusal) = self.stale_pairing() {
             return self
                 .reject_proposal(id, error_code::INVALID_METHOD, refusal)
@@ -1031,6 +1059,39 @@ fn namespace_chains(key: &str, namespace: &ProposalNamespace) -> Vec<String> {
         return vec![key.to_owned()];
     }
     namespace.chains.clone().unwrap_or_default()
+}
+
+/// Everything a proposal asks for, counted as one number.
+///
+/// One count rather than a limit per field, because the reviewer's screen does
+/// not care which list the ten thousandth string came from, and a rule with one
+/// number has one thing to get wrong.
+fn proposal_entries(proposal: &SessionProposeParams) -> usize {
+    let namespaces = proposal
+        .required_namespaces
+        .values()
+        .chain(proposal.optional_namespaces.values());
+    let asked: usize = namespaces
+        .map(|namespace| {
+            1 + namespace.chains.as_ref().map_or(0, Vec::len)
+                + namespace.methods.len()
+                + namespace.events.len()
+        })
+        .sum();
+    asked + proposal.proposer.metadata.icons.len()
+}
+
+/// The refusal for a proposal that asks for more than [`MAX_PROPOSAL_ENTRIES`]
+/// things, or `None` for one a person could read.
+fn oversized_refusal(proposal: &SessionProposeParams) -> Option<String> {
+    let asked = proposal_entries(proposal);
+    (asked > MAX_PROPOSAL_ENTRIES).then(|| {
+        format!(
+            "This proposal asks for {asked} chains, methods, and events. This wallet reviews a \
+             proposal on one screen and refuses anything above {MAX_PROPOSAL_ENTRIES}; ask for \
+             the scope the dapp actually needs."
+        )
+    })
 }
 
 /// Reduce a proposal to the facts a person decides on, with required and

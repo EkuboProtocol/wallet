@@ -159,6 +159,65 @@ fn icons_from_somewhere_else_are_mentioned_and_never_fetched() {
     assert!(!caution.contains("example.com,"), "{caution}");
 }
 
+/// A dapp decides how many icons its proposal lists, and every distinct host
+/// among them was drawn — as a fact on the review and again inside the caution
+/// naming the foreign ones. A few thousand of them is a wall of text in front
+/// of the decision a person is there to make.
+///
+/// What is left out is counted and said, because a review showing eight of a
+/// hundred hosts without saying so describes a different dapp than the one
+/// proposing.
+#[test]
+fn a_proposal_cannot_fill_the_review_with_icon_hosts() {
+    let mut many = metadata("Example", "https://example.com");
+    many.icons = (0..500)
+        .map(|n| format!("https://cdn{n}.elsewhere.net/icon.png"))
+        .collect();
+    let identity = DappIdentity::of(&many);
+
+    assert_eq!(identity.icon_hosts.len(), MAX_ICON_HOSTS);
+    let counted = identity
+        .cautions
+        .iter()
+        .find(|caution| caution.contains("different hosts"))
+        .unwrap_or_else(|| panic!("{:?}", identity.cautions));
+    assert!(counted.contains("500"), "{counted}");
+
+    // The foreign-icons caution is bounded too, and says so rather than
+    // reading as a complete list of eight.
+    let foreign = identity
+        .cautions
+        .iter()
+        .find(|caution| caution.contains("served from"))
+        .unwrap_or_else(|| panic!("{:?}", identity.cautions));
+    assert!(foreign.contains("more"), "{foreign}");
+    assert!(foreign.len() < 400, "{foreign}");
+}
+
+/// The cap is on what is drawn, not on what is examined. A dapp that lists its
+/// own host first and somebody else's five hundred entries later is still one
+/// whose icons come from somewhere else.
+#[test]
+fn a_foreign_host_past_the_cap_is_still_a_foreign_host() {
+    let mut buried = metadata("Example", "https://example.com");
+    buried.icons = (0..MAX_ICON_HOSTS * 4)
+        .map(|n| format!("https://a{n}.example.com/icon.png"))
+        .collect();
+    buried
+        .icons
+        .push("https://zz.elsewhere.net/icon.png".to_owned());
+
+    let identity = DappIdentity::of(&buried);
+    assert!(
+        identity
+            .cautions
+            .iter()
+            .any(|caution| caution.contains("elsewhere.net")),
+        "{:?}",
+        identity.cautions
+    );
+}
+
 #[test]
 fn icons_on_the_dapps_own_site_say_nothing() {
     let mut same = metadata("Example", "https://example.com");
