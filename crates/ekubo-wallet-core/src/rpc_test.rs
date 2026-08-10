@@ -526,3 +526,79 @@ fn a_receipt_the_lifecycle_cannot_store_is_the_endpoints_failure() {
     assert!(storable_receipt_fields(highest, highest).is_ok());
     assert!(storable_receipt_fields(highest + 1, 0).is_err());
 }
+
+/// The gap the two-endpoint contradiction test could not see. With `agree`
+/// equal to the endpoint count a quorum is only ever reached on the last
+/// endpoint, so the early return at the threshold never fired and the
+/// disagreement branch always ran. Give the quorum room -- `m_of_n(2)` over
+/// three endpoints, which `validate_network` explicitly permits -- and the
+/// two agreeing endpoints ended the loop before the third could contradict
+/// them. Whether the wallet noticed depended on the order the endpoints were
+/// visited in, and under `random` that is a coin flip per request.
+#[tokio::test]
+async fn agreement_hears_every_endpoint_before_accepting_a_quorum() {
+    let (first, _a) = stub_endpoint(7, 500);
+    let (second, _b) = stub_endpoint(7, 500);
+    let (dissenter, _c) = stub_endpoint(7, 999_999);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![first, second, dissenter],
+    );
+    let error = format!(
+        "{:#}",
+        crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect_err("a witness that contradicts the quorum must still be heard")
+    );
+    assert!(error.contains("do not agree"), "unexpected: {error}");
+    assert!(error.contains("2 distinct answers"), "unexpected: {error}");
+}
+
+/// The other half: reaching the threshold early must still succeed once every
+/// endpoint has been heard and none of them dissented. A dead third endpoint
+/// is a missing witness, so it neither blocks the answer nor forges a
+/// contradiction.
+#[tokio::test]
+async fn a_quorum_still_answers_when_the_remaining_endpoint_is_silent() {
+    let (first, _a) = stub_endpoint(7, 500);
+    let (second, _b) = stub_endpoint(7, 500);
+    let network = strategy_network(
+        RpcStrategy::MOfN { agree: 2 },
+        vec![first, second, dead_endpoint()],
+    );
+    assert_eq!(
+        crate::rpc::agree_across_endpoints(&network, |provider| async move {
+            with_timeout(provider.get_block_number()).await
+        })
+        .await
+        .expect("two endpoints agreed and the third said nothing"),
+        500
+    );
+}
+
+/// The rule both quorums obey, tested once because both now read it from the
+/// same function rather than each deciding for itself. The historical defect
+/// is the third case: a tally in which one answer has already reached the
+/// threshold *and* another endpoint contradicted it is a refusal, not a win
+/// for whichever bucket filled first.
+#[test]
+fn a_quorum_verdict_refuses_any_tally_that_contains_a_contradiction() {
+    use crate::rpc::{QuorumVerdict, quorum_verdict};
+
+    assert_eq!(quorum_verdict(&[2], 2), QuorumVerdict::Agreed(0));
+    assert_eq!(quorum_verdict(&[3], 2), QuorumVerdict::Agreed(0));
+    assert_eq!(
+        quorum_verdict(&[2, 1], 2),
+        QuorumVerdict::Contradicted,
+        "a bucket at the threshold does not outrank a dissenting witness"
+    );
+    assert_eq!(
+        quorum_verdict(&[1, 1], 2),
+        QuorumVerdict::Contradicted,
+        "and neither does one below it"
+    );
+    assert_eq!(quorum_verdict(&[1], 2), QuorumVerdict::TooFewWitnesses(1));
+    assert_eq!(quorum_verdict(&[], 2), QuorumVerdict::TooFewWitnesses(0));
+}

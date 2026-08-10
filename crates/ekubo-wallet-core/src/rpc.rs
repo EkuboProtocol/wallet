@@ -133,6 +133,46 @@ fn shuffle<T>(items: &mut [T]) {
     }
 }
 
+/// What a completed round of quorum voting decided.
+///
+/// There are two quorums in this crate — a generic read in
+/// [`agree_across_endpoints`] and a simulation in `simulation.rs` — and they
+/// bucket entirely different things. What they must not do differently is
+/// *decide*, so the rule lives here and neither of them reasons about it
+/// locally. Both used to, and both made the same mistake: accepting the
+/// `required`-th matching witness as final, which made a later contradiction
+/// unobservable and left "a disagreement is refused" true only when the
+/// disagreeing endpoint happened to be visited early.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QuorumVerdict {
+    /// Every endpoint that answered gave the same answer, and at least
+    /// `required` of them did. The index is the single bucket.
+    Agreed(usize),
+    /// Endpoints answered and contradicted each other. Refuse; there is no
+    /// basis on which to pick a side.
+    Contradicted,
+    /// One answer at most, but too few endpoints stood behind it. Carries how
+    /// many did, which is what separates "unavailable" from "disagreed".
+    TooFewWitnesses(usize),
+}
+
+/// Decide a quorum from how many endpoints stood behind each distinct answer.
+///
+/// Takes counts rather than the answers themselves so the two callers can keep
+/// their own bucket types, and so the rule is testable without either of them.
+/// Call it only after every configured endpoint has been heard: a verdict
+/// computed from a partial tally is the very bug this exists to prevent.
+pub(crate) fn quorum_verdict(witness_counts: &[usize], required: usize) -> QuorumVerdict {
+    if witness_counts.len() > 1 {
+        return QuorumVerdict::Contradicted;
+    }
+    match witness_counts.first() {
+        Some(&count) if count >= required => QuorumVerdict::Agreed(0),
+        Some(&count) => QuorumVerdict::TooFewWitnesses(count),
+        None => QuorumVerdict::TooFewWitnesses(0),
+    }
+}
+
 /// Run one read against enough endpoints to satisfy the network's strategy,
 /// and return the answer only if that many of them agree.
 ///
@@ -170,24 +210,41 @@ where
     // Answers, each with the endpoints that returned it. A second endpoint
     // returning an answer already seen is what agreement means.
     let mut answers: Vec<(T, Vec<&url::Url>)> = Vec::new();
+    // Every configured endpoint is asked, including the ones after the
+    // `required`-th agreement. Returning at the threshold made the
+    // contradiction check below unreachable exactly when it mattered: with
+    // `m_of_n(2)` over three endpoints, two agreeing answers ended the loop
+    // and the third endpoint — the one that would have disagreed — was never
+    // consulted. Whether a disagreement was noticed then depended on the order
+    // the endpoints happened to be visited in, which under `random` is a coin
+    // flip. "A genuine disagreement fails closed" has to mean every configured
+    // witness was heard, or it means nothing.
+    //
+    // The cost is the difference between `agree` requests and one per
+    // configured endpoint. That is what the guarantee costs; an owner who does
+    // not want to pay it is asking for `ordered`.
     for endpoint in endpoint_order(network) {
         match operation(provider_for(endpoint)).await {
             Ok(value) => {
                 if let Some(slot) = answers.iter_mut().find(|(seen, _)| *seen == value) {
                     slot.1.push(endpoint);
-                    if slot.1.len() >= required {
-                        return Ok(answers
-                            .into_iter()
-                            .find(|(_, witnesses)| witnesses.len() >= required)
-                            .map(|(value, _)| value)
-                            .expect("the slot just counted is still there"));
-                    }
                 } else {
                     answers.push((value, vec![endpoint]));
                 }
             }
             Err(error) => failures.push((endpoint, error)),
         }
+    }
+    let counts: Vec<usize> = answers
+        .iter()
+        .map(|(_, witnesses)| witnesses.len())
+        .collect();
+    if let QuorumVerdict::Agreed(index) = quorum_verdict(&counts, required) {
+        return Ok(answers
+            .into_iter()
+            .nth(index)
+            .map(|(value, _)| value)
+            .expect("the bucket the verdict names is still there"));
     }
     // Disagreement outranks unavailability in the message: an owner whose
     // endpoints contradict each other has a different problem, and a more

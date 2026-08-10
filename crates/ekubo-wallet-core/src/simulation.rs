@@ -370,18 +370,37 @@ pub async fn simulate_execution(
             last = Some(result);
             continue;
         }
+        // No early return at the threshold. Stopping as soon as `required`
+        // endpoints agreed made the contradiction branch below unreachable
+        // precisely when a contradiction existed: under `m_of_n(2)` over three
+        // endpoints, the third — the one about to disagree — was never asked.
+        // A quorum that stops listening once it has heard what it needs is not
+        // a quorum, and this one decides what an automatic signature is
+        // evaluated against.
         let witness = SimulationAgreement::of(&result, parent);
         if let Some(slot) = agreed.iter_mut().find(|(seen, _, _)| *seen == witness) {
             slot.1.push(endpoint.to_string());
-            if slot.1.len() >= required {
-                return Ok(slot.2.clone());
-            }
         } else {
             agreed.push((witness, vec![endpoint.to_string()], result));
         }
     }
 
     if required > 1 {
+        // The same rule the generic read quorum uses, from the same function,
+        // so the two cannot drift apart again.
+        let counts: Vec<usize> = agreed
+            .iter()
+            .map(|(_, witnesses, _)| witnesses.len())
+            .collect();
+        if let crate::rpc::QuorumVerdict::Agreed(index) =
+            crate::rpc::quorum_verdict(&counts, required)
+        {
+            return Ok(agreed
+                .into_iter()
+                .nth(index)
+                .map(|(_, _, result)| result)
+                .expect("the bucket the verdict names is still there"));
+        }
         // Endpoints that answered and contradicted each other. This is
         // reported as a simulation failure rather than an error so it lands
         // in front of a human with the reason on the screen: a contradiction
