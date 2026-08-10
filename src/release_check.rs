@@ -281,6 +281,29 @@ fn write_cache(data_dir: &Path, cache: &Cache) {
     }
 }
 
+/// Read a response body, stopping at `MAX_RESPONSE_BYTES`.
+///
+/// The `content_length` check above is a courtesy the server extends. It can
+/// omit the header entirely -- chunked encoding does -- or state one length
+/// and send another, and `text()` then buffers whatever arrives. So the header
+/// is worth checking because it refuses the honest oversized case before a
+/// single byte is read, and it is not worth trusting.
+///
+/// Accumulated chunk by chunk and abandoned the moment it passes the ceiling,
+/// so the memory this costs is bounded by the ceiling rather than by what the
+/// far end decided to send. `None` rather than a truncated body: a partial
+/// JSON document is not a release, and the whole call is already best-effort.
+async fn bounded_body(mut response: reqwest::Response) -> Option<String> {
+    let mut body = Vec::new();
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if body.len() + chunk.len() > MAX_RESPONSE_BYTES as usize {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).ok()
+}
+
 async fn fetch_latest_tag(repository: String) -> Option<String> {
     let client = reqwest::Client::builder()
         .connect_timeout(REQUEST_TIMEOUT)
@@ -305,7 +328,7 @@ async fn fetch_latest_tag(repository: String) -> Option<String> {
     {
         return None;
     }
-    let body = response.text().await.ok()?;
+    let body = bounded_body(response).await?;
     let value: serde_json::Value = serde_json::from_str(&body).ok()?;
     let tag = value.get("tag_name")?.as_str()?.trim().to_string();
     valid_tag(&tag).then_some(tag)
