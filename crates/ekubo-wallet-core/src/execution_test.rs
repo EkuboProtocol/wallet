@@ -553,3 +553,103 @@ mod cancellation_gas_tests {
         assert!(cancellation_gas_limit(0, admitted) <= admitted);
     }
 }
+
+mod automatic_gas_floor_tests {
+    //! The twin of the cancellation floor, on the path with no human on it.
+
+    use super::*;
+
+    fn simulation(gas_used: &str, block_gas_limit: &str, delegating: bool) -> SimulationResult {
+        let mut result = crate::simulation::SimulationResult {
+            simulation_id: None,
+            digest: format!("0x{}", "11".repeat(32)),
+            allowed: true,
+            policy_outcome: crate::core::policy::PolicyOutcome::Allowed,
+            policy_findings: Vec::new(),
+            policy_revision: 1,
+            execution_mode: crate::simulation::ExecutionMode::Direct,
+            implementation: None,
+            will_authorize_delegation: delegating,
+            replaces_delegated_implementation: None,
+            simulation: crate::simulation::SimulationExecution {
+                success: true,
+                gas_used: Some(gas_used.into()),
+                block_gas_limit: Some(block_gas_limit.into()),
+                output: None,
+                error: None,
+                failure: None,
+            },
+            token_spends: std::collections::BTreeMap::new(),
+            balance_changes: None,
+            block_number: "100".into(),
+            fork: None,
+        };
+        result.simulation.success = true;
+        result
+    }
+
+    fn mainnet() -> crate::config::NetworkConfig {
+        crate::config::default_networks()
+            .into_iter()
+            .find(|network| network.chain_id == 1)
+            .expect("mainnet preset")
+    }
+
+    /// `execution_output` copies `max_used_gas` or `gas_used` through
+    /// untouched, so a successful simulation claiming `0` multiplied to `0`
+    /// and was signed. Nodes reject an envelope under the intrinsic cost
+    /// before executing it, and the automatic path records it -- taking the
+    /// wallet's one in-flight slot for the chain, with no human anywhere in
+    /// the sequence to notice.
+    #[test]
+    fn a_simulation_reporting_no_gas_still_signs_a_mineable_limit() {
+        let network = mainnet();
+        for reported in ["0", "1", "10499"] {
+            let limit = signing_gas_limit(&network, &simulation(reported, "30000000", false))
+                .expect("an endpoint's number is not a reason to refuse to sign");
+            assert!(
+                limit >= INTRINSIC_TRANSACTION_GAS,
+                "{reported} gas produced a limit of {limit}"
+            );
+        }
+    }
+
+    /// A delegation pays its authorization on top of the intrinsic cost, so
+    /// the floor moves with it rather than being a constant.
+    ///
+    /// It does not bind here, and that is worth stating rather than asserting
+    /// around: the authorization cost is already in the baseline, so doubling
+    /// it clears the floor by itself. What the floor guarantees is the bound,
+    /// not that it is the answer.
+    #[test]
+    fn a_delegating_transaction_floors_above_the_bare_intrinsic_cost() {
+        let floor = INTRINSIC_TRANSACTION_GAS + EIP7702_AUTHORIZATION_INTRINSIC_COST;
+        let limit = signing_gas_limit(&mainnet(), &simulation("0", "30000000", true)).unwrap();
+        assert!(
+            limit >= floor,
+            "{limit} is below the {floor} this transaction costs"
+        );
+        assert!(
+            limit > INTRINSIC_TRANSACTION_GAS,
+            "the bare intrinsic cost is not enough for a transaction that authorizes"
+        );
+    }
+
+    /// An ordinary simulation is unchanged: the floor is a floor, not a
+    /// replacement for the estimate.
+    #[test]
+    fn an_ordinary_simulation_is_unchanged() {
+        let limit = signing_gas_limit(&mainnet(), &simulation("50000", "30000000", false)).unwrap();
+        assert_eq!(limit, 100_000);
+    }
+
+    /// And a ceiling that cannot hold the floor is refused rather than
+    /// silently clamped past it -- the one case where raising would otherwise
+    /// breach a bound the owner set.
+    #[test]
+    fn a_ceiling_below_the_floor_is_refused() {
+        let mut network = mainnet();
+        network.max_gas_limit = Some("21000".into());
+        assert!(signing_gas_limit(&network, &simulation("0", "30000000", true)).is_err());
+    }
+}

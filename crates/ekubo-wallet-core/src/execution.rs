@@ -613,9 +613,30 @@ fn signing_gas_limit(network: &NetworkConfig, simulation: &SimulationResult) -> 
         baseline <= maximum,
         "simulated gas {baseline} exceeds the network maximum gas limit {maximum}"
     );
+    // The same floor `cancellation_gas_limit` applies, on the path that has
+    // even less standing between it and the chain. `gas_used` is whatever the
+    // endpoint reported: `execution_output` copies `max_used_gas` or
+    // `gas_used` through untouched, and a successful simulation claiming `0`
+    // multiplied to `0` and was signed. An envelope under the intrinsic cost
+    // is rejected by every node before it executes, and the automatic path
+    // records it -- taking the wallet's one in-flight slot for the chain until
+    // something reconciles or cancels it, with no human anywhere in the
+    // sequence to notice.
+    //
+    // A delegation pays its authorization on top of the intrinsic cost, so the
+    // floor moves with it rather than being a constant.
+    let floor = INTRINSIC_TRANSACTION_GAS
+        .checked_add(authorization_cost)
+        .context("intrinsic gas floor overflow")?;
+    ensure!(
+        floor <= maximum,
+        "the {maximum} gas ceiling is below the {floor} gas this transaction costs before it \
+         does anything"
+    );
     Ok(baseline
         .saturating_mul(SIMULATION_GAS_MULTIPLIER)
-        .min(maximum))
+        .min(maximum)
+        .max(floor))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -744,6 +765,18 @@ pub fn validate_signed_execution(
             "signed transaction exceeds configured maximum gas limit"
         );
     }
+    // And from below. This function is the last thing between a freshly signed
+    // envelope and the row that records it, and it checked every field except
+    // whether the transaction can execute at all. The bound belongs here as
+    // well as in `signing_gas_limit`, because this is what a caller reaches
+    // for to ask "is this envelope sound" -- including callers that did not
+    // compute the limit themselves.
+    ensure!(
+        envelope.gas_limit() >= INTRINSIC_TRANSACTION_GAS,
+        "signed transaction carries {} gas, below the {INTRINSIC_TRANSACTION_GAS} every \
+         transaction costs before it does anything; no node would execute it",
+        envelope.gas_limit()
+    );
 
     match (&envelope, planned.mode) {
         (TxEnvelope::Eip1559(_), _) => {}
