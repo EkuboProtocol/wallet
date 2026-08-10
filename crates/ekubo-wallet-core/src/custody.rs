@@ -431,17 +431,50 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         })
     }
 
-    pub async fn export(&self, wallet_id: &str) -> Result<Zeroizing<String>> {
-        let metadata = self.config.wallet(wallet_id)?;
+    /// Reveal the raw private key of the wallet at `expected`, and record that
+    /// it left.
+    ///
+    /// `expected` is the address the owner was shown, and it is required for
+    /// the same reason `delete_matching` requires one: a wallet id is
+    /// reusable, so an export addressed by name alone is an export of whatever
+    /// holds that name when it lands. This used to check the loaded credential
+    /// against the loaded metadata, which is a real check of a different
+    /// thing — both are read after the review, so a replacement that happened
+    /// before this was called produces two values that agree with each other
+    /// and with nothing the owner saw. An owner approving "reveal the key for
+    /// 0xabc…" could be handed the key for a wallet that address was never
+    /// part of.
+    ///
+    /// So the reviewed address is compared at each place the id is resolved:
+    /// before owner authentication, so a doomed export does not put a prompt
+    /// on their screen; after it, because authentication takes as long as a
+    /// person takes; against the credential itself; and against the row the
+    /// disclosure is recorded on, so the mark cannot land on a successor while
+    /// the predecessor's key is what was returned.
+    ///
+    /// The lifecycle lock covers everything after the prompt, so a create or a
+    /// remove cannot interleave with the read at all. The comparisons remain
+    /// because the lock is not held across the prompt: it is the answer to
+    /// concurrency, not to time.
+    pub async fn export(&self, wallet_id: &str, expected: Address) -> Result<Zeroizing<String>> {
+        Self::ensure_reviewed(&self.config.wallet(wallet_id)?, wallet_id, expected)?;
         self.presence
             .confirm(&PresenceRequest::ExportPrivateKey {
                 wallet: wallet_id.into(),
             })
             .await?;
+        self.config
+            .with_lifecycle_lock(|| self.export_locked(wallet_id, expected))
+    }
+
+    fn export_locked(&self, wallet_id: &str, expected: Address) -> Result<Zeroizing<String>> {
+        Self::ensure_reviewed(&self.config.wallet(wallet_id)?, wallet_id, expected)?;
         let key = self.keys.load(wallet_id)?;
         ensure!(
-            key.signer().address() == metadata.address,
-            "credential address does not match wallet metadata"
+            key.signer().address() == expected,
+            "the credential stored under {wallet_id} controls {} rather than the {expected} that \
+             was reviewed; nothing was revealed",
+            key.signer().address()
         );
 
         // Record that a copy left through this tool before returning key
@@ -453,12 +486,29 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             let wallet = config
                 .wallets
                 .iter_mut()
-                .find(|wallet| wallet.id == wallet_id)
-                .with_context(|| format!("unknown wallet {wallet_id}"))?;
+                .find(|wallet| wallet.id == wallet_id && wallet.address == expected)
+                .with_context(|| {
+                    format!("no wallet {wallet_id} holds the reviewed address {expected}")
+                })?;
             wallet.exported_at.get_or_insert_with(Utc::now);
             Ok(())
         })?;
         Ok(key.expose_hex())
+    }
+
+    /// Refuse a wallet that is no longer the one the owner reviewed.
+    fn ensure_reviewed(
+        metadata: &WalletMetadata,
+        wallet_id: &str,
+        expected: Address,
+    ) -> Result<()> {
+        ensure!(
+            metadata.address == expected,
+            "wallet {wallet_id} now holds address {} rather than the {expected} that was \
+             reviewed; it was replaced while this export was being authorized",
+            metadata.address
+        );
+        Ok(())
     }
 
     pub async fn remove(&self, wallet_id: &str) -> Result<WalletMetadata> {

@@ -1172,7 +1172,7 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
             .await?;
 
             let progress = crate::tui::Progress::start("Waiting for owner authentication");
-            let result = custody.export(&wallet_id).await;
+            let result = custody.export(&wallet_id, wallet.address).await;
             let key = match result {
                 Ok(key) => {
                     progress.stop("Owner authenticated; export recorded");

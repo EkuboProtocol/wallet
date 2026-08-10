@@ -84,7 +84,7 @@ async fn export_records_a_timestamp() {
     let (_directory, service) = service(true);
     let wallet = service.create("primary").unwrap();
     assert!(wallet.exported_at.is_none());
-    let exported = service.export("primary").await.unwrap();
+    let exported = service.export("primary", wallet.address).await.unwrap();
     assert_eq!(exported.len(), 66);
     assert!(
         service
@@ -99,18 +99,18 @@ async fn export_records_a_timestamp() {
 #[tokio::test]
 async fn re_export_keeps_the_first_timestamp() {
     let (_directory, service) = service(true);
-    service.create("primary").unwrap();
-    service.export("primary").await.unwrap();
+    let wallet = service.create("primary").unwrap();
+    service.export("primary", wallet.address).await.unwrap();
     let first = service.config.wallet("primary").unwrap().exported_at;
-    service.export("primary").await.unwrap();
+    service.export("primary", wallet.address).await.unwrap();
     assert_eq!(service.config.wallet("primary").unwrap().exported_at, first);
 }
 
 #[tokio::test]
 async fn denial_does_not_record_an_export() {
     let (_directory, service) = service(false);
-    service.create("primary").unwrap();
-    assert!(service.export("primary").await.is_err());
+    let wallet = service.create("primary").unwrap();
+    assert!(service.export("primary", wallet.address).await.is_err());
     assert!(
         service
             .config
@@ -449,4 +449,98 @@ fn a_write_that_reported_an_error_is_classified_by_what_the_store_holds() {
         classify_failed_write(Err(anyhow::anyhow!("unreachable"))),
         FailedWrite::Unknown(_)
     ));
+}
+
+/// The export twin of `a_replacement_wallet_keeps_its_key`.
+///
+/// The owner reads "reveal the raw private key for 0xabc…" and authenticates.
+/// Another process removes that wallet and creates a different one under the
+/// same name before the authentication returns. Resolving by name alone hands
+/// back the replacement's key — an address that was never on the screen the
+/// owner agreed to, and the one thing in this tool that cannot be undone.
+///
+/// The check that used to be here compared the loaded credential against the
+/// loaded metadata. That is a real check of a different thing: both are read
+/// after the review, so they agree with each other and with nothing the owner
+/// saw.
+#[tokio::test]
+async fn an_export_reveals_only_the_key_that_was_reviewed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_path_buf();
+    let keys = Arc::new(MemoryKeyStore::default());
+    let seed = CustodyService::new(
+        ConfigStore::new(&path),
+        Arc::clone(&keys),
+        Arc::new(TestHumanPresence { allow: true }),
+    );
+    let reviewed = seed.create("primary").unwrap();
+
+    let swap_path = path.clone();
+    let swap_keys = Arc::clone(&keys);
+    let reviewed_address = reviewed.address;
+    let service = CustodyService::new(
+        ConfigStore::new(&path),
+        Arc::clone(&keys),
+        Arc::new(PresenceThen(move || {
+            let other = CustodyService::new(
+                ConfigStore::new(&swap_path),
+                Arc::clone(&swap_keys),
+                Arc::new(TestHumanPresence { allow: true }),
+            );
+            other
+                .config
+                .update(|config| {
+                    config.wallets.retain(|wallet| wallet.id != "primary");
+                    Ok(())
+                })
+                .unwrap();
+            swap_keys
+                .delete_matching("primary", reviewed_address)
+                .unwrap();
+            other.create("primary").unwrap();
+        })),
+    );
+
+    let error = format!(
+        "{:#}",
+        service
+            .export("primary", reviewed.address)
+            .await
+            .expect_err("the reviewed wallet is gone; nothing may be revealed")
+    );
+    assert!(error.contains("was replaced"), "{error}");
+
+    // And the disclosure is not attributed to the wallet that took the name.
+    assert!(
+        service
+            .config
+            .wallet("primary")
+            .unwrap()
+            .exported_at
+            .is_none(),
+        "a key that never left must not be marked as having left, on any row"
+    );
+}
+
+/// The other half: the wallet is still the reviewed one, so the export is the
+/// export it always was. Without this, refusing every export would pass above.
+#[tokio::test]
+async fn an_unchanged_wallet_exports_as_before() {
+    let (_directory, service) = service(true);
+    let wallet = service.create("primary").unwrap();
+    let exported = service.export("primary", wallet.address).await.unwrap();
+    assert_eq!(exported.len(), 66);
+    assert!(
+        service
+            .config
+            .wallet("primary")
+            .unwrap()
+            .exported_at
+            .is_some()
+    );
+
+    // A caller naming an address this id does not hold is refused, which is
+    // the same refusal from the other direction.
+    let stranger = service.export("primary", Address::repeat_byte(0x99)).await;
+    assert!(stranger.is_err());
 }
