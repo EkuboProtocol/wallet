@@ -75,7 +75,7 @@ fn a_rejected_send_whose_transaction_landed_is_reported_as_mined() {
                 gas_used: 21_000,
                 effective_gas_price: 1_000_000_000,
             }),
-            false,
+            Presence::Absent,
             (*rejection).to_owned(),
         );
         assert_eq!(result.receipt_status, ReceiptStatus::Success);
@@ -97,7 +97,7 @@ fn a_rejected_send_whose_transaction_reverted_reports_the_revert_not_the_rejecti
             gas_used: 21_000,
             effective_gas_price: 1_000_000_000,
         }),
-        false,
+        Presence::Absent,
         "nonce too low".to_owned(),
     );
     assert_eq!(result.receipt_status, ReceiptStatus::Reverted);
@@ -110,7 +110,7 @@ fn a_rejected_send_whose_transaction_is_in_the_mempool_is_an_ordinary_pending_se
     // Submission succeeded; the rejection described an earlier attempt.
     // An agent must not be able to tell this from a clean send, because
     // there is nothing different for it to do.
-    let result = send_failure_outcome("0xabc", None, true, "already known".to_owned());
+    let result = send_failure_outcome("0xabc", None, Presence::Held, "already known".to_owned());
     assert_eq!(result.receipt_status, ReceiptStatus::Pending);
     assert_eq!(result.block_number, None);
     assert!(result.broadcast_error.is_none());
@@ -121,13 +121,42 @@ fn a_send_the_chain_never_heard_of_keeps_its_error() {
     let result = send_failure_outcome(
         "0xabc",
         None,
-        false,
+        Presence::Absent,
         "insufficient funds for gas * price + value".to_owned(),
     );
     assert_eq!(result.receipt_status, ReceiptStatus::Pending);
     assert_eq!(
         result.broadcast_error.as_deref(),
         Some("insufficient funds for gas * price + value")
+    );
+    assert!(
+        result.absence_established,
+        "the node answered, so the lifecycle may act on this"
+    );
+}
+
+/// The third answer, which used to arrive as the second. A raw-send timeout
+/// can happen *after* the node accepted the transaction, so an observation
+/// that timed out or errored establishes nothing -- and `submit_claimed` used
+/// to spend it on releasing the submission lease, putting a possibly-live
+/// transaction back to `signed` where it is retryable and discardable.
+#[test]
+fn a_send_whose_absence_could_not_be_observed_says_so() {
+    let result = send_failure_outcome(
+        "0xabc",
+        None,
+        Presence::Unobserved,
+        "transaction submission RPC timed out".to_owned(),
+    );
+    assert_eq!(result.receipt_status, ReceiptStatus::Pending);
+    assert_eq!(
+        result.broadcast_error.as_deref(),
+        Some("transaction submission RPC timed out"),
+        "the caller asked for a send and did not get one, so the failure is still reported"
+    );
+    assert!(
+        !result.absence_established,
+        "but nothing observed the transaction to be absent, so the lifecycle must not act on it"
     );
 }
 

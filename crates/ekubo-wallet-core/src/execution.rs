@@ -160,6 +160,32 @@ pub struct BroadcastResult {
     pub mined_fee: Option<crate::rpc::MinedFee>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broadcast_error: Option<String>,
+    /// Whether the absence a `broadcast_error` asserts was actually observed.
+    ///
+    /// Not serialized: this says something about how the wallet came to its
+    /// conclusion rather than about the transaction, and only
+    /// `reconcile::submit_claimed` needs it. `true` for every result that
+    /// carries no `broadcast_error`, so the field is only ever read alongside
+    /// one.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub absence_established: bool,
+}
+
+/// What the chain said about an exact hash after a send failed.
+///
+/// Three answers, not two. Collapsing the third into `Absent` is finding
+/// 202009: a raw-send timeout can happen *after* the node accepted the
+/// transaction, and an observation that timed out or errored establishes
+/// nothing either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Presence {
+    /// The node holds this exact transaction.
+    Held,
+    /// The node was asked and does not have it.
+    Absent,
+    /// The node could not be asked, or did not answer.
+    Unobserved,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1110,6 +1136,7 @@ async fn send_exact_bytes_through(
         block_number: None,
         mined_fee: None,
         broadcast_error: None,
+        absence_established: true,
     })
 }
 
@@ -1136,12 +1163,15 @@ async fn reconcile_failed_send<P: Provider>(
         .await
         .ok()
         .flatten();
-    let accepted = tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash))
-        .await
-        .ok()
-        .and_then(std::result::Result::ok)
-        .flatten()
-        .is_some();
+    // `Ok(Ok(None))` is the node answering that it does not hold the
+    // transaction. A timeout or a transport error is the node not answering,
+    // and the two used to arrive here as the same `false`.
+    let accepted =
+        match tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash)).await {
+            Ok(Ok(Some(_))) => Presence::Held,
+            Ok(Ok(None)) => Presence::Absent,
+            Ok(Err(_)) | Err(_) => Presence::Unobserved,
+        };
     send_failure_outcome(&signed.transaction_hash, receipt, accepted, failure)
 }
 
@@ -1149,10 +1179,10 @@ async fn reconcile_failed_send<P: Provider>(
 ///
 /// Split out from the RPC calls so the decision itself is testable: it is the
 /// part that has to be right.
-fn send_failure_outcome(
+pub(crate) fn send_failure_outcome(
     hash: &str,
     receipt: Option<crate::rpc::ReceiptStatus>,
-    accepted: bool,
+    accepted: Presence,
     failure: String,
 ) -> BroadcastResult {
     // Mined already. The send was rejected because it had nothing left to do.
@@ -1164,11 +1194,20 @@ fn send_failure_outcome(
         receipt_status: ReceiptStatus::Pending,
         block_number: None,
         mined_fee: None,
-        // The node holds this exact transaction, so submission succeeded and
-        // the rejection described an earlier attempt rather than a problem
-        // with this one. That is indistinguishable from an ordinary accepted
-        // send still waiting for a receipt, and is reported as one.
-        broadcast_error: (!accepted).then_some(failure),
+        // `Held`: the node holds this exact transaction, so submission
+        // succeeded and the rejection described an earlier attempt rather than
+        // a problem with this one. That is indistinguishable from an ordinary
+        // accepted send still waiting for a receipt, and is reported as one.
+        //
+        // `Unobserved` still reports the failure, because the caller asked for
+        // a send and did not get one — but it says the absence was never
+        // established, and `submit_claimed` will not spend that on a lifecycle
+        // transition.
+        broadcast_error: match accepted {
+            Presence::Held => None,
+            Presence::Absent | Presence::Unobserved => Some(failure),
+        },
+        absence_established: accepted != Presence::Unobserved,
     }
 }
 
@@ -1183,6 +1222,7 @@ fn receipt_result(hash: &str, receipt: crate::rpc::ReceiptStatus) -> BroadcastRe
         block_number: Some(receipt.block_number.to_string()),
         mined_fee: Some(receipt.mined_fee()),
         broadcast_error: None,
+        absence_established: true,
     }
 }
 

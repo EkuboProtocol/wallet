@@ -373,11 +373,28 @@ pub async fn submit_claimed(
     // The lease goes back instead, exactly as a transport failure returns it.
     // The row is `signed` again: retryable, discardable, and honest about
     // never having been submitted.
-    if broadcast.broadcast_error.is_some() {
+    //
+    // All of which holds only when the absence was actually observed. A
+    // raw-send timeout can happen *after* the node accepted the transaction,
+    // and the lookups that follow it can themselves time out — so
+    // `broadcast_error` alone does not mean the chain does not have this
+    // envelope, it means the wallet asked for a send and did not get one.
+    // Releasing the lease on that reads "we could not tell" as "it is not
+    // there", puts a possibly-live transaction back to `signed`, and invites
+    // the owner to discard or replace something that may still mine.
+    //
+    // Unobserved keeps the lease. The row stays `submitting`, which is what
+    // the stale-lease machinery is for: it lapses after
+    // `SUBMISSION_LEASE_SECONDS` and the next reconcile pass asks the chain
+    // again and settles it on an observation rather than on a guess.
+    if broadcast.broadcast_error.is_some() && broadcast.absence_established {
         let record = lock(pending)?
             .release_submission(claimed.request_id, claimed.generation)
             .context("failed to release the lease of a transaction no endpoint accepted")?;
         return Ok((record, broadcast));
+    }
+    if broadcast.broadcast_error.is_some() {
+        return Ok((claimed, broadcast));
     }
     let record = {
         let mut pending = lock(pending)?;
