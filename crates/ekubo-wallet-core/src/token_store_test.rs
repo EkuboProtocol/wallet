@@ -701,3 +701,67 @@ fn a_whole_review_is_confirmed_as_one_decision() {
     // repeated review is not an error the owner has to interpret.
     assert_eq!(store.insert_all_absent(&listed).unwrap(), 0);
 }
+
+mod provenance_sanitizing_tests {
+    //! Three fields with one provenance, cleaned the same way.
+
+    use super::*;
+
+    fn listed() -> ListedToken {
+        usdc(1, Address::repeat_byte(0x11))
+    }
+
+    /// `source` is a token list's declared name or a filename -- chosen by
+    /// whoever wrote the list, exactly like the symbol and the name beside it,
+    /// and the only one of the three that was stored verbatim.
+    ///
+    /// Newlines are what make that more than untidy. `terminal_safe_multiline`
+    /// preserves them on purpose, and `token list` interpolates the stored
+    /// source into one line per token, so a source carrying a newline prints
+    /// as extra inventory rows: a forgery of the one column that says where a
+    /// name came from.
+    #[test]
+    fn a_source_cannot_forge_extra_inventory_lines() {
+        let (_directory, mut store) = store();
+        let hostile = "Real List\n  chain 1 · 0x2222222222222222222222222222222222222222 · \
+                       ETH · via Ethereum Foundation";
+        store
+            .insert_all_absent(&[(listed(), hostile.into())])
+            .unwrap();
+
+        let stored = store.list(None, 10, 0).unwrap();
+        let source = &stored[0].source;
+        assert!(
+            !source.contains('\n'),
+            "a stored provenance must not be able to start a new line: {source:?}"
+        );
+        assert!(source.starts_with("Real List"));
+    }
+
+    /// And the other characters the symbol and name are already protected
+    /// from: a right-to-left override in a provenance reorders the line it
+    /// sits in.
+    #[test]
+    fn a_source_is_stripped_like_the_fields_beside_it() {
+        let (_directory, mut store) = store();
+        store
+            .insert_all_absent(&[(listed(), format!("List{}evil", '\u{202e}'))])
+            .unwrap();
+        let stored = store.list(None, 10, 0).unwrap();
+        assert!(!stored[0].source.contains('\u{202e}'));
+    }
+
+    /// An ordinary provenance survives intact, which is what a sanitizer
+    /// applied too eagerly would break.
+    #[test]
+    fn an_ordinary_source_is_unchanged() {
+        let (_directory, mut store) = store();
+        store
+            .insert_all_absent(&[(listed(), "Uniswap Labs Default".into())])
+            .unwrap();
+        assert_eq!(
+            store.list(None, 10, 0).unwrap()[0].source,
+            "Uniswap Labs Default"
+        );
+    }
+}

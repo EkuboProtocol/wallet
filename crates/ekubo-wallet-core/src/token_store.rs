@@ -340,6 +340,18 @@ impl TokenStore {
                 token.chain_id
             );
             let chain_id = i64::try_from(token.chain_id).context("chain ID out of range")?;
+            // The provenance goes through the same sanitizer as the symbol and
+            // the name, because it has the same provenance: a token list's
+            // declared name, or a filename, both chosen by whoever wrote the
+            // list. Two of the three fields were cleaned and this one was not.
+            //
+            // Newlines are what make it more than untidy. `terminal_safe_multiline`
+            // preserves them deliberately -- it exists so multi-line output
+            // survives -- and `token list` and `token search` interpolate the
+            // stored source into one line each. A source carrying a newline
+            // therefore prints as extra inventory rows, which is a forgery of
+            // the one column that says where a name came from.
+            let source = sanitize(source);
             let changed = transaction.execute(
                 "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
