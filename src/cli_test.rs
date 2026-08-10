@@ -1244,9 +1244,13 @@ mod reviewed_wallet_tests {
             2,
             "the proposal review and the direct `policy set` both check"
         );
+        // No newline in either needle. The checkout is CRLF on Windows, so a
+        // `\n` in the pattern matches nothing there and `split_once` returns
+        // `None` -- the test passed locally and failed only in CI, which is
+        // the failure mode a source-scanning test is most prone to.
         for applying in [
             "policies.consume_proposal(&proposal)?",
-            "let stored = policies.put(\n",
+            "let stored = policies.put(",
         ] {
             let before = source
                 .split_once(applying)
