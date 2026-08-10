@@ -804,9 +804,10 @@ impl DappSession<'_> {
             Some(&requester),
         )?;
         let store = MessageStore::production(&self.data_dir)?;
+        let policies = PolicyStore::production(&self.data_dir)?;
         // Every message is reviewed by a person, so this one always draws.
         self.suspend_idle().await;
-        match decide_message(self.config, store, record, false).await? {
+        match decide_message(self.config, &policies, store, record, false).await? {
             MessageDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this message.",
             )),
@@ -846,10 +847,11 @@ impl DappSession<'_> {
             Some(&requester),
         )?;
         let store = TypedDataStore::production(&self.data_dir)?;
+        let policies = PolicyStore::production(&self.data_dir)?;
         // Every typed-data payload is reviewed by a person, so this one always
         // draws.
         self.suspend_idle().await;
-        match decide_typed_data(self.config, store, record, false).await? {
+        match decide_typed_data(self.config, &policies, store, record, false).await? {
             TypedDataDecision::Rejected(_) => Ok(RequestOutcome::rejected(
                 "The wallet owner declined to sign this payload.",
             )),

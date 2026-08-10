@@ -72,6 +72,7 @@ pub enum TypedDataDecision {
 /// subject even on the path that answers the question for them.
 pub async fn decide_message(
     config: &ConfigStore,
+    policies: &PolicyStore,
     mut store: MessageStore,
     request: PendingMessage,
     no_confirm: bool,
@@ -223,7 +224,7 @@ pub async fn decide_message(
     Ok(MessageDecision::Signed(
         crate::orchestrator::sign_reviewed_message(
             config,
-            &PolicyStore::production(config.data_dir())?,
+            policies,
             &mut store,
             &request,
             &wallet,
@@ -240,6 +241,7 @@ pub async fn decide_message(
 /// Who asked is read from the row, on the same terms as [`decide_message`].
 pub async fn decide_typed_data(
     config: &ConfigStore,
+    policies: &PolicyStore,
     mut store: TypedDataStore,
     request: PendingTypedData,
     no_confirm: bool,
@@ -382,7 +384,7 @@ pub async fn decide_typed_data(
     Ok(TypedDataDecision::Signed(
         crate::orchestrator::sign_reviewed_typed_data(
             config,
-            &PolicyStore::production(config.data_dir())?,
+            policies,
             &mut store,
             &request,
             &wallet,

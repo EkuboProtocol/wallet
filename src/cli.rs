@@ -2811,9 +2811,17 @@ async fn run_approve(
                 let Some(request) = found else {
                     return Err(transaction_error);
                 };
-                return approve_message(config, messages, request, no_confirm, mode).await;
+                // Opened here rather than at the moment of signing: this is
+                // where the other request stores are opened, and a database
+                // that will not open should say so before a person reads a
+                // payload, not after they have approved one.
+                let policies = PolicyStore::production(config.data_dir())?;
+                return approve_message(config, &policies, messages, request, no_confirm, mode)
+                    .await;
             };
-            return approve_typed_data(config, typed_data, request, no_confirm, mode).await;
+            let policies = PolicyStore::production(config.data_dir())?;
+            return approve_typed_data(config, &policies, typed_data, request, no_confirm, mode)
+                .await;
         }
     };
     let data_dir = config.data_dir().to_path_buf();
@@ -2922,12 +2930,15 @@ impl crate::approval::ReviewPresenter for CliTransactionPresenter {
 
 async fn approve_typed_data(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: TypedDataStore,
     request: PendingTypedData,
     no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    match crate::signing_review::decide_typed_data(config, store, request, no_confirm).await? {
+    match crate::signing_review::decide_typed_data(config, policies, store, request, no_confirm)
+        .await?
+    {
         crate::signing_review::TypedDataDecision::Rejected(rejected) => emit_rejected(
             mode,
             "typed-data request",
@@ -2962,12 +2973,15 @@ async fn approve_typed_data(
 
 async fn approve_message(
     config: &ConfigStore,
+    policies: &PolicyStore,
     store: MessageStore,
     request: PendingMessage,
     no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
-    match crate::signing_review::decide_message(config, store, request, no_confirm).await? {
+    match crate::signing_review::decide_message(config, policies, store, request, no_confirm)
+        .await?
+    {
         crate::signing_review::MessageDecision::Rejected(rejected) => emit_rejected(
             mode,
             "message request",
