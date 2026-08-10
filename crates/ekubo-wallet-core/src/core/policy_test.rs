@@ -848,3 +848,132 @@ fn an_unreadable_token_balance_stops_the_automatic_path() {
     // there is no rule that makes an unreadable token readable.
     assert!(denial_reasons(std::slice::from_ref(&finding)).is_empty());
 }
+
+mod admission_tests_belong_to_the_types {
+    //! Deserializing any policy type is admission, not just
+    //! `WalletPolicy::parse`.
+    //!
+    //! The checks used to hang off `parse` alone, so `from_value` was a second
+    //! door into the same authority-bearing types that skipped every one of
+    //! them. `evaluate_policy` then read `max_calls_per_batch` from whatever it
+    //! was handed, so a policy that never passed admission decided what signed
+    //! automatically.
+
+    use crate::core::policy::{ChainPolicy, Rule, WalletPolicy};
+    use serde_json::json;
+
+    /// The finding's own repro, at the type it names. Deserialization is the
+    /// only way an out-of-crate caller can build one of these at all, so
+    /// refusing here is refusing everywhere.
+    #[test]
+    fn a_directly_deserialized_policy_cannot_exceed_the_batch_ceiling() {
+        let document = json!({
+            "version": 1,
+            "chains": {"1": {"max_calls_per_batch": 5000, "rules": []}}
+        });
+
+        let direct = serde_json::from_value::<WalletPolicy>(document.clone())
+            .expect_err("4096 is the ceiling however the policy was built");
+        assert!(
+            direct.to_string().contains("max_calls_per_batch"),
+            "{direct}"
+        );
+
+        // And `parse` still says the same thing, because it is now the same
+        // door rather than the only checked one.
+        assert!(WalletPolicy::parse(document).is_err());
+    }
+
+    /// One level down: a chain policy lifted out of a fragment on its own is
+    /// checked by the code that checks one reached through a document. Left
+    /// unchecked, the same value arrives at `evaluate_policy` inside a
+    /// `WalletPolicy` a caller assembled around it.
+    #[test]
+    fn a_chain_policy_deserialized_on_its_own_is_checked_too() {
+        assert!(
+            serde_json::from_value::<ChainPolicy>(json!({"max_calls_per_batch": 5000})).is_err()
+        );
+        assert!(serde_json::from_value::<ChainPolicy>(json!({"max_calls_per_batch": 0})).is_err());
+        assert!(serde_json::from_value::<ChainPolicy>(json!({"label": ""})).is_err());
+        assert!(
+            serde_json::from_value::<ChainPolicy>(json!({"max_calls_per_batch": 4096})).is_ok(),
+            "the ceiling itself is admissible"
+        );
+    }
+
+    /// And a rule, whose invariant is that each predicate is applicable to the
+    /// slot holding it. A `length` predicate over an address decides nothing;
+    /// admitted, it silently never matches, so a rule the owner reviewed as a
+    /// restriction restricts nothing.
+    #[test]
+    fn a_rule_deserialized_on_its_own_has_its_slots_checked() {
+        let inapplicable = json!({"effect": "allow", "to": {"length": {"eq": "20"}}});
+        let error = serde_json::from_value::<Rule>(inapplicable.clone())
+            .expect_err("a predicate must be applicable to the slot it sits in");
+        assert!(error.to_string().contains("applicable"), "{error}");
+
+        // The same rule inside a document is refused by the same code, so the
+        // two paths cannot disagree about what a valid rule is.
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({
+                "version": 1,
+                "chains": {"1": {"rules": [inapplicable]}}
+            }))
+            .is_err()
+        );
+    }
+
+    /// Version and chain keys are `WalletPolicy`'s own, and they travel with
+    /// the type rather than with one constructor.
+    #[test]
+    fn the_document_level_checks_travel_with_the_type() {
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({"version": 2, "chains": {}})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({"chains": {"01": {}}})).is_err(),
+            "a non-canonical chain key governs nothing and must not be admitted"
+        );
+        assert!(
+            serde_json::from_value::<WalletPolicy>(json!({"chains": {}})).is_ok(),
+            "and an empty document is still a policy: it governs nothing automatically"
+        );
+    }
+
+    /// The guard on the private mirrors this fix introduced. A field added to
+    /// a public type and forgotten in its mirror would be rejected by the
+    /// mirror's `deny_unknown_fields` rather than quietly skipping validation
+    /// — this is the test that notices, by round-tripping a document that
+    /// names every field there is.
+    #[test]
+    fn every_field_survives_a_round_trip_through_the_validating_deserializer() {
+        let document = json!({
+            "$schema": "https://example.invalid/policy.schema.json",
+            "version": 1,
+            "chains": {
+                "*": {
+                    "label": "every chain",
+                    "max_calls_per_batch": 32,
+                    "native_value": {"eq": "0"},
+                    "rules": [{
+                        "effect": "deny",
+                        "label": "no calls to the stranger",
+                        "to": {"eq": "0x3333333333333333333333333333333333333333"},
+                        "from": {"eq": "$self"},
+                        "value": {"eq": "0"},
+                        "calldata": {"eq": "0x"}
+                    }]
+                }
+            }
+        });
+        let policy: WalletPolicy = serde_json::from_value(document.clone()).expect("admissible");
+        assert_eq!(
+            serde_json::to_value(&policy).expect("serializes"),
+            document,
+            "a field dropped by a mirror would vanish here"
+        );
+        // Every shipped example is likewise admissible through `from_value`
+        // and not only through `parse`.
+        assert_eq!(policy.chains.len(), 1);
+    }
+}
