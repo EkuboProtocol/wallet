@@ -154,8 +154,24 @@ impl SimulationStore {
     }
 
     /// Drop every expired entry.
+    ///
+    /// Expired means the deadline has passed *or* the clock has moved behind
+    /// the moment the entry was recorded. `expires_at` is wall-clock
+    /// arithmetic on a value the host can move backwards -- an NTP correction,
+    /// a manual change, a suspended laptop resuming with a stale RTC -- and
+    /// compared against a later wall-clock reading alone, a rollback makes an
+    /// entry look younger than it is and keeps it sendable past the window it
+    /// was given.
+    ///
+    /// A `now` before `recorded_at` says the clock moved, which is the one
+    /// thing this can detect without a monotonic source. The safe reading of
+    /// "I cannot tell how long this has been here" is that it has been here
+    /// too long: re-simulating costs one RPC round trip, and sending a stale
+    /// result costs a signature over state the chain has left behind. Same
+    /// rule, and the same reasoning, as `reconcile::lease_expired`.
     pub fn prune(&mut self, now: DateTime<Utc>) {
-        self.recorded.retain(|_, entry| entry.expires_at > now);
+        self.recorded
+            .retain(|_, entry| entry.expires_at > now && entry.recorded_at <= now);
     }
 
     #[must_use]
