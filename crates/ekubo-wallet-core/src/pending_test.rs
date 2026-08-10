@@ -528,7 +528,11 @@ fn cancellation_reprices_on_one_row_until_an_attempt_mines() {
             request_id,
             Some(hash_of(CANCEL_BYTES_ONE).as_str()),
             CANCEL_BYTES_THREE,
-            "0x3333333333333333333333333333333333333333333333333333333333333333",
+            // Its own hash, not an arbitrary one. The envelope and the hash
+            // are validated as a pair before anything else now, so a junk hash
+            // here would be rejected for the wrong reason and this assertion
+            // would stop testing what it names.
+            hash_of(CANCEL_BYTES_THREE).as_str(),
         )
         .unwrap_err()
         .to_string();
@@ -872,5 +876,72 @@ fn a_reclaim_within_one_millisecond_still_invalidates_a_replacement_verdict() {
     assert_eq!(
         store.get(signed.request_id).unwrap().status,
         PendingStatus::Submitting
+    );
+}
+
+#[test]
+fn a_mismatched_envelope_and_hash_never_reach_the_database() {
+    // The pair used to be checked only by `PendingRow::parse`, on the way back
+    // out. A well-formed but mismatched pair therefore committed, and only the
+    // `self.get` after the commit failed -- leaving a durable row that every
+    // read rejects while `signed` and `cancelling` both hold the wallet's one
+    // in-flight slot through the partial unique index. `reconcile_all`
+    // swallows the read error to keep a listing rendering, so the slot stays
+    // held and nothing further can be signed for that wallet on that chain.
+    let (_directory, mut store) = store();
+    let wrong = hash_of(CANCEL_BYTES_ONE);
+
+    let error = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            wrong.as_str(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("do not hash to"), "{error}");
+
+    // Nothing was written, so the in-flight slot is still free and the honest
+    // pair goes in.
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .expect("the slot was never taken by the rejected write");
+
+    // And the same on the cancellation writer, which is the worse one to wedge
+    // -- the owner is trying to stop a transaction.
+    let leased = store.claim_for_submission(signed.request_id).unwrap();
+    store
+        .mark_broadcast(
+            signed.request_id,
+            hash_of(ORIGINAL_BYTES).as_str(),
+            leased.generation,
+        )
+        .unwrap();
+    let error = store
+        .store_cancellation(
+            signed.request_id,
+            None,
+            CANCEL_BYTES_ONE,
+            hash_of(CANCEL_BYTES_TWO).as_str(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("do not hash to"), "{error}");
+    assert_eq!(
+        store.get(signed.request_id).unwrap().status,
+        PendingStatus::Broadcast,
+        "the row is still readable and still progressing"
     );
 }

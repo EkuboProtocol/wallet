@@ -239,8 +239,7 @@ impl PendingStore {
             "network name cannot be empty"
         );
         plan.validate()?;
-        let serialized_transaction = parse_envelope(serialized_transaction)?;
-        let transaction_hash = parse_hash(transaction_hash)?;
+        let envelope = VerifiedEnvelope::parse(serialized_transaction, transaction_hash)?;
         let policy_revision =
             i64::try_from(policy_revision).context("policy revision is too large")?;
         let transaction = self.database.connection.transaction()?;
@@ -276,8 +275,8 @@ impl PendingStore {
                     plan_source,
                     policy_revision,
                     Millis(created_at),
-                    Blob(serialized_transaction),
-                    Blob(transaction_hash),
+                    Blob(envelope.bytes),
+                    Blob(envelope.hash),
                 ],
             )
             .with_context(|| in_flight_conflict(&transaction, wallet_id, chain_id))?;
@@ -376,8 +375,7 @@ impl PendingStore {
         transaction_hash: &str,
     ) -> Result<PendingTransaction> {
         let review_digest = parse_hash(review_digest)?;
-        let serialized_transaction = parse_envelope(serialized_transaction)?;
-        let transaction_hash = parse_hash(transaction_hash)?;
+        let envelope = VerifiedEnvelope::parse(serialized_transaction, transaction_hash)?;
         let expected_digest = parse_hash(expected_digest)?;
         let transaction = self.database.connection.transaction()?;
         let (wallet_id, chain_id, digest, policy_revision, status, approval_required): (
@@ -438,8 +436,8 @@ impl PendingStore {
                 params![
                     request_id,
                     Millis(sql::now()),
-                    Blob(serialized_transaction),
-                    Blob(transaction_hash),
+                    Blob(envelope.bytes),
+                    Blob(envelope.hash),
                     Blob(review_digest),
                 ],
             )
@@ -597,8 +595,9 @@ impl PendingStore {
         cancel_serialized_transaction: &str,
         cancel_transaction_hash: &str,
     ) -> Result<PendingTransaction> {
-        let cancel_serialized_transaction = parse_envelope(cancel_serialized_transaction)?;
-        let cancel_transaction_hash = parse_hash(cancel_transaction_hash)?;
+        let cancellation =
+            VerifiedEnvelope::parse(cancel_serialized_transaction, cancel_transaction_hash)?;
+        let cancel_transaction_hash = cancellation.hash;
         let priced_against = priced_against.map(parse_hash).transpose()?;
         let transaction = self.database.connection.transaction()?;
         let (status, hashes): (String, Option<Vec<u8>>) = transaction
@@ -642,7 +641,7 @@ impl PendingStore {
              WHERE request_id = ?1 AND status IN ('broadcast', 'cancelling')",
             params![
                 request_id,
-                Blob(cancel_serialized_transaction),
+                Blob(cancellation.bytes),
                 encode_cancel_hashes(&hashes),
                 Millis(sql::now()),
             ],
@@ -1126,6 +1125,42 @@ fn parse_envelope(value: &str) -> Result<Bytes> {
     let bytes = Bytes::from_str(value).context("value must be 0x-prefixed hexadecimal")?;
     ensure!(!bytes.is_empty(), "signed transaction bytes are empty");
     Ok(bytes)
+}
+
+/// An envelope and the hash that names it, which agree.
+///
+/// The two used to arrive at every writer as separate strings, each parsed on
+/// its own, and `keccak256(bytes) == hash` was checked only by
+/// [`PendingRow::parse`] — on the way back *out*. A caller that supplied a
+/// well-formed but mismatched pair therefore committed the row, and only the
+/// `self.get` after the commit failed. The row is durable, `signed` and
+/// `cancelling` both hold the wallet's one in-flight slot through the partial
+/// unique index, and every read of it fails — including `reconcile_all`, which
+/// swallows the error to keep a listing rendering. Nothing further can be
+/// signed for that wallet on that chain until the database is repaired by
+/// hand, and if the wedged row is a *cancellation* the owner is locked out
+/// while trying to stop a transaction.
+///
+/// So the pair is one value with one constructor. A writer cannot hold the
+/// bytes and the hash separately long enough to disagree about them, and a
+/// future writer cannot reintroduce the two-argument shape without saying so
+/// out loud.
+struct VerifiedEnvelope {
+    bytes: Bytes,
+    hash: B256,
+}
+
+impl VerifiedEnvelope {
+    fn parse(serialized: &str, transaction_hash: &str) -> Result<Self> {
+        let bytes = parse_envelope(serialized)?;
+        let hash = parse_hash(transaction_hash)?;
+        ensure!(
+            keccak256(&bytes) == hash,
+            "signed transaction bytes do not hash to {hash:#x}, so the pair would not be readable \
+             once stored"
+        );
+        Ok(Self { bytes, hash })
+    }
 }
 
 /// A plan's chain as the column holds it.
