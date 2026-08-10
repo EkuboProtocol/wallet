@@ -374,6 +374,11 @@ struct NetworkAddArgs {
     native_currency_decimals: Option<u8>,
     #[arg(long)]
     max_gas_limit: Option<String>,
+    /// Most this wallet will ever sign as `maxFeePerGas` on this chain, in
+    /// wei. Unset means unbounded: the fee of an automatic transaction comes
+    /// from an endpoint, no policy rule speaks about it, and nobody reviews it.
+    #[arg(long)]
+    max_fee_per_gas: Option<String>,
     #[arg(long)]
     block_explorer_url: Option<Url>,
     #[arg(long)]
@@ -3928,6 +3933,9 @@ fn network_field_value(network: &NetworkConfig, flag: &str) -> String {
         "--native-currency-symbol" => currency.symbol,
         "--native-currency-decimals" => currency.decimals.to_string(),
         "--max-gas-limit" => network.max_gas_limit.clone().unwrap_or_default(),
+        // Empty when unset, which is also what clears it: unset is unbounded,
+        // and an owner who set a ceiling needs a way to take it off again.
+        "--max-fee-per-gas" => network.max_fee_per_gas.clone().unwrap_or_default(),
         "--block-explorer-url" => network
             .block_explorer_url
             .as_ref()
@@ -3982,6 +3990,22 @@ fn set_network_field(network: &mut NetworkConfig, flag: &str, value: &str) -> Re
             network.native_currency = Some(currency);
         }
         "--max-gas-limit" => network.max_gas_limit = Some(value.trim().to_owned()),
+        "--max-fee-per-gas" => {
+            let ceiling = value.trim();
+            network.max_fee_per_gas = if ceiling.is_empty() {
+                // Blank clears it. Unset is unbounded, and an owner who set a
+                // ceiling has to be able to take it off without editing JSON.
+                None
+            } else {
+                // Parsed here rather than at signing time: a ceiling that does
+                // not fit is a ceiling that refuses every transaction on the
+                // chain, and finding that out when one is due is too late.
+                ceiling
+                    .parse::<u128>()
+                    .context("maximum fee per gas must be a whole number of wei")?;
+                Some(ceiling.to_owned())
+            };
+        }
         "--block-explorer-url" => {
             network.block_explorer_url = Some(
                 value
@@ -4103,6 +4127,9 @@ fn apply_network_overrides(mut base: NetworkConfig, args: NetworkAddArgs) -> Res
     if let Some(maximum) = args.max_gas_limit {
         base.max_gas_limit = Some(maximum);
     }
+    if let Some(ceiling) = args.max_fee_per_gas {
+        set_network_field(&mut base, "--max-fee-per-gas", &ceiling)?;
+    }
     if let Some(url) = args.block_explorer_url {
         base.block_explorer_url = Some(url);
     }
@@ -4206,6 +4233,14 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
         optional: false,
     },
     RequiredField {
+        flag: "--max-fee-per-gas",
+        prompt: "Maximum fee per gas (wei, blank for none)",
+        help: "Largest maxFeePerGas this wallet may sign here. The fee of an automatic transaction comes from an endpoint, no policy rule speaks about it, and nobody reviews it, so this is the only bound on what one dishonest answer can cost",
+        example: "50000000000",
+        default: None,
+        optional: true,
+    },
+    RequiredField {
         flag: "--block-explorer-url",
         prompt: "Block explorer URL",
         help: "Where the CLI links transactions and addresses",
@@ -4267,6 +4302,7 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
             args.native_currency_decimals.map(|value| value.to_string()),
         ),
         ("--max-gas-limit", args.max_gas_limit.clone()),
+        ("--max-fee-per-gas", args.max_fee_per_gas.clone()),
         (
             "--block-explorer-url",
             args.block_explorer_url.as_ref().map(ToString::to_string),
@@ -4313,10 +4349,18 @@ fn build_custom_network(name: String, args: &NetworkAddArgs) -> Result<NetworkCo
             .parse()
             .context("RPC strategy is invalid")?,
         max_gas_limit: Some(field("--max-gas-limit")),
-        // Not asked for here. A fee ceiling is a judgement about what the
-        // owner's transactions are worth rather than a property of the chain,
-        // like `rpc_strategy`, and the form asks only for the latter.
-        max_fee_per_gas: None,
+        // Asked for, and optional. It is a judgement about what the owner's
+        // transactions are worth rather than a property of the chain -- but so
+        // is `rpc_strategy`, which the form has always asked, and leaving it
+        // out meant the ceiling `docs/networks.md` calls the protection for
+        // automatic transactions could not be set through the CLI at all.
+        // Blank stays blank: unset is unbounded, and a number invented here
+        // would be wrong on most chains.
+        max_fee_per_gas: answers
+            .get("--max-fee-per-gas")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
         native_currency: Some(NativeCurrency {
             name: field("--native-currency-name"),
             symbol: field("--native-currency-symbol"),
@@ -4438,6 +4482,14 @@ fn validate_network_field(flag: &str, input: &str) -> std::result::Result<(), St
     {
         let value = input.trim();
         match flag {
+            // Before the emptiness rule, because blank is a real answer here:
+            // no ceiling. Every other field is required, so the general rule
+            // stays and this is the exception that says so.
+            "--max-fee-per-gas" if value.is_empty() => Ok(()),
+            "--max-fee-per-gas" => value
+                .parse::<u128>()
+                .map(|_| ())
+                .map_err(|_| "must be a whole number of wei, or blank for no ceiling".into()),
             _ if value.is_empty() => Err("a value is required".into()),
             "--rpc-url" | "--block-explorer-url" | "--documentation-url" => Url::parse(value)
                 .map_err(|error| format!("not a URL: {error}"))

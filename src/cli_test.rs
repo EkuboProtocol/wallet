@@ -217,6 +217,7 @@ fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
         rpc_strategy: None,
         display_name: None,
         aliases: Vec::new(),
+        max_fee_per_gas: None,
         native_currency_name: None,
         native_currency_symbol: None,
         native_currency_decimals: None,
@@ -1306,5 +1307,85 @@ mod removal_fencing_tests {
             checked < removed && removed < purged,
             "and long before the key is destroyed: afterwards, refusing helps nobody"
         );
+    }
+}
+
+mod fee_ceiling_surface_tests {
+    //! The one bound on what a dishonest endpoint can charge is settable.
+
+    use super::*;
+
+    /// `docs/networks.md` calls `max_fee_per_gas` the protection for automatic
+    /// transactions -- their fee comes from an endpoint, no policy rule speaks
+    /// about it, and nobody reviews it -- and the CLI had no way to set it.
+    /// Every other field of a custom network was reachable; this one was
+    /// hard-coded to `None`.
+    #[test]
+    fn a_custom_network_can_be_given_a_fee_ceiling() {
+        let mut network = crate::config::NetworkConfig {
+            name: "custom".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: vec!["https://example.invalid/rpc".parse().unwrap()],
+            rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        };
+        set_network_field(&mut network, "--max-fee-per-gas", " 50000000000 ").unwrap();
+        assert_eq!(network.max_fee_per_gas.as_deref(), Some("50000000000"));
+    }
+
+    /// Parsed when it is set rather than when a transaction is due. A ceiling
+    /// that does not fit refuses every transaction on that chain, and finding
+    /// that out at signing time is finding out too late.
+    #[test]
+    fn a_ceiling_that_is_not_a_number_is_refused_at_the_prompt() {
+        let mut network = crate::config::NetworkConfig {
+            name: "custom".into(),
+            display_name: None,
+            aliases: Vec::new(),
+            chain_id: 999,
+            rpc_urls: vec!["https://example.invalid/rpc".parse().unwrap()],
+            rpc_strategy: ekubo_wallet_core::config::RpcStrategy::Ordered,
+            max_gas_limit: None,
+            max_fee_per_gas: None,
+            native_currency: None,
+            block_explorer_url: None,
+            documentation_url: None,
+        };
+        for bad in ["50 gwei", "-1", "1e9"] {
+            assert!(
+                set_network_field(&mut network, "--max-fee-per-gas", bad).is_err(),
+                "`{bad}` is not a whole number of wei"
+            );
+        }
+        assert!(network.max_fee_per_gas.is_none(), "and nothing was written");
+
+        // Blank is not a bad value, it is the way to remove a ceiling: unset
+        // is unbounded, and an owner who set one has to be able to take it off
+        // without editing JSON by hand.
+        set_network_field(&mut network, "--max-fee-per-gas", "1").unwrap();
+        set_network_field(&mut network, "--max-fee-per-gas", "  ").unwrap();
+        assert!(
+            network.max_fee_per_gas.is_none(),
+            "blank clears the ceiling"
+        );
+    }
+
+    /// The interactive form offers it, and offers it as optional: unset is
+    /// unbounded and a number invented here would be wrong on most chains, so
+    /// it must not become a required answer.
+    #[test]
+    fn the_custom_network_form_offers_the_ceiling_without_demanding_one() {
+        let field = CUSTOM_NETWORK_FIELDS
+            .iter()
+            .find(|field| field.flag == "--max-fee-per-gas")
+            .expect("the form asks about the fee ceiling");
+        assert!(field.optional, "an unset ceiling is a valid answer");
+        assert!(field.default.is_none(), "and no number is invented for it");
     }
 }
