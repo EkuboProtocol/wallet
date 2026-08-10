@@ -147,3 +147,85 @@ mod cancellation_configuration_tests {
         );
     }
 }
+
+mod poll_throttle_tests {
+    //! A dapp decides how often to ask; the chain should not be asked that often.
+
+    use super::*;
+
+    /// `wallet_getCallsStatus` is dapp-callable and each call reached
+    /// `observe`: a receipt lookup, and when that finds nothing, a nonce read
+    /// as well -- two RPC round trips per poll, against endpoints shared with
+    /// simulation and signing. A loop turned one pending transaction into as
+    /// much RPC load as the dapp cared to generate.
+    #[test]
+    fn an_unchanged_answer_is_reused_briefly_then_expires() {
+        let request = uuid::Uuid::from_u128(1);
+        assert!(
+            !recently_unchanged(request),
+            "nothing is suppressed before an observation has been made"
+        );
+
+        remember_unchanged(request);
+        assert!(
+            recently_unchanged(request),
+            "the repeat is answered from it"
+        );
+
+        // A different transaction is unaffected: the throttle is per request,
+        // not a global gate on reconciliation.
+        assert!(!recently_unchanged(uuid::Uuid::from_u128(2)));
+    }
+
+    /// It is remembered only where the chain said nothing had changed. Every
+    /// settled branch falls through without touching it, so a status a caller
+    /// is waiting for is never delayed.
+    #[test]
+    fn only_the_unchanged_observation_is_remembered() {
+        let source = include_str!("reconcile.rs");
+        let body = source
+            .split_once("pub async fn reconcile_record")
+            .expect("the entry point exists")
+            .1;
+        assert_eq!(
+            body.matches("remember_unchanged(").count(),
+            1,
+            "exactly one branch remembers, and it is the one that found nothing"
+        );
+        let arm = body
+            .split_once("ChainObservation::StillPending =>")
+            .expect("the pending arm exists")
+            .1;
+        assert!(
+            arm.contains("remember_unchanged("),
+            "and that branch is the pending one"
+        );
+
+        // And the throttle is consulted before the chain is asked, which is
+        // the half that does the work. Asserting only where the remembering
+        // happens leaves the early return free to be deleted -- which it was,
+        // when this test first passed against a build with it removed.
+        let consulted = body
+            .find("recently_unchanged(record.request_id)")
+            .expect("the throttle is consulted");
+        let observed = body.find("observe(network,").expect("the chain is asked");
+        assert!(
+            consulted < observed,
+            "the reuse has to come before the round trip it exists to avoid"
+        );
+    }
+
+    /// The map is a throttle rather than a cache of truth, so it is bounded
+    /// and losing it costs one extra round trip.
+    #[test]
+    fn the_throttle_is_bounded() {
+        for index in 0..(MAX_REMEMBERED_OBSERVATIONS + 10) {
+            remember_unchanged(uuid::Uuid::from_u128(index as u128 + 1_000));
+        }
+        let held = UNCHANGED_SINCE.lock().unwrap().len();
+        assert!(
+            held <= MAX_REMEMBERED_OBSERVATIONS,
+            "the map holds {held}, above its ceiling"
+        );
+    }
+}
