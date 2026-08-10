@@ -7,8 +7,8 @@
 
 use crate::{
     config::{
-        NetworkConfig, create_private_dir, set_private_file_permissions,
-        set_private_handle_permissions, validate_network, validate_wallet_id,
+        NetworkConfig, create_private_dir, open_private_file, set_private_handle_permissions,
+        validate_network, validate_wallet_id,
     },
     core::policy::WalletPolicy,
     sql::{Millis, RowExt},
@@ -186,7 +186,26 @@ impl PolicyStore {
         lock.lock_exclusive()
             .with_context(|| format!("failed to lock {}", lock_path.display()))?;
         let path = data_dir.join(DATABASE_FILE);
-        let key = load_or_create_database_key(data_dir, path.exists())?;
+        // Whether a database exists decides whether a missing credential-store
+        // key is state loss or a first run, so it must not be a separate
+        // question from the one the open below answers. `path.exists()`
+        // resolved the name a second time and followed a link, which let a
+        // replacement between the two calls turn "this database exists and its
+        // key is gone" into "there is no database, mint a key" — and the
+        // original wallet database is then unopenable forever.
+        //
+        // Asking a handle instead binds the answer to an inode. Size rather
+        // than presence is the test SQLite itself applies: a zero-length file
+        // is a database with nothing in it yet, and a stray empty file left by
+        // a failed first run must not brick the next one.
+        let database = open_private_file(&path)?;
+        let database_exists = database
+            .metadata()
+            .with_context(|| format!("failed to inspect {}", path.display()))?
+            .len()
+            > 0;
+        let key = load_or_create_database_key(data_dir, database_exists)?;
+        drop(database);
         let result = Self::open_with(&path, &key, SeedDefaults::Yes);
         // The work's own error is the one worth reporting. Unlocking after a
         // failure and propagating *that* replaces "the database key is wrong"
@@ -323,7 +342,11 @@ impl PolicyStore {
              lost with it)"
         );
         verify_integrity(&connection)?;
-        set_private_file_permissions(path)?;
+        // Narrowed through a handle that refuses to follow a link, not through
+        // the name. This runs after the connection is open, which is exactly
+        // the window in which a by-path chmod could be pointed at some other
+        // reachable file.
+        drop(open_private_file(path)?);
         Ok(Self { connection })
     }
 

@@ -980,17 +980,43 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        if !path.exists() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(path)?;
-        }
-        // An existing directory may predate this rule, or have been restored
-        // from a backup that widened it.
-        let mode = fs::metadata(path)?.permissions().mode();
-        if mode & 0o077 != 0 {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        // `symlink_metadata` rather than `exists`/`metadata`: both of those
+        // resolve the name, so a symlink planted at `path` answered for its
+        // target and the mode below was applied to whatever the link pointed
+        // at. Asking about the link itself is the only question with a stable
+        // answer, and a data directory reached through a link is refused
+        // outright rather than hardened in place — the wallet cannot promise
+        // 0700 on a directory whose identity another process chooses.
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "{} is a symbolic link; the wallet data directory must be a real directory it \
+                     can keep private",
+                    path.display()
+                );
+            }
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_dir(),
+                    "{} exists and is not a directory",
+                    path.display()
+                );
+                // An existing directory may predate this rule, or have been
+                // restored from a backup that widened it.
+                let mode = metadata.permissions().mode();
+                if mode & 0o077 != 0 {
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(path)?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+            }
         }
     }
     #[cfg(not(unix))]
@@ -998,14 +1024,30 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn set_private_file_permissions(path: &Path) -> Result<()> {
+/// Open a file that only this owner may read, refusing to follow a symlink
+/// planted in its place, and return the handle that names the inode.
+///
+/// There is deliberately no by-path counterpart. `fs::set_permissions` and
+/// `File::open` each resolve the name independently, so a caller that opens a
+/// file and then narrows it by name has asked the filesystem the same question
+/// twice and may be answered differently each time — the second answer being a
+/// link the mode is then applied to. Handing back the handle means the caller
+/// cannot reintroduce that gap: it already holds the only reference it needs.
+pub(crate) fn open_private_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW fails with ELOOP rather than opening a link's target, so
+        // the handle below refers to the name itself or to nothing.
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let _ = path;
-    Ok(())
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    set_private_handle_permissions(&file)?;
+    Ok(file)
 }
 
 /// Narrow the file this handle already refers to, rather than whatever its

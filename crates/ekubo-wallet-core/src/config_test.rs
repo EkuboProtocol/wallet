@@ -413,3 +413,62 @@ fn the_default_strategy_is_neither_required_nor_written() {
         agreeing
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn a_symlinked_data_directory_is_refused_rather_than_hardened() {
+    // `exists` and `metadata` both resolve the name, so a link planted at the
+    // data directory answered for its target and the 0700 was applied there.
+    // The wallet cannot promise privacy for a directory whose identity another
+    // process picks, so it declines to try.
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("elsewhere");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let link = directory.path().join("data");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let error = format!("{:#}", create_private_dir(&link).unwrap_err());
+    assert!(error.contains("symbolic link"), "{error}");
+    assert_eq!(
+        std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+        0o777,
+        "the link's target is left exactly as it was, not silently re-moded"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_private_file_is_opened_through_the_name_it_was_given() {
+    // The by-path chmod this replaced could be pointed at any file the owner
+    // could reach by swapping a link in after the open. O_NOFOLLOW makes the
+    // swap an error instead of a redirection.
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    std::fs::write(&target, b"secret").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let link = directory.path().join("database");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    assert!(
+        open_private_file(&link).is_err(),
+        "a link standing in for the file is refused"
+    );
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644,
+        "and its target keeps the mode it had"
+    );
+
+    let plain = directory.path().join("plain");
+    std::fs::write(&plain, b"secret").unwrap();
+    std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let file = open_private_file(&plain).unwrap();
+    assert_eq!(
+        file.metadata().unwrap().permissions().mode() & 0o777,
+        0o600,
+        "a real file is narrowed through the handle that names it"
+    );
+}
