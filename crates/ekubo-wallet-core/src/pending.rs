@@ -964,6 +964,34 @@ impl PendingRow {
             "automatic transaction unexpectedly has a review digest"
         );
         let status = PendingStatus::parse(&self.status)?;
+        // The envelope is not optional decoration on an in-flight row; it is
+        // the thing the row is about. A `signed`, `submitting`, `broadcast`,
+        // or `cancelling` row with no envelope still holds the wallet's one
+        // in-flight slot through the partial unique index, and nothing can
+        // move it on: `claim_for_submission` leases any `signed` row without
+        // looking, `submit_claimed` then fails building `SignedExecution`
+        // before it reaches its lease-release handling, and reconciliation
+        // cannot observe a record it cannot take a nonce from. `reconcile_all`
+        // keeps the record on error, so the slot is held until someone repairs
+        // the database.
+        //
+        // The converse matters too, more quietly: a `rejected` row is reached
+        // only from `awaiting_approval`, which never had an envelope, so
+        // signed bytes on one are bytes that should not exist and are readable
+        // through the ordinary transaction reads.
+        match envelope_requirement(status) {
+            EnvelopeRequirement::Required => ensure!(
+                self.serialized_transaction.is_some(),
+                "a {} transaction must carry the signed envelope it was reached by",
+                self.status
+            ),
+            EnvelopeRequirement::Forbidden => ensure!(
+                self.serialized_transaction.is_none(),
+                "a {} transaction precedes any signature and must not carry signed bytes",
+                self.status
+            ),
+            EnvelopeRequirement::Either => {}
+        }
         let (approved_at, rejected_at) =
             split_decision(self.decided_at, status == PendingStatus::Rejected);
         ensure!(
@@ -1141,6 +1169,40 @@ fn encode_cancel_hashes(hashes: &[B256]) -> Vec<u8> {
 }
 
 /// One hash from the `0x`-prefixed hex a caller passed across the API.
+/// Whether a row in this lifecycle state has an envelope behind it.
+///
+/// Written as an exhaustive match rather than a set of "in-flight" statuses so
+/// that adding a state is a decision someone has to make here, in the one
+/// place that says what an envelope means, instead of a default that silently
+/// admits a row with nothing to submit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnvelopeRequirement {
+    /// Reached by signing, so the bytes have to be there.
+    Required,
+    /// Precedes any signature, so bytes here are bytes that should not exist.
+    Forbidden,
+    /// Reachable from both sides.
+    Either,
+}
+
+const fn envelope_requirement(status: PendingStatus) -> EnvelopeRequirement {
+    match status {
+        PendingStatus::AwaitingApproval | PendingStatus::Rejected => EnvelopeRequirement::Forbidden,
+        PendingStatus::Signed
+        | PendingStatus::Submitting
+        | PendingStatus::Broadcast
+        | PendingStatus::Confirmed
+        | PendingStatus::Reverted
+        | PendingStatus::Replaced
+        | PendingStatus::Cancelling => EnvelopeRequirement::Required,
+        // Two honest origins. `discard_unsent` cancels a `signed` row that was
+        // never submitted, which has its envelope; removing a wallet's state
+        // cancels its `awaiting_approval` rows, which never had one. Demanding
+        // either would refuse a row the wallet itself writes.
+        PendingStatus::Cancelled => EnvelopeRequirement::Either,
+    }
+}
+
 fn parse_hash(value: &str) -> Result<B256> {
     B256::from_str(value).context("value must be a 0x-prefixed 32-byte hash")
 }

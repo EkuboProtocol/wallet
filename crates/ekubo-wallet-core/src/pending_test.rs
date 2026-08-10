@@ -1023,3 +1023,107 @@ fn a_broadcast_hash_naming_another_transaction_is_refused_on_read() {
         "{error}"
     );
 }
+
+#[test]
+fn an_in_flight_row_without_its_envelope_is_refused_rather_than_wedging_the_slot() {
+    // An envelope is not optional decoration on an in-flight row; it is the
+    // thing the row is about. Without one, nothing can move the row on:
+    // `claim_for_submission` leases any `signed` row without looking,
+    // `submit_claimed` then fails building `SignedExecution` before reaching
+    // its lease-release handling, and reconciliation cannot take a nonce from
+    // a record that has no bytes. `reconcile_all` keeps the record on error,
+    // so the wallet's one in-flight slot for that chain is held until someone
+    // repairs the database by hand.
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET serialized_transaction = NULL, signed_transaction_hash = NULL
+             WHERE request_id = ?1",
+            params![signed.request_id],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(signed.request_id).unwrap_err());
+    assert!(error.contains("must carry the signed envelope"), "{error}");
+}
+
+#[test]
+fn a_rejected_row_carrying_signed_bytes_is_refused() {
+    // The quiet direction. `rejected` is reachable only from
+    // `awaiting_approval`, which never had an envelope, so signed bytes on one
+    // are bytes that should not exist -- and they are readable through the
+    // ordinary transaction reads.
+    let (_directory, mut store) = store();
+    let request = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    store.reject(request.request_id).unwrap();
+    store
+        .database
+        .connection
+        .execute(
+            "UPDATE pending_transactions
+             SET serialized_transaction = ?2, signed_transaction_hash = ?3
+             WHERE request_id = ?1",
+            params![
+                request.request_id,
+                Blob(Bytes::from_str(ORIGINAL_BYTES).unwrap()),
+                Blob(B256::from_str(hash_of(ORIGINAL_BYTES).as_str()).unwrap()),
+            ],
+        )
+        .unwrap();
+    let error = format!("{:#}", store.get(request.request_id).unwrap_err());
+    assert!(error.contains("must not carry signed bytes"), "{error}");
+}
+
+#[test]
+fn a_cancelled_row_is_accepted_from_either_origin() {
+    // `discard_unsent` cancels a `signed` row that was never submitted, which
+    // has its envelope. Removing a wallet's state cancels its
+    // `awaiting_approval` rows, which never had one. Both are the wallet's own
+    // writes, so the invariant above has to admit both rather than picking the
+    // origin it happened to be written against.
+    let (_directory, mut store) = store();
+    let signed = store
+        .record_automatic_signed(
+            "primary",
+            "ethereum",
+            &plan(),
+            None,
+            1,
+            ORIGINAL_BYTES,
+            hash_of(ORIGINAL_BYTES).as_str(),
+        )
+        .unwrap();
+    let discarded = store.discard_unsent(signed.request_id).unwrap();
+    assert_eq!(discarded.status, PendingStatus::Cancelled);
+    assert!(discarded.serialized_transaction.is_some());
+}
+
+#[test]
+fn a_cancelled_row_from_wallet_removal_never_had_an_envelope() {
+    // The other origin, and the one that caught an over-strict first attempt
+    // at the invariant above: removing a wallet's state cancels its
+    // `awaiting_approval` rows, which have no envelope and never did.
+    let (_directory, mut store) = store();
+    let awaiting = store
+        .create("primary", "ethereum", &plan(), None, 1)
+        .unwrap();
+    store.database.delete("primary", 1).unwrap();
+    let cancelled = store.get(awaiting.request_id).unwrap();
+    assert_eq!(cancelled.status, PendingStatus::Cancelled);
+    assert!(cancelled.serialized_transaction.is_none());
+}
