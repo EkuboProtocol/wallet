@@ -373,25 +373,66 @@ fn a_pairings_own_deadline_outlives_the_moment_the_uri_was_pasted() {
 }
 
 #[test]
-fn the_replay_set_forgets_the_oldest_rather_than_growing() {
-    // Protocol ids are microsecond-scale timestamps, so the lowest is the
-    // oldest, and a relay's redelivery window is minutes -- nothing evicted at
-    // this depth is still eligible to arrive again.
-    let mut answered = BTreeSet::new();
-    for id in 0..u64::try_from(MAX_ANSWERED_IDS).unwrap() * 2 {
+fn the_replay_set_forgets_the_oldest_arrival_rather_than_growing() {
+    // "Oldest" is the order they arrived in, not their numeric value. The id
+    // is a u64 the peer chooses, and this set is the only thing between a
+    // captured envelope and a second execution of the request inside it.
+    let mut answered = AnsweredIds::default();
+    let capacity = u64::try_from(MAX_ANSWERED_IDS).unwrap();
+    for id in 0..capacity * 2 {
         assert!(remember(&mut answered, id), "every id here is new");
     }
     assert_eq!(answered.len(), MAX_ANSWERED_IDS);
-    assert_eq!(
-        *answered.first().unwrap(),
-        u64::try_from(MAX_ANSWERED_IDS).unwrap(),
-        "the oldest half went, not the newest"
-    );
 
-    // A redelivery inside the window is still caught, which is the whole
-    // point of keeping any of this.
-    assert!(!remember(
-        &mut answered,
-        u64::try_from(MAX_ANSWERED_IDS).unwrap() * 2 - 1
-    ));
+    // The first half arrived first and is gone; the second half is retained.
+    assert!(
+        remember(&mut answered, 0),
+        "the earliest arrival was forgotten"
+    );
+    assert!(
+        !remember(&mut answered, capacity * 2 - 1),
+        "and a redelivery inside the window is still caught, which is the whole point"
+    );
+}
+
+/// The eviction rule used to be "drop the numerically smallest", justified in
+/// a comment by protocol ids being microsecond timestamps. They usually are --
+/// but the id is a `u64` a peer chooses, so that rule let the peer pick what
+/// was forgotten.
+///
+/// A settled dapp sends enough high-valued answerable messages to push out the
+/// low id it used earlier, replays the authenticated envelope carrying that
+/// id, and the replay is admitted as new. `on_request` dispatches it again,
+/// and a policy-allowed `eth_sendTransaction` reaches simulation, signing and
+/// broadcast a second time at a fresh nonce with no new review.
+#[test]
+fn a_peer_cannot_choose_which_answered_id_is_forgotten() {
+    let mut answered = AnsweredIds::default();
+    let capacity = u64::try_from(MAX_ANSWERED_IDS).unwrap();
+    let high = u64::MAX - capacity * 2;
+
+    // The session has been busy: the cache is one short of full, and every id
+    // in it is numerically above the one the dapp is about to use.
+    for offset in 0..capacity - 1 {
+        assert!(remember(&mut answered, high + offset));
+    }
+
+    // The request the dapp actually made, with an ordinary low id, arriving
+    // last of everything so far.
+    let replayed = 1_000_u64;
+    assert!(remember(&mut answered, replayed));
+
+    // One more message tips the cache over capacity. Exactly one entry has to
+    // go, and it is the one that arrived first -- not the one with the
+    // smallest number, which is the id the peer wants forgotten.
+    assert!(remember(&mut answered, high + capacity));
+    assert!(
+        !remember(&mut answered, replayed),
+        "the id the dapp chose arrived after every other entry, so nothing about their values \
+         may displace it"
+    );
+    assert!(
+        remember(&mut answered, high),
+        "the entry that actually arrived first is the one that went"
+    );
 }
