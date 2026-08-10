@@ -126,7 +126,6 @@ pub async fn decide_message(
     mut store: MessageStore,
     request: PendingMessage,
     account: &SigningAccount<'_>,
-    no_confirm: bool,
 ) -> Result<MessageDecision> {
     ensure!(
         request.status == MessageStatus::AwaitingApproval,
@@ -260,12 +259,21 @@ pub async fn decide_message(
             "siwe": siwe,
         },
     }))?;
-    if !no_confirm
-        && !reviewer_approved(
-            approval,
-            message_payload_lines(&request.message_hex, &display),
-        )
-        .await?
+    // Not conditional on anything. `--decision approve` used to skip this,
+    // and this is the component that defaults to Reject and refuses Approve
+    // until the end of the payload has been on screen. The owner
+    // authentication that follows names a wallet and an operation; it is not
+    // evidence that anyone saw *these bytes*, which for an EIP-191 login or an
+    // EIP-712 permit is the only thing the signature is about.
+    //
+    // A non-interactive approval of an off-chain signature is therefore not a
+    // thing this offers. Rejecting without a prompt still is: it signs
+    // nothing, and a scripted session must always be able to say no.
+    if !reviewer_approved(
+        approval,
+        message_payload_lines(&request.message_hex, &display),
+    )
+    .await?
     {
         return Ok(MessageDecision::Rejected(store.reject(request.request_id)?));
     }
@@ -297,7 +305,6 @@ pub async fn decide_typed_data(
     mut store: TypedDataStore,
     request: PendingTypedData,
     account: &SigningAccount<'_>,
-    no_confirm: bool,
 ) -> Result<TypedDataDecision> {
     ensure!(
         request.status == TypedDataStatus::AwaitingApproval,
@@ -425,9 +432,9 @@ pub async fn decide_typed_data(
         "approval": approval,
         "typed_data": request.typed_data,
     }))?;
-    if !no_confirm
-        && !reviewer_approved(approval, typed_data_payload_lines(&request.typed_data)).await?
-    {
+    // As in `decide_message`: the review is what the signature is about, so
+    // there is no mode that skips it.
+    if !reviewer_approved(approval, typed_data_payload_lines(&request.typed_data)).await? {
         return Ok(TypedDataDecision::Rejected(
             store.reject(request.request_id)?,
         ));

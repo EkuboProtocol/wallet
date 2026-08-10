@@ -288,3 +288,72 @@ mod settled_account_tests {
         }
     }
 }
+
+mod mandatory_review_tests {
+    //! An off-chain signature is about its bytes, so there is no mode that
+    //! signs one without showing them.
+
+    /// `review --decision approve` mapped to `no_confirm`, and `no_confirm`
+    /// skipped `reviewer_approved` -- the component that starts on Reject and
+    /// refuses Approve until the end of the payload has been on screen. What
+    /// remained was an OS prompt naming a wallet and an operation, which is
+    /// not evidence anyone saw a permit, a delegation, or a login.
+    ///
+    /// Rejecting without a prompt is still offered and must stay offered: it
+    /// signs nothing, and a scripted session must always be able to say no.
+    #[test]
+    fn neither_off_chain_reviewer_can_skip_its_review() {
+        let source = include_str!("signing_review.rs");
+        for reviewer in ["decide_message", "decide_typed_data"] {
+            let body = source
+                .split_once(&format!("pub async fn {reviewer}("))
+                .expect("the reviewer is declared")
+                .1;
+            let signature = body.split_once(')').expect("its parameters end").0;
+            assert!(
+                !signature.contains("no_confirm"),
+                "{reviewer} still takes a flag that can skip its review"
+            );
+            let review = body
+                .find("reviewer_approved")
+                .expect("it draws the review it exists to draw");
+            let preceding = &body[..review];
+            let clause = preceding
+                .rfind("if ")
+                .map_or("", |start| &preceding[start..]);
+            assert!(
+                !clause.contains("&&"),
+                "{reviewer} guards its review behind a condition: {clause}"
+            );
+        }
+    }
+
+    /// And the flag's own description no longer promises what it used to.
+    /// A caller reading `--help` was told approving skipped the prompt; for
+    /// these two requests it does not, and the help is where they find out.
+    #[test]
+    fn the_decision_flag_says_an_approval_still_draws() {
+        let cli = include_str!("cli.rs");
+        let help = cli
+            .split_once("/// Decide without the interactive prompt.")
+            .expect("the flag is documented")
+            .1
+            .split_once("decision: Option<ReviewDecision>")
+            .expect("the field follows")
+            .0;
+        // The doc comment wraps, so compare the prose rather than the layout.
+        let prose = help
+            .replace("///", " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            prose.contains("still draws the review"),
+            "the help has to say that approving an off-chain signature reviews it: {prose}"
+        );
+        assert!(
+            prose.contains("`reject` needs no terminal"),
+            "and that rejecting needs no terminal: {prose}"
+        );
+    }
+}

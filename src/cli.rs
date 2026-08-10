@@ -138,8 +138,14 @@ enum Command {
     /// List exceptional requests, or review one locally and approve or reject it.
     Review {
         request_id: Option<Uuid>,
-        /// Decide without the interactive prompt. Approving still requires
-        /// platform owner authentication.
+        /// Decide without the interactive prompt.
+        ///
+        /// `reject` needs no terminal: it signs nothing, and a scripted
+        /// session must always be able to say no. `approve` still draws the
+        /// review for a message or typed-data request, because the review is
+        /// what that signature is about -- owner authentication names a wallet
+        /// and an operation, not the bytes. Approving still requires platform
+        /// owner authentication either way.
         #[arg(long, value_enum)]
         decision: Option<ReviewDecision>,
     },
@@ -2893,12 +2899,10 @@ async fn run_approve(
                 // that will not open should say so before a person reads a
                 // payload, not after they have approved one.
                 let policies = PolicyStore::production(config.data_dir())?;
-                return approve_message(config, &policies, messages, request, no_confirm, mode)
-                    .await;
+                return approve_message(config, &policies, messages, request, mode).await;
             };
             let policies = PolicyStore::production(config.data_dir())?;
-            return approve_typed_data(config, &policies, typed_data, request, no_confirm, mode)
-                .await;
+            return approve_typed_data(config, &policies, typed_data, request, mode).await;
         }
     };
     let data_dir = config.data_dir().to_path_buf();
@@ -3010,7 +3014,6 @@ async fn approve_typed_data(
     policies: &PolicyStore,
     store: TypedDataStore,
     request: PendingTypedData,
-    no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
     match crate::signing_review::decide_typed_data(
@@ -3019,7 +3022,6 @@ async fn approve_typed_data(
         store,
         request,
         &crate::signing_review::SigningAccount::AsRecorded,
-        no_confirm,
     )
     .await?
     {
@@ -3060,7 +3062,6 @@ async fn approve_message(
     policies: &PolicyStore,
     store: MessageStore,
     request: PendingMessage,
-    no_confirm: bool,
     mode: OutputMode,
 ) -> Result<()> {
     match crate::signing_review::decide_message(
@@ -3069,7 +3070,6 @@ async fn approve_message(
         store,
         request,
         &crate::signing_review::SigningAccount::AsRecorded,
-        no_confirm,
     )
     .await?
     {

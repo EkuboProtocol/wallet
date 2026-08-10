@@ -862,7 +862,6 @@ impl DappSession<'_> {
             store,
             record,
             &SigningAccount::Settled(self.wallet()),
-            false,
         )
         .await?
         {
@@ -915,7 +914,6 @@ impl DappSession<'_> {
             store,
             record,
             &SigningAccount::Settled(self.wallet()),
-            false,
         )
         .await?
         {
