@@ -80,6 +80,35 @@ async fn a_plaintext_relay_is_refused_rather_than_downgraded_to() {
     assert!(format!("{error}").contains("wss:"), "{error}");
 }
 
+#[tokio::test]
+async fn a_host_that_never_finishes_the_handshake_is_given_up_on() {
+    // Bound and never accepted: the kernel completes the TCP handshake from
+    // the backlog, so the connection is established and then nothing is ever
+    // read or written. That is the shape a deadline is for — a peer that is
+    // reachable and silent, rather than one that refuses — and before this
+    // there was no deadline on opening a connection at all, only on calls
+    // made over one already open.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a stalled host");
+    let port = listener.local_addr().expect("the bound address").port();
+
+    let identity = ClientIdentity::generate().unwrap();
+    let stalled = config(&format!("wss://127.0.0.1:{port}"));
+    let opening = RelayConnection::connect_within(&stalled, &identity, Duration::from_millis(250));
+    // A second deadline, well above the one under test, so that a build
+    // without the first fails here rather than hanging the suite. A
+    // regression test for a missing timeout has to end either way.
+    let error = tokio::time::timeout(Duration::from_secs(10), opening)
+        .await
+        .expect("opening a connection was never given up on")
+        .map(|_| ())
+        .expect_err("a host that never answered was treated as a relay");
+
+    assert!(
+        format!("{error}").contains("did not finish opening"),
+        "{error}"
+    );
+}
+
 #[test]
 fn a_delivered_message_is_acknowledged_before_it_is_read() {
     // The relay redelivers anything it was not told arrived. Acknowledging

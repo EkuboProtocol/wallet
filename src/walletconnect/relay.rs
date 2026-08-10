@@ -48,6 +48,22 @@ const JWT_TTL_SECONDS: i64 = 86_400;
 /// How long to wait for the relay to answer one of our own JSON-RPC calls.
 const RELAY_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long the relay has to finish opening the connection.
+///
+/// The call timeout above bounds a request sent over a connection that is
+/// already up. Nothing bounded getting it up: a host that completes the TCP
+/// handshake and then never sends a TLS record, or never answers the websocket
+/// upgrade, left `connect` awaiting one future forever. The relay is trusted
+/// for liveness, which is a statement about dropped messages rather than a
+/// licence to hold the owner's terminal open indefinitely — and the host on
+/// the other end is whatever the URL resolved to, not necessarily a relay at
+/// all.
+///
+/// Same thirty seconds as a call, for the same reason: long enough that a slow
+/// link is not mistaken for a dead one, short enough to be a wait rather than
+/// a hang.
+const RELAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Delivered messages held for the session loop before the relay is left to
 /// hold the rest.
 ///
@@ -117,6 +133,17 @@ type Subscriptions = Arc<Mutex<std::collections::HashSet<String>>>;
 impl RelayConnection {
     /// Open and authenticate a connection.
     pub async fn connect(relay: &Url, identity: &ClientIdentity) -> Result<Self> {
+        Self::connect_within(relay, identity, RELAY_HANDSHAKE_TIMEOUT).await
+    }
+
+    /// [`Self::connect`], with the handshake deadline named rather than
+    /// compiled in, so a test can stand a stalled host up in milliseconds
+    /// instead of waiting out the real one.
+    async fn connect_within(
+        relay: &Url,
+        identity: &ClientIdentity,
+        handshake: Duration,
+    ) -> Result<Self> {
         let url = authenticated_url(relay, identity)?;
         // The websocket URL carries a bearer token in its query string. Over
         // `ws:` that token — and every topic this wallet subscribes to — is
@@ -137,15 +164,26 @@ impl RelayConnection {
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(MAX_FRAME_BYTES))
             .max_frame_size(Some(MAX_FRAME_BYTES));
-        let (stream, _) =
-            tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), false)
-                .await
-                .with_context(|| {
-                    format!(
-                        "could not reach the WalletConnect relay at {}",
-                        relay.as_str()
-                    )
-                })?;
+        // The deadline covers name resolution, the TCP connection, TLS, and the
+        // upgrade together, because they are one await and a host that stalls
+        // can stall in any of them. The error names the configured URL rather
+        // than the one built above, which carries this connection's bearer
+        // token in its query string.
+        let opening =
+            tokio_tungstenite::connect_async_with_config(url.as_str(), Some(config), false);
+        let (stream, _) = match tokio::time::timeout(handshake, opening).await {
+            Ok(opened) => opened.with_context(|| {
+                format!(
+                    "could not reach the WalletConnect relay at {}",
+                    relay.as_str()
+                )
+            })?,
+            Err(_) => bail!(
+                "the WalletConnect relay at {} did not finish opening a connection within \
+                 {handshake:?}",
+                relay.as_str()
+            ),
+        };
         let (mut sink, mut source) = stream.split();
 
         let (outgoing_sender, mut outgoing_receiver) = mpsc::channel::<Message>(MAX_QUEUED_FRAMES);
