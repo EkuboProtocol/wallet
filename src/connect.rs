@@ -63,7 +63,10 @@ use serde_json::{Value, json};
 use std::{
     cell::RefCell,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use url::Url;
 
@@ -168,6 +171,7 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
         data_dir: config.data_dir().to_path_buf(),
         state: Arc::clone(&state),
         idle: RefCell::new(None),
+        quit: Arc::new(AtomicBool::new(false)),
         submitted_batches: RefCell::new(std::collections::BTreeSet::new()),
     };
     let session = Session::new(relay, pairing, &handler);
@@ -243,6 +247,17 @@ struct DappSession<'a> {
     /// Exactly one of them ever reads a keystroke, and the handover is the
     /// `suspend_idle`/`enter_idle` pair rather than anything implicit.
     idle: RefCell<Option<IdleView>>,
+    /// Whether the person asked to disconnect, held by the session rather than
+    /// by whichever idle view happened to be on screen when they said so.
+    ///
+    /// The flag used to belong to the view. A view is stopped and replaced
+    /// around every review, and the session loop selects between relay
+    /// delivery and this answer -- so a `q`, Escape, or Ctrl-C that lands
+    /// while a request wins that race set a flag on a view that `suspend_idle`
+    /// then dropped, and `enter_idle` built a replacement that started out
+    /// saying no. The disconnect was not delayed; it was gone, and the dapp
+    /// stayed connected with a person who believed they had left.
+    quit: Arc<AtomicBool>,
     /// Batch ids this session minted, so `wallet_getCallsStatus` answers about
     /// the dapp's own batches and nothing else.
     ///
@@ -273,6 +288,12 @@ impl DappSession<'_> {
         }
     }
 
+    /// Whether a disconnect has been asked for, at any point since the session
+    /// started and from whichever surface was on screen at the time.
+    fn quit_pending(&self) -> bool {
+        self.quit.load(Ordering::Relaxed)
+    }
+
     /// Record something that happened, for the idle surface's log.
     fn log(&self, tone: crate::tui::Tone, text: impl AsRef<str>) {
         if let Ok(mut state) = self.state.lock() {
@@ -293,7 +314,7 @@ impl SessionHandler for DappSession<'_> {
         if self.idle.borrow().is_some() {
             return;
         }
-        let view = IdleView::start(Arc::clone(&self.state));
+        let view = IdleView::start(Arc::clone(&self.state), Arc::clone(&self.quit));
         *self.idle.borrow_mut() = Some(view);
     }
 
@@ -303,12 +324,7 @@ impl SessionHandler for DappSession<'_> {
         // around every review, and this future is dropped and rebuilt on every
         // turn of the session loop anyway.
         loop {
-            if self
-                .idle
-                .borrow()
-                .as_ref()
-                .is_some_and(IdleView::wants_quit)
-            {
+            if self.quit_pending() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -732,6 +748,17 @@ impl DappSession<'_> {
         // request, before the method is even looked at, so a method added
         // later is covered by having been dispatched rather than by having
         // remembered.
+        // A disconnect already asked for is not undone by a request arriving.
+        // The session loop selects between the relay and the quit future, so
+        // delivery can win the race and reach here with the answer already
+        // given; the loop honours it on its next turn, and until then this is
+        // what keeps the interval from being one more signature.
+        if self.quit_pending() {
+            return Ok(RequestOutcome::Error {
+                code: error_code::UNSUPPORTED_METHODS,
+                message: "The wallet owner disconnected this session.".into(),
+            });
+        }
         if let Err(error) = legal::require_current_acceptance(self.config.data_dir()) {
             return Ok(RequestOutcome::Error {
                 code: error_code::UNSUPPORTED_METHODS,

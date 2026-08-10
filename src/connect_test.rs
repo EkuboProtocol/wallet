@@ -341,3 +341,65 @@ mod legal_currency_tests {
         );
     }
 }
+
+mod disconnect_intent_tests {
+    //! A disconnect asked for once stays asked for.
+
+    /// The flag has to belong to the session, not to the surface that happened
+    /// to be on screen when the key was pressed. `suspend_idle` drops the view
+    /// around every review and `enter_idle` builds a new one, so a `q`,
+    /// Escape, or Ctrl-C that lands while relay delivery wins the session
+    /// `select!` used to set a flag on a view that was then thrown away --
+    /// and the replacement started out saying no. The disconnect was not
+    /// delayed, it was gone, and the dapp stayed connected to a person who
+    /// believed they had left.
+    ///
+    /// Read from the source because standing the race up needs a relay, a
+    /// settled session, and a terminal. What is checkable is the ownership:
+    /// one flag, constructed once with the session, handed to each view.
+    #[test]
+    fn the_disconnect_flag_outlives_the_screen_that_recorded_it() {
+        let screen = include_str!("connect_screen.rs");
+        assert!(
+            !screen.contains("let quit = Arc::new(AtomicBool::new(false));"),
+            "an idle view must not mint its own disconnect flag; it is handed the session's"
+        );
+        assert!(
+            screen.contains("pub fn start(state: Arc<Mutex<SessionState>>, quit: Arc<AtomicBool>)"),
+            "the view takes the flag rather than making one"
+        );
+
+        let connect = include_str!("connect.rs");
+        assert_eq!(
+            connect.matches("Arc::new(AtomicBool::new(false))").count(),
+            1,
+            "exactly one disconnect flag exists, and the session owns it"
+        );
+        assert!(
+            connect.contains("IdleView::start(Arc::clone(&self.state), Arc::clone(&self.quit))"),
+            "every view started shares that one flag"
+        );
+    }
+
+    /// And a request arriving after the answer was given does not undo it. The
+    /// session loop selects between the relay and the quit future, so delivery
+    /// can win that race and reach dispatch with the disconnect already asked
+    /// for. The loop honours it on its next turn; this is what keeps the
+    /// interval from being one more signature.
+    #[test]
+    fn a_request_that_won_the_race_is_refused_rather_than_handled() {
+        let connect = include_str!("connect.rs");
+        let body = connect
+            .split_once("async fn dispatch(&self, request: &DappRequest<'_>)")
+            .expect("dispatch is declared")
+            .1;
+        let quit = body
+            .find("self.quit_pending()")
+            .expect("dispatch checks it");
+        let matched = body.find("match request.method").expect("it dispatches");
+        assert!(
+            quit < matched,
+            "the disconnect is honoured before the method is looked at"
+        );
+    }
+}

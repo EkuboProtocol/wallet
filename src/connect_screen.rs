@@ -85,7 +85,6 @@ impl SessionState {
 /// review goes through it.
 pub struct IdleView {
     stop: Arc<AtomicBool>,
-    quit: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -95,28 +94,27 @@ impl IdleView {
     /// Discarding the returned handle does not stop the loop — see the
     /// struct doc — so a dropped return value is a screen with nobody left
     /// to hand it back.
+    ///
+    /// `quit` is the session's flag, not this view's. A view is stopped and
+    /// replaced around every review, so a disconnect recorded in a flag this
+    /// constructor made would be thrown away with the view that held it --
+    /// which is precisely what happens when a keystroke lands during the
+    /// handoff. The person pressed `q`; the view carrying that answer was
+    /// dropped; the replacement started out saying no.
     #[must_use]
-    pub fn start(state: Arc<Mutex<SessionState>>) -> Self {
+    pub fn start(state: Arc<Mutex<SessionState>>, quit: Arc<AtomicBool>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let quit = Arc::new(AtomicBool::new(false));
         let loop_stop = Arc::clone(&stop);
-        let loop_quit = Arc::clone(&quit);
         let task = tokio::task::spawn_blocking(move || {
             // A surface that cannot be drawn is not worth failing the session
             // over: the requests still work, and the reviews open their own
             // screens. Losing the idle view is a cosmetic loss, and turning it
             // into a disconnect would be a worse one.
             if let Ok(mut screen) = Screen::enter() {
-                run_idle(&mut screen, &state, &loop_stop, &loop_quit);
+                run_idle(&mut screen, &state, &loop_stop, &quit);
             }
         });
-        Self { stop, quit, task }
-    }
-
-    /// Whether the person asked to disconnect from this screen.
-    #[must_use]
-    pub fn wants_quit(&self) -> bool {
-        self.quit.load(Ordering::Relaxed)
+        Self { stop, task }
     }
 
     /// Stop drawing and wait for the terminal to be handed back.
