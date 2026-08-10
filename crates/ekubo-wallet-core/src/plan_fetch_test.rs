@@ -874,3 +874,62 @@ async fn a_local_read_does_not_run_on_a_runtime_worker() {
     .to_string();
     assert!(error.contains("not a regular file"), "{error}");
 }
+
+mod resolver_slot_tests {
+    //! A deadline bounds a caller's patience, not the work it started.
+
+    /// `RESOLVE_TIMEOUT` bounds how long a caller waits. It does not bound the
+    /// resolution: `lookup_host` works on the blocking pool, and cancelling
+    /// the future that awaits it does not stop the platform stub resolver
+    /// retrying across its nameservers. So a caller naming a dead-resolver
+    /// host was released after five seconds -- returning its admission slot --
+    /// while the thread it started stayed stuck for tens of seconds. Repeated,
+    /// the admission limit is satisfied at every moment while the blocking
+    /// pool fills with work nobody is waiting for.
+    ///
+    /// Read from the source because reproducing it needs a resolver that
+    /// hangs. What is checkable is where the permit lives: inside the spawned
+    /// task, so it returns when the work ends rather than when the caller
+    /// gives up.
+    #[test]
+    fn the_resolver_permit_is_held_by_the_resolution() {
+        let source = include_str!("plan_fetch.rs");
+        let body = source
+            .split_once("async fn resolve_with_deadline")
+            .expect("the resolver exists")
+            .1;
+        let acquired = body.find("acquire_owned()").expect("a slot is taken");
+        let spawned = body.find("tokio::spawn").expect("the lookup is spawned");
+        let moved = body
+            .find("let _permit = permit;")
+            .expect("the permit moves in");
+        let timed = body
+            .find("RESOLVE_TIMEOUT")
+            .expect("the caller still gives up");
+        assert!(
+            acquired < spawned && spawned < moved && moved < timed,
+            "take the slot, move it into the task, then let the caller time out"
+        );
+        assert!(
+            !body[..timed].contains(".abort()"),
+            "aborting would end the caller's wait and leave the resolver running \
+             anyway; detaching is what holds the permit for its real duration"
+        );
+    }
+
+    /// And the ceiling is stated where a reader will find it.
+    #[test]
+    fn the_number_of_outstanding_resolutions_is_bounded() {
+        // Read from the source rather than compared as a constant, which the
+        // compiler folds away into an assertion about nothing.
+        let source = include_str!("plan_fetch.rs");
+        assert!(
+            source.contains("const MAX_CONCURRENT_RESOLUTIONS: usize ="),
+            "the ceiling is stated where a reader will find it"
+        );
+        assert!(
+            source.contains("Semaphore::new(MAX_CONCURRENT_RESOLUTIONS)"),
+            "and it is the number the slots are created with"
+        );
+    }
+}

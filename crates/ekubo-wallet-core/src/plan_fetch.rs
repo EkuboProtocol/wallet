@@ -917,13 +917,49 @@ fn vetted_host(host: &Host<&str>, allow_insecure: bool, noun: &str) -> Result<St
     })
 }
 
+/// How many name resolutions may be outstanding at once.
+///
+/// `RESOLVE_TIMEOUT` bounds how long a *caller* waits. It does not bound the
+/// resolution: `lookup_host` does its work on the blocking pool, and cancelling
+/// the future that awaits it does not stop the platform stub resolver from
+/// retrying across its nameservers. So a caller who names a host served by a
+/// dead resolver used to be released after five seconds -- returning its
+/// admission slot to the next caller -- while the thread it started stayed
+/// stuck for tens of seconds. Repeat that and the admission limit is
+/// satisfied at every moment while the blocking pool fills with work nobody
+/// is waiting for.
+///
+/// This bounds the thing that actually accumulates. A permit is held by the
+/// resolution rather than by the caller, so it comes back when the resolver
+/// finishes, not when the caller gives up.
+const MAX_CONCURRENT_RESOLUTIONS: usize = 16;
+
+static RESOLVER_SLOTS: LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_RESOLUTIONS)));
+
 async fn resolve_with_deadline(host: &str, port: u16, noun: &str) -> Result<Vec<SocketAddr>> {
-    let resolved: Vec<SocketAddr> =
-        tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, port)))
+    let permit = RESOLVER_SLOTS
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| anyhow!("the resolver slot pool was closed"))?;
+    let host = host.to_owned();
+    // Spawned, and its handle deliberately dropped on timeout. A dropped
+    // `JoinHandle` detaches rather than aborting, so the task -- and the permit
+    // it holds -- outlives the caller's patience by exactly as long as the
+    // resolver takes. That is the point: the slot is returned when the work
+    // ends.
+    let lookup = tokio::spawn(async move {
+        let _permit = permit;
+        tokio::net::lookup_host((host.as_str(), port))
             .await
-            .with_context(|| format!("{noun} host did not resolve within {RESOLVE_TIMEOUT:?}"))?
-            .with_context(|| format!("{noun} host did not resolve"))?
-            .collect();
+            .map(std::iter::Iterator::collect::<Vec<SocketAddr>>)
+    });
+    let resolved: Vec<SocketAddr> = tokio::time::timeout(RESOLVE_TIMEOUT, lookup)
+        .await
+        .with_context(|| format!("{noun} host did not resolve within {RESOLVE_TIMEOUT:?}"))?
+        .with_context(|| format!("{noun} host resolution did not complete"))?
+        .with_context(|| format!("{noun} host did not resolve"))?;
     ensure!(!resolved.is_empty(), "{noun} host did not resolve");
     Ok(resolved)
 }
