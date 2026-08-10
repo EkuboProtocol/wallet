@@ -560,6 +560,25 @@ pub const CALL_NOT_ALLOWED_CODE: &str = "call_not_allowed";
 /// transfers were allowlisted.
 pub const DELEGATION_REPLACED_CODE: &str = "delegation_replaced";
 
+/// This plan's EIP-7702 authorization would give the account a delegation it
+/// does not currently have.
+///
+/// A warning rather than an error, because a first delegation is what every
+/// account's first batch legitimately does and blocking it would mean no
+/// unattended batch could ever run. It exists because the *only* disclosure
+/// of a delegation used to be [`DELEGATION_REPLACED_CODE`], and whether that
+/// fired was decided by one `get_code_at` answer from one endpoint. An
+/// endpoint that reports empty code for an account that is in fact delegated
+/// elsewhere turns a reviewed replacement into a silent one: the wallet still
+/// signs the authorization, and the replacement still happens on chain, but
+/// nothing in the document said a delegation was involved at all.
+///
+/// Under `m_of_n` the delegation facts are part of the simulation agreement
+/// projection, so a single endpoint cannot move them. Under `ordered` this
+/// finding is what remains: the document always states that an authorization
+/// is being signed, so a reader can notice one they did not expect.
+pub const DELEGATION_AUTHORIZED_CODE: &str = "delegation_authorized";
+
 /// What the policy decided, and therefore what happens next.
 ///
 /// The distinction between the two negative outcomes is the whole point. A

@@ -21,8 +21,8 @@ use crate::{
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{
-            DELEGATION_REPLACED_CODE, FindingSeverity, PolicyFinding, PolicyOutcome,
-            SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
+            DELEGATION_AUTHORIZED_CODE, DELEGATION_REPLACED_CODE, FindingSeverity, PolicyFinding,
+            PolicyOutcome, SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
     },
@@ -963,6 +963,29 @@ async fn simulate_execution_through(
                  {CANONICAL_CALIBUR:#x}, which persists whether or not the batch succeeds and \
                  may leave the previous implementation's storage under one that reads it \
                  differently"
+            ),
+            step: None,
+        });
+    } else if will_authorize {
+        // Whether the finding above fires is decided by one `get_code_at`
+        // answer. An endpoint that reports empty code for an account that is
+        // actually delegated elsewhere takes the `None if is_empty` branch:
+        // the authorization is still signed and the replacement still happens
+        // on chain, but `replaces` is None, so nothing above says so and the
+        // automatic path never draws a document to say it in.
+        //
+        // Disclosing the authorization itself does not depend on that answer
+        // being honest. A warning rather than an error because a first
+        // delegation is what every account's first batch does, and refusing it
+        // would mean no unattended batch could ever run.
+        findings.push(PolicyFinding {
+            severity: FindingSeverity::Warning,
+            code: DELEGATION_AUTHORIZED_CODE.into(),
+            message: format!(
+                "this batch would sign an EIP-7702 authorization delegating the account to \
+                 {CANONICAL_CALIBUR:#x}, which persists whether or not the batch succeeds; the \
+                 account was observed to have no delegation, and if that observation is wrong \
+                 this authorization replaces whatever is actually there"
             ),
             step: None,
         });

@@ -786,3 +786,40 @@ fn replacing_a_delegation_asks_a_person_rather_than_being_denied_or_allowed() {
     );
     assert!(denial_reasons(std::slice::from_ref(&finding)).is_empty());
 }
+
+#[test]
+fn authorizing_a_first_delegation_is_disclosed_without_blocking_the_batch() {
+    // The companion to the finding above, and the reason it exists: whether
+    // `delegation_replaced` fires at all is decided by a single `get_code_at`
+    // answer. An endpoint reporting empty code for an account that is really
+    // delegated elsewhere produced no delegation finding whatsoever, while the
+    // wallet went on to sign the authorization -- so the replacement happened
+    // on chain with the document silent about delegations entirely.
+    //
+    // This one is therefore not conditional on that answer being honest. It
+    // must stay a warning: every account's first batch authorizes a
+    // delegation, and making that `RequiresApproval` would mean no unattended
+    // batch could ever run.
+    let finding = PolicyFinding {
+        severity: FindingSeverity::Warning,
+        code: DELEGATION_AUTHORIZED_CODE.into(),
+        message: "would authorize a delegation".into(),
+        step: None,
+    };
+    assert!(policy_allows(std::slice::from_ref(&finding)));
+    assert_eq!(
+        policy_outcome(std::slice::from_ref(&finding)),
+        PolicyOutcome::Allowed,
+        "disclosure must not turn every first batch into an approval prompt"
+    );
+
+    // And it never displaces the stronger finding when both could apply.
+    let replaced = PolicyFinding {
+        severity: FindingSeverity::Error,
+        code: DELEGATION_REPLACED_CODE.into(),
+        message: "would replace the delegation".into(),
+        step: None,
+    };
+    let both = [finding, replaced];
+    assert_eq!(policy_outcome(&both), PolicyOutcome::RequiresApproval);
+}
