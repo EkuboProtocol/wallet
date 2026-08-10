@@ -12,7 +12,7 @@ use crate::{
     human_presence::{HumanPresence, PlatformHumanPresence, PresenceRequest},
     legal::{self, LegalDocument, LegalStore},
     message::{MessageStore, PendingMessage},
-    pending::{PendingStatus, PendingStore, PendingTransaction},
+    pending::{PendingStatus, PendingStore, PendingTransaction, is_unknown_request},
     policy_store::PolicyStore,
     render::{OutputMode, described_time, emit, print_json, relative_time},
     rpc::verify_chain_id,
@@ -2665,11 +2665,34 @@ fn print_pending_approvals(
 fn run_reject(config: &ConfigStore, request_id: Uuid, mode: OutputMode) -> Result<()> {
     let request = match PendingStore::production(config.data_dir())?.reject(request_id) {
         Ok(request) => request,
+        // Only an absent row sends the search on. Anything else -- a row that
+        // has already been decided, an envelope that no longer parses, a
+        // database that cannot be read -- is this queue's answer about this
+        // request, and carrying on past it rejected whatever the next queue
+        // happened to hold under that id while the request the owner meant
+        // stayed awaiting a decision.
+        Err(transaction_error) if !is_unknown_request(&transaction_error) => {
+            return Err(transaction_error);
+        }
         Err(transaction_error) => {
             let mut typed_data = TypedDataStore::production(config.data_dir())?;
-            let Ok(request) = typed_data.reject(request_id) else {
+            let request = match typed_data.reject(request_id) {
+                Ok(request) => Some(request),
+                Err(typed_data_error) if !is_unknown_request(&typed_data_error) => {
+                    return Err(typed_data_error);
+                }
+                Err(_) => None,
+            };
+            let Some(request) = request else {
                 let mut messages = MessageStore::production(config.data_dir())?;
-                let Ok(request) = messages.reject(request_id) else {
+                let request = match messages.reject(request_id) {
+                    Ok(request) => Some(request),
+                    Err(message_error) if !is_unknown_request(&message_error) => {
+                        return Err(message_error);
+                    }
+                    Err(_) => None,
+                };
+                let Some(request) = request else {
                     return Err(transaction_error);
                 };
                 return emit_rejected(
@@ -2760,12 +2783,32 @@ async fn run_approve(
     let pending = PendingStore::production(config.data_dir())?;
     let request = match pending.get(request_id) {
         Ok(request) => request,
+        // As in `run_reject`: only a missing row means "try the next queue".
+        // A stored row this queue cannot read is a failure the owner has to
+        // see, not permission to review something else under the same id.
+        Err(transaction_error) if !is_unknown_request(&transaction_error) => {
+            return Err(transaction_error);
+        }
         Err(transaction_error) => {
             drop(pending);
             let typed_data = TypedDataStore::production(config.data_dir())?;
-            let Ok(request) = typed_data.get(request_id) else {
+            let found = match typed_data.get(request_id) {
+                Ok(request) => Some(request),
+                Err(typed_data_error) if !is_unknown_request(&typed_data_error) => {
+                    return Err(typed_data_error);
+                }
+                Err(_) => None,
+            };
+            let Some(request) = found else {
                 let messages = MessageStore::production(config.data_dir())?;
-                let Ok(request) = messages.get(request_id) else {
+                let found = match messages.get(request_id) {
+                    Ok(request) => Some(request),
+                    Err(message_error) if !is_unknown_request(&message_error) => {
+                        return Err(message_error);
+                    }
+                    Err(_) => None,
+                };
+                let Some(request) = found else {
                     return Err(transaction_error);
                 };
                 return approve_message(config, messages, request, no_confirm, mode).await;

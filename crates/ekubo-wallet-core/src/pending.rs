@@ -139,6 +139,31 @@ impl PendingStatus {
     ];
 }
 
+/// Whether this error means the store simply does not hold that request.
+///
+/// A request id does not say which of the three signing queues owns it, so the
+/// CLI tries each in turn. What it must not do is treat *every* failure as
+/// "not here": a transaction row whose stored envelope no longer parses, a
+/// typed-data row that has already been decided, a database that cannot be
+/// read at all — each of those used to send the search on to the next queue,
+/// where a colliding or merely subsequent id could be found and, in the
+/// rejection path, terminally closed. The request the owner meant stayed
+/// awaiting a decision, and the error they were shown named the wrong queue.
+///
+/// Only a missing row is an invitation to look elsewhere. Every store reports
+/// that the same way, because every store reads through `query_row`, so
+/// `QueryReturnedNoRows` anywhere in the chain is the one answer that means
+/// absence rather than trouble.
+#[must_use]
+pub fn is_unknown_request(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::QueryReturnedNoRows)
+        )
+    })
+}
+
 /// Drop this wallet's oldest finished rows past the retention bound.
 ///
 /// Only terminal rows, and only the oldest beyond the cap: anything still
