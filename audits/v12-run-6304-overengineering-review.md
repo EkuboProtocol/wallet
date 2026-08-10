@@ -28,9 +28,16 @@ essentially one instance of it (finding 2). The sweep shows real restraint
 where overreach would have been easiest, and four commits are model examples
 of the intended shape.
 
-Two of the four items I flagged turned out to be the *opposite* problem on
-inspection — a check that covers one door of two, and a supply-chain fix that
-stops short of the README. Both are worth fixing; neither is excess.
+Two of the items I first flagged turned out to be the *opposite* problem once
+I read the call sites — a check that covers one door of two, and a
+supply-chain fix that stops short of the README. Both are worth fixing;
+neither is excess.
+
+What is left is one recurring placement mistake: **a refusal in front of an
+approval screen the code already builds.** It appears twice (finding 2), and
+in the sharper case the screen already prints the exact value being objected
+to. That is the shape worth naming, because it is what "the agent cannot do
+X" turning into "nobody can do X" looks like in practice.
 
 The genuine overengineering risk is not in this range at all. It is in what
 the next pass does with the ~40 unfixed mediums that all restate "a limit
@@ -103,46 +110,71 @@ deliberate burn, that is the point to add an explicitly-approved override —
 but nothing needs it today, and adding one now would be the
 overengineering.
 
-### 2. `720343e` — plaintext RPC: right rule, no human override
+### 2 and 3 — two refusals placed in front of an approval screen that already exists
 
-`validate_admissible_endpoints` refuses `http` to anything but loopback, on
-admission. Three callers: `config.rs:995` / `config.rs:1038` (`network add`
-and `network edit` — a human at the CLI) and `policy_store.rs:703` (the
-agent's network proposal).
+These are one pattern, not two findings. In both, the code builds a review
+surface for the owner and then `bail!`s before the owner can reach it.
 
-For the agent path this is correct as written. For the human path it is
-capability deletion: an operator with a node at `http://192.168.1.10:8545`,
-or on a Tailscale address, or in a lab VLAN, is told no with no way to say
-"yes, I know." That is a real and common self-hosting configuration, and the
-LAN threat the message describes is one the operator is entitled to accept.
+#### 2a. `720343e` — plaintext RPC
 
-**Recommendation:** keep the refusal as the default and the *only* answer on
-the agent-proposal path; on `network add` / `network edit`, render the same
-sentence as a confirmation the human must clear (or an explicit
-`--allow-plaintext` flag that the agent path ignores).
+`validate_admissible_endpoints` refuses `http` to anything but loopback.
+Four call sites, and the placement is the finding:
 
-### 3. `f6429a9` — the removal refusal fires before the approval prompt
+| Site | Path |
+|---|---|
+| `cli.rs:3629` (`network_candidate`) | human `network add` / `network edit` |
+| `config.rs:995` (`add_configured_network`) | shared write helper |
+| `config.rs:1038` (`replace_configured_network`) | shared write helper |
+| `policy_store.rs:703` (`put_network_proposal`) | agent's network proposal |
 
-The `bail!` at `src/cli.rs` runs immediately before
-`require_approval(ApprovalKind::RemoveWallet)`. So the human never gets to
-see the in-flight list on the approval screen and decide; the command dies
-first.
+The human `network add` flow at `cli.rs:3378` is: `network_candidate` →
+`confirm_network_change` (a full-screen review printing the **complete RPC
+URLs**, chain ID, and strategy) → `verify_chain_id` (a live probe) →
+`PlatformHumanPresence.confirm` (an OS authentication prompt) → write.
 
-The underlying concern is sound and the error message is genuinely good — it
-names the transactions and the two commands that resolve them. But an owner
-whose node is gone, whose transaction will never mine, and who wants the
-wallet off this machine has no path but editing the database — the exact
-outcome the commit criticizes elsewhere.
+That is three separate human gates, and the refusal fires before the first
+of them. The comment at `cli.rs:3623` says so deliberately — "a profile that
+will be refused should be refused before the owner is walked through a
+confirmation screen, a live chain-ID probe, and an operating-system
+authentication prompt." Sound reasoning for a malformed chain ID. Wrong for
+a rule the owner is entitled to overrule: an operator with a node at
+`http://192.168.1.10:8545`, on Tailscale, or in a lab VLAN is told no, and
+the screen that would let them say "yes, I know" is already written and
+already prints the exact URL being objected to.
 
-This one is milder than 1 and 2, because the escape hatch is documented
-(`transaction cancel`) and destroying a key is genuinely one-way. Still, the
-in-flight list belongs *in* the approval prompt as a warning, not as a wall
-in front of it.
+For `put_network_proposal` the refusal is correct exactly as it stands.
 
-**Recommendation:** move the list into the `ApprovalRequest` as warnings and
-let the human approve past it. Lowest priority of the four.
+**Repair, with the constraint that makes it non-trivial.** A plain
+`--allow-plaintext` flag threaded into `add_configured_network` /
+`replace_configured_network` would hand the agent the bypass, because
+`put_network_proposal` and the agent-acceptance path at `cli.rs:4706-4708`
+cross those same helpers. The exemption has to be something only the
+interactive owner path can produce — an owner-confirmed variant of the write
+helper, or a witness value the CLI mints after `confirm_network_change`
+returns true and `put_network_proposal` has no way to construct. Then:
+drop the early `ensure!` from `network_candidate`, render the plaintext
+sentence as a warning line inside `confirm_network_change`, and let the
+unconditional refusal stay in the helper for every caller that cannot
+present the witness.
 
-### 4. `01d13cb` — the install verification stops short of the two places most people read
+#### 2b. `f6429a9` — wallet removal
+
+Same shape, milder. The `bail!` in `src/cli.rs` runs immediately before
+`require_approval(ApprovalKind::RemoveWallet)`, so the owner never sees the
+in-flight list on the approval screen. An owner whose node is gone, whose
+transaction will never mine, and who wants the wallet off this machine has
+no path but editing the database — the outcome the commit criticizes
+elsewhere.
+
+The concern is sound and the error message is genuinely good — it names the
+transactions and the two commands that resolve them. But the list belongs
+*in* the approval prompt as warnings, not as a wall in front of it.
+
+**Repair:** move the descriptions into the `ApprovalRequest` as warnings and
+let the human approve past them. No agent path reaches `account remove`, so
+this one has none of 2a's threading constraint. Lowest priority here.
+
+### 3. `01d13cb` — the install verification stops short of the two places most people read
 
 Also not overengineering — an incomplete fix, and the inconsistency is
 worse than either end of it alone.
@@ -235,10 +267,10 @@ regression tests for a signing kernel are the right spend.
 
 | Item | Verdict |
 |---|---|
-| `720343e` plaintext RPC | **Over-absolute on the human path — add an override.** The one real capability deletion |
+| `720343e` plaintext RPC | **Refuses in front of a review screen that already prints the URL.** The one real capability deletion |
+| `f6429a9` wallet removal | Same shape, milder — belongs in the approval prompt, not in front of it |
 | `7c72cd3` zero-address refusal | Justified, but under-placed — move to `ExecutionPlan::validate`, which covers both doors |
 | `01d13cb` install verification | Incomplete — README and `docs/installation.md` still pipe an unverified script from `main` |
-| `f6429a9` wallet removal | Slightly over-placed — belongs in the approval prompt, not in front of it |
 | `856a333` policy admission | Correct; triple-validates each rule |
 | `f11cd5c` envelope decode | Correct; pays per read for a write-time invariant |
 | `35ed495` policy bounds | Defensible alone; the template for ~40 more, which is the real risk |
