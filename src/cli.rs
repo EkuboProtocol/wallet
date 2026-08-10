@@ -3394,6 +3394,7 @@ async fn run_network(
                     ("RPC URLs", endpoint_list(&candidate)),
                     ("RPC strategy", vec![candidate.rpc_strategy.to_string()]),
                 ],
+                plaintext_remote_warning(&candidate),
             )? {
                 crate::tui::outro_cancel("No network added.");
                 return Ok(());
@@ -3438,6 +3439,9 @@ async fn run_network(
                     ("Network", vec![removed.name.clone()]),
                     ("Chain ID", vec![removed.chain_id.to_string()]),
                 ],
+                // Nothing new is granted by removing a network, so there is
+                // no write here for a plaintext-remote endpoint to hide in.
+                None,
             )? {
                 crate::tui::outro_cancel("Networks unchanged.");
                 return Ok(());
@@ -3884,6 +3888,7 @@ async fn run_network_edit(
             ("RPC URLs", endpoint_list(&draft)),
             ("RPC strategy", vec![draft.rpc_strategy.to_string()]),
         ],
+        plaintext_remote_warning(&draft),
     )
     .ask(
         "Save these changes to this network?",
@@ -4677,7 +4682,14 @@ async fn review_one_network_proposal(
         // proposal in a row, so an inline prompt would stack answered
         // exchanges behind the next one. Two endpoint lists side by side is
         // also the network fact most likely to outgrow a terminal.
-        if !network_review(title, summary, facts).ask(
+        // `None` in practice, never by trusting that here: an agent's
+        // proposal cannot carry a plaintext-remote endpoint in the first
+        // place, because `put_network_proposal` validates with no
+        // `InteractiveOwner` and `validate_admissible_endpoints` refuses one
+        // on that path. Asking the same predicate here anyway keeps the
+        // screen right if that ever changes, instead of relying on a reader
+        // remembering why it doesn't need to.
+        if !network_review(title, summary, facts, plaintext_remote_warning(proposal)).ask(
             "Accept this network?",
             "Accept this network",
             "Discard the suggestion",
@@ -4731,18 +4743,52 @@ fn network_review(
     title: &str,
     summary: &str,
     facts: Vec<(&str, Vec<String>)>,
+    extra_warning: Option<String>,
 ) -> crate::fullscreen::Review {
-    let mut review = crate::fullscreen::Review::new(title, summary);
+    let mut review = crate::fullscreen::Review::new(title, summary).warning(NETWORK_TRUST_WARNING);
     for (label, values) in facts {
         review = review.fact_lines(label, values);
     }
-    review.warning(NETWORK_TRUST_WARNING)
+    if let Some(warning) = extra_warning {
+        review = review.warning(warning);
+    }
+    review
 }
 
 /// What a configured RPC decides, said the same way everywhere it is asked
 /// about.
 const NETWORK_TRUST_WARNING: &str = "The configured RPC supplies the chain state and eth_simulateV1 results that automatic \
      signing decisions are made from.";
+
+/// The confirmation-screen warning for a network whose RPC list contains
+/// plaintext http to a remote host, naming which endpoint qualifies.
+///
+/// `is_remote_plaintext` is the same predicate `validate_admissible_endpoints`
+/// refuses on because of, everywhere an `InteractiveOwner` is absent; on the
+/// two paths where the owner is asked instead of refused, the screen has to
+/// say so in the same terms the refusal used, or agreeing to the write means
+/// agreeing to a risk the code never actually named.
+fn plaintext_remote_warning(network: &NetworkConfig) -> Option<String> {
+    let remote: Vec<String> = network
+        .rpc_urls
+        .iter()
+        .filter(|url| ekubo_wallet_core::config::is_remote_plaintext(url))
+        .map(ToString::to_string)
+        .collect();
+    if remote.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} plaintext http to a remote host. Anything on the path can read the addresses, \
+         calldata, and balances this wallet asks about, and can choose the fee estimate an \
+         automatic transaction is signed against.",
+        if let [only] = remote.as_slice() {
+            format!("{only} is")
+        } else {
+            format!("{} are", remote.join(", "))
+        }
+    ))
+}
 
 /// The scrollback rendering, for the network commands that never open a
 /// screen. A command that has already shown one asks with
@@ -4769,9 +4815,13 @@ fn confirm_network_change(
     summary: &str,
     prompt: &str,
     facts: Vec<(&str, Vec<String>)>,
+    extra_warning: Option<String>,
 ) -> Result<bool> {
     require_interactive("network configuration changes")?;
     let mut question = crate::tui::Confirmation::new(title, summary).warning(NETWORK_TRUST_WARNING);
+    if let Some(warning) = extra_warning {
+        question = question.warning(warning);
+    }
     for (label, values) in facts {
         // Repeated rather than blanked for the second and later values: a
         // `Confirmation` fact is one line, so a list has to arrive as separate
