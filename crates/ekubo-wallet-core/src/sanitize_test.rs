@@ -44,3 +44,37 @@ fn strips_terminal_control_sequences() {
 fn caps_count_characters_not_bytes() {
     assert_eq!(stripped_capped("éééé", 2), "éé");
 }
+
+/// `U+2028` and `U+2029` are printable-category punctuation, so neither
+/// `char::is_control` nor the bidi and invisible-format sets caught them --
+/// and every *other* line ending this file cares about is a control character,
+/// which is why the gap survived. `terminal_safe_line` promises its result
+/// occupies the one line it was given, and a stored alias carrying either of
+/// these could break that line in a transcript or a platform dialog and draw
+/// what looks like the wallet's own next line.
+#[test]
+fn unicode_line_separators_do_not_survive_a_one_line_value() {
+    assert_eq!(
+        terminal_safe_line("alias\u{2028}Address: 0xattacker"),
+        "alias Address: 0xattacker"
+    );
+    assert_eq!(
+        terminal_safe_line("alias\u{2029}Address: 0xattacker"),
+        "alias Address: 0xattacker"
+    );
+    assert!(is_disallowed('\u{2028}'));
+    assert!(is_disallowed('\u{2029}'));
+
+    // The multiline helper exempts exactly one character, and it is `\n`.
+    // A renderer that honours `U+2028` must not be handed one by a surface
+    // that believes it controls its own line structure.
+    assert_eq!(
+        terminal_safe_multiline("first\nsecond\u{2028}third"),
+        "first\nsecond third"
+    );
+
+    // Neither is a control character, which is the whole reason they were
+    // missed; pin that so the predicate is not "simplified" back later.
+    assert!(!'\u{2028}'.is_control());
+    assert!(!'\u{2029}'.is_control());
+}
