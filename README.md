@@ -67,11 +67,26 @@ unsigned transactions and never sees a key. Skip it with
 meta-agent remove`.
 
 On Linux, install the polkit action shipped in the archive before signing, and
-make sure a Secret Service provider is running:
+make sure a Secret Service provider is running. If you used `install.sh`, it
+measured a digest from the packaged file in its own private temporary, staged
+a read-only copy, and printed a `sudo` command carrying that digest — run that
+one. If it could find no sha256 tool it deliberately prints no command at all,
+and says so. Either way it does not install the action for you, and it does
+nothing about the Secret Service provider.
+
+Installing manually, run this immediately after extracting the archive, before
+anything else touches the extraction directory. A plain `sudo install` from
+that directory trusts whatever bytes are at the path when root reads them;
+this hands `sha256sum` and `install` the same bytes, and refuses anything that
+is not a regular file — a symlink to a regular file still passes, and it is
+the digest check after it that catches a path pointed somewhere unexpected. It
+cannot protect a copy you already let sit around, only the file you extract
+and check in the same breath. See [first use](docs/first-use.md) for the full
+reasoning.
 
 ```sh
-sudo install -m 0644 contrib/polkit/com.ekubo.wallet.policy \
-  /usr/share/polkit-1/actions/com.ekubo.wallet.policy
+POLKIT_DIGEST=$(sha256sum contrib/polkit/com.ekubo.wallet.policy | cut -d' ' -f1)
+sudo sh -c '[ -f "$2" ] || { echo "not a regular file: $2" >&2; exit 1; }; t=$(mktemp) || exit 1; head -c 65536 "$2" > "$t" && printf "%s  %s\n" "$1" "$t" | sha256sum -c >/dev/null && install -m 0644 "$t" /usr/share/polkit-1/actions/com.ekubo.wallet.policy; status=$?; rm -f "$t"; exit $status' sh "$POLKIT_DIGEST" contrib/polkit/com.ekubo.wallet.policy
 ```
 
 ## First run

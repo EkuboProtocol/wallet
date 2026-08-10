@@ -442,11 +442,17 @@ A candidate is still a real release. It is immutable, it consumes its tag
 permanently, and it is signed and notarized exactly like a stable one.
 
 Linux users must install the packaged polkit action before signing, key
-export, or wallet removal can authenticate:
+export, or wallet removal can authenticate. `install.sh` prints a command
+carrying a digest it measured from the packaged file in a temporary it creates
+and deletes on exit, rather than from the staged path the command names.
+Installing manually there is no such measurement: the command below digests
+the same path root then reads, so it catches a swap during the command itself
+but not one that happened earlier. Run it immediately after extraction, before
+anything else touches the directory. See [first use](first-use.md) for why.
 
 ```sh
-sudo install -m 0644 contrib/polkit/com.ekubo.wallet.policy \
-  /usr/share/polkit-1/actions/com.ekubo.wallet.policy
+POLKIT_DIGEST=$(sha256sum contrib/polkit/com.ekubo.wallet.policy | cut -d' ' -f1)
+sudo sh -c '[ -f "$2" ] || { echo "not a regular file: $2" >&2; exit 1; }; t=$(mktemp) || exit 1; head -c 65536 "$2" > "$t" && printf "%s  %s\n" "$1" "$t" | sha256sum -c >/dev/null && install -m 0644 "$t" /usr/share/polkit-1/actions/com.ekubo.wallet.policy; status=$?; rm -f "$t"; exit $status' sh "$POLKIT_DIGEST" contrib/polkit/com.ekubo.wallet.policy
 ```
 
 ## Verify a download
