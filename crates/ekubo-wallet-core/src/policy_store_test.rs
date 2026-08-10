@@ -693,8 +693,6 @@ mod database_lock_tests {
     //! A lock taken by pathname serializes two processes only if both of them
     //! locked the same inode.
 
-    use super::*;
-
     /// A symlink at `policies.lock` gave two processes different inodes, and
     /// the first-use path is what that costs: both see no database, both
     /// generate a key, the second `set_secret` wins, and the first creates a
