@@ -235,7 +235,32 @@ async fn recheck_replaced(
 }
 
 fn submission_lease_expired(record: &PendingTransaction) -> bool {
-    Utc::now() - record.updated_at >= TimeDelta::seconds(SUBMISSION_LEASE_SECONDS)
+    lease_expired(Utc::now() - record.updated_at)
+}
+
+/// Whether a submission lease of this age may be reclaimed.
+///
+/// Split from the clock so the rule is testable without one, and because the
+/// interesting case is the age nobody expected: a negative one.
+///
+/// `updated_at` is a durable wall-clock value with no plausibility bound in
+/// the schema or the row decoding, so a row stamped in the future — a clock
+/// that jumped and came back, a database copied between machines, a restored
+/// backup — yields a negative age. Compared only against the lease interval,
+/// that reads as a lease with time still to run, and reconciliation declines
+/// to recover the row until wall time catches up to the stamp *and then* 120
+/// seconds pass. `submitting` holds the wallet's one in-flight slot for that
+/// chain through the partial unique index, so the wallet is frozen there for
+/// however far ahead the timestamp was, and nothing short of repairing the
+/// database shortens it.
+///
+/// A lease whose age is negative is therefore not a lease. The two failure
+/// directions are not symmetric: recovering too early is bounded — every
+/// recovery transition is a compare-and-set on `generation`, so a recovery
+/// racing a live submitter loses rather than corrupting it — while refusing to
+/// recover is unbounded and needs a human with a SQL prompt.
+fn lease_expired(age: TimeDelta) -> bool {
+    age < TimeDelta::zero() || age >= TimeDelta::seconds(SUBMISSION_LEASE_SECONDS)
 }
 
 /// Settle the race between a broadcast envelope and its own cancellation

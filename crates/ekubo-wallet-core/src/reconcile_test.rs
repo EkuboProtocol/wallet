@@ -39,3 +39,31 @@ fn an_unconsumed_nonce_without_a_receipt_is_still_pending() {
     assert_eq!(classify(5, 5, None), ChainObservation::StillPending);
     assert_eq!(classify(5, 0, None), ChainObservation::StillPending);
 }
+
+#[test]
+fn a_lease_stamped_in_the_future_is_not_a_lease() {
+    // `updated_at` is a durable wall-clock value with no plausibility bound in
+    // the schema or the row decoding. A row stamped in the future -- a clock
+    // that jumped and came back, a database copied between machines, a
+    // restored backup -- gives a negative age, which compared only against the
+    // lease interval reads as a lease with time still to run.
+    //
+    // `submitting` holds the wallet's one in-flight slot for that chain, so
+    // the wallet stays frozen there until wall time catches up to the stamp
+    // and *then* the lease elapses. Nothing short of a SQL prompt shortens it.
+    assert!(
+        lease_expired(TimeDelta::seconds(-1)),
+        "a lease that has not started yet is not one this wallet has to wait out"
+    );
+    assert!(lease_expired(TimeDelta::days(-365)));
+
+    // The ordinary rule is unchanged.
+    assert!(!lease_expired(TimeDelta::zero()));
+    assert!(!lease_expired(TimeDelta::seconds(
+        SUBMISSION_LEASE_SECONDS - 1
+    )));
+    assert!(lease_expired(TimeDelta::seconds(SUBMISSION_LEASE_SECONDS)));
+    assert!(lease_expired(TimeDelta::seconds(
+        SUBMISSION_LEASE_SECONDS + 1
+    )));
+}
