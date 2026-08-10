@@ -43,7 +43,14 @@ fn mcp_server_cannot_reach_an_approval_surface() {
 /// Adding to this list is a deliberate act. It widens the set of places a
 /// human override can originate, which is exactly what an auditor reads this
 /// test to enumerate.
-const PROOF_ORIGINS: &[&str] = &["src/cli.rs", "src/connect.rs"];
+///
+/// `src/cli.rs` mints two, and they are different capabilities. One is
+/// `ekubo-wallet review`. The other is `owner_at_terminal`, the single origin
+/// of the `InteractiveOwner` that lets `network add` and `network edit`
+/// configure a plaintext endpoint to a node the operator runs -- a decision the
+/// confirmation screen puts to them by name, and one an agent's network
+/// proposal has no way to reach, because it cannot mint the witness.
+const PROOF_ORIGINS: &[(&str, usize)] = &[("src/cli.rs", 2), ("src/connect.rs", 1)];
 
 /// Only the listed production call sites can mint an interactive-terminal
 /// proof, one each. Every human override in the process descends from one of
@@ -80,15 +87,15 @@ fn interactive_proof_has_exactly_one_production_origin_per_listed_command() {
         }
     }
     call_sites.sort();
-    for origin in PROOF_ORIGINS {
+    for (origin, expected) in PROOF_ORIGINS {
         let found = call_sites
             .iter()
             .filter(|site| site.contains(origin))
             .count();
         assert_eq!(
-            found, 1,
-            "expected exactly one InteractiveProof::from_terminal call site in {origin}, found \
-             {found}: {call_sites:?}"
+            found, *expected,
+            "expected exactly {expected} InteractiveProof::from_terminal call site(s) in \
+             {origin}, found {found}: {call_sites:?}"
         );
     }
     // Nothing outside the list, so the count is the whole check: a new call
@@ -96,7 +103,7 @@ fn interactive_proof_has_exactly_one_production_origin_per_listed_command() {
     // for a human override to originate.
     assert_eq!(
         call_sites.len(),
-        PROOF_ORIGINS.len(),
+        PROOF_ORIGINS.iter().map(|(_, count)| count).sum::<usize>(),
         "InteractiveProof::from_terminal is called outside {PROOF_ORIGINS:?}: {call_sites:?}"
     );
 }

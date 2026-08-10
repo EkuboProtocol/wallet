@@ -699,6 +699,62 @@ pub fn default_data_dir() -> Result<PathBuf> {
 /// configuration contains" is a configuration question.
 pub use crate::networks::default_networks;
 
+/// Whether this endpoint sends the wallet's reads in the clear to another
+/// machine.
+///
+/// One predicate, two callers: the refusal below and the warning the CLI puts
+/// on the confirmation screen. Loopback is not remote -- that is the case the
+/// plaintext allowance exists for.
+#[must_use]
+pub fn is_remote_plaintext(rpc_url: &url::Url) -> bool {
+    if rpc_url.scheme() != "http" {
+        return false;
+    }
+    !match rpc_url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+        None => false,
+    }
+}
+
+/// A write reached through the interactive owner path.
+///
+/// A self-hosted node behind a private address -- `http://192.168.1.10:8545`,
+/// something on Tailscale, a lab VLAN -- is a configuration an operator is
+/// entitled to accept, and the human `network add` flow already shows them the
+/// complete RPC URLs on a full-screen review before writing anything. Refusing
+/// outright turned "the agent cannot configure plaintext" into "nobody can",
+/// which is the shape this repository treats as the failure mode.
+///
+/// It is a type rather than a flag because a flag would not stay on the human
+/// path. `add_configured_network` and `replace_configured_network` are crossed
+/// by the agent's proposal and its acceptance as well, so a boolean threaded
+/// through them is a boolean the agent's route can also set. This can only be
+/// made from an [`InteractiveProof`], whose sole production origin is
+/// `from_terminal` and whose call sites are enumerated one by one in
+/// `tests/boundary.rs` -- so a new way to mint one cannot appear quietly.
+///
+/// `put_network_proposal` has no way to construct it, and that is deliberate:
+/// an agent may not propose a plaintext endpoint at all, so no stored proposal
+/// can carry one and the acceptance path never has to judge one.
+///
+/// What this type asserts is *which path* the write came down, not that the
+/// owner has already agreed. Their agreement is carried by
+/// `confirm_network_change`, which prints the complete URLs and now warns about
+/// the plaintext one by name, and which has to return true before the write
+/// happens at all. Holding one of these does not mean yes; it means the
+/// question will be asked.
+pub struct InteractiveOwner(());
+
+impl InteractiveOwner {
+    /// Minted only where a terminal has been established.
+    #[must_use]
+    pub const fn at_terminal(_proof: &crate::approval::InteractiveProof) -> Self {
+        Self(())
+    }
+}
+
 /// Refuse a plaintext endpoint that is not a node on this machine.
 ///
 /// An RPC connection carries the addresses, calldata, and balances this wallet
@@ -718,19 +774,19 @@ pub use crate::networks::default_networks;
 /// every other network with it, and leaving no way to run the edit that would
 /// fix it. An existing configuration keeps working and can be repaired; what
 /// this stops is one being written.
-pub fn validate_admissible_endpoints(network: &NetworkConfig) -> Result<()> {
+pub fn validate_admissible_endpoints(
+    network: &NetworkConfig,
+    owner: Option<&InteractiveOwner>,
+) -> Result<()> {
+    if owner.is_some() {
+        // The owner is at a terminal and `confirm_network_change` will print
+        // these URLs and warn about this one before anything is written. A
+        // self-hosted node behind a private address is theirs to accept.
+        return Ok(());
+    }
     for rpc_url in &network.rpc_urls {
-        if rpc_url.scheme() != "http" {
-            continue;
-        }
-        let local = match rpc_url.host() {
-            Some(url::Host::Ipv4(address)) => address.is_loopback(),
-            Some(url::Host::Ipv6(address)) => address.is_loopback(),
-            Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
-            None => false,
-        };
         ensure!(
-            local,
+            !is_remote_plaintext(rpc_url),
             "{rpc_url} is plaintext http to a remote host. Anything on the path can read the \
              addresses, calldata, and balances this wallet asks about, and can choose the fee \
              estimate an automatic transaction is signed against. Use https, or a node on this \
@@ -990,9 +1046,10 @@ fn validate_network_identifier(value: &str, label: &str) -> Result<()> {
 pub fn add_configured_network(
     networks: &mut Vec<NetworkConfig>,
     next: NetworkConfig,
+    owner: Option<&InteractiveOwner>,
 ) -> Result<()> {
     validate_network(&next)?;
-    validate_admissible_endpoints(&next)?;
+    validate_admissible_endpoints(&next, owner)?;
     if let Some(existing) = networks
         .iter()
         .find(|network| network.chain_id == next.chain_id)
@@ -1033,9 +1090,10 @@ pub fn add_configured_network(
 pub fn replace_configured_network(
     networks: &mut Vec<NetworkConfig>,
     next: NetworkConfig,
+    owner: Option<&InteractiveOwner>,
 ) -> Result<()> {
     validate_network(&next)?;
-    validate_admissible_endpoints(&next)?;
+    validate_admissible_endpoints(&next, owner)?;
     let identifiers = std::iter::once(&next.name)
         .chain(next.aliases.iter())
         .collect::<BTreeSet<_>>();

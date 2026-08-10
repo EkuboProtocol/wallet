@@ -3383,7 +3383,8 @@ async fn run_network(
                 .iter()
                 .find(|network| network.chain_id == candidate.chain_id)
                 .cloned();
-            replace_configured_network(&mut prospective, candidate.clone())?;
+            let owner = owner_at_terminal()?;
+            replace_configured_network(&mut prospective, candidate.clone(), Some(&owner))?;
             // The complete URL is shown, not just its origin. This is the
             // one moment the user can catch a typo or the wrong endpoint, and
             // `network list` already prints configured URLs in full; an RPC
@@ -3410,7 +3411,7 @@ async fn run_network(
                 .await?;
             config.update(|state| {
                 ensure_reviewed_network(&state.networks, candidate.chain_id, reviewed.as_ref())?;
-                replace_configured_network(&mut state.networks, candidate.clone())
+                replace_configured_network(&mut state.networks, candidate.clone(), Some(&owner))
             })?;
             emit(
                 mode,
@@ -3626,7 +3627,14 @@ fn network_candidate(
     // chain-ID probe, and an operating-system authentication prompt, all to
     // be told at the end that a number they typed was out of range.
     ekubo_wallet_core::config::validate_network(&candidate)?;
-    ekubo_wallet_core::config::validate_admissible_endpoints(&candidate)?;
+    // No plaintext-endpoint refusal here. It used to fire before
+    // `confirm_network_change`, a live chain-ID probe, and an OS
+    // authentication prompt -- three human gates, and the first of them prints
+    // the complete RPC URLs. An operator with a node at
+    // `http://192.168.1.10:8545`, on Tailscale, or in a lab VLAN was told no
+    // by a wall in front of the screen that exists to let them say "yes, I
+    // know". The refusal still stands for every path that cannot present an
+    // `InteractiveOwner`; here it is a warning on that screen instead.
     Ok(candidate)
 }
 
@@ -3896,9 +3904,10 @@ async fn run_network_edit(
             network: draft.name.clone(),
         })
         .await?;
+    let owner = owner_at_terminal()?;
     config.update(|state| {
         ensure_reviewed_network(&state.networks, draft.chain_id, Some(&original))?;
-        replace_configured_network(&mut state.networks, draft.clone())
+        replace_configured_network(&mut state.networks, draft.clone(), Some(&owner))
     })?;
     emit(
         mode,
@@ -4703,9 +4712,11 @@ async fn review_one_network_proposal(
         config.update(|state| {
             ensure_reviewed_network(&state.networks, proposal.chain_id, existing.as_ref())?;
             if existing.is_some() {
-                replace_configured_network(&mut state.networks, proposal.clone())
+                // `None` on both: an agent may not propose a plaintext
+                // endpoint, so accepting one is not a case that arises.
+                replace_configured_network(&mut state.networks, proposal.clone(), None)
             } else {
-                add_configured_network(&mut state.networks, proposal.clone())
+                add_configured_network(&mut state.networks, proposal.clone(), None)
             }
         })?;
         PolicyStore::production(config.data_dir())?.discard_network_proposal(proposal)?;
@@ -4741,6 +4752,23 @@ const NETWORK_TRUST_WARNING: &str = "The configured RPC supplies the chain state
 /// The scrollback rendering, for the network commands that never open a
 /// screen. A command that has already shown one asks with
 /// [`crate::fullscreen::Review::ask`] instead.
+/// The witness that a network write came down the interactive owner path.
+///
+/// One place, so `tests/boundary.rs` enumerates one new origin rather than one
+/// per command. `network add` and `network edit` both reach it, and both then
+/// put the profile through `confirm_network_change` -- which prints the
+/// complete RPC URLs and warns about a plaintext one by name -- before anything
+/// is written.
+///
+/// Holding this does not mean the owner agreed. It means the question will be
+/// asked, on a screen they are sitting in front of. What an agent's proposal
+/// cannot do is get here at all.
+fn owner_at_terminal() -> Result<ekubo_wallet_core::config::InteractiveOwner> {
+    Ok(ekubo_wallet_core::config::InteractiveOwner::at_terminal(
+        &crate::approval::InteractiveProof::from_terminal()?,
+    ))
+}
+
 fn confirm_network_change(
     title: &str,
     summary: &str,

@@ -700,7 +700,9 @@ impl PolicyStore {
     /// decisions to make.
     pub fn put_network_proposal(&mut self, profile: &NetworkConfig) -> Result<()> {
         validate_network(profile)?;
-        crate::config::validate_admissible_endpoints(profile)?;
+        // `None`, always: an agent may not propose a plaintext endpoint, so no
+        // stored proposal can carry one and the acceptance path never judges one.
+        crate::config::validate_admissible_endpoints(profile, None)?;
         ensure!(profile.chain_id > 0, "network chain ID must be positive");
         let profile_json = serde_json::to_string(profile)?;
         ensure!(
