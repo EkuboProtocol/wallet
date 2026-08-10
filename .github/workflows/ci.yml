@@ -31,7 +31,7 @@ jobs:
       # The Windows job spends most of its time compiling vendored SQLCipher
       # and OpenSSL; caching cuts that to minutes on unchanged dependencies.
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # Diagnosis runs fail by design until the Windows overflow is fixed;
           # the expensive vendored SQLCipher/OpenSSL build must still be saved.
