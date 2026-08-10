@@ -153,6 +153,32 @@ fn no_signer_or_key_material_escapes_the_kernel() {
         );
     }
 
+    // The signature is one half of a signed decision; the row that says a
+    // request was answered is the other, and it is the half every reader and
+    // waiter actually reports. `store_signature` and `store_signed` check the
+    // row -- right wallet, right digest, still awaiting -- and nothing about
+    // whether a person reviewed the payload, authenticated as the owner, or
+    // held the key that produced those bytes. Reachable from presentation
+    // code, they are a durable signed decision with an attacker-chosen
+    // signature in it and no signature ever made.
+    for (module, declaration) in [
+        ("message.rs", "pub(crate) fn store_signature("),
+        ("typed_data.rs", "pub(crate) fn store_signature("),
+        ("pending.rs", "pub(crate) fn store_signed("),
+    ] {
+        let source = fs::read_to_string(
+            repository_root()
+                .join("crates/ekubo-wallet-core/src")
+                .join(module),
+        )
+        .unwrap();
+        assert!(
+            source.contains(declaration),
+            "{module} no longer declares `{declaration}`; a terminal signed state presentation \
+             code can write is an approval nobody gave"
+        );
+    }
+
     let clippy = fs::read_to_string(repository_root().join("clippy.toml")).unwrap();
     for ban in CUSTODY_BANS {
         assert!(

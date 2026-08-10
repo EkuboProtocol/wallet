@@ -506,7 +506,7 @@ impl PendingStore {
 
     /// Atomically records owner approval and the exact locally validated signed
     /// bytes. Approval without a complete signed transaction is never stored.
-    pub fn store_signed(
+    pub(crate) fn store_signed(
         &mut self,
         request_id: Uuid,
         expected_digest: &str,

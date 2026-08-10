@@ -664,7 +664,10 @@ impl TypedDataStore {
 
     /// Atomically record approval and the exact signature. The stored payload
     /// digest must still match what the approver reviewed.
-    pub fn store_signature(
+    ///
+    /// Crate-private: see the twin in `message.rs`. Its checks are about the
+    /// row, not about anyone having reviewed, authenticated, or signed.
+    pub(crate) fn store_signature(
         &mut self,
         request_id: Uuid,
         signer_wallet_id: &str,

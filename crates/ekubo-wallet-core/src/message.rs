@@ -585,7 +585,18 @@ impl MessageStore {
 
     /// Atomically record approval and the exact signature. The stored message
     /// must still hash to what the approver reviewed.
-    pub fn store_signature(
+    ///
+    /// Crate-private for the same reason `load_matching_signer` is: this is
+    /// the transition that makes a request *answered*, and everything a reader
+    /// or a waiter subsequently reports comes from the row it writes. Its
+    /// checks are about the row -- right wallet, right digest, still awaiting
+    /// -- and say nothing about whether anybody reviewed the payload,
+    /// authenticated as the owner, or held the key that produced these 65
+    /// bytes. Reachable from presentation code, it would be a durable signed
+    /// decision with an attacker-chosen signature in it and no signature ever
+    /// made. The orchestrator is the only caller, and it is the only caller
+    /// that has done those things.
+    pub(crate) fn store_signature(
         &mut self,
         request_id: Uuid,
         signer_wallet_id: &str,
