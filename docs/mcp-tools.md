@@ -31,7 +31,7 @@
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. One of the two tools available before acceptance. |
 | `wallet_check_for_updates` | Whether a newer release than the running one has been published, and the command that installs it. Touches no wallet, key, or policy, and is the other tool available before acceptance — being told the build is stale should not require accepting anything. Installs nothing: the wallet has no tool that does, because replacing the binary would replace the approval surface that would have confirmed it. The command is the user's to run, or the agent's if the user asks; the running server keeps its version until it is restarted. |
 | `wallet_walletconnect_connect` | Pair with a dapp's own web interface from a `wc:` link and settle a session, **with no connection review and nobody asked**. The only tool in this server that grants a counterparty standing access without a human decision; see [walletconnect](walletconnect.md#sessions-an-agent-opens). Binds one account and one set of chains, narrowable with `chain_ids`, and returns the dapp's claimed identity plus every caution the review would have drawn. |
-| `wallet_walletconnect_sessions` | What each open session is with, exposes, and has done, plus the request IDs waiting for `ekubo-wallet review`. Reads only. |
+| `wallet_walletconnect_sessions` | What each open session is with, exposes, and has done, plus the request IDs waiting for `ekubo-wallet review`. Live sessions only — one that ended is dropped rather than listed as finished. Reads only. |
 | `wallet_walletconnect_disconnect` | End a session, telling the dapp. Rejects anything still waiting rather than leaving it approvable. |
 | `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
 
@@ -162,6 +162,12 @@ run. Two rules about those ids:
 Close a session with `wallet_walletconnect_disconnect` as soon as the work on
 that dapp is done. A session left open keeps proposal rights nobody reviewed,
 and at most four are held at once.
+
+The listing covers live sessions only. One that ended — closed, dropped by the
+dapp, or never paired — is forgotten rather than reported as finished, so it
+stops occupying one of those four. The caller that opened it already has the
+outcome: `wallet_walletconnect_connect` returns the session's state, including
+a `failed` one, before anything else could have listed it.
 
 
 ## Token database and portfolio

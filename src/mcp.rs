@@ -2476,7 +2476,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_walletconnect_sessions",
-        description = "List the WalletConnect sessions this server is holding open: which dapp each is with, which account and chains it exposes, what it has done recently, and which of its requests are waiting for the user. A request under awaiting_review needs the user to run `ekubo-wallet review <request_id>` in their own terminal (never invoke that CLI for them); tell them, and wait. Do not submit those ids with wallet_send_execution_plan — the session broadcasts what it is waiting on, and a second submission is a second transaction. A request not approved within 240 seconds is rejected and the dapp is told so. This tool changes nothing.",
+        description = "List the WalletConnect sessions this server is holding open: which dapp each is with, which account and chains it exposes, what it has done recently, and which of its requests are waiting for the user. A request under awaiting_review needs the user to run `ekubo-wallet review <request_id>` in their own terminal (never invoke that CLI for them); tell them, and wait. Do not submit those ids with wallet_send_execution_plan — the session broadcasts what it is waiting on, and a second submission is a second transaction. A request not approved within 240 seconds is rejected and the dapp is told so. Only live sessions are listed: one that has ended, been closed, or failed to pair is dropped rather than reported as finished, so an empty list means nothing is open and not that nothing was ever opened. This tool changes nothing.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_walletconnect_sessions(&self) -> Result<Json<Vec<SessionReport>>, ErrorData> {
