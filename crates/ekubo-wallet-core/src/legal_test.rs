@@ -110,6 +110,25 @@ fn terms_disclaim_dapp_directed_signing_and_the_relay() {
     assert!(TERMS_OF_SERVICE.contains("under the control of the developer"));
 }
 
+/// Key loss is the one unrecoverable failure this wallet has, and nothing in
+/// the software prevents it: there is no seed, no escrow, and no second copy
+/// anywhere. A user who learns that only after losing a machine learned it too
+/// late, so the terms have to say it before anything signs.
+#[test]
+fn terms_disclaim_key_backup_and_recovery() {
+    assert!(TERMS_OF_SERVICE.contains("THE FUNDS CONTROLLED BY THAT KEY ARE PERMANENTLY LOST"));
+    assert!(TERMS_OF_SERVICE.contains("no recovery phrase, no seed"));
+    // The data directory is deliberately not key-bearing, which also means a
+    // backup of it is not a backup of a key. Somebody who copies it and
+    // believes otherwise is the exact person this section exists for.
+    assert!(
+        TERMS_OF_SERVICE.contains("Copying\nthe wallet's data directory does not copy any key")
+    );
+    // Saying a copy is the user's job is only fair if the terms also say how
+    // to get one, and `account export` is the supported route.
+    assert!(TERMS_OF_SERVICE.contains("ekubo-wallet account export"));
+}
+
 fn store() -> (tempfile::TempDir, LegalStore) {
     let directory = tempfile::tempdir().unwrap();
     let database = PolicyStore::open(

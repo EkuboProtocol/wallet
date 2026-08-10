@@ -39,7 +39,7 @@ pub const THIRD_PARTY_LICENSES: &str = include_str!("../../../THIRD_PARTY_LICENS
 pub const TERMS_OF_SERVICE: &str = "\
 # Ekubo Wallet Terms of Service
 
-Version 2 — Effective 2026-08-08
+Version 3 — Effective 2026-08-10
 
 These terms are an agreement between you and Ekubo, Inc. (the
 \"developer\"). By accepting them you agree to all of the following before
@@ -60,7 +60,31 @@ by, endorsed by, or under the control of the developer, and this software's
 use of the WalletConnect protocol implies no relationship with, or approval
 by, its operators or any dapp you connect to.
 
-## 2. You direct all signing, including through agents and connected dapps
+## 2. There are no backups, and backing up your keys is out of scope
+
+This software keeps no backup of any private key, and neither does the
+developer. A key exists in your operating system's credential store on one
+machine and nowhere else. There is no recovery phrase, no seed, no hosted
+copy, and no account to recover. Nobody — including the developer — can
+restore a key that is lost, and no support request can recover one.
+
+If the credential store entry is deleted, if the machine is lost, wiped, or
+destroyed, or if the operating system account holding the entry becomes
+inaccessible, THE FUNDS CONTROLLED BY THAT KEY ARE PERMANENTLY LOST. Copying
+the wallet's data directory does not copy any key, and restoring that
+directory onto another machine does not restore one.
+
+Keeping a durable copy of any key you care about is entirely your
+responsibility, and doing so is out of the scope of this software. You can
+obtain a copy with `ekubo-wallet account export <wallet>`, and the key is
+also readable through the tooling your operating system provides for its own
+credential store. Storing, protecting, and securely destroying every copy you
+make is your responsibility alone, and the developer is not responsible or
+liable for any loss of funds arising from a key you did not back up, from a
+backup you cannot find or read, or from a copy that was exposed, stolen, or
+misused.
+
+## 3. You direct all signing, including through agents and connected dapps
 
 This software is designed to be driven by AI agents and other automated
 tooling through the Model Context Protocol, and to serve requests from a dapp
@@ -69,7 +93,7 @@ prompts are safety aids, not guarantees. You are solely responsible for every
 transaction and signature this software produces, including those requested
 by an agent on your behalf and those requested by a dapp you paired with.
 
-## 3. Assumption of risk
+## 4. Assumption of risk
 
 Blockchain transactions are irreversible. Agents can misunderstand
 instructions, be manipulated by malicious content (including prompt
@@ -84,7 +108,7 @@ belong to someone else. The relay carrying that session can delay, drop, or
 refuse messages, and may be unavailable. Nothing this software shows about a
 dapp is a verification of who it is. You accept these risks too.
 
-## 4. No liability for agent-directed or dapp-directed signing
+## 5. No liability for agent-directed or dapp-directed signing
 
 TO THE MAXIMUM EXTENT PERMITTED BY LAW, EKUBO, INC. AND ALL COPYRIGHT
 HOLDERS ARE NOT RESPONSIBLE OR LIABLE FOR ANY LOSSES INCURRED DUE TO USING AN AGENT
@@ -101,7 +125,7 @@ SOURCE, OR THE CONDUCT, FAILURE, DOWNTIME, OR UNAVAILABILITY OF ANY RELAY
 OPERATOR, INCLUDING WITHOUT LIMITATION LOSSES FROM A MALICIOUS, COMPROMISED,
 OR IMPERSONATED DAPP AND FROM MESSAGES DELAYED, DROPPED, OR NEVER DELIVERED.
 
-## 5. No warranty
+## 6. No warranty
 
 THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -109,7 +133,7 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY ARISING FROM THE SOFTWARE OR ITS USE.
 
-## 6. Acceptance
+## 7. Acceptance
 
 Acceptance is recorded locally against the exact text of this document. If a
 future release materially changes these terms, you will be asked to accept
