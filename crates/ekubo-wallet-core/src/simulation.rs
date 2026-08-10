@@ -1564,6 +1564,30 @@ fn base_failure_result(
         message: "eth_simulateV1 simulation did not succeed".into(),
         step: None,
     });
+    // A failure can happen before the wallet's code was ever read, so this
+    // result knows nothing about the account's delegation — and it says so
+    // rather than letting `replaces_delegated_implementation: None` be read as
+    // "there is nothing to replace". It is not: the field is empty because
+    // nobody looked.
+    //
+    // The distinction matters because a failed simulation is exactly the case
+    // a human is asked to override, and the review document draws its
+    // replacement warning from that same empty field. Overriding the failure
+    // would then sign an authorization that silently replaces a delegation the
+    // document never mentioned.
+    if mode == ExecutionMode::CaliburBatch {
+        findings.push(PolicyFinding {
+            severity: FindingSeverity::Warning,
+            code: DELEGATION_AUTHORIZED_CODE.into(),
+            message: format!(
+                "this batch would sign an EIP-7702 authorization delegating the account to \
+                 {CANONICAL_CALIBUR:#x}, and the simulation failed before the account's current \
+                 delegation could be observed; if it is already delegated elsewhere, this \
+                 replaces that, and the replacement persists whether or not the batch succeeds"
+            ),
+            step: None,
+        });
+    }
     SimulationResult {
         simulation_id: None,
         digest: format!("{:#x}", plan.digest()),
