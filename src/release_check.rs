@@ -296,7 +296,11 @@ fn write_cache(data_dir: &Path, cache: &Cache) {
 async fn bounded_body(mut response: reqwest::Response) -> Option<String> {
     let mut body = Vec::new();
     while let Ok(Some(chunk)) = response.chunk().await {
-        if body.len() + chunk.len() > MAX_RESPONSE_BYTES as usize {
+        // Compared as `u64`, the type the ceiling is declared in. Casting it
+        // down would truncate on a 32-bit target, which is the one place a
+        // ceiling silently becoming a different number matters.
+        let total = body.len() as u64 + chunk.len() as u64;
+        if total > MAX_RESPONSE_BYTES {
             return None;
         }
         body.extend_from_slice(&chunk);
