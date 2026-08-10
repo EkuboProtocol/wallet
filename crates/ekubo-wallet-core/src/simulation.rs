@@ -309,7 +309,7 @@ pub async fn simulate_execution(
     // is asked to. Left as `None` under the single-answer strategies, where the
     // endpoint that runs the simulation reads its own head and there is no
     // quorum for a stale one to drag backwards.
-    let mut pin = if fork.is_none() {
+    let pin = if fork.is_none() {
         crate::rpc::median_head(network).await?
     } else {
         None
@@ -335,15 +335,26 @@ pub async fn simulate_execution(
             &mut observed_parent,
         )
         .await?;
-        // Under a single-answer strategy the height is still whatever the
-        // first endpoint that read a header reported — there is one answer and
-        // it is that endpoint's, so there is nothing here to protect. Under
-        // `m_of_n` the pin was already set from the median head above, and
-        // this cannot move it. Either way the endpoint has by now been shown
-        // to be on the chain it was asked about.
-        if pin.is_none() && fork.is_none() {
-            pin = observed_parent.map(|parent| parent.number);
-        }
+        // Nothing is promoted to `pin` here, and the promotion that used to be
+        // is the whole of finding 201318.
+        //
+        // It could only ever fire under a single-answer strategy: `m_of_n`
+        // sets `pin` from `median_head` before the loop, and a fork pins its
+        // own parent. The reasoning was that under one answer the height is
+        // that endpoint's anyway, so there is nothing to protect — true only
+        // while that endpoint's answer is the one used. It is not, when the
+        // endpoint reads a header and *then* fails: the loop fails over, the
+        // answer is discarded, and the height it chose stays behind and is
+        // forced on the healthy endpoint that follows. An endpoint could
+        // report an old header, fail the request on purpose, and pick the
+        // state a later honest endpoint simulates against without ever having
+        // produced a simulation at all.
+        //
+        // So a failover reads its own head, which is what a single-answer
+        // strategy says it does. There is no cross-endpoint comparison here
+        // for two different heights to disturb — that concern belongs to
+        // `m_of_n`, which pins ahead of the loop precisely so it does not
+        // arise.
 
         if required <= 1 {
             let retryable = result
