@@ -2016,6 +2016,41 @@ async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMo
 /// then authenticated against the OS — the policy decides what may be signed
 /// with nobody watching, so replacing it requires the owner even though no
 /// key material is read — and is revision-guarded end to end.
+/// Refuse to act on a wallet that is no longer the one the owner reviewed.
+///
+/// Every policy change is authorized against a screen naming a wallet id *and*
+/// an address, and then applied by id after an owner authentication that takes
+/// as long as a person takes. A wallet id is reusable: `account remove` purges
+/// this database by name and `account create` under the same name starts a new
+/// wallet whose policy numbering begins again at revision 1. So the row a
+/// stale review lands on can be a different wallet's, holding a different key,
+/// and the revision check cannot see it -- the numbers match precisely because
+/// the sequence restarted.
+///
+/// Comparing the whole `WalletMetadata` rather than the address alone is
+/// deliberate: `created_at` distinguishes two wallets that somehow share an
+/// address, and a field added later is covered by having been added.
+fn ensure_reviewed_wallet(
+    config: &ConfigStore,
+    reviewed: &crate::config::WalletMetadata,
+) -> Result<()> {
+    let current = config.wallet(&reviewed.id).with_context(|| {
+        format!(
+            "wallet {} could not be re-read after it was authorized, so nothing was applied",
+            reviewed.id
+        )
+    })?;
+    anyhow::ensure!(
+        current == *reviewed,
+        "wallet {} now holds address {:#x} rather than the {:#x} that was reviewed; it was \
+         replaced while this change was being authorized, and nothing was applied",
+        reviewed.id,
+        current.address,
+        reviewed.address
+    );
+    Ok(())
+}
+
 async fn review_policy_proposal(
     config: &ConfigStore,
     wallet_id: &str,
@@ -2090,6 +2125,7 @@ async fn review_policy_proposal(
     // during the review fail closed; matching the proposal itself covers the
     // case that check cannot see, where a newer proposal arrived while the
     // active revision never moved.
+    ensure_reviewed_wallet(config, &wallet)?;
     let stored = policies.consume_proposal(&proposal)?;
     eprintln!(
         "Applied. An agent can observe the new revision through wallet_get_policy; nothing \
@@ -3116,6 +3152,7 @@ async fn replace_policy(
             wallet: wallet.id.clone(),
         })
         .await?;
+    ensure_reviewed_wallet(config, &wallet)?;
     let stored = policies.put(
         wallet_id,
         policy,

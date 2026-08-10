@@ -1154,3 +1154,114 @@ fn two_characters_pick_out_any_alias() {
         );
     }
 }
+
+mod reviewed_wallet_tests {
+    //! A policy change lands on the wallet that was reviewed, or on none.
+
+    use super::super::ensure_reviewed_wallet;
+    use crate::config::{ConfigStore, WalletMetadata, WalletSource};
+    use alloy::primitives::Address;
+
+    fn metadata(id: &str, byte: u8) -> WalletMetadata {
+        WalletMetadata {
+            id: id.into(),
+            address: Address::repeat_byte(byte),
+            created_at: chrono::Utc::now(),
+            source: WalletSource::Created,
+            exported_at: None,
+        }
+    }
+
+    fn store_holding(wallet: &WalletMetadata) -> (tempfile::TempDir, ConfigStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path());
+        store
+            .update(|config| {
+                config.wallets.push(wallet.clone());
+                Ok(())
+            })
+            .unwrap();
+        (directory, store)
+    }
+
+    /// The ABA this closes. `account remove` purges the policy database by
+    /// name and `account create` under that name starts a wallet whose policy
+    /// numbering begins again at revision 1 -- so a review authorized against
+    /// the predecessor can land on the successor with every number matching,
+    /// precisely because the sequence restarted. The owner authorized a policy
+    /// for one key and it would govern another.
+    #[test]
+    fn a_wallet_replaced_during_authorization_is_refused() {
+        let replacement = metadata("primary", 0x22);
+        let (_directory, config) = store_holding(&replacement);
+
+        let reviewed = metadata("primary", 0x11);
+        let error = format!(
+            "{:#}",
+            ensure_reviewed_wallet(&config, &reviewed)
+                .expect_err("the reviewed wallet is gone; nothing may be applied")
+        );
+        assert!(error.contains("was replaced"), "{error}");
+        assert!(
+            error.contains("nothing was applied"),
+            "the refusal has to say the change did not happen: {error}"
+        );
+    }
+
+    /// A wallet gone entirely is refused too, and says why rather than
+    /// reporting a missing wallet as if the caller had asked for one.
+    #[test]
+    fn a_wallet_removed_during_authorization_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = ConfigStore::new(directory.path());
+        let error = format!(
+            "{:#}",
+            ensure_reviewed_wallet(&config, &metadata("primary", 0x11))
+                .expect_err("a wallet that is gone cannot have its policy replaced")
+        );
+        assert!(error.contains("nothing was applied"), "{error}");
+    }
+
+    /// And the ordinary case still applies, which is what a guard that refused
+    /// everything would fail.
+    #[test]
+    fn an_unchanged_wallet_still_applies_its_policy() {
+        let reviewed = metadata("primary", 0x11);
+        let (_directory, config) = store_holding(&reviewed);
+        ensure_reviewed_wallet(&config, &reviewed).expect("nothing changed");
+    }
+
+    /// Both policy-application paths consult it, and after owner
+    /// authentication rather than before: the window this is about is the one
+    /// that authentication opens.
+    #[test]
+    fn both_policy_paths_recheck_after_owner_authentication() {
+        let source = include_str!("cli.rs");
+        assert_eq!(
+            source
+                .matches("ensure_reviewed_wallet(config, &wallet)?;")
+                .count(),
+            2,
+            "the proposal review and the direct `policy set` both check"
+        );
+        for applying in [
+            "policies.consume_proposal(&proposal)?",
+            "let stored = policies.put(\n",
+        ] {
+            let before = source
+                .split_once(applying)
+                .expect("the application site exists")
+                .0;
+            let checked = before
+                .rfind("ensure_reviewed_wallet(config, &wallet)?;")
+                .expect("it is checked first");
+            let authenticated = before
+                .rfind("PresenceRequest::ReplacePolicy")
+                .expect("owner authentication precedes it");
+            assert!(
+                checked > authenticated,
+                "the recheck must follow the authentication it is protecting against"
+            );
+        }
+    }
+}
