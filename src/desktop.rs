@@ -36,8 +36,10 @@ use gpui::{
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, StyledExt,
+    WindowExt as _,
     alert::Alert,
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonVariant, ButtonVariants},
+    dialog::DialogButtonProps,
     group_box::{GroupBox, GroupBoxVariants as _},
     h_flex,
     input::{Input, InputState},
@@ -50,7 +52,7 @@ use gpui_component::{
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
     sync::{
         Arc, Mutex,
@@ -103,7 +105,7 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: &LegalStatu
         }
 }
 
-fn legal_scroll_reached_end(offset_y: gpui::Pixels, max_offset_y: gpui::Pixels) -> bool {
+fn scroll_reached_end(offset_y: gpui::Pixels, max_offset_y: gpui::Pixels) -> bool {
     -offset_y >= max_offset_y - px(1.0)
 }
 
@@ -149,6 +151,35 @@ fn token_list_url_draft(value: &str) -> Result<String> {
     );
     ensure!(parsed.host().is_some(), "token-list URL has no host");
     Ok(value.to_owned())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// These are independent capabilities of one persisted lifecycle state; an
+// enum would still need to enumerate every valid combination.
+#[allow(clippy::struct_excessive_bools)]
+struct TransactionActions {
+    refresh: bool,
+    send: bool,
+    cancel: bool,
+    discard: bool,
+}
+
+fn transaction_actions(status: PendingStatus) -> TransactionActions {
+    TransactionActions {
+        refresh: matches!(
+            status,
+            PendingStatus::Submitting
+                | PendingStatus::Broadcast
+                | PendingStatus::Cancelling
+                | PendingStatus::Replaced
+        ),
+        send: matches!(status, PendingStatus::Signed | PendingStatus::Broadcast),
+        cancel: matches!(
+            status,
+            PendingStatus::Submitting | PendingStatus::Broadcast | PendingStatus::Cancelling
+        ),
+        discard: status == PendingStatus::Signed,
+    }
 }
 
 async fn upsert_detected_agents(owner: &OwnerApi, port: u16) -> Result<String> {
@@ -340,6 +371,8 @@ pub struct WalletWindow {
     token_list_generation: u64,
     mcp_status: SharedString,
     selected_record: Option<uuid::Uuid>,
+    activity_busy: BTreeSet<uuid::Uuid>,
+    activity_feedback: BTreeMap<uuid::Uuid, ActivityFeedback>,
     active_review: Option<ActiveReview>,
     queued_reviews: SerialQueue<QueuedReview>,
     review_flow: ReviewFlowState,
@@ -479,6 +512,9 @@ struct ActiveReview {
     simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
     completion: Option<ActiveReviewCompletion>,
     awaiting_refresh: bool,
+    scroll_handle: ScrollHandle,
+    scroll_check_scheduled: bool,
+    scroll_layout_ready: bool,
 }
 
 enum ActiveReviewCompletion {
@@ -562,6 +598,12 @@ struct TokenListDelegate {
 enum TokenListStatus {
     Message(SharedString),
     Error(SharedString),
+}
+
+#[derive(Clone)]
+struct ActivityFeedback {
+    message: SharedString,
+    error: bool,
 }
 
 struct TokenProposalListDelegate {
@@ -1057,6 +1099,8 @@ impl WalletWindow {
             token_list_generation: 0,
             mcp_status: "MCP starting…".into(),
             selected_record: None,
+            activity_busy: BTreeSet::new(),
+            activity_feedback: BTreeMap::new(),
             active_review: None,
             queued_reviews: SerialQueue::default(),
             review_flow: ReviewFlowState::Ready,
@@ -1291,6 +1335,9 @@ impl WalletWindow {
                 response: prompt.response,
             }),
             awaiting_refresh: false,
+            scroll_handle: ScrollHandle::new(),
+            scroll_check_scheduled: false,
+            scroll_layout_ready: false,
         });
     }
 
@@ -1782,6 +1829,9 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
                     awaiting_refresh: false,
+                    scroll_handle: ScrollHandle::new(),
+                    scroll_check_scheduled: false,
+                    scroll_layout_ready: false,
                 });
                 self.operation_status = None;
             }
@@ -1840,7 +1890,7 @@ impl WalletWindow {
         if review.acceptance_required
             && review.scroll_layout_ready
             && !review.viewed_to_end
-            && legal_scroll_reached_end(
+            && scroll_reached_end(
                 review.scroll_handle.offset().y,
                 review.scroll_handle.max_offset().y,
             )
@@ -2327,10 +2377,181 @@ impl WalletWindow {
     }
 
     fn discard_unsent_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        self.operation_status = Some(match self.owner.discard_unsent_transaction(request_id) {
-            Ok(_) => "Discarded signed bytes that were never submitted.".into(),
-            Err(error) => format!("Could not discard transaction: {error:#}").into(),
+        let feedback = match self.owner.discard_unsent_transaction(request_id) {
+            Ok(_) => ActivityFeedback {
+                message: "Discarded signed bytes that were never submitted.".into(),
+                error: false,
+            },
+            Err(error) => ActivityFeedback {
+                message: format!("Could not discard transaction: {error:#}").into(),
+                error: true,
+            },
+        };
+        self.activity_feedback.insert(request_id, feedback);
+        self.selected_record = Some(request_id);
+        cx.notify();
+    }
+
+    fn refresh_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if !self.activity_busy.insert(request_id) {
+            return;
+        }
+        self.activity_feedback.remove(&request_id);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.refresh_transaction(request_id).await
         });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.activity_busy.remove(&request_id);
+                view.selected_record = Some(request_id);
+                view.activity_feedback.insert(
+                    request_id,
+                    match result {
+                        Ok(record) => ActivityFeedback {
+                            message: format!("Refreshed chain status: {:?}.", record.status).into(),
+                            error: false,
+                        },
+                        Err(error) => ActivityFeedback {
+                            message: format!("Could not refresh transaction: {error:#}").into(),
+                            error: true,
+                        },
+                    },
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn rebroadcast_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if !self.activity_busy.insert(request_id) {
+            return;
+        }
+        self.activity_feedback.remove(&request_id);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.rebroadcast_transaction(request_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.activity_busy.remove(&request_id);
+                view.selected_record = Some(request_id);
+                let feedback = match result {
+                    Ok(action) => match action
+                        .broadcast
+                        .as_ref()
+                        .and_then(|broadcast| broadcast.broadcast_error.as_deref())
+                    {
+                        Some(error) => ActivityFeedback {
+                            message: format!(
+                                "No endpoint accepted the exact signed bytes: {error}"
+                            )
+                            .into(),
+                            error: true,
+                        },
+                        None => ActivityFeedback {
+                            message: format!(
+                                "Exact signed bytes reconciled with status {:?}.",
+                                action.record.status
+                            )
+                            .into(),
+                            error: false,
+                        },
+                    },
+                    Err(error) => ActivityFeedback {
+                        message: format!("Could not send exact signed bytes: {error:#}").into(),
+                        error: true,
+                    },
+                };
+                view.activity_feedback.insert(request_id, feedback);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn confirm_transaction_cancellation(
+        &mut self,
+        request_id: uuid::Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.activity_busy.contains(&request_id) {
+            return;
+        }
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            alert
+                .title("Attempt transaction cancellation?")
+                .description(
+                    "The wallet will sign and broadcast a 0-value self-send at the same nonce. It costs gas, and the original transaction may still win the race.",
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Attempt cancellation")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("Keep transaction")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = view.update(cx, |view, cx| {
+                        view.attempt_transaction_cancellation(request_id, cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    fn attempt_transaction_cancellation(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if !self.activity_busy.insert(request_id) {
+            return;
+        }
+        self.activity_feedback.remove(&request_id);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.attempt_transaction_cancellation(request_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.activity_busy.remove(&request_id);
+                view.selected_record = Some(request_id);
+                let feedback = match result {
+                    Ok(action) => match action
+                        .broadcast
+                        .as_ref()
+                        .and_then(|broadcast| broadcast.broadcast_error.as_deref())
+                    {
+                        Some(error) => ActivityFeedback {
+                            message: format!("Cancellation broadcast was not accepted: {error}")
+                                .into(),
+                            error: true,
+                        },
+                        None => ActivityFeedback {
+                            message: format!(
+                                "Cancellation reconciled with status {:?}.",
+                                action.record.status
+                            )
+                            .into(),
+                            error: false,
+                        },
+                    },
+                    Err(error) => ActivityFeedback {
+                        message: format!("Could not cancel transaction: {error:#}").into(),
+                        error: true,
+                    },
+                };
+                view.activity_feedback.insert(request_id, feedback);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2691,7 +2912,13 @@ impl WalletWindow {
             && active.awaiting_refresh
             && active.completion.is_none()
         {
+            let identity_changed = active.state.document().identity != prompt.document.identity;
             active.state.refresh(prompt.document);
+            if identity_changed {
+                active.scroll_handle = ScrollHandle::new();
+                active.scroll_check_scheduled = false;
+                active.scroll_layout_ready = false;
+            }
             active.simulation = Some(prompt.simulation);
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
             active.awaiting_refresh = false;
@@ -2712,6 +2939,9 @@ impl WalletWindow {
             simulation: Some(prompt.simulation),
             completion: Some(ActiveReviewCompletion::Transaction(prompt.response)),
             awaiting_refresh: false,
+            scroll_handle: ScrollHandle::new(),
+            scroll_check_scheduled: false,
+            scroll_layout_ready: false,
         });
     }
 
@@ -2729,6 +2959,9 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::Message { request_id, digest }),
                     awaiting_refresh: false,
+                    scroll_handle: ScrollHandle::new(),
+                    scroll_check_scheduled: false,
+                    scroll_layout_ready: false,
                 });
                 self.operation_status = None;
             }
@@ -2754,6 +2987,9 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::TypedData { request_id, digest }),
                     awaiting_refresh: false,
+                    scroll_handle: ScrollHandle::new(),
+                    scroll_check_scheduled: false,
+                    scroll_layout_ready: false,
                 });
                 self.operation_status = None;
             }
@@ -2811,13 +3047,21 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn mark_review_viewed(&mut self, generation: u64, cx: &mut Context<Self>) {
-        if self
-            .active_review
-            .as_mut()
-            .is_some_and(|review| review.state.mark_viewed_to_end(generation))
+    fn update_review_scroll_state(&mut self, cx: &mut Context<Self>) {
+        let Some(review) = self.active_review.as_mut() else {
+            return;
+        };
+        if review.scroll_layout_ready
+            && !review.state.approve_enabled()
+            && scroll_reached_end(
+                review.scroll_handle.offset().y,
+                review.scroll_handle.max_offset().y,
+            )
         {
-            cx.notify();
+            let generation = review.state.generation();
+            if review.state.mark_viewed_to_end(generation) {
+                cx.notify();
+            }
         }
     }
 
@@ -3330,6 +3574,276 @@ impl WalletWindow {
             }
         }
         content
+    }
+
+    fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let panel = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_3();
+        let items = match self.owner.transactions(None, 200) {
+            Ok(items) => items,
+            Err(error) => return panel.child(format!("Activity unavailable: {error:#}")),
+        };
+        let selected = self
+            .selected_record
+            .and_then(|request_id| items.iter().find(|item| item.request_id == request_id))
+            .cloned();
+        let mut panel = panel;
+        if let Some(item) = selected {
+            let exact_plan = serde_json::to_string_pretty(&item.execution_plan)
+                .unwrap_or_else(|_| "Exact execution plan could not be rendered.".into());
+            let close_id = item.request_id;
+            let mut detail = GroupBox::new()
+                .id(SharedString::from(format!(
+                    "activity-detail-{}",
+                    item.request_id
+                )))
+                .outline()
+                .title("Transaction details")
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            div()
+                                .font_semibold()
+                                .child(format!("{:?} · {}", item.status, item.request_id)),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "close-activity-detail-{close_id}"
+                            )))
+                            .label("Close")
+                            .on_click(cx.listener(
+                                |view, _, _, cx| {
+                                    view.selected_record = None;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                )
+                .child(format!("Account: {}", item.wallet_id))
+                .child(format!(
+                    "Network: {} · chain {}",
+                    item.network_name, item.chain_id
+                ))
+                .child(format!(
+                    "Created: {} · updated: {}",
+                    item.created_at, item.updated_at
+                ))
+                .child(format!("Policy revision: {}", item.policy_revision))
+                .child(
+                    div()
+                        .child("Plan digest")
+                        .child(div().font_family("monospace").child(item.digest.clone())),
+                );
+            if let Some(source) = item.plan_source.as_ref() {
+                detail = detail.child(format!("Plan source: {source}"));
+            }
+            if let Some(review_digest) = item.review_digest.as_ref() {
+                detail = detail.child(
+                    div()
+                        .child("Review digest")
+                        .child(div().font_family("monospace").child(review_digest.clone())),
+                );
+            }
+            for (label, value) in [
+                ("Signed hash", item.signed_transaction_hash.as_ref()),
+                ("Broadcast hash", item.broadcast_transaction_hash.as_ref()),
+                ("Block", item.block_number.as_ref()),
+            ] {
+                if let Some(value) = value {
+                    detail = detail.child(
+                        div()
+                            .child(label)
+                            .child(div().font_family("monospace").child(value.clone())),
+                    );
+                }
+            }
+            if let Some(fee) = item.mined_fee.as_ref() {
+                detail = detail.child(format!(
+                    "Mined fee: {} wei · {} gas at {} wei/gas",
+                    fee.transaction_fee_wei, fee.gas_used, fee.effective_gas_price
+                ));
+            }
+            if !item.cancel_transaction_hashes.is_empty() {
+                detail = detail
+                    .child(div().font_semibold().child("Cancellation attempts"))
+                    .children(
+                        item.cancel_transaction_hashes
+                            .iter()
+                            .cloned()
+                            .map(|hash| div().font_family("monospace").text_sm().child(hash)),
+                    );
+            }
+            detail = detail.child(
+                div().child("Exact execution plan").child(
+                    div()
+                        .max_h(px(360.0))
+                        .overflow_y_scrollbar()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .font_family("monospace")
+                        .text_sm()
+                        .whitespace_normal()
+                        .child(exact_plan),
+                ),
+            );
+            panel = panel.child(detail);
+        }
+        if items.is_empty() {
+            return panel.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No transaction activity yet."),
+            );
+        }
+        panel.children(items.into_iter().map(|item| {
+            let request_id = item.request_id;
+            let status = item.status;
+            let busy = self.activity_busy.contains(&request_id);
+            let selected = self.selected_record == Some(request_id);
+            let actions = transaction_actions(item.status);
+            let feedback = self.activity_feedback.get(&request_id).cloned();
+            div()
+                .p_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(if selected {
+                    cx.theme().primary
+                } else {
+                    cx.theme().border
+                })
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(format!(
+                                    "{:?} · {} · {}",
+                                    item.status, item.wallet_id, item.network_name
+                                ))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .font_family("monospace")
+                                        .truncate()
+                                        .child(request_id.to_string()),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "inspect-transaction-{request_id}"
+                                    )))
+                                    .label("Inspect")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.selected_record = Some(request_id);
+                                        cx.notify();
+                                    })),
+                                )
+                                .when(actions.refresh, |buttons| {
+                                    buttons.child(
+                                        Button::new(SharedString::from(format!(
+                                            "refresh-transaction-{request_id}"
+                                        )))
+                                        .label(if busy { "Working…" } else { "Refresh" })
+                                        .disabled(busy)
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                view.refresh_transaction(request_id, cx);
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when(actions.send, |buttons| {
+                                    buttons.child(
+                                        Button::new(SharedString::from(format!(
+                                            "rebroadcast-transaction-{request_id}"
+                                        )))
+                                        .label(if status == PendingStatus::Signed {
+                                            "Send signed bytes"
+                                        } else {
+                                            "Rebroadcast"
+                                        })
+                                        .disabled(busy)
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                view.rebroadcast_transaction(request_id, cx);
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when(actions.cancel, |buttons| {
+                                    buttons.child(
+                                        Button::new(SharedString::from(format!(
+                                            "cancel-transaction-{request_id}"
+                                        )))
+                                        .label(if status == PendingStatus::Cancelling {
+                                            "Retry cancellation"
+                                        } else {
+                                            "Cancel transaction"
+                                        })
+                                        .danger()
+                                        .disabled(busy)
+                                        .on_click(
+                                            cx.listener(move |view, _, window, cx| {
+                                                view.confirm_transaction_cancellation(
+                                                    request_id, window, cx,
+                                                );
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when(actions.discard, |buttons| {
+                                    buttons.child(
+                                        Button::new(SharedString::from(format!(
+                                            "discard-{request_id}"
+                                        )))
+                                        .label("Discard unsent signature")
+                                        .danger()
+                                        .disabled(busy)
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                view.discard_unsent_transaction(request_id, cx);
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        ),
+                )
+                .when_some(feedback, |row, feedback| {
+                    row.child(
+                        div()
+                            .text_sm()
+                            .text_color(if feedback.error {
+                                cx.theme().danger
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(feedback.message),
+                    )
+                })
+        }))
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -4914,31 +5428,7 @@ impl WalletWindow {
             .gap_2();
         match self.route {
             Route::Overview => self.render_portfolio(cx),
-            Route::Activity => match self.owner.transactions(None, 200) {
-                Ok(items) => panel.children(items.into_iter().map(|item| {
-                    let request_id = item.request_id;
-                    let can_discard = item.status == PendingStatus::Signed;
-                    div()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(format!(
-                            "{:?} · {} · {} · {}",
-                            item.status, item.wallet_id, item.network_name, item.request_id
-                        ))
-                        .when(can_discard, |row| {
-                            row.child(
-                                Button::new(SharedString::from(format!("discard-{request_id}")))
-                                    .label("Discard unsent signature")
-                                    .danger()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.discard_unsent_transaction(request_id, cx);
-                                    })),
-                            )
-                        })
-                })),
-                Err(error) => panel.child(format!("Activity unavailable: {error:#}")),
-            },
+            Route::Activity => self.render_activity(cx),
             Route::Accounts => self.render_accounts(cx),
             Route::Policies => self.render_policies(cx),
             Route::Networks => self.render_networks(cx),
@@ -5065,19 +5555,6 @@ impl WalletWindow {
                     simulation.execution_mode
                 ));
         }
-        review_body = review_body.child(
-            Button::new(("review-viewed", generation))
-                .label(if active.state.approve_enabled() {
-                    "Complete review viewed"
-                } else {
-                    "Mark complete review as viewed"
-                })
-                .disabled(active.state.approve_enabled())
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    view.mark_review_viewed(generation, cx);
-                })),
-        );
-
         div()
             .absolute()
             .inset_0()
@@ -5125,7 +5602,14 @@ impl WalletWindow {
                 div()
                     .id(("review-scroll", generation))
                     .flex_1()
+                    .min_h_0()
+                    .track_scroll(&active.scroll_handle)
                     .overflow_y_scrollbar()
+                    .on_scroll_wheel(cx.listener(|_view, _, window, cx| {
+                        cx.defer_in(window, |view, _, cx| {
+                            view.update_review_scroll_state(cx);
+                        });
+                    }))
                     .pr_2()
                     .child(review_body),
             )
@@ -5146,7 +5630,16 @@ impl WalletWindow {
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap_2()
+                            .when(!approve_enabled, |buttons| {
+                                buttons.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Scroll to the end to enable approval"),
+                                )
+                            })
                             .child(
                                 Button::new(("review-select-reject", generation))
                                     .label("Reject")
@@ -5501,6 +5994,19 @@ impl WalletWindow {
 impl Render for WalletWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach_window(window, cx);
+        if let Some(review) = self.active_review.as_mut() {
+            if review.scroll_layout_ready {
+                self.update_review_scroll_state(cx);
+            } else if !review.scroll_check_scheduled {
+                review.scroll_check_scheduled = true;
+                cx.on_next_frame(window, |view, _, cx| {
+                    if let Some(review) = view.active_review.as_mut() {
+                        review.scroll_layout_ready = true;
+                    }
+                    view.update_review_scroll_state(cx);
+                });
+            }
+        }
         if let Some(review) = self.legal_review.as_mut() {
             if review.scroll_layout_ready {
                 self.update_legal_scroll_state(cx);

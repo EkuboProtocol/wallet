@@ -12,18 +12,21 @@ use ekubo_wallet_core::{
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{AgentKind, ClientToken, DesktopStore, McpClient, RegisteredClient},
+    execution::BroadcastResult,
     human_presence::{
         HumanPresence as _, OwnerAuthorization, OwnerAuthorizationScope, PlatformHumanPresence,
         PresenceRequest, authorize_owner,
     },
-    legal::{LegalDocument, LegalStatus, LegalStore},
+    legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
     orchestrator::{
         ApprovalOutcome, approve_transaction, sign_reviewed_message, sign_reviewed_typed_data,
     },
-    pending::{PendingStore, PendingTransaction},
+    pending::{PendingStatus, PendingStore, PendingTransaction},
     plan_fetch::{FetchPolicy, fetch_token_list_url},
     policy_store::{PolicyProposal, PolicyStore, StoredPolicy},
+    reconcile::{attempt_cancellation, reconcile_record, submit_claimed},
+    rpc::transaction_known,
     token_store::{
         MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
         TokenProposal, TokenStore, read_portfolio,
@@ -67,6 +70,12 @@ pub struct OwnerTokenListImport {
     pub skipped_other_chain: usize,
     pub summary: ProposalSummary,
     pub proposals: Vec<TokenProposal>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnerTransactionAction {
+    pub record: PendingTransaction,
+    pub broadcast: Option<BroadcastResult>,
 }
 
 /// The restricted capability cloned into authenticated MCP sessions.
@@ -525,6 +534,136 @@ impl OwnerApi {
         limit: u16,
     ) -> Result<Vec<PendingTransaction>> {
         PendingStore::production(self.config.data_dir())?.list(wallet_id, limit)
+    }
+
+    pub fn transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
+        PendingStore::production(self.config.data_dir())?.get(request_id)
+    }
+
+    /// Reconcile one lifecycle row against its configured network. This is a
+    /// read from the owner's perspective, but any observed terminal state is
+    /// persisted so the activity record remains authoritative after restart.
+    pub async fn refresh_transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
+        let pending = Mutex::new(PendingStore::production(self.config.data_dir())?);
+        let before = pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+            .get(request_id)?;
+        let network = self.config.network_by_chain_id(before.chain_id.as_str())?;
+        let refreshed = reconcile_record(&pending, &network, before.clone(), true).await?;
+        if refreshed.status != before.status {
+            self.publish_transaction_status(&refreshed);
+        }
+        Ok(refreshed)
+    }
+
+    /// Submit or rebroadcast only the exact signed bytes already held in the
+    /// encrypted lifecycle row. Policy and configuration changes cannot turn
+    /// this into a different transaction.
+    pub async fn rebroadcast_transaction(
+        &self,
+        request_id: Uuid,
+    ) -> Result<OwnerTransactionAction> {
+        require_current_acceptance(self.config.data_dir())?;
+        let pending = Mutex::new(PendingStore::production(self.config.data_dir())?);
+        let before = pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+            .get(request_id)?;
+        let wallet = self.config.wallet(&before.wallet_id)?;
+        let network = self.config.network_by_chain_id(before.chain_id.as_str())?;
+        let current = reconcile_record(&pending, &network, before, true).await?;
+        let starting_status = current.status;
+        let claimed = match current.status {
+            PendingStatus::Signed => pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                .claim_for_submission(request_id)?,
+            PendingStatus::Broadcast => {
+                let hash = current
+                    .signed_transaction_hash
+                    .as_deref()
+                    .context("broadcast transaction is missing its signed hash")?;
+                if transaction_known(&network, hash).await? {
+                    return Ok(OwnerTransactionAction {
+                        record: current,
+                        broadcast: None,
+                    });
+                }
+                pending
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+                    .claim_broadcast_retry(request_id)?
+            }
+            _ => anyhow::bail!(
+                "transaction is {:?}; only signed or unconfirmed broadcast transactions can be sent again",
+                current.status
+            ),
+        };
+        let (record, broadcast) = submit_claimed(&pending, &wallet, &network, claimed).await?;
+        if record.status != starting_status {
+            self.publish_transaction_status(&record);
+        }
+        Ok(OwnerTransactionAction {
+            record,
+            broadcast: Some(broadcast),
+        })
+    }
+
+    /// Race an unconfirmed transaction with the core's bounded 0-value
+    /// self-send cancellation. The desktop confirms the destructive intent;
+    /// this method derives every signed field from the stored envelope and
+    /// current chain state, exactly like the restricted agent operation.
+    pub async fn attempt_transaction_cancellation(
+        &self,
+        request_id: Uuid,
+    ) -> Result<OwnerTransactionAction> {
+        require_current_acceptance(self.config.data_dir())?;
+        let pending = Mutex::new(PendingStore::production(self.config.data_dir())?);
+        let record = pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
+            .get(request_id)?;
+        let starting_status = record.status;
+        let wallet = self.config.wallet(&record.wallet_id)?;
+        let network = self.config.network_by_chain_id(record.chain_id.as_str())?;
+        let (record, broadcast) = attempt_cancellation(
+            &pending,
+            &self.config,
+            &wallet,
+            &network,
+            record,
+            &OsKeyStore,
+        )
+        .await?;
+        if record.status != starting_status {
+            self.publish_transaction_status(&record);
+        }
+        Ok(OwnerTransactionAction {
+            record,
+            broadcast: Some(broadcast),
+        })
+    }
+
+    fn publish_transaction_status(&self, record: &PendingTransaction) {
+        let stage = match record.status {
+            PendingStatus::AwaitingApproval => Some(crate::events::TransactionStage::Proposed),
+            PendingStatus::Signed => Some(crate::events::TransactionStage::Signed),
+            PendingStatus::Submitting | PendingStatus::Broadcast | PendingStatus::Cancelling => {
+                Some(crate::events::TransactionStage::Broadcast)
+            }
+            PendingStatus::Confirmed => Some(crate::events::TransactionStage::Confirmed),
+            PendingStatus::Reverted => Some(crate::events::TransactionStage::Reverted),
+            PendingStatus::Cancelled => Some(crate::events::TransactionStage::Cancelled),
+            PendingStatus::Replaced => Some(crate::events::TransactionStage::Replaced),
+            PendingStatus::Rejected => None,
+        };
+        if let Some(stage) = stage {
+            self.events.publish(DomainEventKind::Transaction {
+                request_id: record.request_id,
+                stage,
+            });
+        }
     }
 
     pub fn reviews(&self, wallet_id: Option<&str>) -> Result<OwnerReviewQueues> {

@@ -200,10 +200,50 @@ fn legal_acceptance_shows_when_the_current_document_was_accepted() {
 }
 
 #[test]
-fn legal_acceptance_unlocks_only_at_the_end_of_the_scroll_range() {
-    assert!(!legal_scroll_reached_end(px(-98.0), px(100.0)));
-    assert!(legal_scroll_reached_end(px(-99.0), px(100.0)));
-    assert!(legal_scroll_reached_end(px(0.0), px(0.0)));
+fn document_actions_unlock_only_at_the_end_of_the_scroll_range() {
+    assert!(!scroll_reached_end(px(-98.0), px(100.0)));
+    assert!(scroll_reached_end(px(-99.0), px(100.0)));
+    assert!(scroll_reached_end(px(0.0), px(0.0)));
+}
+
+#[test]
+fn activity_exposes_only_lifecycle_safe_owner_actions() {
+    assert_eq!(
+        transaction_actions(PendingStatus::Signed),
+        TransactionActions {
+            refresh: false,
+            send: true,
+            cancel: false,
+            discard: true,
+        }
+    );
+    assert_eq!(
+        transaction_actions(PendingStatus::Broadcast),
+        TransactionActions {
+            refresh: true,
+            send: true,
+            cancel: true,
+            discard: false,
+        }
+    );
+    assert_eq!(
+        transaction_actions(PendingStatus::Cancelling),
+        TransactionActions {
+            refresh: true,
+            send: false,
+            cancel: true,
+            discard: false,
+        }
+    );
+    assert_eq!(
+        transaction_actions(PendingStatus::Confirmed),
+        TransactionActions {
+            refresh: false,
+            send: false,
+            cancel: false,
+            discard: false,
+        }
+    );
 }
 
 #[test]
