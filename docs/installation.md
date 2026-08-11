@@ -8,8 +8,8 @@ Install the signed native package for the platform:
   StatusNotifierItem integration, and the polkit policy.
 
 The app launches without arguments. On startup it detects supported agents and
-upserts an authenticated `ekubo-wallet` MCP entry for each one. The first
-successful installation enables launch-at-login. A login launch stays hidden
+upserts a credential-free `ekubo-wallet` MCP entry for each one. This never
+opens an authentication prompt. A login launch stays hidden
 when a tray host exists; on Linux without a tray host it retains a minimized
 taskbar window.
 
@@ -18,13 +18,16 @@ and opencode. Automatic installation uses the typed configuration adapter for
 that agent, creates a timestamped backup before changing an existing file,
 writes atomically, validates, and rolls back on failure. Settings and the tray
 both provide **Reinstall MCP Server**, which upserts every detected agent again;
-Settings also retains per-agent repair, token rotation, revocation, and removal.
+Settings also retains per-agent repair, OAuth access revocation, and removal.
 The remote Ekubo MCP entry is installed by default and remains independently
 removable.
 
-Codex entries use a Streamable HTTP `url` and static `http_headers` map. Tokens
-are written directly into the agent configuration and are never displayed
-again after installation.
+Codex entries use the fixed Streamable HTTP `url` and `auth = "oauth"`; no
+static header, bearer token, refresh token, or client secret is written to any
+managed configuration. The user starts authentication from the harness (for
+Codex, **Authenticate** or `codex mcp login ekubo-wallet`). Ekubo Wallet must be
+running and requires operating-system human presence before access is granted.
+The harness is responsible for its OAuth credential storage.
 
 ## Running locally on macOS
 

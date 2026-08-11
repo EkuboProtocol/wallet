@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use directories::BaseDirs;
-use ekubo_wallet_core::desktop_store::AgentKind;
+use ekubo_wallet_core::desktop_store::{AgentKind, MCP_RESOURCE};
 use serde_json::{Map, Value, json};
 use std::{
     fs,
@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::NamedTempFile;
-use toml_edit::{DocumentMut, InlineTable, Item, Table, Value as TomlValue, value};
+use toml_edit::{DocumentMut, Item, Table, value};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const LOCAL_SERVER_NAME: &str = "ekubo-wallet";
@@ -35,6 +35,76 @@ pub struct ConfigPreview {
     validation: ConfigValidation,
 }
 
+struct InstalledConfig {
+    path: PathBuf,
+    existed: bool,
+    backup: PathBuf,
+}
+
+/// A set of managed configuration writes that either all remain installed or
+/// all return to their exact prior bytes. Timestamped backups remain on disk
+/// after commit or rollback.
+pub struct ConfigBatchInstall {
+    installed: Vec<InstalledConfig>,
+    committed: bool,
+}
+
+impl ConfigBatchInstall {
+    pub fn install(previews: Vec<ConfigPreview>) -> Result<Self> {
+        let mut batch = Self {
+            installed: Vec::new(),
+            committed: false,
+        };
+        for preview in previews {
+            if !preview.has_changes() {
+                preview.validate_current()?;
+                continue;
+            }
+            let path = preview.path.clone();
+            let existed = path.is_file();
+            match preview.install() {
+                Ok(backup) => batch.installed.push(InstalledConfig {
+                    path,
+                    existed,
+                    backup,
+                }),
+                Err(error) => {
+                    batch.rollback_best_effort();
+                    batch.committed = true;
+                    return Err(error).context(
+                        "managed agent configuration batch failed; earlier files were restored",
+                    );
+                }
+            }
+        }
+        Ok(batch)
+    }
+
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+
+    fn rollback_best_effort(&self) {
+        for installed in self.installed.iter().rev() {
+            if installed.existed {
+                if let Ok(prior) = fs::read(&installed.backup) {
+                    let _ = write_atomic(&installed.path, &prior);
+                }
+            } else if installed.path.is_file() {
+                let _ = fs::remove_file(&installed.path);
+            }
+        }
+    }
+}
+
+impl Drop for ConfigBatchInstall {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.rollback_best_effort();
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ConfigValidation {
     Installed { kind: AgentKind, companion: bool },
@@ -52,7 +122,7 @@ impl ConfigPreview {
         self.before != self.after
     }
 
-    /// Verify that an unchanged file still contains the complete authenticated
+    /// Verify that an unchanged file still contains the credential-free OAuth
     /// Streamable HTTP server shape.
     pub fn validate_current(&self) -> Result<()> {
         let installed = fs::read_to_string(&self.path)
@@ -63,12 +133,6 @@ impl ConfigPreview {
         );
         validate_document(&self.path, &installed)?;
         validate_server_shape(&installed, self.validation)
-    }
-
-    /// Conceal a bearer token in the human-facing diff while retaining it in
-    /// the in-memory document that will be atomically installed.
-    pub fn redact_diff_secret(&mut self, secret: &str) {
-        self.diff = self.diff.replace(secret, "<redacted-token>");
     }
 
     pub fn install(mut self) -> Result<PathBuf> {
@@ -166,48 +230,32 @@ impl AgentAdapter {
             }
     }
 
-    pub fn preview_install(
-        &self,
-        port: u16,
-        token: &str,
-        install_companion: bool,
-    ) -> Result<ConfigPreview> {
-        ensure!(
-            token.len() == 43 && token.bytes().all(is_base64url),
-            "MCP token is not an unpadded base64url 256-bit value"
-        );
+    pub fn preview_install(&self, install_companion: bool) -> Result<ConfigPreview> {
         let before = match fs::read_to_string(&self.config_path) {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(error.into()),
         };
-        let url = format!("http://127.0.0.1:{port}/mcp");
+        let url = MCP_RESOURCE;
         let after = match self.kind {
-            AgentKind::Codex => merge_codex(&before, &url, token, install_companion)?,
+            AgentKind::Codex => merge_codex(&before, url, install_companion)?,
             AgentKind::ClaudeCode | AgentKind::Cursor => merge_json(
                 &before,
                 "mcpServers",
                 JsonShape::Url,
-                &url,
-                token,
+                url,
                 install_companion,
             )?,
             AgentKind::GeminiCli => merge_json(
                 &before,
                 "mcpServers",
                 JsonShape::HttpUrl,
-                &url,
-                token,
+                url,
                 install_companion,
             )?,
-            AgentKind::Opencode => merge_json(
-                &before,
-                "mcp",
-                JsonShape::Remote,
-                &url,
-                token,
-                install_companion,
-            )?,
+            AgentKind::Opencode => {
+                merge_json(&before, "mcp", JsonShape::Remote, url, install_companion)?
+            }
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
         };
         let diff = exact_diff(&before, &after);
@@ -247,17 +295,13 @@ impl AgentAdapter {
     }
 }
 
-fn is_base64url(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-}
-
 fn binary_on_path(name: &str) -> bool {
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths).any(|directory| directory.join(name).is_file())
     })
 }
 
-fn merge_codex(before: &str, url: &str, token: &str, companion: bool) -> Result<String> {
+fn merge_codex(before: &str, url: &str, companion: bool) -> Result<String> {
     let mut document = if before.trim().is_empty() {
         DocumentMut::new()
     } else {
@@ -284,14 +328,13 @@ fn merge_codex(before: &str, url: &str, token: &str, companion: bool) -> Result<
         "cwd",
         "experimental_environment",
         "bearer_token_env_var",
+        "http_headers",
         "env_http_headers",
     ] {
         local.remove(legacy_key);
     }
     local["url"] = value(url);
-    let mut headers = InlineTable::new();
-    headers.insert("Authorization", TomlValue::from(format!("Bearer {token}")));
-    local["http_headers"] = Item::Value(TomlValue::InlineTable(headers));
+    local["auth"] = value("oauth");
     if companion {
         let remote = servers
             .entry(COMPANION_SERVER_NAME)
@@ -328,7 +371,6 @@ fn merge_json(
     root: &str,
     shape: JsonShape,
     url: &str,
-    token: &str,
     companion: bool,
 ) -> Result<String> {
     let mut document: Value = if before.trim().is_empty() {
@@ -344,15 +386,10 @@ fn merge_json(
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .context("agent MCP configuration must be an object")?;
-    let authorization = format!("Bearer {token}");
     let local = match shape {
-        JsonShape::Url => {
-            json!({"type": "http", "url": url, "headers": {"Authorization": authorization}})
-        }
-        JsonShape::HttpUrl => json!({"httpUrl": url, "headers": {"Authorization": authorization}}),
-        JsonShape::Remote => {
-            json!({"type": "remote", "url": url, "headers": {"Authorization": authorization}})
-        }
+        JsonShape::Url => json!({"type": "http", "url": url}),
+        JsonShape::HttpUrl => json!({"httpUrl": url}),
+        JsonShape::Remote => json!({"type": "remote", "url": url}),
     };
     servers.insert(LOCAL_SERVER_NAME.into(), local);
     if companion {
@@ -447,13 +484,16 @@ fn validate_codex_shape(contents: &str, installed: bool, companion: bool) -> Res
         .and_then(Item::as_str)
         .context("local MCP server has no HTTP URL")?;
     validate_loopback_url(url)?;
-    let authorization = local
-        .get("http_headers")
-        .and_then(Item::as_inline_table)
-        .and_then(|headers| headers.get("Authorization"))
-        .and_then(TomlValue::as_str)
-        .context("local MCP server has no static Authorization header")?;
-    validate_authorization(authorization)?;
+    ensure!(
+        local.get("auth").and_then(Item::as_str) == Some("oauth"),
+        "Codex MCP server is not configured for OAuth"
+    );
+    ensure!(
+        local.get("http_headers").is_none()
+            && local.get("env_http_headers").is_none()
+            && local.get("bearer_token_env_var").is_none(),
+        "Codex MCP server configuration contains a credential source"
+    );
     if companion {
         ensure!(
             document["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str()
@@ -507,13 +547,12 @@ fn validate_json_shape(
         .and_then(Value::as_str)
         .context("local MCP server has no HTTP URL")?;
     validate_loopback_url(url)?;
-    let authorization = local
-        .get("headers")
-        .and_then(Value::as_object)
-        .and_then(|headers| headers.get("Authorization"))
-        .and_then(Value::as_str)
-        .context("local MCP server has no static Authorization header")?;
-    validate_authorization(authorization)?;
+    ensure!(
+        local.get("headers").is_none()
+            && local.get("env").is_none()
+            && local.get("bearerToken").is_none(),
+        "local MCP server configuration contains credentials"
+    );
     if companion {
         ensure!(
             document[root][COMPANION_SERVER_NAME][url_key].as_str() == Some(COMPANION_SERVER_URL),
@@ -533,17 +572,6 @@ fn validate_loopback_url(url: &str) -> Result<()> {
             && parsed.query().is_none()
             && parsed.fragment().is_none(),
         "local MCP server URL is not the expected loopback endpoint"
-    );
-    Ok(())
-}
-
-fn validate_authorization(value: &str) -> Result<()> {
-    let token = value
-        .strip_prefix("Bearer ")
-        .context("local MCP Authorization header is not a bearer token")?;
-    ensure!(
-        token.len() == 43 && token.bytes().all(is_base64url),
-        "local MCP Authorization header does not contain a 256-bit token"
     );
     Ok(())
 }

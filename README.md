@@ -6,11 +6,17 @@ state and private keys. There is no command-line, terminal, stdio, or webview
 mode.
 
 The application exposes Streamable HTTP MCP only at
-`http://127.0.0.1:<persisted-random-port>/mcp`. Each registered agent receives
-its own 256-bit bearer token. Requests must carry the exact loopback `Host`, no
-`Origin`, and one active token. Tokens prevent accidental or unauthorized local
-clients; plaintext loopback HTTP cannot protect against malicious software
-already running as the same OS user.
+`http://127.0.0.1:61744/mcp`. Managed agent files contain that URL and OAuth
+mode only. A harness must explicitly start OAuth login; the wallet then brings
+its native window forward and requires operating-system human presence before
+issuing a one-time PKCE-bound authorization code. The harness owns storage of
+its short-lived access token and rotated refresh token.
+
+Every request must carry the exact loopback `Host`; `Origin`, every
+`Access-Control-*` request header, and `OPTIONS` are rejected before a body is
+read. OAuth credentials prevent accidental or unauthorized local clients;
+plaintext loopback HTTP cannot protect against malicious software already
+running as the same OS user.
 
 ## Desktop model
 

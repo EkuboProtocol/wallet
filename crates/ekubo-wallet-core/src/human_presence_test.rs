@@ -42,6 +42,20 @@ fn a_hostile_name_cannot_repaint_the_platform_dialog() {
 }
 
 #[test]
+fn oauth_prompt_names_and_sanitizes_the_client_and_callback_host() {
+    let reason = PresenceRequest::AuthorizeAgent {
+        client_name: "Codex\nforged".into(),
+        redirect_host: "127.0.0.1\u{202e}".into(),
+    }
+    .reason();
+    assert_eq!(
+        reason,
+        "allow Codex forged to access the wallet via 127.0.0.1"
+    );
+    assert!(!reason.contains('\n') && !reason.contains('\u{202e}'));
+}
+
+#[test]
 fn an_empty_name_still_names_something() {
     assert_eq!(
         PresenceRequest::SignMessage {

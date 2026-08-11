@@ -1,13 +1,10 @@
 use super::*;
 
-const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
 #[test]
-fn codex_uses_documented_static_http_headers_and_preserves_unknowns() {
+fn codex_uses_documented_oauth_mode_without_credentials_and_preserves_unknowns() {
     let output = merge_codex(
         "model = \"gpt\"\n[other]\nvalue = 7\n",
         "http://127.0.0.1:50000/mcp",
-        TOKEN,
         true,
     )
     .unwrap();
@@ -19,8 +16,13 @@ fn codex_uses_documented_static_http_headers_and_preserves_unknowns() {
         Some("http://127.0.0.1:50000/mcp")
     );
     assert_eq!(
-        parsed["mcp_servers"][LOCAL_SERVER_NAME]["http_headers"]["Authorization"].as_str(),
-        Some("Bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        parsed["mcp_servers"][LOCAL_SERVER_NAME]["auth"].as_str(),
+        Some("oauth")
+    );
+    assert!(
+        parsed["mcp_servers"][LOCAL_SERVER_NAME]
+            .get("http_headers")
+            .is_none()
     );
 }
 
@@ -29,7 +31,6 @@ fn codex_upsert_replaces_legacy_stdio_transport() {
     let output = merge_codex(
         "[mcp_servers.ekubo-wallet]\ncommand = \"wallet\"\nargs = [\"serve\"]\n\n",
         "http://127.0.0.1:50000/mcp",
-        TOKEN,
         false,
     )
     .unwrap();
@@ -38,10 +39,8 @@ fn codex_upsert_replaces_legacy_stdio_transport() {
     assert!(local.get("command").is_none());
     assert!(local.get("args").is_none());
     assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:50000/mcp"));
-    assert_eq!(
-        local["http_headers"]["Authorization"].as_str(),
-        Some("Bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-    );
+    assert_eq!(local["auth"].as_str(), Some("oauth"));
+    assert!(local.get("http_headers").is_none());
 }
 
 #[test]
@@ -53,24 +52,11 @@ fn every_json_shape_preserves_unrelated_servers() {
     ] {
         let before =
             format!(r#"{{"keep":true,"{root}":{{"unrelated":{{"url":"https://example.com"}}}}}}"#);
-        let output = merge_json(
-            &before,
-            root,
-            shape,
-            "http://127.0.0.1:50000/mcp",
-            TOKEN,
-            false,
-        )
-        .unwrap();
+        let output = merge_json(&before, root, shape, "http://127.0.0.1:50000/mcp", false).unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["keep"], true);
         assert_eq!(parsed[root]["unrelated"]["url"], "https://example.com");
-        assert!(
-            parsed[root][LOCAL_SERVER_NAME]["headers"]["Authorization"]
-                .as_str()
-                .unwrap()
-                .starts_with("Bearer ")
-        );
+        assert!(parsed[root][LOCAL_SERVER_NAME].get("headers").is_none());
     }
 }
 
@@ -100,20 +86,19 @@ fn a_failed_install_restores_the_timestamped_backup() {
 }
 
 #[test]
-fn repair_diffs_can_hide_a_token_without_changing_installed_bytes() {
-    let mut preview = ConfigPreview {
+fn managed_preview_contains_no_credential() {
+    let preview = ConfigPreview {
         path: PathBuf::from("mcp.json"),
         before: String::new(),
-        after: format!("Bearer {TOKEN}"),
-        diff: format!("+Bearer {TOKEN}"),
+        after: "http://127.0.0.1:61744/mcp".into(),
+        diff: "+http://127.0.0.1:61744/mcp".into(),
         validation: ConfigValidation::Installed {
             kind: AgentKind::Cursor,
             companion: false,
         },
     };
-    preview.redact_diff_secret(TOKEN);
-    assert_eq!(preview.exact_diff(), "+Bearer <redacted-token>");
-    assert_eq!(preview.after, format!("Bearer {TOKEN}"));
+    assert!(!preview.exact_diff().contains("Authorization"));
+    assert!(!preview.after.contains("Bearer"));
 }
 
 #[test]
@@ -132,7 +117,20 @@ fn automatic_upserts_skip_files_that_are_already_exact() {
 }
 
 #[test]
-fn install_rejects_a_parseable_config_without_authentication_and_rolls_back() {
+fn managed_previews_always_use_the_fixed_oauth_resource() {
+    let directory = tempfile::tempdir().unwrap();
+    let adapter = AgentAdapter {
+        kind: AgentKind::Cursor,
+        display_name: "Cursor",
+        config_path: directory.path().join("mcp.json"),
+    };
+    let preview = adapter.preview_install(false).unwrap();
+    assert!(preview.after.contains("http://127.0.0.1:61744/mcp"));
+    assert!(!preview.after.contains("Authorization"));
+}
+
+#[test]
+fn install_rejects_a_parseable_config_with_static_credentials_and_rolls_back() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mcp.json");
     let before = "{\"keep\":true}\n";
@@ -141,7 +139,7 @@ fn install_rejects_a_parseable_config_without_authentication_and_rolls_back() {
         path: path.clone(),
         before: before.into(),
         after: format!(
-            "{{\"mcpServers\":{{\"{LOCAL_SERVER_NAME}\":{{\"type\":\"http\",\"url\":\"http://127.0.0.1:50000/mcp\"}}}}}}\n"
+            "{{\"mcpServers\":{{\"{LOCAL_SERVER_NAME}\":{{\"type\":\"http\",\"url\":\"http://127.0.0.1:50000/mcp\",\"headers\":{{\"Authorization\":\"Bearer secret\"}}}}}}}}\n"
         ),
         diff: "redacted test diff".into(),
         validation: ConfigValidation::Installed {
@@ -152,4 +150,36 @@ fn install_rejects_a_parseable_config_without_authentication_and_rolls_back() {
     let error = preview.install().unwrap_err();
     assert!(error.to_string().contains("validation failed"), "{error:#}");
     assert_eq!(fs::read_to_string(path).unwrap(), before);
+}
+
+#[test]
+fn a_multi_agent_install_restores_every_earlier_file_when_one_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_path = directory.path().join("first.json");
+    let second_path = directory.path().join("second.json");
+    let first_before = "{\"keep\":1}\n";
+    let second_before = "{\"keep\":2}\n";
+    fs::write(&first_path, first_before).unwrap();
+    fs::write(&second_path, second_before).unwrap();
+    let first = AgentAdapter {
+        kind: AgentKind::Cursor,
+        display_name: "Cursor",
+        config_path: first_path.clone(),
+    }
+    .preview_install(false)
+    .unwrap();
+    let invalid_second = ConfigPreview {
+        path: second_path.clone(),
+        before: second_before.into(),
+        after: "{".into(),
+        diff: "redacted test diff".into(),
+        validation: ConfigValidation::Installed {
+            kind: AgentKind::Cursor,
+            companion: false,
+        },
+    };
+
+    assert!(ConfigBatchInstall::install(vec![first, invalid_second]).is_err());
+    assert_eq!(fs::read_to_string(first_path).unwrap(), first_before);
+    assert_eq!(fs::read_to_string(second_path).unwrap(), second_before);
 }

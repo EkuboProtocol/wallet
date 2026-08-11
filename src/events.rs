@@ -23,6 +23,9 @@ pub enum DomainEventKind {
     AgentConnectionChanged {
         client_id: Uuid,
     },
+    OAuthAuthorizationRequested {
+        client_id: Uuid,
+    },
     WalletConnectChanged {
         session_id: String,
     },

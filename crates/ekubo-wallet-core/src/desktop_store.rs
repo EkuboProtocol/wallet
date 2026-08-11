@@ -1,8 +1,9 @@
-//! Desktop-only application settings and authenticated MCP client registry.
+//! Desktop settings and the OAuth authority for the loopback MCP resource.
 //!
-//! Raw bearer tokens live in the `SQLCipher` database so an owner-approved
-//! repair can rewrite a managed agent configuration. They are returned only
-//! at registration or rotation and are never part of a client's metadata.
+//! Agent configuration files contain only the stable resource URL. OAuth
+//! credentials are issued after owner presence and stored by the client; this
+//! encrypted store retains only one-way hashes needed to validate and revoke
+//! them.
 
 use crate::{
     human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
@@ -11,17 +12,28 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rand::TryRng as _;
 use rusqlite::{OptionalExtension as _, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest as _, Sha256};
 use std::path::Path;
 use subtle::ConstantTimeEq as _;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub const DEFAULT_MCP_PORT_MIN: u16 = 49_152;
-pub const DEFAULT_MCP_PORT_MAX: u16 = 65_535;
+/// Stable private-range port used by every managed agent configuration.
+/// Binding can still fail if another local process already owns it; the app
+/// never falls back because silently changing it would invalidate OAuth
+/// resource identifiers and every installed URL.
+pub const MCP_PORT: u16 = 61_744;
+pub const MCP_RESOURCE: &str = "http://127.0.0.1:61744/mcp";
+pub const MCP_SCOPE: &str = "wallet:use";
+
+const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
+const ACCESS_TOKEN_TTL: Duration = Duration::hours(1);
+const REFRESH_TOKEN_TTL: Duration = Duration::days(30);
+const MAX_OAUTH_CLIENTS: i64 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +78,7 @@ pub struct McpClient {
     pub agent_kind: AgentKind,
     pub registration: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
+    pub authorized_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
@@ -78,9 +91,9 @@ pub struct AuthenticatedClient {
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct ClientToken([u8; 32]);
+pub struct OAuthSecret([u8; 32]);
 
-impl ClientToken {
+impl OAuthSecret {
     fn generate() -> Result<Self> {
         let mut bytes = [0_u8; 32];
         rand::rng()
@@ -95,9 +108,16 @@ impl ClientToken {
     }
 }
 
-pub struct RegisteredClient {
-    pub client: McpClient,
-    pub token: ClientToken,
+pub struct OAuthAuthorizationCode {
+    pub code: OAuthSecret,
+    pub redirect_uri: String,
+}
+
+pub struct OAuthTokenPair {
+    pub access_token: OAuthSecret,
+    pub refresh_token: OAuthSecret,
+    pub expires_in: u64,
+    pub scope: String,
 }
 
 /// A dedicated connection to the one desktop `SQLCipher` database.
@@ -152,20 +172,6 @@ impl DesktopStore {
         Ok(())
     }
 
-    pub fn mcp_port(&self) -> Result<Option<u16>> {
-        self.setting("mcp_port")
-    }
-
-    /// Persist the internally selected loopback port. This is application
-    /// lifecycle state rather than an owner-editable setting.
-    pub fn set_mcp_port(&mut self, port: u16) -> Result<()> {
-        ensure!(
-            port >= DEFAULT_MCP_PORT_MIN,
-            "MCP port is outside the private range"
-        );
-        self.set_setting("mcp_port", &port)
-    }
-
     pub fn detailed_notification_previews(&self) -> Result<bool> {
         Ok(self
             .setting("notification_detailed_previews")?
@@ -181,24 +187,48 @@ impl DesktopStore {
         self.set_setting("notification_detailed_previews", &enabled)
     }
 
-    pub fn register_client(
+    /// Record public OAuth client metadata. This does not authorize the client
+    /// and creates no credential, so it deliberately requires no owner proof.
+    pub fn register_oauth_client(
         &mut self,
         display_name: &str,
         agent_kind: AgentKind,
+        redirect_uris: &[String],
         registration: Option<&serde_json::Value>,
-        authorization: &OwnerAuthorization,
-    ) -> Result<RegisteredClient> {
-        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+    ) -> Result<McpClient> {
         let name = display_name.trim();
         ensure!(
             !name.is_empty() && name.chars().count() <= 100,
             "invalid client name"
         );
+        ensure!(
+            crate::sanitize::terminal_safe_line(name) == name,
+            "OAuth client name contains invisible or control characters"
+        );
+        ensure!(
+            !redirect_uris.is_empty() && redirect_uris.len() <= 16,
+            "OAuth client must register between one and 16 redirect URIs"
+        );
+        for redirect_uri in redirect_uris {
+            validate_redirect_uri(redirect_uri)?;
+        }
+        let redirect_uris_json = serde_json::to_string(redirect_uris)?;
         let registration = registration.map(serde_json::to_string).transpose()?;
         if let Some(value) = &registration {
             ensure!(value.len() <= 262_144, "managed registration is too large");
         }
-        let token = ClientToken::generate()?;
+        self.connection.execute(
+            "DELETE FROM mcp_clients
+             WHERE authorized_at IS NULL AND created_at < ?1",
+            [Millis(Utc::now() - Duration::days(1))],
+        )?;
+        let count: i64 =
+            self.connection
+                .query_row("SELECT count(*) FROM mcp_clients", [], |row| row.get(0))?;
+        ensure!(
+            count < MAX_OAUTH_CLIENTS,
+            "OAuth client registration limit reached"
+        );
         let client = McpClient {
             id: Uuid::new_v4(),
             display_name: name.to_owned(),
@@ -208,64 +238,154 @@ impl DesktopStore {
                 .map(serde_json::from_str)
                 .transpose()?,
             created_at: Utc::now(),
+            authorized_at: None,
             last_used_at: None,
             revoked_at: None,
         };
         self.connection.execute(
             "INSERT INTO mcp_clients(
-                 client_id, display_name, agent_kind, token, registration_json, created_at
+                 client_id, display_name, agent_kind, redirect_uris_json,
+                 registration_json, created_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 Blob(*client.id.as_bytes()),
                 client.display_name,
                 agent_kind.as_str(),
-                token.0.as_slice(),
+                redirect_uris_json,
                 registration,
                 Millis(client.created_at),
             ],
         )?;
-        Ok(RegisteredClient { client, token })
+        Ok(client)
     }
 
-    pub fn rotate_client_token(
-        &mut self,
-        client_id: Uuid,
-        authorization: &OwnerAuthorization,
-    ) -> Result<ClientToken> {
-        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
-        let token = ClientToken::generate()?;
-        let changed = self.connection.execute(
-            "UPDATE mcp_clients SET token = ?1 WHERE client_id = ?2 AND revoked_at IS NULL",
-            params![token.0.as_slice(), Blob(*client_id.as_bytes())],
-        )?;
-        ensure!(changed == 1, "unknown or revoked MCP client");
-        Ok(token)
-    }
-
-    /// Recover an active managed client's token for an owner-approved repair.
-    ///
-    /// Callers must keep the returned value inside the configuration repair
-    /// flow; it must never be displayed, logged, or included in diagnostics.
-    pub fn repair_client_token(
+    pub fn oauth_client_for_authorization(
         &self,
         client_id: Uuid,
-        authorization: &OwnerAuthorization,
-    ) -> Result<ClientToken> {
-        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
-        let stored: Vec<u8> = self
+        redirect_uri: &str,
+    ) -> Result<McpClient> {
+        let stored = self
             .connection
             .query_row(
-                "SELECT token FROM mcp_clients
-                 WHERE client_id = ?1 AND revoked_at IS NULL",
+                "SELECT display_name, agent_kind, redirect_uris_json,
+                        registration_json, created_at, authorized_at,
+                        last_used_at, revoked_at
+                 FROM mcp_clients WHERE client_id = ?1",
                 [Blob(*client_id.as_bytes())],
-                |row| row.get(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Millis>(4)?.0,
+                        row.get::<_, Option<Millis>>(5)?.map(|value| value.0),
+                        row.get::<_, Option<Millis>>(6)?.map(|value| value.0),
+                        row.get::<_, Option<Millis>>(7)?.map(|value| value.0),
+                    ))
+                },
             )
             .optional()?
-            .context("unknown or revoked MCP client")?;
-        let bytes: [u8; 32] = stored
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("stored MCP token has invalid length"))?;
-        Ok(ClientToken(bytes))
+            .context("unknown OAuth client")?;
+        let (
+            display_name,
+            kind,
+            redirects,
+            registration,
+            created_at,
+            authorized_at,
+            last_used_at,
+            revoked_at,
+        ) = stored;
+        let redirects: Vec<String> = serde_json::from_str(&redirects)?;
+        ensure!(
+            redirects
+                .iter()
+                .any(|registered| registered == redirect_uri),
+            "OAuth redirect URI is not registered for this client"
+        );
+        Ok(McpClient {
+            id: client_id,
+            display_name,
+            agent_kind: AgentKind::parse(&kind)?,
+            registration: registration
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
+            created_at,
+            authorized_at,
+            last_used_at,
+            revoked_at,
+        })
+    }
+
+    pub fn validate_oauth_authorization_request(
+        &self,
+        client_id: Uuid,
+        redirect_uri: &str,
+        code_challenge: &str,
+        scope: &str,
+        resource: &str,
+    ) -> Result<McpClient> {
+        let client = self.oauth_client_for_authorization(client_id, redirect_uri)?;
+        validate_code_challenge(code_challenge)?;
+        ensure!(scope == MCP_SCOPE, "unsupported OAuth scope");
+        ensure!(
+            resource == MCP_RESOURCE,
+            "OAuth resource does not match MCP endpoint"
+        );
+        Ok(client)
+    }
+
+    pub fn issue_authorization_code(
+        &mut self,
+        client_id: Uuid,
+        redirect_uri: &str,
+        code_challenge: &str,
+        scope: &str,
+        resource: &str,
+        authorization: &OwnerAuthorization,
+    ) -> Result<OAuthAuthorizationCode> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+        let _ = self.validate_oauth_authorization_request(
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+        )?;
+        let code = OAuthSecret::generate()?;
+        let now = Utc::now();
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM oauth_authorization_codes WHERE expires_at <= ?1",
+            [Millis(now)],
+        )?;
+        transaction.execute(
+            "INSERT INTO oauth_authorization_codes(
+                 code_hash, client_id, redirect_uri, code_challenge, scope,
+                 resource, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                secret_hash(&code.0).as_slice(),
+                Blob(*client_id.as_bytes()),
+                redirect_uri,
+                code_challenge,
+                scope,
+                resource,
+                Millis(now + AUTHORIZATION_CODE_TTL),
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE mcp_clients SET authorized_at = ?1, revoked_at = NULL
+             WHERE client_id = ?2",
+            params![Millis(now), Blob(*client_id.as_bytes())],
+        )?;
+        transaction.commit()?;
+        Ok(OAuthAuthorizationCode {
+            code,
+            redirect_uri: redirect_uri.to_owned(),
+        })
     }
 
     pub fn revoke_client(
@@ -274,12 +394,22 @@ impl DesktopStore {
         authorization: &OwnerAuthorization,
     ) -> Result<()> {
         authorization.require(OwnerAuthorizationScope::AgentAccess)?;
-        let changed = self.connection.execute(
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
             "UPDATE mcp_clients SET revoked_at = ?1
-             WHERE client_id = ?2 AND revoked_at IS NULL",
+             WHERE client_id = ?2 AND authorized_at IS NOT NULL AND revoked_at IS NULL",
             params![Millis(Utc::now()), Blob(*client_id.as_bytes())],
         )?;
         ensure!(changed == 1, "unknown or already revoked MCP client");
+        transaction.execute(
+            "DELETE FROM oauth_access_tokens WHERE client_id = ?1",
+            [Blob(*client_id.as_bytes())],
+        )?;
+        transaction.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE client_id = ?1",
+            [Blob(*client_id.as_bytes())],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -297,23 +427,181 @@ impl DesktopStore {
         Ok(())
     }
 
-    pub fn authenticate(&mut self, encoded: &str) -> Result<Option<AuthenticatedClient>> {
-        // Decode into a fixed-sized candidate. Malformed inputs still execute
-        // the same comparisons against every active row.
-        let decoded = URL_SAFE_NO_PAD.decode(encoded.as_bytes()).ok();
-        let canonical = decoded
-            .as_deref()
-            .is_some_and(|bytes| bytes.len() == 32 && URL_SAFE_NO_PAD.encode(bytes) == encoded);
-        let mut candidate = [0_u8; 32];
-        if let Some(bytes) = decoded.as_deref().filter(|bytes| bytes.len() == 32) {
-            candidate.copy_from_slice(bytes);
-        }
-
-        let mut statement = self.connection.prepare(
-            "SELECT client_id, display_name, agent_kind, token
-             FROM mcp_clients WHERE revoked_at IS NULL ORDER BY client_id",
+    pub fn exchange_authorization_code(
+        &mut self,
+        encoded_code: &str,
+        client_id: Uuid,
+        redirect_uri: &str,
+        code_verifier: &str,
+        resource: &str,
+    ) -> Result<OAuthTokenPair> {
+        ensure!(
+            resource == MCP_RESOURCE,
+            "OAuth resource does not match MCP endpoint"
+        );
+        let code_hash = decode_and_hash_secret(encoded_code)?;
+        validate_code_verifier(code_verifier)?;
+        let now = Utc::now();
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT a.redirect_uri, a.code_challenge, a.scope, a.resource,
+                        a.expires_at, a.used_at
+                 FROM oauth_authorization_codes a
+                 JOIN mcp_clients c ON c.client_id = a.client_id
+                 WHERE a.code_hash = ?1 AND a.client_id = ?2
+                   AND c.revoked_at IS NULL",
+                params![code_hash.as_slice(), Blob(*client_id.as_bytes())],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Millis>(4)?.0,
+                        row.get::<_, Option<Millis>>(5)?.map(|value| value.0),
+                    ))
+                },
+            )
+            .optional()?
+            .context("invalid OAuth authorization code")?;
+        ensure!(
+            stored.0 == redirect_uri,
+            "OAuth redirect URI changed during token exchange"
+        );
+        ensure!(
+            stored.3 == resource,
+            "OAuth authorization code has the wrong audience"
+        );
+        ensure!(
+            stored.4 > now && stored.5.is_none(),
+            "OAuth authorization code expired or was already used"
+        );
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+        ensure!(
+            bool::from(challenge.as_bytes().ct_eq(stored.1.as_bytes())),
+            "OAuth PKCE verification failed"
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM oauth_access_tokens WHERE expires_at <= ?1",
+            [Millis(now)],
         )?;
-        let rows = statement.query_map([], |row| {
+        transaction.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE expires_at <= ?1",
+            [Millis(now)],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE oauth_authorization_codes SET used_at = ?1
+             WHERE code_hash = ?2 AND used_at IS NULL",
+            params![Millis(now), code_hash.as_slice()],
+        )?;
+        ensure!(changed == 1, "OAuth authorization code was already used");
+        let pair = insert_token_pair(
+            &transaction,
+            client_id,
+            &stored.2,
+            resource,
+            Uuid::new_v4(),
+            now,
+        )?;
+        transaction.commit()?;
+        Ok(pair)
+    }
+
+    pub fn refresh_access_token(
+        &mut self,
+        encoded_refresh_token: &str,
+        client_id: Uuid,
+        resource: &str,
+    ) -> Result<OAuthTokenPair> {
+        ensure!(
+            resource == MCP_RESOURCE,
+            "OAuth resource does not match MCP endpoint"
+        );
+        let token_hash = decode_and_hash_secret(encoded_refresh_token)?;
+        let now = Utc::now();
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT t.family_id, t.scope, t.resource, t.expires_at, t.consumed_at
+                 FROM oauth_refresh_tokens t
+                 JOIN mcp_clients c ON c.client_id = t.client_id
+                 WHERE t.token_hash = ?1 AND t.client_id = ?2
+                   AND c.revoked_at IS NULL",
+                params![token_hash.as_slice(), Blob(*client_id.as_bytes())],
+                |row| {
+                    Ok((
+                        Uuid::from_bytes(row.get::<_, Blob<[u8; 16]>>(0)?.0),
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Millis>(3)?.0,
+                        row.get::<_, Option<Millis>>(4)?.map(|value| value.0),
+                    ))
+                },
+            )
+            .optional()?
+            .context("invalid OAuth refresh token")?;
+        if stored.4.is_some() {
+            self.revoke_token_family(stored.0)?;
+            anyhow::bail!("OAuth refresh token reuse detected; the token family was revoked");
+        }
+        ensure!(
+            stored.2 == resource && stored.3 > now,
+            "OAuth refresh token expired or has the wrong audience"
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM oauth_access_tokens WHERE expires_at <= ?1",
+            [Millis(now)],
+        )?;
+        transaction.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE expires_at <= ?1",
+            [Millis(now)],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE oauth_refresh_tokens SET consumed_at = ?1
+             WHERE token_hash = ?2 AND consumed_at IS NULL",
+            params![Millis(now), token_hash.as_slice()],
+        )?;
+        ensure!(changed == 1, "OAuth refresh token was already consumed");
+        let pair = insert_token_pair(&transaction, client_id, &stored.1, resource, stored.0, now)?;
+        transaction.commit()?;
+        Ok(pair)
+    }
+
+    fn revoke_token_family(&mut self, family_id: Uuid) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM oauth_access_tokens WHERE client_id IN (
+                 SELECT client_id FROM oauth_refresh_tokens WHERE family_id = ?1
+             )",
+            [Blob(*family_id.as_bytes())],
+        )?;
+        transaction.execute(
+            "DELETE FROM oauth_refresh_tokens WHERE family_id = ?1",
+            [Blob(*family_id.as_bytes())],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn authenticate_access_token(
+        &mut self,
+        encoded: &str,
+        resource: &str,
+    ) -> Result<Option<AuthenticatedClient>> {
+        let candidate = decode_and_hash_secret(encoded).unwrap_or([0_u8; 32]);
+        let canonical = decode_and_hash_secret(encoded).is_ok();
+        let now = Utc::now();
+        let mut statement = self.connection.prepare(
+            "SELECT c.client_id, c.display_name, c.agent_kind, t.token_hash
+             FROM oauth_access_tokens t
+             JOIN mcp_clients c ON c.client_id = t.client_id
+             WHERE c.revoked_at IS NULL AND t.expires_at > ?1 AND t.resource = ?2
+             ORDER BY c.client_id, t.token_hash",
+        )?;
+        let rows = statement.query_map(params![Millis(now), resource], |row| {
             Ok((
                 Uuid::from_bytes(row.get::<_, Blob<[u8; 16]>>(0)?.0),
                 row.get::<_, String>(1)?,
@@ -337,8 +625,6 @@ impl DesktopStore {
             }
         }
         drop(statement);
-        candidate.zeroize();
-
         if let Some(client) = &found {
             self.connection.execute(
                 "UPDATE mcp_clients SET last_used_at = ?1 WHERE client_id = ?2",
@@ -351,8 +637,10 @@ impl DesktopStore {
     pub fn clients(&self) -> Result<Vec<McpClient>> {
         let mut statement = self.connection.prepare(
             "SELECT client_id, display_name, agent_kind, registration_json,
-                    created_at, last_used_at, revoked_at
-             FROM mcp_clients ORDER BY created_at, client_id",
+                    created_at, authorized_at, last_used_at, revoked_at
+             FROM mcp_clients
+             WHERE authorized_at IS NOT NULL AND revoked_at IS NULL
+             ORDER BY created_at, client_id",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -363,10 +651,20 @@ impl DesktopStore {
                 row.get::<_, Millis>(4)?.0,
                 row.get::<_, Option<Millis>>(5)?.map(|value| value.0),
                 row.get::<_, Option<Millis>>(6)?.map(|value| value.0),
+                row.get::<_, Option<Millis>>(7)?.map(|value| value.0),
             ))
         })?;
         rows.map(|row| {
-            let (id, display_name, kind, registration, created_at, last_used_at, revoked_at) = row?;
+            let (
+                id,
+                display_name,
+                kind,
+                registration,
+                created_at,
+                authorized_at,
+                last_used_at,
+                revoked_at,
+            ) = row?;
             Ok(McpClient {
                 id,
                 display_name,
@@ -376,6 +674,7 @@ impl DesktopStore {
                     .map(serde_json::from_str)
                     .transpose()?,
                 created_at,
+                authorized_at,
                 last_used_at,
                 revoked_at,
             })
@@ -463,6 +762,108 @@ impl DesktopStore {
         transaction.commit()?;
         Ok(())
     }
+}
+
+fn validate_redirect_uri(value: &str) -> Result<()> {
+    ensure!(value.len() <= 2_048, "OAuth redirect URI is too long");
+    let parsed = url::Url::parse(value).context("OAuth redirect URI is invalid")?;
+    ensure!(
+        parsed.fragment().is_none() && parsed.username().is_empty() && parsed.password().is_none(),
+        "OAuth redirect URI must not contain credentials or a fragment"
+    );
+    let local_http = parsed.scheme() == "http"
+        && matches!(
+            parsed.host_str(),
+            Some("127.0.0.1" | "localhost" | "[::1]" | "::1")
+        );
+    ensure!(
+        (parsed.scheme() == "https" && parsed.host_str().is_some()) || local_http,
+        "OAuth redirect URI must use HTTPS or an exact loopback HTTP host"
+    );
+    Ok(())
+}
+
+fn validate_code_challenge(value: &str) -> Result<()> {
+    ensure!(
+        value.len() == 43 && value.bytes().all(is_base64url),
+        "OAuth PKCE S256 challenge must be canonical base64url"
+    );
+    Ok(())
+}
+
+fn validate_code_verifier(value: &str) -> Result<()> {
+    ensure!(
+        (43..=128).contains(&value.len())
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+            }),
+        "OAuth PKCE verifier is invalid"
+    );
+    Ok(())
+}
+
+const fn is_base64url(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
+fn secret_hash(secret: &[u8]) -> [u8; 32] {
+    Sha256::digest(secret).into()
+}
+
+fn decode_and_hash_secret(encoded: &str) -> Result<[u8; 32]> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded.as_bytes())
+        .context("OAuth credential is not canonical base64url")?;
+    ensure!(
+        decoded.len() == 32 && URL_SAFE_NO_PAD.encode(&decoded) == encoded,
+        "OAuth credential has an invalid encoding or length"
+    );
+    Ok(secret_hash(&decoded))
+}
+
+fn insert_token_pair(
+    transaction: &rusqlite::Transaction<'_>,
+    client_id: Uuid,
+    scope: &str,
+    resource: &str,
+    family_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<OAuthTokenPair> {
+    let access_token = OAuthSecret::generate()?;
+    let refresh_token = OAuthSecret::generate()?;
+    transaction.execute(
+        "INSERT INTO oauth_access_tokens(
+             token_hash, client_id, scope, resource, created_at, expires_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            secret_hash(&access_token.0).as_slice(),
+            Blob(*client_id.as_bytes()),
+            scope,
+            resource,
+            Millis(now),
+            Millis(now + ACCESS_TOKEN_TTL),
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO oauth_refresh_tokens(
+             token_hash, family_id, client_id, scope, resource, created_at, expires_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            secret_hash(&refresh_token.0).as_slice(),
+            Blob(*family_id.as_bytes()),
+            Blob(*client_id.as_bytes()),
+            scope,
+            resource,
+            Millis(now),
+            Millis(now + REFRESH_TOKEN_TTL),
+        ],
+    )?;
+    Ok(OAuthTokenPair {
+        access_token,
+        refresh_token,
+        expires_in: u64::try_from(ACCESS_TOKEN_TTL.num_seconds()).expect("positive token TTL"),
+        scope: scope.to_owned(),
+    })
 }
 
 #[cfg(test)]

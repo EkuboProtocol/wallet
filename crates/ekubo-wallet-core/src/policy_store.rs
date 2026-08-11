@@ -963,11 +963,43 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  agent_kind TEXT NOT NULL CHECK (agent_kind IN (
                      'codex', 'claude_code', 'gemini_cli', 'cursor', 'opencode', 'other'
                  )),
-                 token BLOB NOT NULL UNIQUE CHECK (length(token) = 32),
+                 redirect_uris_json TEXT NOT NULL,
                  registration_json TEXT,
                  created_at INTEGER NOT NULL,
+                 authorized_at INTEGER,
                  last_used_at INTEGER,
                  revoked_at INTEGER
+             ) STRICT",
+            "CREATE TABLE oauth_authorization_codes (
+                 code_hash BLOB PRIMARY KEY NOT NULL CHECK (length(code_hash) = 32),
+                 client_id BLOB NOT NULL CHECK (length(client_id) = 16),
+                 redirect_uri TEXT NOT NULL,
+                 code_challenge TEXT NOT NULL,
+                 scope TEXT NOT NULL,
+                 resource TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 used_at INTEGER,
+                 FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
+             ) STRICT",
+            "CREATE TABLE oauth_access_tokens (
+                 token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+                 client_id BLOB NOT NULL CHECK (length(client_id) = 16),
+                 scope TEXT NOT NULL,
+                 resource TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
+             ) STRICT",
+            "CREATE TABLE oauth_refresh_tokens (
+                 token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+                 family_id BLOB NOT NULL CHECK (length(family_id) = 16),
+                 client_id BLOB NOT NULL CHECK (length(client_id) = 16),
+                 scope TEXT NOT NULL,
+                 resource TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 consumed_at INTEGER,
+                 FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
              ) STRICT",
             "CREATE TABLE wallet_policies (
                  wallet_id TEXT PRIMARY KEY NOT NULL,

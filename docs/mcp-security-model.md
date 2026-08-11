@@ -1,19 +1,31 @@
 # MCP transport security
 
-The only MCP listener is a persisted random high port on `127.0.0.1`, route
-`/mcp`, with a 24 MiB body ceiling. GET, POST, and DELETE are authenticated
-before body decoding. OPTIONS, every request with `Origin`, and a request whose
-`Host` is not the exact expected loopback authority are rejected. No CORS or
-unauthenticated health route exists.
+The only MCP listener is the fixed private-range port `61744` on `127.0.0.1`,
+route `/mcp`, with a 24 MiB body ceiling. GET, POST, and DELETE are authenticated
+before body decoding. OPTIONS, every request with `Origin`, every request with
+an `Access-Control-*` header, and a request whose `Host` is not exactly
+`127.0.0.1:61744` are rejected before body decoding. No CORS or unauthenticated
+health route exists. OAuth discovery and registration routes are the only
+mandated unauthenticated protocol surface.
 
-Each registration has a random 32-byte unpadded-base64url bearer token stored
-inside SQLCipher. Authentication scans active tokens using constant-time byte
-comparison. Rotation invalidates the previous value; revocation and removal are
-per client. Client identity is the attribution and isolation namespace for MCP
-sessions, forks, and simulations.
+Agent configuration carries only `http://127.0.0.1:61744/mcp`; installing or
+repairing it creates no credential and requests no owner authentication. OAuth
+uses Dynamic Client Registration for public client metadata, Authorization Code
+with S256 PKCE, exact redirect-URI matching, the canonical MCP resource
+indicator, one-hour access tokens, and rotating 30-day refresh tokens. The
+native OS prompt names both the requesting client and callback host. Only after
+the owner authenticates can a one-time code be minted, and only the token
+endpoint returns credentials to the harness.
 
-If the persisted port is occupied the MCP server remains offline. The owner can
-choose a new port and repair managed registrations after reviewing their diffs.
+SQLCipher stores one-way credential hashes and client attribution. Access-token
+authentication scans active hashes using constant-time byte comparison. Refresh
+reuse revokes its token family; owner revocation immediately deletes the
+client's active access and refresh tokens. Client identity is the attribution
+and isolation namespace for MCP sessions, forks, and simulations.
+
+If port 61744 is occupied the MCP server remains offline and reports the
+collision. It does not silently select another port because that would change
+the OAuth resource identity and invalidate every installed URL.
 
 This protects against accidental and unauthorized local clients. It does not
 claim that plaintext loopback HTTP can defeat malicious code already executing

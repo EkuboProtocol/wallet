@@ -12,11 +12,12 @@ use ekubo_wallet_core::{
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
-    desktop_store::{AgentKind, ClientToken, DesktopStore, McpClient, RegisteredClient},
+    desktop_store::{AgentKind, DesktopStore, McpClient, OAuthAuthorizationCode, OAuthTokenPair},
     execution::BroadcastResult,
     human_presence::{
         HumanPresence as _, OwnerAuthorization, OwnerAuthorizationScope, PlatformHumanPresence,
-        PresenceRequest, authorize_owner, require_software_update_authorization,
+        PresenceRequest, authorize_oauth_client, authorize_owner,
+        require_software_update_authorization,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
@@ -257,43 +258,92 @@ impl OwnerApi {
         Ok(removed)
     }
 
-    pub fn register_client(
+    pub fn register_oauth_client(
         &self,
         name: &str,
         kind: AgentKind,
+        redirect_uris: &[String],
         managed_registration: Option<&serde_json::Value>,
-        authorization: &OwnerAuthorization,
-    ) -> Result<RegisteredClient> {
-        let registered =
-            self.desktop()?
-                .register_client(name, kind, managed_registration, authorization)?;
-        self.events
-            .publish(DomainEventKind::AgentConnectionChanged {
-                client_id: registered.client.id,
-            });
-        Ok(registered)
+    ) -> Result<McpClient> {
+        self.desktop()?
+            .register_oauth_client(name, kind, redirect_uris, managed_registration)
     }
 
-    pub fn rotate_client_token(
+    pub async fn authorize_oauth_client(
         &self,
         client_id: Uuid,
-        authorization: &OwnerAuthorization,
-    ) -> Result<ClientToken> {
-        let token = self
-            .desktop()?
-            .rotate_client_token(client_id, authorization)?;
+        redirect_uri: &str,
+        code_challenge: &str,
+        scope: &str,
+        resource: &str,
+    ) -> Result<OAuthAuthorizationCode> {
+        let client = self.desktop()?.validate_oauth_authorization_request(
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+        )?;
+        self.events
+            .publish(DomainEventKind::OAuthAuthorizationRequested { client_id });
+        tokio::task::yield_now().await;
+        require_current_acceptance(self.config.data_dir())?;
+        let authorization = authorize_oauth_client(&client.display_name, redirect_uri).await?;
+        let code = self.desktop()?.issue_authorization_code(
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+            &authorization,
+        )?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
-        Ok(token)
+        Ok(code)
     }
 
-    pub fn repair_client_token(
+    pub fn validate_oauth_authorization_request(
         &self,
         client_id: Uuid,
-        authorization: &OwnerAuthorization,
-    ) -> Result<ClientToken> {
+        redirect_uri: &str,
+        code_challenge: &str,
+        scope: &str,
+        resource: &str,
+    ) -> Result<McpClient> {
+        self.desktop()?.validate_oauth_authorization_request(
+            client_id,
+            redirect_uri,
+            code_challenge,
+            scope,
+            resource,
+        )
+    }
+
+    pub fn exchange_oauth_code(
+        &self,
+        code: &str,
+        client_id: Uuid,
+        redirect_uri: &str,
+        code_verifier: &str,
+        resource: &str,
+    ) -> Result<OAuthTokenPair> {
+        self.desktop()?.exchange_authorization_code(
+            code,
+            client_id,
+            redirect_uri,
+            code_verifier,
+            resource,
+        )
+    }
+
+    pub fn refresh_oauth_token(
+        &self,
+        refresh_token: &str,
+        client_id: Uuid,
+        resource: &str,
+    ) -> Result<OAuthTokenPair> {
         self.desktop()?
-            .repair_client_token(client_id, authorization)
+            .refresh_access_token(refresh_token, client_id, resource)
     }
 
     pub fn revoke_client(&self, client_id: Uuid, authorization: &OwnerAuthorization) -> Result<()> {
@@ -327,14 +377,6 @@ impl OwnerApi {
         authorization: &OwnerAuthorization,
     ) -> Result<()> {
         Ok(require_software_update_authorization(authorization)?)
-    }
-
-    pub fn mcp_port(&self) -> Result<Option<u16>> {
-        self.desktop()?.mcp_port()
-    }
-
-    pub fn set_mcp_port(&self, port: u16) -> Result<()> {
-        self.desktop()?.set_mcp_port(port)
     }
 
     pub fn detailed_notification_previews(&self) -> Result<bool> {

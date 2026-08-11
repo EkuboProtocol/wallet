@@ -71,6 +71,41 @@ pub async fn authorize_owner(
     })
 }
 
+/// Authenticate an owner immediately before granting an OAuth client access.
+/// The client name is carried into the OS-owned prompt; the returned proof is
+/// still the same narrow, expiring AgentAccess capability required by storage.
+#[cfg(not(any(test, feature = "test-hooks")))]
+pub async fn authorize_oauth_client(
+    client_name: &str,
+    redirect_uri: &str,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    let redirect_host = url::Url::parse(redirect_uri)
+        .ok()
+        .and_then(|uri| uri.host_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "an unknown callback".into());
+    PlatformHumanPresence
+        .confirm(&PresenceRequest::AuthorizeAgent {
+            client_name: client_name.to_owned(),
+            redirect_host,
+        })
+        .await?;
+    Ok(OwnerAuthorization {
+        scope: OwnerAuthorizationScope::AgentAccess,
+        granted_at: Instant::now(),
+    })
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub async fn authorize_oauth_client(
+    _client_name: &str,
+    _redirect_uri: &str,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    Ok(std::future::ready(OwnerAuthorization::for_test(
+        OwnerAuthorizationScope::AgentAccess,
+    ))
+    .await)
+}
+
 #[cfg(any(test, feature = "test-hooks"))]
 pub async fn authorize_owner(
     scope: OwnerAuthorizationScope,
@@ -91,15 +126,37 @@ pub async fn authorize_owner(
 /// reading. Those use explicit native confirmation without a biometric prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceRequest {
-    SignTransaction { wallet: String },
-    SignTypedData { wallet: String },
-    SignMessage { wallet: String },
-    ExportPrivateKey { wallet: String },
-    RemoveWallet { wallet: String },
-    ReplacePolicy { wallet: String },
-    ConfirmTokenNames { count: usize },
-    ConfirmNetwork { network: String },
-    ChangeProtectedSettings { scope: OwnerAuthorizationScope },
+    AuthorizeAgent {
+        client_name: String,
+        redirect_host: String,
+    },
+    SignTransaction {
+        wallet: String,
+    },
+    SignTypedData {
+        wallet: String,
+    },
+    SignMessage {
+        wallet: String,
+    },
+    ExportPrivateKey {
+        wallet: String,
+    },
+    RemoveWallet {
+        wallet: String,
+    },
+    ReplacePolicy {
+        wallet: String,
+    },
+    ConfirmTokenNames {
+        count: usize,
+    },
+    ConfirmNetwork {
+        network: String,
+    },
+    ChangeProtectedSettings {
+        scope: OwnerAuthorizationScope,
+    },
 }
 
 /// How much of a name the platform dialog will carry. The dialog is a single
@@ -117,6 +174,16 @@ impl PresenceRequest {
     #[must_use]
     pub fn reason(&self) -> String {
         match self {
+            Self::AuthorizeAgent {
+                client_name,
+                redirect_host,
+            } => {
+                format!(
+                    "allow {} to access the wallet via {}",
+                    subject(client_name),
+                    subject(redirect_host)
+                )
+            }
             Self::SignTransaction { wallet } => {
                 format!("sign a transaction from wallet {}", subject(wallet))
             }
