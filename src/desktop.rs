@@ -360,6 +360,7 @@ pub struct WalletWindow {
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
     policy_installing: bool,
+    policy_action_error: Option<SharedString>,
     token_proposal_busy: bool,
     network_proposal_busy: bool,
     update_state: SoftwareUpdateState,
@@ -1169,6 +1170,7 @@ impl WalletWindow {
             policy_json_input: None,
             policy_editor: None,
             policy_installing: false,
+            policy_action_error: None,
             token_proposal_busy: false,
             network_proposal_busy: false,
             update_state: SoftwareUpdateState::Idle,
@@ -1620,16 +1622,16 @@ impl WalletWindow {
                             proposal: None,
                             validation: None,
                         });
-                        self.operation_status = None;
+                        self.policy_action_error = None;
                     }
                     Err(error) => {
-                        self.operation_status =
+                        self.policy_action_error =
                             Some(format!("Could not serialize policy: {error:#}").into());
                     }
                 }
             }
             Err(error) => {
-                self.operation_status = Some(format!("Could not read policy: {error:#}").into());
+                self.policy_action_error = Some(format!("Could not read policy: {error:#}").into());
             }
         }
         cx.notify();
@@ -1669,19 +1671,16 @@ impl WalletWindow {
                             proposal: Some(proposal),
                             validation: Some(Ok(review)),
                         });
-                        self.operation_status = Some(
-                            "Opened the exact agent proposal. Review its rationale and permission diff before installing or rejecting it."
-                                .into(),
-                        );
+                        self.policy_action_error = None;
                     }
                     Err(error) => {
-                        self.operation_status =
+                        self.policy_action_error =
                             Some(format!("Could not prepare proposal review: {error:#}").into());
                     }
                 }
             }
             Err(error) => {
-                self.operation_status =
+                self.policy_action_error =
                     Some(format!("Could not read the active policy: {error:#}").into());
             }
         }
@@ -1689,7 +1688,7 @@ impl WalletWindow {
     }
 
     fn reject_policy_proposal(&mut self, proposal: &PolicyProposal, cx: &mut Context<Self>) {
-        self.operation_status = Some(match self.owner.reject_policy_proposal(proposal) {
+        self.policy_action_error = match self.owner.reject_policy_proposal(proposal) {
             Ok(true) => {
                 if self
                     .policy_editor
@@ -1699,11 +1698,13 @@ impl WalletWindow {
                 {
                     self.policy_editor = None;
                 }
-                format!("Rejected the policy proposal for {}.", proposal.wallet_id).into()
+                None
             }
-            Ok(false) => "The proposal changed while it was open. Review the current one.".into(),
-            Err(error) => format!("Could not reject proposal: {error:#}").into(),
-        });
+            Ok(false) => {
+                Some("The proposal changed while it was open. Review the current one.".into())
+            }
+            Err(error) => Some(format!("Could not reject proposal: {error:#}").into()),
+        };
         cx.notify();
     }
 
@@ -1717,13 +1718,10 @@ impl WalletWindow {
             Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
-                self.operation_status = Some(
-                    "Reset the draft to require explicit approval for every transaction. Validate the permission diff before installing."
-                        .into(),
-                );
+                self.policy_action_error = None;
             }
             Err(error) => {
-                self.operation_status =
+                self.policy_action_error =
                     Some(format!("Could not prepare the reset policy: {error:#}").into());
             }
         }
@@ -1748,15 +1746,11 @@ impl WalletWindow {
                 input.update(cx, |input, cx| {
                     input.set_value(review.document.clone(), window, cx);
                 });
-                self.operation_status = Some(
-                    "Policy is valid and canonical. Review every permission change before installing."
-                        .into(),
-                );
+                self.policy_action_error = None;
                 Ok(review)
             }
             Err(error) => {
                 let message: SharedString = format!("Policy validation failed: {error:#}").into();
-                self.operation_status = Some(message.clone());
                 Err(message)
             }
         });
@@ -1773,12 +1767,13 @@ impl WalletWindow {
             return;
         };
         let Some(Ok(review)) = editor.validation.as_ref() else {
-            self.operation_status = Some("Validate the policy and review its diff first.".into());
+            self.policy_action_error =
+                Some("Validate the policy and review its diff first.".into());
             cx.notify();
             return;
         };
         if input.read(cx).value().as_ref() != review.document {
-            self.operation_status = Some(
+            self.policy_action_error = Some(
                 "The policy changed after validation. Validate it again before installing.".into(),
             );
             cx.notify();
@@ -1795,7 +1790,7 @@ impl WalletWindow {
         let task_review = review.clone();
         let task_proposal = proposal.clone();
         self.policy_installing = true;
-        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        self.policy_action_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let installed = if proposal_is_exact {
                 owner
@@ -1834,21 +1829,16 @@ impl WalletWindow {
                             editor.proposal = None;
                             editor.validation = None;
                         }
-                        view.operation_status = Some(match proposal_cleanup {
-                            Ok(_) => format!(
-                                "Installed policy revision {} for {}.",
-                                installed.revision, review.wallet_id
-                            )
-                            .into(),
-                            Err(error) => format!(
+                        view.policy_action_error = proposal_cleanup.err().map(|error| {
+                            format!(
                                 "Installed policy revision {} for {}, but could not clear the superseded proposal: {error:#}",
                                 installed.revision, review.wallet_id
                             )
-                            .into(),
+                            .into()
                         });
                     }
                     Err(error) => {
-                        view.operation_status =
+                        view.policy_action_error =
                             Some(format!("Policy installation cancelled: {error:#}").into());
                     }
                 }
@@ -4428,7 +4418,15 @@ impl WalletWindow {
     }
 
     fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut content = div().h_full().min_h(px(520.0)).flex().flex_col().gap_4();
+        let mut content = div()
+            .h_full()
+            .min_h(px(520.0))
+            .flex()
+            .flex_col()
+            .gap_4()
+            .when_some(self.policy_action_error.clone(), |content, error| {
+                content.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            });
         let accounts = match self.owner.accounts() {
             Ok(accounts) => accounts,
             Err(error) => {
@@ -4442,7 +4440,12 @@ impl WalletWindow {
             Ok(proposals) if !proposals.is_empty() => {
                 let mut proposal_list = div().flex().flex_col().gap_3();
                 for proposal in proposals {
-                    let current = self.owner.policy(&proposal.wallet_id).ok().flatten();
+                    let current_result = self.owner.policy(&proposal.wallet_id);
+                    let current_error = current_result
+                        .as_ref()
+                        .err()
+                        .map(|error| format!("Could not read active policy: {error:#}"));
+                    let current = current_result.ok().flatten();
                     let current_revision = current.as_ref().map(|policy| policy.revision);
                     let current_policy = current
                         .as_ref()
@@ -4498,6 +4501,11 @@ impl WalletWindow {
                                         &proposal.rationale,
                                     ),
                                 ))
+                                .when_some(current_error, |card, error| {
+                                    card.child(
+                                        div().text_sm().text_color(cx.theme().danger).child(error),
+                                    )
+                                })
                                 .child(changes)
                                 .child(
                                     div()
