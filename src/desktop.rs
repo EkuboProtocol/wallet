@@ -299,6 +299,9 @@ struct PendingAgentInstall {
 
 #[derive(Clone, Copy)]
 enum AgentConfigCompletion {
+    Install {
+        client_id: uuid::Uuid,
+    },
     Repair,
     Rotate {
         previous_client_id: uuid::Uuid,
@@ -313,7 +316,8 @@ impl Drop for PendingAgentInstall {
     fn drop(&mut self) {
         if !self.committed {
             match self.completion {
-                AgentConfigCompletion::Rotate {
+                AgentConfigCompletion::Install { client_id }
+                | AgentConfigCompletion::Rotate {
                     replacement_client_id: client_id,
                     ..
                 } => {
@@ -1000,6 +1004,85 @@ impl WalletWindow {
         self.prepare_existing_agent_change(client_id, false, false, cx);
     }
 
+    fn prepare_detected_agent_install(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        if self.pending_agent_install.is_some()
+            || self.agent_reinstall == AgentReinstallState::Running
+        {
+            self.operation_status = Some("Finish the current agent change first.".into());
+            cx.notify();
+            return;
+        }
+        let clients = match self.owner.clients() {
+            Ok(clients) => clients,
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not inspect agent registrations: {error:#}").into());
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(client) = clients
+            .iter()
+            .rev()
+            .find(|client| client.agent_kind == kind && client.revoked_at.is_none())
+        {
+            self.prepare_agent_repair(client.id, cx);
+            return;
+        }
+
+        let result = (|| -> Result<PendingAgentInstall> {
+            let adapter = AgentAdapter::supported()?
+                .into_iter()
+                .find(|adapter| adapter.kind == kind)
+                .context("the selected agent has no managed configuration adapter")?;
+            ensure!(
+                adapter.detected(),
+                "the selected agent is no longer detected"
+            );
+            let port = self
+                .owner
+                .mcp_port()?
+                .context("the MCP server has not selected its loopback port yet")?;
+            let registration = serde_json::json!({
+                "config_path": adapter.config_path,
+                "install_companion": true,
+            });
+            let registered = self.owner.register_client(
+                adapter.display_name,
+                adapter.kind,
+                Some(&registration),
+            )?;
+            let client_id = registered.client.id;
+            let token = zeroize::Zeroizing::new(registered.token.expose_base64url());
+            let mut preview = match adapter.preview_install(port, &token, true) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    let _ = self.owner.remove_client(client_id);
+                    return Err(error);
+                }
+            };
+            preview.redact_diff_secret(&token);
+            Ok(PendingAgentInstall {
+                display_name: format!("Install {}", adapter.display_name),
+                preview: Some(preview),
+                owner: self.owner.clone(),
+                completion: AgentConfigCompletion::Install { client_id },
+                committed: false,
+            })
+        })();
+        match result {
+            Ok(pending) => {
+                self.pending_agent_install = Some(pending);
+                self.operation_status = None;
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not prepare agent installation: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
     fn prepare_agent_rotation(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
         self.prepare_existing_agent_change(client_id, true, false, cx);
     }
@@ -1130,7 +1213,7 @@ impl WalletWindow {
             Ok(backup) => {
                 pending.committed = true;
                 let database_result = match pending.completion {
-                    AgentConfigCompletion::Repair => Ok(()),
+                    AgentConfigCompletion::Install { .. } | AgentConfigCompletion::Repair => Ok(()),
                     AgentConfigCompletion::Rotate {
                         previous_client_id, ..
                     }
@@ -1705,24 +1788,51 @@ impl WalletWindow {
                 .any(|client| client.agent_kind == adapter.kind && client.revoked_at.is_none());
             let display_name = adapter.display_name;
             let config_path = adapter.config_path.display().to_string();
+            let kind = adapter.kind;
             agents = agents.child(
-                ListItem::new(SharedString::from(format!("detected-agent-{detected}")))
-                    .disabled(true)
-                    .child(
-                        div().child(display_name).child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(config_path),
+                ListItem::new(SharedString::from(format!("detected-agent-{detected}"))).child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            div().flex_1().min_w_0().child(display_name).child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(config_path),
+                            ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if installed {
+                                            "Automatically managed"
+                                        } else {
+                                            "Not installed"
+                                        }),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "install-detected-agent-{detected}"
+                                    )))
+                                    .label(if installed { "Reinstall" } else { "Install" })
+                                    .disabled(
+                                        self.legal_gate
+                                            || self.agent_reinstall == AgentReinstallState::Running,
+                                    )
+                                    .when(!installed, ButtonVariants::primary)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.prepare_detected_agent_install(kind, cx);
+                                    })),
+                                ),
                         ),
-                    )
-                    .suffix(move |_, _| {
-                        div().text_sm().child(if installed {
-                            "Automatically managed"
-                        } else {
-                            "Will install after legal acceptance"
-                        })
-                    }),
+                ),
             );
         }
         if detected == 0 {
