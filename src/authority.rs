@@ -456,7 +456,13 @@ impl OwnerApi {
     }
 
     pub fn discard_unsent_transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
-        PendingStore::production(self.config.data_dir())?.discard_unsent(request_id)
+        let discarded =
+            PendingStore::production(self.config.data_dir())?.discard_unsent(request_id)?;
+        self.events.publish(DomainEventKind::Transaction {
+            request_id,
+            stage: crate::events::TransactionStage::Cancelled,
+        });
+        Ok(discarded)
     }
 
     pub fn tokens(

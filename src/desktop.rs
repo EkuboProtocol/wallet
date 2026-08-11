@@ -17,6 +17,7 @@ use ekubo_wallet_core::approval::ReviewDecision;
 use ekubo_wallet_core::core::policy::WalletPolicy;
 use ekubo_wallet_core::desktop_store::AgentKind;
 use ekubo_wallet_core::legal::LegalDocument;
+use ekubo_wallet_core::pending::PendingStatus;
 use gpui::{
     App, Context, Entity, KeyBinding, QuitMode, Render, SharedString, Window, WindowAppearance,
     WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px, size,
@@ -238,6 +239,22 @@ impl WalletWindow {
             },
         );
         self.legal_review = None;
+        cx.notify();
+    }
+
+    fn discard_unsent_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.operation_status = Some(match self.owner.discard_unsent_transaction(request_id) {
+            Ok(_) => "Discarded signed bytes that were never submitted.".into(),
+            Err(error) => format!("Could not discard transaction: {error:#}").into(),
+        });
+        cx.notify();
+    }
+
+    fn revoke_agent(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.operation_status = Some(match self.owner.revoke_client(client_id) {
+            Ok(()) => "Revoked the agent token immediately.".into(),
+            Err(error) => format!("Could not revoke agent: {error:#}").into(),
+        });
         cx.notify();
     }
 
@@ -920,6 +937,8 @@ impl WalletWindow {
             }
             Route::Activity => match self.owner.transactions(None, 200) {
                 Ok(items) => panel.children(items.into_iter().map(|item| {
+                    let request_id = item.request_id;
+                    let can_discard = item.status == PendingStatus::Signed;
                     div()
                         .py_2()
                         .border_b_1()
@@ -928,6 +947,16 @@ impl WalletWindow {
                             "{:?} · {} · {} · {}",
                             item.status, item.wallet_id, item.network_name, item.request_id
                         ))
+                        .when(can_discard, |row| {
+                            row.child(
+                                Button::new(SharedString::from(format!("discard-{request_id}")))
+                                    .label("Discard unsent signature")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.discard_unsent_transaction(request_id, cx);
+                                    })),
+                            )
+                        })
                 })),
                 Err(error) => panel.child(format!("Activity unavailable: {error:#}")),
             },
@@ -1012,28 +1041,44 @@ impl WalletWindow {
                 })),
                 Err(error) => panel.child(format!("Address book unavailable: {error:#}")),
             },
-            Route::Agents => match self.owner.clients() {
-                Ok(items) => panel.children(items.into_iter().map(|item| {
-                    div()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(format!("{} · {:?}", item.display_name, item.agent_kind))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if let Some(revoked) = item.revoked_at {
-                                    format!("Revoked {revoked}")
-                                } else if let Some(last_used) = item.last_used_at {
-                                    format!("Last used {last_used}")
-                                } else {
-                                    "Registered, not yet used".into()
-                                }),
-                        )
-                })),
-                Err(error) => panel.child(format!("Agents unavailable: {error:#}")),
-            },
+            Route::Agents => {
+                match self.owner.clients() {
+                    Ok(items) => panel.children(items.into_iter().map(|item| {
+                        let client_id = item.id;
+                        let active = item.revoked_at.is_none();
+                        div()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .child(format!("{} · {:?}", item.display_name, item.agent_kind))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(if let Some(revoked) = item.revoked_at {
+                                        format!("Revoked {revoked}")
+                                    } else if let Some(last_used) = item.last_used_at {
+                                        format!("Last used {last_used}")
+                                    } else {
+                                        "Registered, not yet used".into()
+                                    }),
+                            )
+                            .when(active, |row| {
+                                row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "revoke-agent-{client_id}"
+                                    )))
+                                    .label("Revoke access")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.revoke_agent(client_id, cx);
+                                    })),
+                                )
+                            })
+                    })),
+                    Err(error) => panel.child(format!("Agents unavailable: {error:#}")),
+                }
+            }
             Route::WalletConnect => panel
                 .child("Pairings are kept only in memory and are disconnected on Quit.")
                 .child("Paste and screen-scan controls will appear here."),
