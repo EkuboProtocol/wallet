@@ -364,6 +364,87 @@ impl TokenStore {
         Ok(inserted)
     }
 
+    /// Confirm the exact proposal rows an owner reviewed and consume them in
+    /// the same transaction that installs their display metadata.
+    ///
+    /// A proposal can be replaced while native authentication is open. The
+    /// timestamp and complete stored content are therefore checked for every
+    /// row before any token is inserted; a changed batch leaves both tables
+    /// untouched and must be reviewed again.
+    pub fn consume_proposals(&mut self, proposals: &[TokenProposal]) -> Result<u64> {
+        ensure!(!proposals.is_empty(), "no token proposals were selected");
+        let transaction = self.database.connection.transaction()?;
+        for proposal in proposals {
+            let token = &proposal.token;
+            let exists: Option<()> = transaction
+                .query_row(
+                    "SELECT 1 FROM token_proposals
+                     WHERE chain_id = ?1 AND address = ?2 AND symbol = ?3
+                       AND name IS ?4 AND decimals = ?5 AND source = ?6
+                       AND proposed_at = ?7",
+                    params![
+                        i64::try_from(token.chain_id).context("chain ID out of range")?,
+                        Blob(token.address),
+                        token.symbol,
+                        token.name,
+                        token.decimals,
+                        proposal.source,
+                        Millis(proposal.proposed_at),
+                    ],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            ensure!(
+                exists.is_some(),
+                "a token proposal changed while it was being reviewed; nothing was installed"
+            );
+        }
+
+        let now = Millis(sql::now());
+        let mut inserted = 0_u64;
+        for proposal in proposals {
+            let token = &proposal.token;
+            let chain_id = i64::try_from(token.chain_id).context("chain ID out of range")?;
+            inserted += u64::from(
+                transaction.execute(
+                    "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(chain_id, address) DO NOTHING",
+                    params![
+                        chain_id,
+                        Blob(token.address),
+                        sanitize(&token.symbol),
+                        token.name.as_deref().map(sanitize),
+                        token.decimals,
+                        sanitize(&proposal.source),
+                        now,
+                    ],
+                )? == 1,
+            );
+            let removed = transaction.execute(
+                "DELETE FROM token_proposals
+                 WHERE chain_id = ?1 AND address = ?2 AND symbol = ?3
+                   AND name IS ?4 AND decimals = ?5 AND source = ?6
+                   AND proposed_at = ?7",
+                params![
+                    chain_id,
+                    Blob(token.address),
+                    token.symbol,
+                    token.name,
+                    token.decimals,
+                    proposal.source,
+                    Millis(proposal.proposed_at),
+                ],
+            )?;
+            ensure!(
+                removed == 1,
+                "a token proposal changed while it was being installed"
+            );
+        }
+        transaction.commit()?;
+        Ok(inserted)
+    }
+
     /// Forget one confirmed token. Returns whether a row was removed.
     ///
     /// Removing a name is fail-safe in a way adding one is not: the wallet

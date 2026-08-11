@@ -8,66 +8,31 @@
 use super::*;
 
 #[test]
-#[cfg(unix)]
-fn a_widely_readable_configuration_is_narrowed_when_it_is_read() {
-    // The file holds RPC URLs, which can carry provider credentials. A
-    // restore or an older build can leave it 0644; nothing would have
-    // fixed that until the next write.
-    use std::os::unix::fs::PermissionsExt;
+fn plaintext_configuration_is_never_an_input() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
-    store
-        .update(|state| {
-            state.networks = default_networks();
-            Ok(())
-        })
-        .unwrap();
-    std::fs::set_permissions(store.file(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let plaintext = directory.path().join("config.json");
+    std::fs::write(&plaintext, r#"{"version":2,"wallets":[],"networks":[]}"#).unwrap();
 
-    store.load().unwrap();
-
-    let mode = std::fs::metadata(store.file())
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o077, 0, "config stayed readable: {mode:o}");
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.networks, default_networks());
+    assert_eq!(
+        std::fs::read_to_string(plaintext).unwrap(),
+        r#"{"version":2,"wallets":[],"networks":[]}"#,
+        "the unrelated plaintext file must also be left untouched"
+    );
 }
 
 #[test]
-#[cfg(unix)]
-fn an_unreadable_configuration_is_an_error_not_an_empty_one() {
-    // The dangerous confusion is between "there is nothing here" and "I
-    // could not look". The first starts a fresh wallet; the second, if it
-    // reads as the first, gets the real file overwritten by the defaults
-    // on the next save.
-    use std::os::unix::fs::PermissionsExt;
+fn configuration_is_encrypted_with_the_wallet_database_key() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
-    store
-        .save(&WalletConfig {
-            version: 2,
-            wallets: Vec::new(),
-            networks: default_networks(),
-        })
-        .unwrap();
-    std::fs::set_permissions(store.file(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    store.load().unwrap();
 
-    let result = store.load();
-    // Running as root defeats the permission bit, so only assert when the
-    // file is genuinely unreadable.
-    if std::fs::read(store.file()).is_err() {
-        assert!(result.is_err(), "an unreadable configuration loaded as one");
-    }
-    std::fs::set_permissions(store.file(), std::fs::Permissions::from_mode(0o600)).unwrap();
-
-    // A directory with no configuration in it still starts fresh.
-    let empty = tempfile::tempdir().unwrap();
+    let wrong_key = DatabaseKey::new([0x44; 32]);
     assert!(
-        ConfigStore::new(empty.path())
-            .load()
-            .unwrap()
-            .wallets
-            .is_empty()
+        DesktopStore::open(&directory.path().join(DATABASE_FILE), &wrong_key).is_err(),
+        "the configuration database opened with the wrong key"
     );
 }
 
@@ -114,20 +79,36 @@ fn disabled_networks_are_not_resolvable_for_wallet_activity() {
 }
 
 #[test]
+fn network_mutations_require_network_scoped_owner_authorization() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let before = store.load().unwrap();
+    let wrong_scope = OwnerAuthorization::for_test(OwnerAuthorizationScope::NotificationPrivacy);
+    assert!(
+        store
+            .set_network_disabled("ethereum", true, &wrong_scope)
+            .is_err()
+    );
+    assert_eq!(store.load().unwrap(), before);
+
+    let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    assert!(
+        store
+            .set_network_disabled("ethereum", true, &authorized)
+            .unwrap()
+            .disabled
+    );
+}
+
+#[test]
 fn round_trips_private_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
     let config = store.load().unwrap();
     store.save(&config).unwrap();
     assert_eq!(store.load().unwrap(), config);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(
-            fs::metadata(store.file()).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
+    assert!(directory.path().join(DATABASE_FILE).is_file());
+    assert!(!directory.path().join("config.json").exists());
 }
 
 #[test]

@@ -1,5 +1,72 @@
 use async_trait::async_trait;
+use std::time::{Duration, Instant};
 use thiserror::Error;
+
+const OWNER_AUTHORIZATION_LIFETIME: Duration = Duration::from_mins(2);
+
+/// The class of protected owner state one authentication may change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerAuthorizationScope {
+    AgentAccess,
+    NetworkSettings,
+    NotificationPrivacy,
+}
+
+/// Short-lived, scope-bound proof minted only after platform authentication.
+///
+/// Its fields are private so presentation and transport crates cannot forge
+/// it. Core mutation APIs validate both scope and age immediately before they
+/// write protected state.
+pub struct OwnerAuthorization {
+    scope: OwnerAuthorizationScope,
+    granted_at: Instant,
+}
+
+impl OwnerAuthorization {
+    pub(crate) fn require(&self, scope: OwnerAuthorizationScope) -> Result<(), HumanPresenceError> {
+        if self.scope != scope {
+            return Err(HumanPresenceError::Denied(
+                "owner authorization was granted for a different setting".into(),
+            ));
+        }
+        if self.granted_at.elapsed() > OWNER_AUTHORIZATION_LIFETIME {
+            return Err(HumanPresenceError::Denied(
+                "owner authorization expired before the setting was changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[must_use]
+    pub fn for_test(scope: OwnerAuthorizationScope) -> Self {
+        Self {
+            scope,
+            granted_at: Instant::now(),
+        }
+    }
+}
+
+/// Authenticate the owner for one narrow class of security-sensitive changes.
+#[cfg(not(any(test, feature = "test-hooks")))]
+pub async fn authorize_owner(
+    scope: OwnerAuthorizationScope,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    PlatformHumanPresence
+        .confirm(&PresenceRequest::ChangeProtectedSettings { scope })
+        .await?;
+    Ok(OwnerAuthorization {
+        scope,
+        granted_at: Instant::now(),
+    })
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub async fn authorize_owner(
+    scope: OwnerAuthorizationScope,
+) -> Result<OwnerAuthorization, HumanPresenceError> {
+    Ok(std::future::ready(OwnerAuthorization::for_test(scope)).await)
+}
 
 /// What the owner is being asked to authorize at the platform prompt.
 ///
@@ -22,6 +89,7 @@ pub enum PresenceRequest {
     ReplacePolicy { wallet: String },
     ConfirmTokenNames { count: usize },
     ConfirmNetwork { network: String },
+    ChangeProtectedSettings { scope: OwnerAuthorizationScope },
 }
 
 /// How much of a name the platform dialog will carry. The dialog is a single
@@ -63,6 +131,17 @@ impl PresenceRequest {
             Self::ConfirmNetwork { network } => {
                 format!("trust the RPC endpoint for network {}", subject(network))
             }
+            Self::ChangeProtectedSettings { scope } => match scope {
+                OwnerAuthorizationScope::AgentAccess => {
+                    "change which local agents can access the wallet".into()
+                }
+                OwnerAuthorizationScope::NetworkSettings => {
+                    "change the wallet's trusted network configuration".into()
+                }
+                OwnerAuthorizationScope::NotificationPrivacy => {
+                    "change whether notifications reveal wallet activity".into()
+                }
+            },
         }
     }
 }
@@ -112,14 +191,29 @@ pub struct PlatformHumanPresence;
 
 impl crate::sealed::SealedHumanPresence for PlatformHumanPresence {}
 
+async fn run_on_dedicated_thread<T, F>(name: &str, operation: F) -> Result<T, HumanPresenceError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _ = sender.send(operation());
+        })
+        .map_err(|error| HumanPresenceError::Backend(error.to_string()))?;
+    receiver.await.map_err(|_| {
+        HumanPresenceError::Backend("owner-authentication thread exited unexpectedly".into())
+    })
+}
+
 #[cfg(target_os = "macos")]
 #[async_trait]
 impl HumanPresence for PlatformHumanPresence {
     async fn confirm(&self, request: &PresenceRequest) -> Result<(), HumanPresenceError> {
         let reason = request.reason();
-        tokio::task::spawn_blocking(move || macos::confirm(&reason))
-            .await
-            .map_err(|error| HumanPresenceError::Backend(error.to_string()))?
+        run_on_dedicated_thread("ekubo-owner-auth", move || macos::confirm(&reason)).await?
     }
 }
 

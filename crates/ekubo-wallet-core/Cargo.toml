@@ -45,6 +45,7 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [dev-dependencies]
+futures = "0.3.31"
 proptest = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]

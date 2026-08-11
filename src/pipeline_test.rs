@@ -379,7 +379,7 @@ fn pipeline_server(
         exported_at: None,
     };
     config
-        .update(|state| {
+        .update_for_test(|state| {
             state.wallets.push(wallet.clone());
             state.networks.push(stub_network(address));
             Ok(())

@@ -1,3 +1,9 @@
+#[cfg(any(test, feature = "test-hooks"))]
+use crate::policy_store::{DATABASE_FILE, DatabaseKey};
+use crate::{
+    desktop_store::DesktopStore,
+    human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
+};
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
@@ -5,14 +11,14 @@ use directories::BaseDirs;
 use fs2::FileExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+#[cfg(any(test, feature = "test-hooks"))]
+use std::sync::Arc;
 use std::{
     collections::BTreeSet,
     env,
     fs::{self, File, OpenOptions},
-    io::{BufReader, Read as _, Write},
     path::{Path, PathBuf},
 };
-use tempfile::NamedTempFile;
 use url::Url;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -190,21 +196,46 @@ pub struct WalletConfig {
     pub networks: Vec<NetworkConfig>,
 }
 
-#[derive(Clone, Debug)]
+const WALLET_CONFIGURATION_SETTING: &str = "wallet_configuration";
+
+#[derive(Clone)]
 pub struct ConfigStore {
     data_dir: PathBuf,
-    file: PathBuf,
+    database: ConfigDatabase,
+}
+
+#[derive(Clone)]
+enum ConfigDatabase {
+    Production,
+    #[cfg(any(test, feature = "test-hooks"))]
+    Explicit(Arc<DatabaseKey>),
 }
 
 impl ConfigStore {
+    /// Open an isolated encrypted configuration store for tests.
+    ///
+    /// Production always obtains its key from the platform credential store
+    /// through [`Self::production`]. This constructor is absent from release
+    /// builds so a caller cannot accidentally put a database key beside or in
+    /// application code.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
-        let data_dir = data_dir.into();
-        let file = data_dir.join("config.json");
-        Self { data_dir, file }
+        Self::open(data_dir, DatabaseKey::new([0x43; 32]))
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn open(data_dir: impl Into<PathBuf>, key: DatabaseKey) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+            database: ConfigDatabase::Explicit(Arc::new(key)),
+        }
     }
 
     pub fn production() -> Result<Self> {
-        Ok(Self::new(default_data_dir()?))
+        Ok(Self {
+            data_dir: default_data_dir()?,
+            database: ConfigDatabase::Production,
+        })
     }
 
     #[must_use]
@@ -212,64 +243,34 @@ impl ConfigStore {
         &self.data_dir
     }
 
-    #[must_use]
-    pub fn file(&self) -> &Path {
-        &self.file
+    fn database(&self) -> Result<DesktopStore> {
+        match &self.database {
+            ConfigDatabase::Production => DesktopStore::production(&self.data_dir),
+            #[cfg(any(test, feature = "test-hooks"))]
+            ConfigDatabase::Explicit(key) => {
+                DesktopStore::open(&self.data_dir.join(DATABASE_FILE), key)
+            }
+        }
     }
 
     pub fn load(&self) -> Result<WalletConfig> {
-        // Only a genuine absence starts from defaults. `Path::exists` answers
-        // false for every stat failure — a permission error on the directory,
-        // a symlink loop, an exhausted descriptor table — so an unreadable
-        // configuration used to load as an empty one, and the next `update`
-        // would write that empty one back over the file that was there all
-        // along, taking the wallet roster and every configured RPC with it.
-        // Failing to read is not the same as having nothing to read.
-        let file = match File::open(&self.file) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(WalletConfig {
-                    version: 2,
-                    wallets: Vec::new(),
-                    networks: default_networks(),
-                });
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to open {}", self.file.display()));
-            }
+        let mut database = self.database()?;
+        let Some(config) = database.setting::<WalletConfig>(WALLET_CONFIGURATION_SETTING)? else {
+            let config = WalletConfig {
+                version: 2,
+                wallets: Vec::new(),
+                networks: default_networks(),
+            };
+            validate_config(&config)?;
+            database.set_setting(WALLET_CONFIGURATION_SETTING, &config)?;
+            return Ok(config);
         };
-        // Read with a ceiling rather than streaming straight into serde. The
-        // filesystem is untrusted and `load` runs on essentially every command
-        // and every MCP call, so an oversized file would be parsed into memory
-        // each time. Nothing legitimate approaches this: the cap is far above
-        // a configuration holding the maximum wallets and networks.
-        // Narrow an existing file that is readable by anyone. `save` writes
-        // 0600, but a file restored from a backup, copied by an older build, or
-        // unpacked from an archive arrives with whatever mode it was given.
-        // Repairing on read means it is fixed the first time anything looks at
-        // it rather than the next time something writes.
-        // Applied to the handle just opened, not to the name it came from: the
-        // two need not still be the same file.
-        set_private_handle_permissions(&file)?;
-        let mut reader = BufReader::new(file).take(MAX_CONFIG_BYTES as u64 + 1);
-        let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("failed to read {}", self.file.display()))?;
-        ensure!(
-            bytes.len() <= MAX_CONFIG_BYTES,
-            "{} exceeds {MAX_CONFIG_BYTES} bytes",
-            self.file.display()
-        );
-        let reader = bytes.as_slice();
-        let config: WalletConfig = serde_json::from_reader(reader)
-            .with_context(|| format!("failed to parse {}", self.file.display()))?;
         validate_config(&config)?;
         Ok(config)
     }
 
-    /// Write the configuration, without taking the inter-process lock.
+    /// Write the configuration into the encrypted database, without taking
+    /// the inter-process read-modify-write lock.
     ///
     /// Private on purpose. `update` is the only correct way to change a
     /// configuration, because a read-modify-write that does not hold the lock
@@ -278,53 +279,23 @@ impl ConfigStore {
     /// anything; now the only caller that can reach this is `update` itself.
     fn save(&self, config: &WalletConfig) -> Result<()> {
         validate_config(config)?;
-        create_private_dir(&self.data_dir)?;
-        let mut temporary = NamedTempFile::new_in(&self.data_dir)
-            .context("failed to create temporary configuration")?;
-        set_private_handle_permissions(temporary.as_file())?;
-        serde_json::to_writer_pretty(&mut temporary, config)?;
-        temporary.write_all(b"\n")?;
-        temporary.as_file().sync_all()?;
-        temporary
-            .persist(&self.file)
-            .map_err(|error| error.error)
-            .with_context(|| format!("failed to replace {}", self.file.display()))?;
-        // Past this point the new configuration is the configuration, so
-        // nothing here may report failure: a caller that hears "the update
-        // failed" about a write that committed rolls back something that
-        // happened. `custody::add` deleting the only copy of a private key is
-        // that mistake in its worst form.
-        //
-        // The mode is already right: the temporary was narrowed through its own
-        // handle before anything was written to it, and a rename carries the
-        // mode with the inode. Re-narrowing by name here bought nothing and was
-        // the one permission change in this file that resolved a path instead
-        // of a handle — on the configuration, immediately after publishing it.
-        //
-        // `sync_parent`'s result is discarded on purpose, and the reason is the
-        // paragraph above rather than anything about how much durability it
-        // buys. The rename has already committed. A caller told "the update
-        // failed" about a write that landed rolls back something that
-        // happened, and `custody::add` doing that deletes the only copy of a
-        // private key -- run 6207's critical, and run 6304's 203740 and
-        // 203742, all of which are that mistake.
-        //
-        // So the residual is real and is accepted knowingly: a power loss
-        // between the rename and this fsync can lose a configuration the
-        // caller was told was saved. Making it an error would trade a rare
-        // lost row for a reachable destroyed key. Do not "fix" this by adding
-        // a `?`.
-        let _ = sync_parent(&self.data_dir);
-        Ok(())
+        let encoded = serde_json::to_vec(config)?;
+        ensure!(
+            encoded.len() <= MAX_CONFIG_BYTES,
+            "wallet configuration exceeds {MAX_CONFIG_BYTES} bytes"
+        );
+        self.database()?
+            .set_setting(WALLET_CONFIGURATION_SETTING, config)
     }
 
     /// Update the configuration while holding an inter-process lock.
     ///
-    /// Reads are safe without the lock because saves replace the complete JSON
-    /// document atomically. Every read-modify-write operation must use this
-    /// method so two owner or MCP tasks cannot silently discard each other's
-    /// changes.
-    pub fn update<T>(&self, update: impl FnOnce(&mut WalletConfig) -> Result<T>) -> Result<T> {
+    /// Every read-modify-write operation must use this method so two owner or
+    /// MCP tasks cannot silently discard each other's changes.
+    pub(crate) fn update<T>(
+        &self,
+        update: impl FnOnce(&mut WalletConfig) -> Result<T>,
+    ) -> Result<T> {
         create_private_dir(&self.data_dir)?;
         let lock_path = self.data_dir.join("config.lock");
         let lock = OpenOptions::new()
@@ -359,6 +330,15 @@ impl ConfigStore {
         result
     }
 
+    /// Test-only access for constructing representative encrypted state.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn update_for_test<T>(
+        &self,
+        update: impl FnOnce(&mut WalletConfig) -> Result<T>,
+    ) -> Result<T> {
+        self.update(update)
+    }
+
     /// Run a whole wallet-lifecycle operation as one cross-process step.
     ///
     /// [`Self::update`] serializes a single read-modify-write of the
@@ -391,6 +371,63 @@ impl ConfigStore {
         // when this process exits regardless.
         let _ = FileExt::unlock(&lock);
         result
+    }
+
+    /// Add or replace a network after core-verified owner authorization.
+    pub fn install_network(
+        &self,
+        network: NetworkConfig,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        self.update(|config| replace_configured_network(&mut config.networks, network))
+    }
+
+    /// Enable or disable one network after core-verified owner authorization.
+    pub fn set_network_disabled(
+        &self,
+        identifier: &str,
+        disabled: bool,
+        authorization: &OwnerAuthorization,
+    ) -> Result<NetworkConfig> {
+        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        let mut network = self
+            .load()?
+            .networks
+            .into_iter()
+            .find(|network| {
+                network.name == identifier
+                    || network.aliases.iter().any(|alias| alias == identifier)
+            })
+            .with_context(|| format!("unknown network {identifier}"))?;
+        network.disabled = disabled;
+        let updated = network.clone();
+        self.update(|config| replace_configured_network(&mut config.networks, network))?;
+        Ok(updated)
+    }
+
+    /// Delete a disabled network after core-verified owner authorization.
+    pub fn remove_network(
+        &self,
+        identifier: &str,
+        authorization: &OwnerAuthorization,
+    ) -> Result<NetworkConfig> {
+        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        let network = self
+            .load()?
+            .networks
+            .into_iter()
+            .find(|network| {
+                network.name == identifier
+                    || network.aliases.iter().any(|alias| alias == identifier)
+            })
+            .with_context(|| format!("unknown network {identifier}"))?;
+        ensure!(
+            network.disabled,
+            "disable network {} before deleting it",
+            network.name
+        );
+        self.update(|config| remove_configured_network(&mut config.networks, identifier))
     }
 
     pub fn wallet(&self, id: &str) -> Result<WalletMetadata> {
@@ -949,23 +986,6 @@ pub(crate) fn set_private_handle_permissions(file: &File) -> Result<()> {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     let _ = file;
-    Ok(())
-}
-
-/// Flush the directory entry so a rename survives a crash.
-///
-/// Unix only, and deliberately not emulated elsewhere: Windows offers no
-/// portable handle to a directory that `sync_all` accepts, and the alternative
-/// — `FlushFileBuffers` on a volume handle — needs privileges this process does
-/// not have and flushes far more than this file. `NamedTempFile::persist` uses
-/// `MoveFileEx`, which is atomic with respect to readers, so a crash there
-/// loses the write rather than corrupting the file. The residual on Windows is
-/// that a power loss immediately after saving can leave the previous
-/// configuration in place; the file is never torn.
-fn sync_parent(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    File::open(path)?.sync_all()?;
-    let _ = path;
     Ok(())
 }
 

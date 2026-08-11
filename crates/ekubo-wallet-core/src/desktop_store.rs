@@ -5,6 +5,7 @@
 //! at registration or rotation and are never part of a client's metadata.
 
 use crate::{
+    human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
     policy_store::{DatabaseKey, PolicyStore},
     sql::{Blob, Millis},
 };
@@ -136,7 +137,7 @@ impl DesktopStore {
             .transpose()
     }
 
-    pub fn set_setting<T: Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
+    pub(crate) fn set_setting<T: Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
         ensure!(!key.is_empty() && key.len() <= 128, "invalid setting key");
         let value = serde_json::to_string(value)?;
         ensure!(value.len() <= 1_048_576, "application setting is too large");
@@ -151,12 +152,43 @@ impl DesktopStore {
         Ok(())
     }
 
+    pub fn mcp_port(&self) -> Result<Option<u16>> {
+        self.setting("mcp_port")
+    }
+
+    /// Persist the internally selected loopback port. This is application
+    /// lifecycle state rather than an owner-editable setting.
+    pub fn set_mcp_port(&mut self, port: u16) -> Result<()> {
+        ensure!(
+            port >= DEFAULT_MCP_PORT_MIN,
+            "MCP port is outside the private range"
+        );
+        self.set_setting("mcp_port", &port)
+    }
+
+    pub fn detailed_notification_previews(&self) -> Result<bool> {
+        Ok(self
+            .setting("notification_detailed_previews")?
+            .unwrap_or(false))
+    }
+
+    pub fn set_detailed_notification_previews(
+        &mut self,
+        enabled: bool,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::NotificationPrivacy)?;
+        self.set_setting("notification_detailed_previews", &enabled)
+    }
+
     pub fn register_client(
         &mut self,
         display_name: &str,
         agent_kind: AgentKind,
         registration: Option<&serde_json::Value>,
+        authorization: &OwnerAuthorization,
     ) -> Result<RegisteredClient> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
         let name = display_name.trim();
         ensure!(
             !name.is_empty() && name.chars().count() <= 100,
@@ -195,7 +227,12 @@ impl DesktopStore {
         Ok(RegisteredClient { client, token })
     }
 
-    pub fn rotate_client_token(&mut self, client_id: Uuid) -> Result<ClientToken> {
+    pub fn rotate_client_token(
+        &mut self,
+        client_id: Uuid,
+        authorization: &OwnerAuthorization,
+    ) -> Result<ClientToken> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
         let token = ClientToken::generate()?;
         let changed = self.connection.execute(
             "UPDATE mcp_clients SET token = ?1 WHERE client_id = ?2 AND revoked_at IS NULL",
@@ -209,7 +246,12 @@ impl DesktopStore {
     ///
     /// Callers must keep the returned value inside the configuration repair
     /// flow; it must never be displayed, logged, or included in diagnostics.
-    pub fn repair_client_token(&self, client_id: Uuid) -> Result<ClientToken> {
+    pub fn repair_client_token(
+        &self,
+        client_id: Uuid,
+        authorization: &OwnerAuthorization,
+    ) -> Result<ClientToken> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
         let stored: Vec<u8> = self
             .connection
             .query_row(
@@ -226,7 +268,12 @@ impl DesktopStore {
         Ok(ClientToken(bytes))
     }
 
-    pub fn revoke_client(&mut self, client_id: Uuid) -> Result<()> {
+    pub fn revoke_client(
+        &mut self,
+        client_id: Uuid,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
         let changed = self.connection.execute(
             "UPDATE mcp_clients SET revoked_at = ?1
              WHERE client_id = ?2 AND revoked_at IS NULL",
@@ -236,7 +283,12 @@ impl DesktopStore {
         Ok(())
     }
 
-    pub fn remove_client(&mut self, client_id: Uuid) -> Result<()> {
+    pub fn remove_client(
+        &mut self,
+        client_id: Uuid,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
         let changed = self.connection.execute(
             "DELETE FROM mcp_clients WHERE client_id = ?1",
             params![Blob(*client_id.as_bytes())],

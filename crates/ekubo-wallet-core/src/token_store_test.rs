@@ -542,6 +542,56 @@ fn a_repeat_suggestion_does_not_throw_away_the_owners_decision() {
 }
 
 #[test]
+fn confirming_token_proposals_installs_and_consumes_the_exact_reviewed_rows() {
+    let (_directory, mut store) = store();
+    let tokens = [
+        usdc(1, Address::repeat_byte(0x11)),
+        usdc(8453, Address::repeat_byte(0x22)),
+    ];
+    store
+        .propose(&tokens, &ProposalSource::Claimed("reviewed-list"))
+        .unwrap();
+    let reviewed = store.proposals().unwrap();
+
+    assert_eq!(store.consume_proposals(&reviewed).unwrap(), 2);
+    assert!(store.proposals().unwrap().is_empty());
+    assert_eq!(store.count(None).unwrap(), 2);
+}
+
+#[test]
+fn confirming_a_replaced_token_proposal_is_atomic_and_fails_closed() {
+    let (_directory, mut store) = store();
+    let first_address = Address::repeat_byte(0x11);
+    let second_address = Address::repeat_byte(0x22);
+    store
+        .propose(
+            &[usdc(1, first_address), usdc(1, second_address)],
+            &ProposalSource::Claimed("reviewed-list"),
+        )
+        .unwrap();
+    let reviewed = store.proposals().unwrap();
+    store
+        .propose(
+            &[ListedToken {
+                symbol: "CHANGED".into(),
+                ..usdc(1, second_address)
+            }],
+            &ProposalSource::Claimed("reviewed-list"),
+        )
+        .unwrap();
+
+    assert!(store.consume_proposals(&reviewed).is_err());
+    assert_eq!(store.count(None).unwrap(), 0);
+    let pending = store.proposals().unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(
+        pending
+            .iter()
+            .any(|proposal| proposal.token.symbol == "CHANGED")
+    );
+}
+
+#[test]
 fn a_claimed_label_can_never_be_spelled_like_a_served_one() {
     // Review groups by this exact string and the owner accepts a group as one
     // unit, so a caller that could reproduce a TLS-proved label would get its

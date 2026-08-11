@@ -8,14 +8,14 @@ use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
 use ekubo_wallet_core::{
     approval::{ApprovalKind, ApprovalRequest, ReviewDocument, ReviewPresenter},
-    config::{
-        ConfigStore, NetworkConfig, WalletConfig, WalletMetadata, remove_configured_network,
-        replace_configured_network,
-    },
+    config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{AgentKind, ClientToken, DesktopStore, McpClient, RegisteredClient},
-    human_presence::{HumanPresence as _, PlatformHumanPresence, PresenceRequest},
+    human_presence::{
+        HumanPresence as _, OwnerAuthorization, OwnerAuthorizationScope, PlatformHumanPresence,
+        PresenceRequest, authorize_owner,
+    },
     legal::{LegalDocument, LegalStatus, LegalStore},
     message::{MessageStore, PendingMessage, describe_message},
     orchestrator::{
@@ -23,7 +23,9 @@ use ekubo_wallet_core::{
     },
     pending::{PendingStore, PendingTransaction},
     policy_store::{PolicyProposal, PolicyStore, StoredPolicy},
-    token_store::{MAX_PORTFOLIO_TOKENS, Portfolio, StoredToken, TokenStore, read_portfolio},
+    token_store::{
+        MAX_PORTFOLIO_TOKENS, Portfolio, StoredToken, TokenProposal, TokenStore, read_portfolio,
+    },
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
 use std::{
@@ -90,6 +92,8 @@ pub struct OwnerReviewQueues {
     pub typed_data: Vec<PendingTypedData>,
     pub messages: Vec<PendingMessage>,
     pub policy_proposals: Vec<PolicyProposal>,
+    pub network_proposals: Vec<NetworkConfig>,
+    pub token_proposals: Vec<TokenProposal>,
 }
 
 impl OwnerApi {
@@ -97,18 +101,6 @@ impl OwnerApi {
         self.desktop
             .lock()
             .map_err(|_| anyhow::anyhow!("desktop database lock was poisoned"))
-    }
-
-    fn configured_network(&self, identifier: &str) -> Result<NetworkConfig> {
-        self.config
-            .load()?
-            .networks
-            .into_iter()
-            .find(|network| {
-                network.name == identifier
-                    || network.aliases.iter().any(|alias| alias == identifier)
-            })
-            .with_context(|| format!("unknown network {identifier}"))
     }
 
     pub fn snapshot(&self) -> Result<WalletConfig> {
@@ -217,10 +209,11 @@ impl OwnerApi {
         name: &str,
         kind: AgentKind,
         managed_registration: Option<&serde_json::Value>,
+        authorization: &OwnerAuthorization,
     ) -> Result<RegisteredClient> {
-        let registered = self
-            .desktop()?
-            .register_client(name, kind, managed_registration)?;
+        let registered =
+            self.desktop()?
+                .register_client(name, kind, managed_registration, authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged {
                 client_id: registered.client.id,
@@ -228,26 +221,37 @@ impl OwnerApi {
         Ok(registered)
     }
 
-    pub fn rotate_client_token(&self, client_id: Uuid) -> Result<ClientToken> {
-        let token = self.desktop()?.rotate_client_token(client_id)?;
+    pub fn rotate_client_token(
+        &self,
+        client_id: Uuid,
+        authorization: &OwnerAuthorization,
+    ) -> Result<ClientToken> {
+        let token = self
+            .desktop()?
+            .rotate_client_token(client_id, authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
         Ok(token)
     }
 
-    pub fn repair_client_token(&self, client_id: Uuid) -> Result<ClientToken> {
-        self.desktop()?.repair_client_token(client_id)
+    pub fn repair_client_token(
+        &self,
+        client_id: Uuid,
+        authorization: &OwnerAuthorization,
+    ) -> Result<ClientToken> {
+        self.desktop()?
+            .repair_client_token(client_id, authorization)
     }
 
-    pub fn revoke_client(&self, client_id: Uuid) -> Result<()> {
-        self.desktop()?.revoke_client(client_id)?;
+    pub fn revoke_client(&self, client_id: Uuid, authorization: &OwnerAuthorization) -> Result<()> {
+        self.desktop()?.revoke_client(client_id, authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
         Ok(())
     }
 
-    pub fn remove_client(&self, client_id: Uuid) -> Result<()> {
-        self.desktop()?.remove_client(client_id)?;
+    pub fn remove_client(&self, client_id: Uuid, authorization: &OwnerAuthorization) -> Result<()> {
+        self.desktop()?.remove_client(client_id, authorization)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
         Ok(())
@@ -257,24 +261,26 @@ impl OwnerApi {
         self.desktop()?.clients()
     }
 
+    pub async fn authorize_agent_access(&self) -> Result<OwnerAuthorization> {
+        Ok(authorize_owner(OwnerAuthorizationScope::AgentAccess).await?)
+    }
+
     pub fn mcp_port(&self) -> Result<Option<u16>> {
-        self.desktop()?.setting("mcp_port")
+        self.desktop()?.mcp_port()
     }
 
     pub fn set_mcp_port(&self, port: u16) -> Result<()> {
-        self.desktop()?.set_setting("mcp_port", &port)
+        self.desktop()?.set_mcp_port(port)
     }
 
     pub fn detailed_notification_previews(&self) -> Result<bool> {
-        Ok(self
-            .desktop()?
-            .setting("notification_detailed_previews")?
-            .unwrap_or(false))
+        self.desktop()?.detailed_notification_previews()
     }
 
-    pub fn set_detailed_notification_previews(&self, enabled: bool) -> Result<()> {
+    pub async fn set_detailed_notification_previews(&self, enabled: bool) -> Result<()> {
+        let authorization = authorize_owner(OwnerAuthorizationScope::NotificationPrivacy).await?;
         self.desktop()?
-            .set_setting("notification_detailed_previews", &enabled)?;
+            .set_detailed_notification_previews(enabled, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }
@@ -429,39 +435,73 @@ impl OwnerApi {
 
     pub async fn install_network(&self, network: NetworkConfig) -> Result<()> {
         ekubo_wallet_core::config::validate_network(&network)?;
-        PlatformHumanPresence
-            .confirm(&PresenceRequest::ConfirmNetwork {
-                network: network.name.clone(),
-            })
-            .await?;
-        self.config
-            .update(|config| replace_configured_network(&mut config.networks, network))?;
+        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
+        self.config.install_network(network, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }
 
-    pub fn remove_network(&self, identifier: &str) -> Result<NetworkConfig> {
-        let network = self.configured_network(identifier)?;
-        ensure!(
-            network.disabled,
-            "disable network {} before deleting it",
-            network.name
-        );
-        let removed = self
-            .config
-            .update(|config| remove_configured_network(&mut config.networks, identifier))?;
+    pub async fn remove_network(&self, identifier: &str) -> Result<NetworkConfig> {
+        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
+        let removed = self.config.remove_network(identifier, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(removed)
     }
 
-    pub fn set_network_disabled(&self, identifier: &str, disabled: bool) -> Result<NetworkConfig> {
-        let mut network = self.configured_network(identifier)?;
-        network.disabled = disabled;
-        let updated = network.clone();
-        self.config
-            .update(|config| replace_configured_network(&mut config.networks, network))?;
+    pub async fn set_network_disabled(
+        &self,
+        identifier: &str,
+        disabled: bool,
+    ) -> Result<NetworkConfig> {
+        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
+        let updated = self
+            .config
+            .set_network_disabled(identifier, disabled, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(updated)
+    }
+
+    pub fn network_proposals(&self) -> Result<Vec<NetworkConfig>> {
+        PolicyStore::production(self.config.data_dir())?.network_proposals()
+    }
+
+    pub async fn accept_network_proposal(&self, proposal: &NetworkConfig) -> Result<()> {
+        let before = PolicyStore::production(self.config.data_dir())?
+            .network_proposal(proposal.chain_id)?
+            .context("the network proposal no longer exists")?;
+        ensure!(
+            before == *proposal,
+            "the network proposal changed; review the current profile"
+        );
+        ekubo_wallet_core::config::validate_network(proposal)?;
+        ekubo_wallet_core::rpc::verify_chain_id(proposal).await?;
+        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
+        let current = PolicyStore::production(self.config.data_dir())?
+            .network_proposal(proposal.chain_id)?
+            .context("the network proposal no longer exists")?;
+        ensure!(
+            current == *proposal,
+            "the network proposal changed during confirmation; review it again"
+        );
+        self.config
+            .install_network(proposal.clone(), &authorization)?;
+        let removed =
+            PolicyStore::production(self.config.data_dir())?.discard_network_proposal(proposal)?;
+        ensure!(
+            removed,
+            "the installed network proposal could not be consumed"
+        );
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
+    pub fn reject_network_proposal(&self, proposal: &NetworkConfig) -> Result<bool> {
+        let removed =
+            PolicyStore::production(self.config.data_dir())?.discard_network_proposal(proposal)?;
+        if removed {
+            self.events.publish(DomainEventKind::ConfigurationChanged);
+        }
+        Ok(removed)
     }
 
     pub fn transactions(
@@ -485,6 +525,9 @@ impl OwnerApi {
                 .into_iter()
                 .filter(|proposal| wallet_id.is_none_or(|wallet| proposal.wallet_id == wallet))
                 .collect(),
+            network_proposals: PolicyStore::production(self.config.data_dir())?
+                .network_proposals()?,
+            token_proposals: TokenStore::production(self.config.data_dir())?.proposals()?,
         })
     }
 
@@ -753,6 +796,46 @@ impl OwnerApi {
     pub fn remove_token(&self, chain_id: u64, address: Address) -> Result<bool> {
         let removed = TokenStore::production(self.config.data_dir())?.remove(chain_id, address)?;
         if removed {
+            self.events.publish(DomainEventKind::ConfigurationChanged);
+        }
+        Ok(removed)
+    }
+
+    pub fn token_proposals(&self) -> Result<Vec<TokenProposal>> {
+        TokenStore::production(self.config.data_dir())?.proposals()
+    }
+
+    pub async fn accept_token_proposals(&self, proposals: &[TokenProposal]) -> Result<u64> {
+        ensure!(!proposals.is_empty(), "no token proposals were selected");
+        for proposal in proposals {
+            self.config
+                .network_by_chain_id(&proposal.token.chain_id.to_string())?;
+        }
+        PlatformHumanPresence
+            .confirm(&PresenceRequest::ConfirmTokenNames {
+                count: proposals.len(),
+            })
+            .await?;
+        let inserted =
+            TokenStore::production(self.config.data_dir())?.consume_proposals(proposals)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(inserted)
+    }
+
+    pub fn reject_token_proposals(&self, proposals: &[TokenProposal]) -> Result<u64> {
+        let identities = proposals
+            .iter()
+            .map(|proposal| {
+                (
+                    proposal.token.chain_id,
+                    proposal.token.address,
+                    proposal.proposed_at,
+                )
+            })
+            .collect::<Vec<_>>();
+        let removed =
+            TokenStore::production(self.config.data_dir())?.discard_proposals(&identities)?;
+        if removed > 0 {
             self.events.publish(DomainEventKind::ConfigurationChanged);
         }
         Ok(removed)

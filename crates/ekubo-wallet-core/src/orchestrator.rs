@@ -799,8 +799,8 @@ async fn transaction_approval_request(
 /// Refuse a wallet that has no policy, whatever it is being asked to sign.
 ///
 /// "No policy" is the half-provisioned state: `account create` and
-/// `account import` write the wallet into `config.json` and only then
-/// initialize its policy, so a failure between the two leaves a wallet whose
+/// `account import` write the wallet metadata into encrypted storage and only
+/// then initialize its policy, so a failure between the two leaves a wallet whose
 /// key exists and whose authority was never described. The desktop tells the owner
 /// that state fails closed — "it has no policy, so signing fails closed and the
 /// MCP server refuses to start until it has one" — and for transactions it

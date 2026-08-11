@@ -49,7 +49,7 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
     config
-        .update(|state| {
+        .update_for_test(|state| {
             state.wallets.push(WalletMetadata {
                 id: "primary".into(),
                 address: Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
@@ -814,7 +814,7 @@ fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
     config
-        .update(|state| {
+        .update_for_test(|state| {
             state.wallets.push(WalletMetadata {
                 id: "orphan".into(),
                 address: Address::repeat_byte(0x22),

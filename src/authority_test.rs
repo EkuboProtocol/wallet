@@ -57,27 +57,33 @@ fn export_lease_conceals_and_conditionally_clears_its_clipboard_value() {
     );
 }
 
-#[test]
-fn notification_preview_preference_is_owner_controlled_and_persisted() {
+#[tokio::test]
+async fn notification_preview_preference_is_owner_controlled_and_persisted() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("wallet.db");
     let desktop = DesktopStore::open(&database, &DatabaseKey::new([13; 32])).unwrap();
     let owner = OwnerApi {
-        config: ConfigStore::new(directory.path()),
+        config: ConfigStore::open(directory.path(), DatabaseKey::new([13; 32])),
         desktop: Arc::new(Mutex::new(desktop)),
         events: EventBus::default(),
     };
     let mut events = owner.event_bus().subscribe();
 
     assert!(!owner.detailed_notification_previews().unwrap());
-    owner.set_detailed_notification_previews(true).unwrap();
+    owner
+        .set_detailed_notification_previews(true)
+        .await
+        .unwrap();
     assert!(owner.detailed_notification_previews().unwrap());
     assert!(matches!(
         events.try_recv().unwrap().kind,
         DomainEventKind::ConfigurationChanged
     ));
 
-    owner.set_detailed_notification_previews(false).unwrap();
+    owner
+        .set_detailed_notification_previews(false)
+        .await
+        .unwrap();
     assert!(!owner.detailed_notification_previews().unwrap());
 }
 

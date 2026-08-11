@@ -51,3 +51,34 @@ fn an_empty_name_still_names_something() {
         "sign a message with wallet (unnamed)"
     );
 }
+
+#[test]
+fn owner_authorization_is_scope_bound() {
+    let authorization = OwnerAuthorization::for_test(OwnerAuthorizationScope::NotificationPrivacy);
+    authorization
+        .require(OwnerAuthorizationScope::NotificationPrivacy)
+        .unwrap();
+    assert!(
+        authorization
+            .require(OwnerAuthorizationScope::AgentAccess)
+            .is_err()
+    );
+}
+
+#[test]
+fn protected_setting_prompts_name_the_security_boundary() {
+    assert_eq!(
+        PresenceRequest::ChangeProtectedSettings {
+            scope: OwnerAuthorizationScope::AgentAccess,
+        }
+        .reason(),
+        "change which local agents can access the wallet"
+    );
+}
+
+#[test]
+fn dedicated_thread_bridge_does_not_require_a_tokio_runtime() {
+    let result =
+        futures::executor::block_on(run_on_dedicated_thread("owner-auth-test", || 42_u8)).unwrap();
+    assert_eq!(result, 42);
+}

@@ -7,7 +7,14 @@ fn clients() -> (Arc<Mutex<DesktopStore>>, String) {
     let path = directory.keep().join("wallet.db");
     let mut store = DesktopStore::open(&path, &DatabaseKey::new([44; 32])).unwrap();
     let registered = store
-        .register_client("Codex", AgentKind::Codex, None)
+        .register_client(
+            "Codex",
+            AgentKind::Codex,
+            None,
+            &ekubo_wallet_core::human_presence::OwnerAuthorization::for_test(
+                ekubo_wallet_core::human_presence::OwnerAuthorizationScope::AgentAccess,
+            ),
+        )
         .unwrap();
     (
         Arc::new(Mutex::new(store)),

@@ -56,7 +56,7 @@ impl KeyStore for UnusableKeys {
     }
 }
 
-/// A wallet in `config.json` whose policy initialization did not happen —
+/// A wallet in encrypted configuration whose policy initialization did not happen —
 /// exactly what `account create` and `account import` leave behind when the
 /// second half of provisioning fails.
 struct HalfProvisioned {
@@ -83,7 +83,7 @@ fn half_provisioned(with_policy: bool) -> HalfProvisioned {
     let config = ConfigStore::new(directory.path());
     // The wallet metadata is built here rather than through custody: every
     // assertion below stops at or before owner authentication, which is ahead
-    // of the point either signer compares this against `config.json`.
+    // of the point either signer compares this against encrypted configuration.
     let wallet = WalletMetadata {
         id: "primary".into(),
         address: Address::repeat_byte(0x11),

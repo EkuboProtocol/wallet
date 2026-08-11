@@ -136,7 +136,7 @@ fn imports_record_their_external_origin() {
 }
 
 #[tokio::test]
-async fn an_unreadable_configuration_never_destroys_the_key() {
+async fn an_unreadable_encrypted_database_never_destroys_the_key() {
     // The removal fails *and* the re-read that follows it fails, which is the
     // shape that used to delete a live wallet's only key: `wallet(..).is_ok()`
     // is false for an unreadable configuration exactly as it is for an absent
@@ -151,12 +151,12 @@ async fn an_unreadable_configuration_never_destroys_the_key() {
     );
     let wallet = seed.create("primary").unwrap();
 
-    let corrupt = path.join("config.json");
+    let corrupt = path.join(crate::policy_store::DATABASE_FILE);
     let service = CustodyService::new(
         ConfigStore::new(&path),
         Arc::clone(&keys),
         Arc::new(PresenceThen(move || {
-            std::fs::write(&corrupt, b"{ not json").unwrap();
+            std::fs::write(&corrupt, b"not a SQLCipher database").unwrap();
         })),
     );
 

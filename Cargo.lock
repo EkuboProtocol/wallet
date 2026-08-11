@@ -3274,6 +3274,7 @@ dependencies = [
  "clear-signing",
  "directories",
  "fs2",
+ "futures",
  "hex",
  "keyring",
  "libc",

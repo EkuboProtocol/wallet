@@ -32,7 +32,7 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// queues and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.db.v2";
 const KEYRING_USER: &str = "default";
 
 /// A raw 256-bit `SQLCipher` key. Debug output never exposes its contents.
@@ -1233,14 +1233,14 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
     )
 }
 
-/// Network profiles an agent has suggested, held apart from `config.json`
+/// Network profiles an agent has suggested, held apart from active configuration
 /// until the owner confirms them.
 ///
 /// Keyed on chain ID because that is what identifies a network: a proposal
 /// naming a chain already configured is an edit of it, and one naming a chain
 /// that is not is an addition. Nothing here is ever consulted when resolving a
-/// network for a request — a row becomes reachable only by being written into
-/// the configuration from the terminal.
+/// network for a request — a row becomes reachable only after the owner writes
+/// it into the encrypted configuration.
 ///
 /// The whole profile travels as JSON rather than as columns. The review screen
 /// has to show the owner exactly what would be stored, and a shape that can

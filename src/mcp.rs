@@ -183,23 +183,10 @@ impl WalletMcpServer {
         global_quota: Arc<Mutex<GlobalAgentQuota>>,
         events: EventBus,
     ) -> Result<Self> {
-        let configured = config.load()?;
-        ensure!(
-            configured.wallets.is_empty()
-                || config
-                    .data_dir()
-                    .join(crate::policy_store::DATABASE_FILE)
-                    .is_file(),
-            "{} lists wallets but {} does not exist. If a wallet was created or imported while \
-             policy initialization failed, open Accounts in Ekubo Wallet to install a \
-             require-approval policy or remove the account. If this directory belongs to \
-             different wallet software, choose a different data location in Settings.",
-            config.data_dir().join("config.json").display(),
-            config
-                .data_dir()
-                .join(crate::policy_store::DATABASE_FILE)
-                .display(),
-        );
+        // Loading first initializes the encrypted wallet configuration in the
+        // same database that the stores below open. No plaintext configuration
+        // file participates in startup or request handling.
+        config.load()?;
         let policies = PolicyStore::production(config.data_dir())?;
         let pending = PendingStore::production(config.data_dir())?;
         let typed_data = TypedDataStore::production(config.data_dir())?;
@@ -3485,8 +3472,8 @@ impl WalletMcpServer {
     /// `new` walks the configured wallets once and refuses to start if any of
     /// them lacks one, which covers the wallets that existed at startup and no
     /// others. Wallets appear afterwards: `account create` and `account import`
-    /// write `config.json` before initializing the policy, and every request
-    /// here resolves its wallet from that file as it stands now. So a wallet
+    /// write encrypted account metadata before initializing the policy, and every request
+    /// here resolves its wallet from encrypted storage as it stands now. So a wallet
     /// half-provisioned under a running server was a wallet the startup check
     /// had never seen.
     ///

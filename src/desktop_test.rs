@@ -141,6 +141,55 @@ fn third_party_licenses_are_informational_not_acceptance_gated() {
 }
 
 #[test]
+fn accepted_legal_documents_reopen_read_only() {
+    use ekubo_wallet_core::legal::DocumentStatus;
+
+    let accepted = DocumentStatus {
+        accepted: true,
+        current_digest: "digest".into(),
+        accepted_at: Some(chrono::Utc::now()),
+        superseded_digest: None,
+    };
+    let status = LegalStatus {
+        signing_allowed: true,
+        terms_of_service: accepted.clone(),
+        privacy_policy: accepted,
+    };
+    assert!(!legal_review_requires_acceptance(
+        LegalDocument::TermsOfService,
+        &status
+    ));
+    assert!(!legal_review_requires_acceptance(
+        LegalDocument::PrivacyPolicy,
+        &status
+    ));
+}
+
+#[test]
+fn legal_acceptance_shows_when_the_current_document_was_accepted() {
+    let accepted_at = chrono::DateTime::parse_from_rfc3339("2026-08-11T14:30:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let status = ekubo_wallet_core::legal::DocumentStatus {
+        accepted: true,
+        current_digest: "digest".into(),
+        accepted_at: Some(accepted_at),
+        superseded_digest: None,
+    };
+    assert_eq!(
+        legal_acceptance_label(&status),
+        "Accepted 2026-08-11 14:30 UTC"
+    );
+}
+
+#[test]
+fn legal_acceptance_unlocks_only_at_the_end_of_the_scroll_range() {
+    assert!(!legal_scroll_reached_end(px(-98.0), px(100.0)));
+    assert!(legal_scroll_reached_end(px(-99.0), px(100.0)));
+    assert!(legal_scroll_reached_end(px(0.0), px(0.0)));
+}
+
+#[test]
 fn policy_draft_validation_canonicalizes_and_previews_permission_changes() {
     let current = WalletPolicy::require_approval_for_everything();
     let proposed = WalletPolicy::allow_all_with_approval();
