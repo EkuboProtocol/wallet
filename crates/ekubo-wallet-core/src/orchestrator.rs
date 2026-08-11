@@ -42,7 +42,13 @@ use crate::{
 use alloy::{primitives::B256, signers::SignerSync as _};
 use anyhow::{Context, Result, ensure};
 use num_bigint::BigUint;
-use std::{str::FromStr, sync::Mutex};
+use std::{
+    str::FromStr,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 /// Calldata bytes shown in full at approval time.
 ///
@@ -359,6 +365,7 @@ pub async fn approve_transaction(
         policy_context: &policy_context,
         token_metadata,
         overrides,
+        generation: AtomicU64::new(0),
         latest: Mutex::new(None),
     };
     // Authoring can fail on a request that is still perfectly rejectable.
@@ -495,10 +502,14 @@ struct TransactionReview<'a> {
     /// threads purely to say the same thing again.
     token_metadata: TokenMetadataMap,
     overrides: SigningOverrides,
+    /// The newest authoring attempt, successful or not. A failed refresh has
+    /// to supersede the document before it, and concurrent refreshes must not
+    /// let an older success publish after a newer failure.
+    generation: AtomicU64,
     /// What the presenter is currently showing. Replaced on every refresh and
     /// read once after the review, because the signature has to be built from
     /// the numbers the reviewer actually decided on.
-    latest: Mutex<Option<Authored>>,
+    latest: Mutex<Option<(u64, Authored)>>,
 }
 
 /// One authored review: the simulation and the envelope prepared from it.
@@ -519,6 +530,15 @@ impl TransactionReview<'_> {
     /// chain: the simulation is pinned to whatever block is current now, and
     /// the fee fields come from the same moment.
     async fn author(&self) -> Result<(ApprovalRequest, SimulationResult)> {
+        // Asking for new chain state withdraws the old answer immediately. If
+        // anything below fails, approval must fail with it rather than falling
+        // back to the nonce, fees, and envelope the reviewer explicitly asked
+        // to replace.
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        *self
+            .latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("review state lock was poisoned"))? = None;
         let simulation = simulate_execution(
             self.wallet,
             self.network,
@@ -544,23 +564,41 @@ impl TransactionReview<'_> {
             &self.token_metadata,
         )
         .await?;
-        *self
+        let mut latest = self
             .latest
             .lock()
-            .map_err(|_| anyhow::anyhow!("review state lock was poisoned"))? = Some(Authored {
-            simulation: simulation.clone(),
-            prepared,
-        });
+            .map_err(|_| anyhow::anyhow!("review state lock was poisoned"))?;
+        // Check while holding the slot: a newer author can increment without
+        // this lock, but it cannot clear the slot until this write finishes.
+        // Whichever side wins therefore leaves either its own pair or no pair,
+        // never an older pair published after a newer failed attempt.
+        ensure!(
+            self.generation.load(Ordering::SeqCst) == generation,
+            "this review was superseded by a newer refresh"
+        );
+        *latest = Some((
+            generation,
+            Authored {
+                simulation: simulation.clone(),
+                prepared,
+            },
+        ));
         Ok((approval, simulation))
     }
 
     /// The authored review the presenter finished on.
     fn take_authored(&self) -> Result<Authored> {
-        self.latest
+        let (generation, authored) = self
+            .latest
             .lock()
             .map_err(|_| anyhow::anyhow!("review state lock was poisoned"))?
             .take()
-            .context("the review produced no authored document")
+            .context("the review produced no current authored document")?;
+        ensure!(
+            self.generation.load(Ordering::SeqCst) == generation,
+            "the authored review was superseded"
+        );
+        Ok(authored)
     }
 }
 

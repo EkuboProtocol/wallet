@@ -58,9 +58,40 @@ impl ReviewPresenter for RefreshThenApprove {
     }
 }
 
+/// A deliberately permissive presenter: it asks for fresh chain state, sees
+/// that refresh fail, and nevertheless returns Approve. The signing kernel has
+/// to reject this even when the UI adapter does not.
+struct ApproveAfterFailedRefresh {
+    chain: std::sync::Arc<StubChain>,
+}
+
+#[async_trait::async_trait]
+impl ReviewPresenter for ApproveAfterFailedRefresh {
+    async fn review_transaction(
+        &self,
+        _request: &ApprovalRequest,
+        _simulation: &SimulationResult,
+        refresh: &dyn ekubo_wallet_core::approval::ReviewRefresh,
+    ) -> anyhow::Result<ApprovalDecision> {
+        self.chain.fail_all.store(true, Ordering::SeqCst);
+        assert!(
+            refresh.resimulate().await.is_err(),
+            "the test endpoint was disabled before the refresh"
+        );
+        Ok(ApprovalDecision::Approved)
+    }
+}
+
 use alloy::primitives::{Address, B256, keccak256};
 use base64::Engine as _;
-use std::{collections::HashSet, net::SocketAddr, sync::Mutex as StdMutex};
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -81,6 +112,9 @@ fn hash_of(number: u64) -> B256 {
 #[derive(Default)]
 struct StubChain {
     mined: StdMutex<HashSet<B256>>,
+    /// Make every subsequent RPC call fail, used to prove a failed refresh
+    /// cannot fall back to an earlier authored transaction.
+    fail_all: AtomicBool,
     /// What this node claims the plan costs. A second stub with a different
     /// value is the smallest possible dishonest endpoint: it agrees about the
     /// chain, the block, and the outcome, and lies about one number that a
@@ -304,6 +338,16 @@ async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain
                     let respond = |request: &serde_json::Value| {
                         let method = request["method"].as_str().expect("method");
                         let params = &request["params"];
+                        if chain.fail_all.load(Ordering::SeqCst) {
+                            return serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": request["id"],
+                                "error": {
+                                    "code": -32000,
+                                    "message": "the test endpoint stopped answering",
+                                },
+                            });
+                        }
                         if method == "eth_sendRawTransaction" && chain.refuses_send {
                             return serde_json::json!({
                                 "jsonrpc": "2.0",
@@ -801,6 +845,78 @@ async fn a_reviewer_can_re_simulate_before_approving() {
         .0;
     assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
     assert_eq!(chain.mined.lock().unwrap().len(), 1);
+}
+
+/// Finding 200861: a refresh error used to leave the prior `Authored` pair in
+/// the review slot. A presenter could then approve and the orchestrator signed
+/// the stale nonce, fees, and envelope the reviewer had explicitly asked to
+/// replace. Failure now withdraws the prior pair before any RPC is awaited.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
+    let (address, chain) = start_stub().await;
+    let (directory, server, wallet) =
+        pipeline_server(address, &WalletPolicy::require_approval_for_everything());
+
+    let output = server
+        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
+            wallet_id: "primary".into(),
+            chain_id: CHAIN_ID.to_string(),
+            reference: Some(plan_reference(wallet.address)),
+            simulation_id: None,
+            request_id: None,
+            on_simulation_failure: OnSimulationFailure::RequestApproval,
+        }))
+        .await
+        .expect("send queues for approval")
+        .0;
+    let request_id = output.request_id;
+    let record = server.pending.lock().unwrap().get(request_id).unwrap();
+    let read_policy = || -> anyhow::Result<crate::policy_store::StoredPolicy> {
+        server
+            .policies
+            .lock()
+            .unwrap()
+            .get("primary")?
+            .context("policy exists")
+    };
+    let presenter = ApproveAfterFailedRefresh {
+        chain: chain.clone(),
+    };
+    let outcome = crate::orchestrator::approve_transaction(
+        &server.config,
+        PendingStore::new(
+            PolicyStore::open(
+                &directory.path().join("policies.db"),
+                &DatabaseKey::new([9; 32]),
+            )
+            .unwrap(),
+        ),
+        &TokenStore::new(
+            PolicyStore::open(
+                &directory.path().join("policies.db"),
+                &DatabaseKey::new([9; 32]),
+            )
+            .unwrap(),
+        ),
+        &read_policy,
+        record,
+        crate::approval::InteractiveProof::for_tests(),
+        &presenter,
+        &TestHumanPresence { allow: true },
+        &*server.keys,
+    )
+    .await;
+    let Err(error) = outcome else {
+        panic!("approval must not fall back to the pre-refresh transaction");
+    };
+    assert!(
+        format!("{error:#}").contains("no current authored document"),
+        "{error:#}"
+    );
+    assert!(
+        chain.mined.lock().unwrap().is_empty(),
+        "no envelope may be broadcast after the failed refresh"
+    );
 }
 
 /// Build a server whose one network lists both stubs and requires them to
