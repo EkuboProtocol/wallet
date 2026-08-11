@@ -2163,23 +2163,6 @@ impl WalletMcpServer {
             .config
             .wallet(&input.wallet_id)
             .map_err(|error| tool_error(&error))?;
-        // Measured before parsing rather than after canonical serialization,
-        // which is where the limit used to be enforced: a document is parsed,
-        // validated, and re-serialized before anything asks how big it is, so
-        // the work of rejecting an oversized proposal was proportional to the
-        // proposal. Counting the bytes of a value already in memory is the
-        // cheapest thing that can be said about it.
-        let measured = serde_json::to_string(&input.policy).map_or(0, |json| json.len());
-        if measured > crate::policy_store::MAX_POLICY_BYTES {
-            return Err(ErrorData::invalid_params(
-                format!(
-                    "the proposed document is {measured} bytes; the limit is {}. Propose a \
-                     smaller policy.",
-                    crate::policy_store::MAX_POLICY_BYTES
-                ),
-                None,
-            ));
-        }
         let proposed = WalletPolicy::parse(input.policy).map_err(|error| {
             ErrorData::invalid_params(
                 format!(

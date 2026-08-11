@@ -59,17 +59,6 @@ pub enum Effect {
     Deny,
 }
 
-/// How many chains one document may govern, and how many rules one chain may
-/// carry.
-///
-/// The counts a reviewer can actually read are far below these; the point of
-/// stating them is that admission does bounded work, and that the work is
-/// bounded by the policy language rather than by whichever parser happened to
-/// deliver the document. See [`Predicate::check_size`] for the same argument
-/// about the trees inside a rule.
-const MAX_CHAINS: usize = 256;
-const MAX_RULES_PER_CHAIN: usize = 1_024;
-
 /// One rule: a conjunction of predicate slots and the effect of matching them.
 /// Every slot is optional and an absent slot constrains nothing, so a rule
 /// naming only `to` covers every function that contract has, including any
@@ -79,7 +68,7 @@ const MAX_RULES_PER_CHAIN: usize = 1_024;
 // were never checked against their types. See the `admission` module. Kept out
 // of the doc comment deliberately: it would otherwise be copied into the
 // shipped JSON schema, which speaks to policy authors rather than to callers.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Rule {
@@ -129,11 +118,6 @@ impl Rule {
     fn validate(&self) -> Result<()> {
         validate_label(self.label.as_deref())?;
         for (slot, predicate, ty) in self.slots() {
-            // Size before applicability: both walk the tree, and there is no
-            // reason to walk an unbounded one twice to reject it.
-            predicate
-                .check_size()
-                .with_context(|| format!("predicate on `{slot}` is too large"))?;
             predicate
                 .check_applicable(&ty)
                 .with_context(|| format!("predicate on `{slot}` is not applicable"))?;
@@ -247,7 +231,7 @@ impl Rule {
     }
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ChainPolicy {
@@ -283,13 +267,6 @@ impl ChainPolicy {
             "max_calls_per_batch must be between 1 and 4096"
         );
         validate_label(self.label.as_deref())?;
-        ensure!(
-            self.rules.len() <= MAX_RULES_PER_CHAIN,
-            "a chain carries more than {MAX_RULES_PER_CHAIN} rules"
-        );
-        self.native_value
-            .check_size()
-            .context("native_value predicate is too large")?;
         self.native_value
             .check_applicable(&DynSolType::Uint(256))
             .context("native_value predicate is not applicable")?;
@@ -465,10 +442,6 @@ impl WalletPolicy {
         if let Some(url) = self.schema.as_deref() {
             url::Url::parse(url).context("invalid policy schema URL")?;
         }
-        ensure!(
-            self.chains.len() <= MAX_CHAINS,
-            "a policy document governs more than {MAX_CHAINS} chains"
-        );
         for (chain_id, chain) in &self.chains {
             validate_chain_key(chain_id)?;
             chain
@@ -491,83 +464,16 @@ impl WalletPolicy {
 /// signing of a batch four thousand calls past the documented ceiling. The
 /// same door admitted predicates never checked against their slots.
 ///
-/// So the check moves onto the boundary every reader crosses. Each type
-/// deserializes through a private mirror of its own fields and then validates
-/// itself; the mirror carries `deny_unknown_fields`, so a field added to the
-/// public type and forgotten here fails loudly on the first document that
-/// uses it rather than quietly skipping validation. Paired with
-/// `#[non_exhaustive]`, which forecloses the easier bypass of writing the
-/// struct literal, an invalid policy of these types cannot be held outside
-/// this crate at all.
+/// So the check moves onto the boundary every authority-bearing document
+/// crosses. `WalletPolicy` deserializes through a private mirror and validates
+/// the complete tree. `Rule` and `ChainPolicy` retain ordinary derived
+/// deserialization: holding either fragment alone grants no authority, and
+/// validating each fragment during its parse only made a full policy walk its
+/// rules three times.
 mod admission {
-    use super::{
-        ChainPolicy, Effect, Predicate, Rule, WalletPolicy, default_max_calls, no_native_value,
-        policy_version,
-    };
+    use super::{ChainPolicy, WalletPolicy, policy_version};
     use serde::{Deserialize, Deserializer, de::Error as _};
     use std::collections::BTreeMap;
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct RuleFields {
-        effect: Effect,
-        #[serde(default)]
-        label: Option<String>,
-        #[serde(default)]
-        to: Option<Predicate>,
-        #[serde(default)]
-        from: Option<Predicate>,
-        #[serde(default)]
-        value: Option<Predicate>,
-        #[serde(default)]
-        calldata: Option<Predicate>,
-    }
-
-    impl<'de> Deserialize<'de> for Rule {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            let fields = RuleFields::deserialize(deserializer)?;
-            let rule = Self {
-                effect: fields.effect,
-                label: fields.label,
-                to: fields.to,
-                from: fields.from,
-                value: fields.value,
-                calldata: fields.calldata,
-            };
-            rule.validate()
-                .map_err(|error| D::Error::custom(format!("{error:#}")))?;
-            Ok(rule)
-        }
-    }
-
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct ChainPolicyFields {
-        #[serde(default)]
-        label: Option<String>,
-        #[serde(default = "default_max_calls")]
-        max_calls_per_batch: u32,
-        #[serde(default = "no_native_value")]
-        native_value: Predicate,
-        #[serde(default)]
-        rules: Vec<Rule>,
-    }
-
-    impl<'de> Deserialize<'de> for ChainPolicy {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            let fields = ChainPolicyFields::deserialize(deserializer)?;
-            let chain = Self {
-                label: fields.label,
-                max_calls_per_batch: fields.max_calls_per_batch,
-                native_value: fields.native_value,
-                rules: fields.rules,
-            };
-            chain
-                .validate()
-                .map_err(|error| D::Error::custom(format!("{error:#}")))?;
-            Ok(chain)
-        }
-    }
 
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]

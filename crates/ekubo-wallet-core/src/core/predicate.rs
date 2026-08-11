@@ -337,69 +337,7 @@ pub enum Predicate {
     Length(Box<Predicate>),
 }
 
-/// How deep a predicate tree may nest, and how many nodes it may hold.
-///
-/// `Predicate` is recursive through `each`, `any`, `all`, `not`, and `length`,
-/// and every walk over it -- applicability at admission, evaluation at signing,
-/// rendering in a review -- is a recursion of the same shape. Nothing stated a
-/// bound. In practice `serde_json` refuses beyond 128 levels while parsing, so
-/// the stack was never actually unbounded, but that is a constant belonging to
-/// a dependency's parser rather than a property of this type: it does not
-/// apply to a `Predicate` built any other way, and it is not something this
-/// crate would notice changing.
-///
-/// So the bound is stated here, where it is a fact about the policy language.
-/// The limits are far above anything a person writes -- the widest shipped
-/// example nests four deep with a few dozen nodes -- and being far above is the
-/// point: this is a backstop, not a style rule, and a document that trips it is
-/// not one anybody was going to review.
-pub const MAX_PREDICATE_DEPTH: usize = 24;
-
-/// Node budget for one predicate tree. Depth alone bounds the stack; this
-/// bounds the work, since a shallow tree can still be enormous sideways.
-pub const MAX_PREDICATE_NODES: usize = 1_024;
-
 impl Predicate {
-    /// Refuse a tree too deep or too large to be reviewable.
-    ///
-    /// Checked at admission, so no later walk has to carry a budget: every
-    /// `Predicate` that exists has already passed this.
-    pub fn check_size(&self) -> Result<()> {
-        let mut budget = MAX_PREDICATE_NODES;
-        self.walk_size(1, &mut budget)
-    }
-
-    fn walk_size(&self, depth: usize, budget: &mut usize) -> Result<()> {
-        ensure!(
-            depth <= MAX_PREDICATE_DEPTH,
-            "a predicate nests deeper than {MAX_PREDICATE_DEPTH} levels"
-        );
-        *budget = budget
-            .checked_sub(1)
-            .with_context(|| format!("a predicate holds more than {MAX_PREDICATE_NODES} terms"))?;
-        match self {
-            Self::AnyValue | Self::Eq(_) => Ok(()),
-            // A literal set is a node each: a million-entry `in` is not deep,
-            // and is exactly the shape depth alone would miss.
-            Self::In(literals) => {
-                *budget = budget.checked_sub(literals.len()).with_context(|| {
-                    format!("a predicate holds more than {MAX_PREDICATE_NODES} terms")
-                })?;
-                Ok(())
-            }
-            Self::Selector(selector) => selector
-                .args
-                .values()
-                .try_for_each(|inner| inner.walk_size(depth + 1, budget)),
-            Self::Each(inner) | Self::Not(inner) | Self::Length(inner) => {
-                inner.walk_size(depth + 1, budget)
-            }
-            Self::Any(inner) | Self::All(inner) => inner
-                .iter()
-                .try_for_each(|item| item.walk_size(depth + 1, budget)),
-        }
-    }
-
     /// Whether this predicate can ever be satisfied by a value of type `ty`.
     ///
     /// Run when the policy document is parsed, against the types the rule's own
