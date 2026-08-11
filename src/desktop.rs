@@ -33,8 +33,8 @@ use ekubo_wallet_core::token_store::{StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, QuitMode, Render,
-    ScrollHandle, SharedString, Subscription, Task, Window, WindowAppearance, WindowBounds,
-    WindowHandle, WindowOptions, actions, div, prelude::*, px, size,
+    ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, Window, WindowAppearance,
+    WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Sizable,
@@ -389,6 +389,9 @@ pub struct WalletWindow {
     portfolio: PortfolioState,
     portfolio_generation: u64,
     portfolio_chain_id: Option<u64>,
+    route_scroll_handle: ScrollHandle,
+    network_editor_anchor: ScrollAnchor,
+    policy_editor_anchor: ScrollAnchor,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_presenter: ProposalPresenter,
@@ -397,6 +400,7 @@ pub struct WalletWindow {
     network_json_error: Option<SharedString>,
     network_action_busy: BTreeSet<String>,
     network_action_errors: BTreeMap<String, SharedString>,
+    expanded_networks: BTreeSet<String>,
     pending_network_removal: Option<String>,
     network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
@@ -528,17 +532,15 @@ enum TokenImportState {
     Fetching,
 }
 
-// Document mode, layout readiness, deferred scroll measurement, and whether
-// the end was reached are orthogonal facts during a review.
-#[allow(clippy::struct_excessive_bools)]
+// The persistent list state keeps long legal documents virtualized between
+// frames; only the digest is retained for the eventual acceptance write.
 struct LegalReview {
     document: LegalDocument,
-    text: String,
     digest: String,
+    sections: Arc<[SharedString]>,
+    list_state: gpui::ListState,
     acceptance_required: bool,
-    scroll_handle: ScrollHandle,
     scroll_check_scheduled: bool,
-    scroll_layout_ready: bool,
     viewed_to_end: bool,
     error: Option<SharedString>,
 }
@@ -653,7 +655,6 @@ struct TokenListDelegate {
     owner: OwnerApi,
     all_tokens: Vec<StoredToken>,
     visible_tokens: Vec<StoredToken>,
-    chain_filter: Option<u64>,
     query: String,
     loading: bool,
     error: Option<SharedString>,
@@ -707,7 +708,6 @@ impl TokenListDelegate {
             owner,
             all_tokens: Vec::new(),
             visible_tokens: Vec::new(),
-            chain_filter: None,
             query: String::new(),
             loading: true,
             error: None,
@@ -733,33 +733,21 @@ impl TokenListDelegate {
         }
     }
 
-    fn set_chain_filter(&mut self, chain_filter: Option<u64>) {
-        self.chain_filter = chain_filter;
-        self.apply_filters();
-    }
-
     fn apply_filters(&mut self) {
         self.visible_tokens = self
             .all_tokens
             .iter()
-            .filter(|token| token_matches_filter(token, self.chain_filter, &self.query))
+            .filter(|token| token_matches_search(token, &self.query))
             .cloned()
             .collect();
         self.selected = None;
     }
-
-    fn selected_token(&self) -> Option<&StoredToken> {
-        self.selected
-            .and_then(|index| self.visible_tokens.get(index.row))
-    }
 }
 
-fn token_matches_filter(token: &StoredToken, chain_filter: Option<u64>, query: &str) -> bool {
-    if chain_filter.is_some_and(|chain| token.chain_id.parse::<u64>().ok() != Some(chain)) {
-        return false;
-    }
+fn token_matches_search(token: &StoredToken, query: &str) -> bool {
     let query = query.to_lowercase();
     query.is_empty()
+        || token.chain_id.contains(&query)
         || token.address.to_lowercase().contains(&query)
         || token
             .symbol
@@ -771,8 +759,70 @@ fn token_matches_filter(token: &StoredToken, chain_filter: Option<u64>, query: &
             .is_some_and(|value| value.to_lowercase().contains(&query))
 }
 
+const LEGAL_SECTION_TARGET_BYTES: usize = 8 * 1024;
+
+fn legal_markdown_sections(text: &str) -> Arc<[SharedString]> {
+    let mut sections = Vec::new();
+    let mut section = String::new();
+    let mut fence = None;
+
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let heading = fence.is_none()
+            && trimmed
+                .strip_prefix('#')
+                .is_some_and(|rest| rest.starts_with('#') || rest.starts_with(' '));
+        if heading && !section.trim().is_empty() {
+            sections.push(SharedString::from(std::mem::take(&mut section)));
+        }
+
+        section.push_str(line);
+        let marker = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if let Some(marker) = marker {
+            fence = if fence == Some(marker) {
+                None
+            } else if fence.is_none() {
+                Some(marker)
+            } else {
+                fence
+            };
+        }
+
+        if fence.is_none() && section.len() >= LEGAL_SECTION_TARGET_BYTES && line.trim().is_empty()
+        {
+            sections.push(SharedString::from(std::mem::take(&mut section)));
+        }
+    }
+    if !section.is_empty() || sections.is_empty() {
+        sections.push(SharedString::from(section));
+    }
+    sections.into()
+}
+
+fn legal_list_reached_end(state: &gpui::ListState) -> bool {
+    let Some(last_index) = state.item_count().checked_sub(1) else {
+        return true;
+    };
+    let Some(item) = state.bounds_for_item(last_index) else {
+        return false;
+    };
+    item.bottom() <= state.viewport_bounds().bottom() + px(1.0)
+}
+
 fn network_can_be_removed(network: &NetworkConfig) -> bool {
     network.disabled
+}
+
+fn networks_for_display(networks: &[NetworkConfig]) -> Vec<&NetworkConfig> {
+    let mut networks = networks.iter().collect::<Vec<_>>();
+    networks.sort_by_key(|network| (network.disabled, network.chain_id, network.name.as_str()));
+    networks
 }
 
 fn token_removal_is_confirmed(
@@ -1235,6 +1285,7 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let automatic_update_checks = owner.automatic_update_checks().unwrap_or(true);
+        let route_scroll_handle = ScrollHandle::new();
         let mut window = Self {
             owner,
             desktop_snapshot: None,
@@ -1282,6 +1333,9 @@ impl WalletWindow {
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
             portfolio_chain_id: None,
+            network_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
+            policy_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
+            route_scroll_handle,
             modal_focus: cx.focus_handle(),
             walletconnect,
             walletconnect_presenter,
@@ -1290,6 +1344,7 @@ impl WalletWindow {
             network_json_error: None,
             network_action_busy: BTreeSet::new(),
             network_action_errors: BTreeMap::new(),
+            expanded_networks: BTreeSet::new(),
             pending_network_removal: None,
             network_proposal_error: None,
             policy_json_input: None,
@@ -1301,7 +1356,7 @@ impl WalletWindow {
             update_state: SoftwareUpdateState::Idle,
             pending_software_update,
         };
-        window.open_next_required_legal();
+        window.open_next_required_legal(cx);
         window.reload_desktop_snapshot(cx);
         if !window.legal_gate && window.automatic_update_checks {
             window.check_for_updates(cx);
@@ -1349,7 +1404,7 @@ impl WalletWindow {
             self.token_list = Some(cx.new(|cx| {
                 ListState::new(TokenListDelegate::new(owner), window, cx)
                     .searchable(true)
-                    .selectable(true)
+                    .selectable(false)
             }));
             self.reload_tokens(cx);
         }
@@ -1560,6 +1615,25 @@ impl WalletWindow {
         let Some(input) = self.walletconnect_uri_input.clone() else {
             return;
         };
+        match self.cached_accounts() {
+            Ok([]) => {
+                self.set_route_error(
+                    Route::WalletConnect,
+                    "Create an account before starting a WalletConnect pairing.",
+                );
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.set_route_error(
+                    Route::WalletConnect,
+                    format!("Could not verify a signing account: {error:#}"),
+                );
+                cx.notify();
+                return;
+            }
+            Ok(_) => {}
+        }
         let uri = input.read(cx).value().trim().to_owned();
         let start = match self
             .walletconnect
@@ -1886,7 +1960,11 @@ impl WalletWindow {
                 );
                 match document {
                     Ok(document) => {
-                        input.update(cx, |input, cx| input.set_value(document, window, cx));
+                        input.update(cx, |input, cx| {
+                            input.set_value(document, window, cx);
+                            input.set_selected_range(0..input.value().len(), cx);
+                            input.focus(window, cx);
+                        });
                         self.policy_editor = Some(PolicyEditor {
                             wallet_id: wallet_id.to_owned(),
                             source_revision,
@@ -1895,6 +1973,7 @@ impl WalletWindow {
                             validation: None,
                         });
                         self.policy_action_error = None;
+                        self.policy_editor_anchor.scroll_to(window, cx);
                     }
                     Err(error) => {
                         self.policy_action_error =
@@ -2159,21 +2238,53 @@ impl WalletWindow {
             .owner
             .legal_status()
             .is_ok_and(|status| legal_review_requires_acceptance(document, &status));
-        self.legal_review = Some(LegalReview {
+        self.legal_review = Some(Self::new_legal_review(
             document,
-            text,
+            &text,
             digest,
             acceptance_required,
-            scroll_handle: ScrollHandle::new(),
-            scroll_check_scheduled: false,
-            scroll_layout_ready: false,
-            viewed_to_end: false,
-            error: None,
-        });
+            cx,
+        ));
         cx.notify();
     }
 
-    fn open_next_required_legal(&mut self) {
+    fn new_legal_review(
+        document: LegalDocument,
+        text: &str,
+        digest: String,
+        acceptance_required: bool,
+        cx: &mut Context<Self>,
+    ) -> LegalReview {
+        let sections = legal_markdown_sections(text);
+        let list_state = gpui::ListState::new(sections.len(), gpui::ListAlignment::Top, px(600.0))
+            .with_uniform_item_height(px(180.0));
+        let view = cx.entity().downgrade();
+        let review_digest = digest.clone();
+        list_state.set_scroll_handler(move |event, _, cx| {
+            if event.visible_range.end < event.count {
+                return;
+            }
+            let view = view.clone();
+            let review_digest = review_digest.clone();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |view, cx| {
+                    view.update_legal_scroll_state(&review_digest, cx);
+                });
+            });
+        });
+        LegalReview {
+            document,
+            digest,
+            sections,
+            list_state,
+            acceptance_required,
+            scroll_check_scheduled: false,
+            viewed_to_end: false,
+            error: None,
+        }
+    }
+
+    fn open_next_required_legal(&mut self, cx: &mut Context<Self>) {
         let document = match self.owner.legal_status() {
             Ok(status) => next_required_legal(&status),
             Err(_) => Some(LegalDocument::TermsOfService),
@@ -2181,31 +2292,18 @@ impl WalletWindow {
         self.legal_gate = document.is_some();
         self.legal_review = document.map(|document| {
             let (text, digest) = self.owner.legal_document(document);
-            LegalReview {
-                document,
-                text,
-                digest,
-                acceptance_required: true,
-                scroll_handle: ScrollHandle::new(),
-                scroll_check_scheduled: false,
-                scroll_layout_ready: false,
-                viewed_to_end: false,
-                error: None,
-            }
+            Self::new_legal_review(document, &text, digest, true, cx)
         });
     }
 
-    fn update_legal_scroll_state(&mut self, cx: &mut Context<Self>) {
+    fn update_legal_scroll_state(&mut self, digest: &str, cx: &mut Context<Self>) {
         let Some(review) = self.legal_review.as_mut() else {
             return;
         };
         if review.acceptance_required
-            && review.scroll_layout_ready
+            && review.digest == digest
             && !review.viewed_to_end
-            && scroll_reached_end(
-                review.scroll_handle.offset().y,
-                review.scroll_handle.max_offset().y,
-            )
+            && legal_list_reached_end(&review.list_state)
         {
             review.viewed_to_end = true;
             cx.notify();
@@ -2221,7 +2319,7 @@ impl WalletWindow {
         }
         match self.owner.accept_legal(review.document, &review.digest) {
             Ok(()) => {
-                self.open_next_required_legal();
+                self.open_next_required_legal(cx);
                 if !self.legal_gate && self.automatic_update_checks {
                     self.check_for_updates(cx);
                 }
@@ -2324,8 +2422,13 @@ impl WalletWindow {
         };
         match serde_json::to_string_pretty(&network) {
             Ok(document) => {
-                input.update(cx, |input, cx| input.set_value(document, window, cx));
+                input.update(cx, |input, cx| {
+                    input.set_value(document, window, cx);
+                    input.set_selected_range(0..input.value().len(), cx);
+                    input.focus(window, cx);
+                });
                 self.network_json_error = None;
+                self.network_editor_anchor.scroll_to(window, cx);
             }
             Err(error) => {
                 self.network_json_error =
@@ -2531,12 +2634,7 @@ impl WalletWindow {
                 return;
             }
         };
-        let requested_chains = self
-            .token_list
-            .as_ref()
-            .and_then(|list| list.read(cx).delegate().chain_filter)
-            .into_iter()
-            .collect::<Vec<_>>();
+        let requested_chains = Vec::new();
         let owner = self.owner.clone();
         let proposal_list = self.token_proposal_list.clone();
         self.token_import_state = TokenImportState::Fetching;
@@ -3402,16 +3500,6 @@ impl WalletWindow {
         }
     }
 
-    fn select_review(&mut self, generation: u64, decision: ReviewDecision, cx: &mut Context<Self>) {
-        if self
-            .active_review
-            .as_mut()
-            .is_some_and(|review| review.state.select(generation, decision))
-        {
-            cx.notify();
-        }
-    }
-
     fn send_review_command(
         &mut self,
         generation: u64,
@@ -3670,12 +3758,38 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn navigate_route(&mut self, action: &NavigateRoute, _: &mut Window, cx: &mut Context<Self>) {
+    fn navigate_route(&mut self, route: Route, cx: &mut Context<Self>) {
         if self.legal_gate {
             return;
         }
-        self.route = action.route;
+        self.route = route;
+        self.route_scroll_handle
+            .set_offset(gpui::point(px(0.0), px(0.0)));
         self.command_palette = false;
+        cx.notify();
+    }
+
+    fn decide_review(&mut self, generation: u64, decision: ReviewDecision, cx: &mut Context<Self>) {
+        let Some(active) = self.active_review.as_mut() else {
+            return;
+        };
+        if !active.state.select(generation, decision) {
+            return;
+        }
+        self.send_review_command(
+            generation,
+            match decision {
+                ReviewDecision::Approve => GuiReviewCommand::Approve,
+                ReviewDecision::Reject => GuiReviewCommand::Reject,
+            },
+            cx,
+        );
+    }
+
+    fn toggle_network_details(&mut self, name: &str, cx: &mut Context<Self>) {
+        if !self.expanded_networks.remove(name) {
+            self.expanded_networks.insert(name.to_owned());
+        }
         cx.notify();
     }
 
@@ -5108,6 +5222,7 @@ impl WalletWindow {
         );
         let editor_panel = div()
             .id("policy-json-editor")
+            .anchor_scroll(Some(self.policy_editor_anchor.clone()))
             .flex_1()
             .min_h(px(420.0))
             .p_4()
@@ -5276,6 +5391,11 @@ impl WalletWindow {
     }
 
     fn render_walletconnect(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let account_error = match self.cached_accounts() {
+            Ok([]) => Some("Create an account before starting a pairing.".into()),
+            Err(error) => Some(format!("Signing accounts unavailable: {error:#}")),
+            Ok(_) => None,
+        };
         let mut panel = div()
             .p_4()
             .rounded_lg()
@@ -5295,11 +5415,15 @@ impl WalletWindow {
                         Button::new("connect-walletconnect")
                             .label("Connect")
                             .primary()
+                            .disabled(account_error.is_some())
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.connect_walletconnect(window, cx);
                             })),
                     ),
             );
+            if let Some(error) = account_error {
+                panel = panel.child(div().text_sm().text_color(cx.theme().danger).child(error));
+            }
         }
         let sessions = self
             .walletconnect
@@ -5459,44 +5583,51 @@ impl WalletWindow {
         }
         if let Some(input) = self.network_json_input.as_ref() {
             content = content.child(
-                GroupBox::new()
-                    .id("network-editor")
-                    .outline()
-                    .title("Add or update network")
+                div()
+                    .id("network-editor-anchor")
+                    .anchor_scroll(Some(self.network_editor_anchor.clone()))
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Paste a complete network object, or choose Edit below. Existing chain IDs are updated in place."),
-                    )
-                    .child(Input::new(input).h(px(260.0)))
-                    .when_some(self.network_json_error.clone(), |panel, error| {
-                        panel.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(error),
-                        )
-                    })
-                    .child(
-                        Button::new("install-network-json")
-                            .label("Authenticate & install")
-                            .primary()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.install_network_from_editor(cx);
-                            })),
+                        GroupBox::new()
+                            .id("network-editor")
+                            .outline()
+                            .title("Add or update network")
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Paste a complete network object, or choose Edit below. Existing chain IDs are updated in place."),
+                            )
+                            .child(Input::new(input).h(px(260.0)))
+                            .when_some(self.network_json_error.clone(), |panel, error| {
+                                panel.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().danger)
+                                        .child(error),
+                                )
+                            })
+                            .child(
+                                Button::new("install-network-json")
+                                    .label("Authenticate & install")
+                                    .primary()
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.install_network_from_editor(cx);
+                                    })),
+                            ),
                     ),
             );
         }
         match self.cached_networks() {
             Ok(networks) => {
-                content.children(networks.iter().map(|network| {
+                content.children(networks_for_display(networks).into_iter().map(|network| {
                     let name = network.name.clone();
                     let edit = network.clone();
+                    let details_name = name.clone();
                     let toggle_name = name.clone();
                     let remove_name = name.clone();
                     let confirm_remove_name = name.clone();
                     let disabled = network.disabled;
+                    let expanded = self.expanded_networks.contains(&name);
                     let busy = self.network_action_busy.contains(&name);
                     let confirming_removal =
                         self.pending_network_removal.as_deref() == Some(name.as_str());
@@ -5519,28 +5650,66 @@ impl WalletWindow {
                                 .child(
                                     div()
                                         .child(
-                                            div().font_semibold().child(
-                                                network
-                                                    .display_name
-                                                    .clone()
-                                                    .unwrap_or_else(|| name.clone()),
-                                            ),
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    div().font_semibold().child(
+                                                        network
+                                                            .display_name
+                                                            .clone()
+                                                            .unwrap_or_else(|| name.clone()),
+                                                    ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .px_2()
+                                                        .py_0p5()
+                                                        .rounded_full()
+                                                        .border_1()
+                                                        .border_color(if disabled {
+                                                            cx.theme().border
+                                                        } else {
+                                                            cx.theme().success
+                                                        })
+                                                        .text_xs()
+                                                        .text_color(if disabled {
+                                                            cx.theme().muted_foreground
+                                                        } else {
+                                                            cx.theme().success
+                                                        })
+                                                        .child(if disabled {
+                                                            "Disabled"
+                                                        } else {
+                                                            "Enabled"
+                                                        }),
+                                                ),
                                         )
                                         .child(
                                             div()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(format!(
-                                                    "{} · chain {} · {}",
-                                                    name,
-                                                    network.chain_id,
-                                                    if disabled { "Disabled" } else { "Enabled" }
+                                                    "{} · chain {}",
+                                                    name, network.chain_id,
                                                 )),
                                         ),
                                 )
                                 .child(
                                     h_flex()
                                         .gap_2()
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "inspect-network-{name}"
+                                            )))
+                                            .label(if expanded {
+                                                "Hide configuration"
+                                            } else {
+                                                "Show configuration"
+                                            })
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.toggle_network_details(&details_name, cx);
+                                            })),
+                                        )
                                         .child(
                                             Button::new(SharedString::from(format!(
                                                 "edit-network-{name}"
@@ -5590,15 +5759,17 @@ impl WalletWindow {
                                         }),
                                 ),
                         )
-                        .child(
-                            div()
-                                .p_3()
-                                .rounded(cx.theme().radius)
-                                .bg(cx.theme().secondary)
-                                .font_family("monospace")
-                                .text_sm()
-                                .child(exact),
-                        )
+                        .when(expanded, |card| {
+                            card.child(
+                                div()
+                                    .p_3()
+                                    .rounded(cx.theme().radius)
+                                    .bg(cx.theme().secondary)
+                                    .font_family("monospace")
+                                    .text_sm()
+                                    .child(exact),
+                            )
+                        })
                         .when(confirming_removal, |card| {
                             card.child(
                                 div()
@@ -5956,11 +6127,8 @@ impl WalletWindow {
             return div().child(Spinner::new());
         };
         let delegate = list.read(cx).delegate();
-        let active_chain = delegate.chain_filter;
         let visible = delegate.visible_tokens.len();
         let total = delegate.all_tokens.len();
-        let selected_token = delegate.selected_token().cloned();
-        let networks = self.cached_networks().unwrap_or_default();
         let (selected_source, selected_count, viewed_to_end) = {
             let delegate = proposal_list.read(cx).delegate();
             (
@@ -5980,10 +6148,6 @@ impl WalletWindow {
                 content.child(div().text_sm().text_color(cx.theme().danger).child(error))
             });
         if let Some(input) = self.token_list_url_input.as_ref() {
-            let selection = active_chain.map_or_else(
-                || "all enabled networks".to_owned(),
-                |chain_id| format!("chain {chain_id}"),
-            );
             content = content.child(
                 GroupBox::new()
                     .id("owner-token-list-import")
@@ -5993,9 +6157,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "Fetch a public HTTPS token-list JSON for {selection}. Nothing is trusted until you inspect and accept the exact resulting list below."
-                            )),
+                            .child("Fetch a public HTTPS token-list JSON for all enabled networks. Nothing is trusted until you inspect and accept the exact resulting list below."),
                     )
                     .child(
                         h_flex()
@@ -6162,92 +6324,13 @@ impl WalletWindow {
         content
             .child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        Button::new("token-network-all")
-                            .label("All networks")
-                            .when(active_chain.is_none(), ButtonVariants::primary)
-                            .on_click({
-                                let list = list.clone();
-                                move |_, _, cx| {
-                                    list.update(cx, |list, cx| {
-                                        list.delegate_mut().set_chain_filter(None);
-                                        cx.notify();
-                                    });
-                                }
-                            }),
-                    )
-                    .children(networks.iter().cloned().map(|network| {
-                        let chain_id = network.chain_id;
-                        let list = list.clone();
-                        Button::new(SharedString::from(format!("token-network-{chain_id}")))
-                            .label(network.display_name.unwrap_or(network.name))
-                            .when(active_chain == Some(chain_id), ButtonVariants::primary)
-                            .on_click(move |_, _, cx| {
-                                list.update(cx, |list, cx| {
-                                    list.delegate_mut().set_chain_filter(Some(chain_id));
-                                    cx.notify();
-                                });
-                            })
-                    })),
-            )
-            .child(
-                div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("Showing {visible} of {total} token(s)")),
             )
-            .when_some(selected_token, |content, token| {
-                let network = token
-                    .chain_id
-                    .parse::<u64>()
-                    .ok()
-                    .and_then(|chain_id| {
-                        networks.iter().find(|network| network.chain_id == chain_id)
-                    })
-                    .map_or_else(
-                        || format!("Chain {}", token.chain_id),
-                        |network| {
-                            network
-                                .display_name
-                                .as_deref()
-                                .unwrap_or(&network.name)
-                                .to_owned()
-                        },
-                    );
-                content.child(
-                    GroupBox::new()
-                        .id("selected-token-details")
-                        .outline()
-                        .title("Selected token")
-                        .child(format!(
-                            "{} · {}",
-                            token.symbol.as_deref().unwrap_or("No symbol"),
-                            token.name.as_deref().unwrap_or("No name")
-                        ))
-                        .child(format!(
-                            "{network} · {} decimals",
-                            token
-                                .decimals
-                                .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
-                        ))
-                        .child(
-                            div()
-                                .font_family("monospace")
-                                .text_sm()
-                                .child(token.address),
-                        )
-                        .child(format!(
-                            "Source: {} · added {}",
-                            token.source, token.added_at
-                        )),
-                )
-            })
             .child(
                 List::new(list)
-                    .search_placeholder("Search token name, symbol, or address")
+                    .search_placeholder("Search token name, symbol, chain ID, or address")
                     .flex_1()
                     .min_h(px(260.0))
                     .w_full()
@@ -6408,7 +6491,6 @@ impl WalletWindow {
         };
         let generation = active.state.generation();
         let document = active.state.document();
-        let selected = active.state.selected();
         let approve_enabled = active.state.approve_enabled() && !active.awaiting_refresh;
         let can_refresh = matches!(
             active.completion,
@@ -6602,51 +6684,19 @@ impl WalletWindow {
                             })
                             .child(
                                 Button::new(("review-select-reject", generation))
-                                    .label("Reject")
-                                    .when(
-                                        selected == ReviewDecision::Reject,
-                                        ButtonVariants::primary,
-                                    )
+                                    .label("Reject request")
+                                    .danger()
                                     .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.select_review(generation, ReviewDecision::Reject, cx);
+                                        view.decide_review(generation, ReviewDecision::Reject, cx);
                                     })),
                             )
                             .child(
                                 Button::new(("review-select-approve", generation))
-                                    .label("Approve")
+                                    .label("Authenticate & approve")
+                                    .primary()
                                     .disabled(!approve_enabled)
-                                    .when(
-                                        selected == ReviewDecision::Approve,
-                                        ButtonVariants::primary,
-                                    )
                                     .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.select_review(generation, ReviewDecision::Approve, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(("review-confirm", generation))
-                                    .label(if selected == ReviewDecision::Reject {
-                                        "Reject request"
-                                    } else {
-                                        "Authenticate & approve"
-                                    })
-                                    .danger()
-                                    .when(
-                                        selected == ReviewDecision::Approve,
-                                        ButtonVariants::primary,
-                                    )
-                                    .disabled(
-                                        active.awaiting_refresh
-                                            || (selected == ReviewDecision::Approve
-                                                && !approve_enabled),
-                                    )
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        let command = if selected == ReviewDecision::Reject {
-                                            GuiReviewCommand::Reject
-                                        } else {
-                                            GuiReviewCommand::Approve
-                                        };
-                                        view.send_review_command(generation, command, cx);
+                                        view.decide_review(generation, ReviewDecision::Approve, cx);
                                     })),
                             ),
                     ),
@@ -6738,6 +6788,24 @@ impl WalletWindow {
         let Some(review) = &self.legal_review else {
             return div().into_any_element();
         };
+        let sections = review.sections.clone();
+        let document_title = review.document.title();
+        let document = gpui::list(review.list_state.clone(), move |index, _, _| {
+            div()
+                .w_full()
+                .pr_3()
+                .pb_3()
+                .child(
+                    TextView::markdown(
+                        SharedString::from(format!("legal-markdown-{document_title}-{index}")),
+                        sections[index].clone(),
+                    )
+                    .w_full()
+                    .selectable(true),
+                )
+                .into_any_element()
+        })
+        .size_full();
         div()
             .absolute()
             .inset_0()
@@ -6758,28 +6826,11 @@ impl WalletWindow {
                     .id("legal-document-scroll")
                     .flex_1()
                     .min_h_0()
-                    .track_scroll(&review.scroll_handle)
-                    .overflow_y_scroll()
-                    .on_scroll_wheel(cx.listener(|_view, _, window, cx| {
-                        cx.defer_in(window, |view, _, cx| {
-                            view.update_legal_scroll_state(cx);
-                        });
-                    }))
                     .p_3()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        TextView::markdown("legal-markdown", review.text.clone())
-                            .w_full()
-                            .selectable(true),
-                    ),
-            )
-            .child(
-                div()
-                    .font_family("monospace")
-                    .text_sm()
-                    .flex_shrink_0()
-                    .child(format!("Document digest: {}", review.digest)),
+                    .vertical_scrollbar(&review.list_state)
+                    .child(document),
             )
             .when_some(review.error.clone(), |panel, error| {
                 panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
@@ -6958,8 +7009,10 @@ impl WalletWindow {
             )
             .child(
                 div()
+                    .id("route-content-scroll")
                     .flex_1()
                     .min_h_0()
+                    .track_scroll(&self.route_scroll_handle)
                     .overflow_y_scrollbar()
                     .px_5()
                     .pb_5()
@@ -7015,7 +7068,7 @@ impl Render for WalletWindow {
                 self.update_review_scroll_state(cx);
             } else if !review.scroll_check_scheduled {
                 review.scroll_check_scheduled = true;
-                cx.on_next_frame(window, |view, _, cx| {
+                cx.on_next_frame(window, move |view, _, cx| {
                     if let Some(review) = view.active_review.as_mut() {
                         review.scroll_layout_ready = true;
                     }
@@ -7023,18 +7076,14 @@ impl Render for WalletWindow {
                 });
             }
         }
-        if let Some(review) = self.legal_review.as_mut() {
-            if review.scroll_layout_ready {
-                self.update_legal_scroll_state(cx);
-            } else if !review.scroll_check_scheduled {
-                review.scroll_check_scheduled = true;
-                cx.on_next_frame(window, |view, _, cx| {
-                    if let Some(review) = view.legal_review.as_mut() {
-                        review.scroll_layout_ready = true;
-                    }
-                    view.update_legal_scroll_state(cx);
-                });
-            }
+        if let Some(review) = self.legal_review.as_mut()
+            && !review.scroll_check_scheduled
+        {
+            review.scroll_check_scheduled = true;
+            let digest = review.digest.clone();
+            cx.on_next_frame(window, move |view, _, cx| {
+                view.update_legal_scroll_state(&digest, cx);
+            });
         }
         let modal_open = self.active_review.is_some()
             || self.pending_agent_install.is_some()
@@ -7053,7 +7102,6 @@ impl Render for WalletWindow {
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
-            .on_action(cx.listener(Self::navigate_route))
             .relative()
             .size_full()
             .flex()
@@ -7267,6 +7315,12 @@ pub fn run_desktop() -> Result<()> {
                     tray.clone(),
                     cx,
                 )
+            });
+            let shortcut_view = wallet_view.clone();
+            cx.on_action(move |action: &NavigateRoute, cx| {
+                shortcut_view.update(cx, |view, cx| {
+                    view.navigate_route(action.route, cx);
+                });
             });
             let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
             show_wallet_window(cx, &wallet_view, &window_slot)

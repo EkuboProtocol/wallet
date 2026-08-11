@@ -96,7 +96,7 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
 }
 
 #[test]
-fn token_filter_combines_network_and_case_insensitive_search() {
+fn token_search_matches_metadata_address_and_chain_id() {
     let token = StoredToken {
         chain_id: "1".into(),
         address: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".into(),
@@ -107,11 +107,31 @@ fn token_filter_combines_network_and_case_insensitive_search() {
         added_at: chrono::Utc::now(),
     };
 
-    assert!(token_matches_filter(&token, None, "usd coin"));
-    assert!(token_matches_filter(&token, Some(1), "usdc"));
-    assert!(token_matches_filter(&token, Some(1), "a0B869"));
-    assert!(!token_matches_filter(&token, Some(10), "usdc"));
-    assert!(!token_matches_filter(&token, Some(1), "wrapped ether"));
+    assert!(token_matches_search(&token, "usd coin"));
+    assert!(token_matches_search(&token, "usdc"));
+    assert!(token_matches_search(&token, "a0B869"));
+    assert!(token_matches_search(&token, "1"));
+    assert!(!token_matches_search(&token, "10"));
+    assert!(!token_matches_search(&token, "wrapped ether"));
+}
+
+#[test]
+fn legal_markdown_is_split_without_changing_content_or_splitting_fences() {
+    let long_paragraph = "x".repeat(LEGAL_SECTION_TARGET_BYTES);
+    let source = format!(
+        "# Terms\n\nIntro\n\n## Details\n\n```text\n# not a heading\n{long_paragraph}\n```\n\nTail\n"
+    );
+    let sections = legal_markdown_sections(&source);
+
+    assert_eq!(
+        sections
+            .iter()
+            .map(AsRef::<str>::as_ref)
+            .collect::<String>(),
+        source
+    );
+    assert_eq!(sections.len(), 3);
+    assert!(sections[1].contains("# not a heading"));
 }
 
 #[test]
@@ -124,6 +144,25 @@ fn only_disabled_networks_offer_permanent_removal() {
     assert!(!network_can_be_removed(&network));
     network.disabled = true;
     assert!(network_can_be_removed(&network));
+}
+
+#[test]
+fn networks_display_enabled_first_then_by_numeric_chain_id() {
+    let mut networks = ekubo_wallet_core::networks::default_networks();
+    for network in &mut networks {
+        network.disabled = network.chain_id != 42_161;
+    }
+    networks.reverse();
+
+    let sorted = networks_for_display(&networks);
+    assert_eq!(sorted[0].chain_id, 42_161);
+    assert!(!sorted[0].disabled);
+    assert!(sorted[1..].iter().all(|network| network.disabled));
+    assert!(
+        sorted[1..]
+            .windows(2)
+            .all(|pair| pair[0].chain_id <= pair[1].chain_id)
+    );
 }
 
 #[test]
