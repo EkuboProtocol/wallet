@@ -55,6 +55,10 @@ fn host_and_browser_cors_headers_are_rejected_before_dispatch() {
         "access-control-request-headers",
         "access-control-request-private-network",
         "access-control-allow-origin",
+        "sec-fetch-site",
+        "sec-fetch-mode",
+        "sec-fetch-dest",
+        "sec-fetch-user",
     ] {
         headers.insert(forbidden, HeaderValue::from_static("attacker"));
         assert_eq!(

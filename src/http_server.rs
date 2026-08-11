@@ -412,7 +412,10 @@ fn validate_request_envelope(
         return Err(StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
     for name in headers.keys() {
-        if name == header::ORIGIN || name.as_str().starts_with("access-control-") {
+        if name == header::ORIGIN
+            || name.as_str().starts_with("access-control-")
+            || name.as_str().starts_with("sec-fetch-")
+        {
             return Err(StatusCode::FORBIDDEN.into_response());
         }
     }
