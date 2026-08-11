@@ -103,9 +103,9 @@ where
 /// Configured order, unless the network asks for a random one. `m_of_n` is
 /// deliberately absent here: it is not an ordering, and the reads that route
 /// through [`try_endpoints`] are the ones whose answers cannot be compared —
-/// a chain head, a receipt that only one endpoint has seen yet. Those take
-/// the first answer under every strategy. Agreement is applied where it means
-/// something, by [`agree_across_endpoints`] and by simulation.
+/// a receipt that only one endpoint has seen yet, for example. Those take the
+/// first answer under every strategy. Quorum sampling is applied only by the
+/// fee, head, and simulation paths where its semantics are defined.
 pub(crate) fn endpoint_order(network: &NetworkConfig) -> Vec<&url::Url> {
     let mut order: Vec<&url::Url> = network.rpc_urls.iter().collect();
     if network.rpc_strategy.shuffles() {
@@ -133,145 +133,6 @@ fn shuffle<T>(items: &mut [T]) {
     }
 }
 
-/// What a completed round of quorum voting decided.
-///
-/// There are two quorums in this crate — a generic read in
-/// [`agree_across_endpoints`] and a simulation in `simulation.rs` — and they
-/// bucket entirely different things. What they must not do differently is
-/// *decide*, so the rule lives here and neither of them reasons about it
-/// locally. Both used to, and both made the same mistake: accepting the
-/// `required`-th matching witness as final, which made a later contradiction
-/// unobservable and left "a disagreement is refused" true only when the
-/// disagreeing endpoint happened to be visited early.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum QuorumVerdict {
-    /// Every endpoint that answered gave the same answer, and at least
-    /// `required` of them did. The index is the single bucket.
-    Agreed(usize),
-    /// Endpoints answered and contradicted each other. Refuse; there is no
-    /// basis on which to pick a side.
-    Contradicted,
-    /// One answer at most, but too few endpoints stood behind it. Carries how
-    /// many did, which is what separates "unavailable" from "disagreed".
-    TooFewWitnesses(usize),
-}
-
-/// Decide a quorum from how many endpoints stood behind each distinct answer.
-///
-/// Takes counts rather than the answers themselves so the two callers can keep
-/// their own bucket types, and so the rule is testable without either of them.
-/// Call it only after every configured endpoint has been heard: a verdict
-/// computed from a partial tally is the very bug this exists to prevent.
-pub(crate) fn quorum_verdict(witness_counts: &[usize], required: usize) -> QuorumVerdict {
-    if witness_counts.len() > 1 {
-        return QuorumVerdict::Contradicted;
-    }
-    match witness_counts.first() {
-        Some(&count) if count >= required => QuorumVerdict::Agreed(0),
-        Some(&count) => QuorumVerdict::TooFewWitnesses(count),
-        None => QuorumVerdict::TooFewWitnesses(0),
-    }
-}
-
-/// Run one read against enough endpoints to satisfy the network's strategy,
-/// and return the answer only if that many of them agree.
-///
-/// Under `ordered` and `random` this is [`try_endpoints`]: one answer, from
-/// whichever endpoint answers first. Under `m_of_n` it keeps asking further
-/// endpoints until the required number have returned *equal* answers.
-///
-/// Three outcomes are deliberately distinct:
-///
-/// - Enough endpoints agreed. The answer is returned.
-/// - Endpoints answered but did not agree. The read **fails**, naming the
-///   disagreement. There is no basis on which the wallet could pick a side,
-///   and picking the majority of two is picking at random; a disagreement
-///   between endpoints about a pinned, deterministic read is either a bug or
-///   a lie, and both are reasons to stop rather than to continue.
-/// - Too few endpoints answered at all. The read fails as unavailable. An
-///   endpoint that errors is a missing witness, not a dissenting one, so it
-///   never counts toward agreement in either direction.
-///
-/// Only meaningful for reads that are deterministic across honest endpoints —
-/// pinned to a block and free of per-node state. A chain head or a pending
-/// nonce legitimately differs between two honest nodes, and requiring those
-/// to match would refuse every request.
-pub async fn agree_across_endpoints<T, F, Fut>(network: &NetworkConfig, operation: F) -> Result<T>
-where
-    T: PartialEq,
-    F: Fn(DynProvider) -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    let required = network.rpc_strategy.required_agreement();
-    if required <= 1 {
-        return try_endpoints(network, operation).await;
-    }
-    let mut failures = Vec::new();
-    // Answers, each with the endpoints that returned it. A second endpoint
-    // returning an answer already seen is what agreement means.
-    let mut answers: Vec<(T, Vec<&url::Url>)> = Vec::new();
-    // Every configured endpoint is asked, including the ones after the
-    // `required`-th agreement. Returning at the threshold made the
-    // contradiction check below unreachable exactly when it mattered: with
-    // `m_of_n(2)` over three endpoints, two agreeing answers ended the loop
-    // and the third endpoint — the one that would have disagreed — was never
-    // consulted. Whether a disagreement was noticed then depended on the order
-    // the endpoints happened to be visited in, which under `random` is a coin
-    // flip. "A genuine disagreement fails closed" has to mean every configured
-    // witness was heard, or it means nothing.
-    //
-    // The cost is the difference between `agree` requests and one per
-    // configured endpoint. That is what the guarantee costs; an owner who does
-    // not want to pay it is asking for `ordered`.
-    for endpoint in endpoint_order(network) {
-        match operation(provider_for(endpoint)).await {
-            Ok(value) => {
-                if let Some(slot) = answers.iter_mut().find(|(seen, _)| *seen == value) {
-                    slot.1.push(endpoint);
-                } else {
-                    answers.push((value, vec![endpoint]));
-                }
-            }
-            Err(error) => failures.push((endpoint, error)),
-        }
-    }
-    let counts: Vec<usize> = answers
-        .iter()
-        .map(|(_, witnesses)| witnesses.len())
-        .collect();
-    if let QuorumVerdict::Agreed(index) = quorum_verdict(&counts, required) {
-        return Ok(answers
-            .into_iter()
-            .nth(index)
-            .map(|(value, _)| value)
-            .expect("the bucket the verdict names is still there"));
-    }
-    // Disagreement outranks unavailability in the message: an owner whose
-    // endpoints contradict each other has a different problem, and a more
-    // urgent one, than an owner whose endpoints are down.
-    if answers.len() > 1 {
-        let mut message = format!(
-            "the RPC endpoints configured for {} do not agree, so the answer was refused; {} distinct answers from",
-            network.name,
-            answers.len()
-        );
-        for (_, witnesses) in &answers {
-            let names: Vec<&str> = witnesses.iter().map(|url| url.as_str()).collect();
-            let _ = write!(message, "\n  {}", names.join(", "));
-        }
-        return Err(anyhow::anyhow!(message));
-    }
-    let reached = answers.first().map_or(0, |(_, witnesses)| witnesses.len());
-    let mut message = format!(
-        "{} requires {required} endpoints to agree but only {reached} answered",
-        network.name
-    );
-    for (endpoint, error) in &failures {
-        let _ = write!(message, "\n  {endpoint}: {error:#}");
-    }
-    Err(anyhow::anyhow!(message))
-}
-
 /// The EIP-1559 fee pair to sign, given what the endpoint that answered the
 /// rest of preparation said.
 ///
@@ -279,10 +140,9 @@ where
 /// already chosen to trust whichever endpoint is first, and asking more of
 /// them here would spend requests the owner said they did not want to spend.
 ///
-/// Under `m_of_n` it does not. A fee estimate cannot go through
-/// [`agree_across_endpoints`], which requires equality and would refuse every
-/// request, because two honest nodes legitimately disagree about what the next
-/// block will cost. What is available instead is a median: draw estimates from
+/// Under `m_of_n` it does not. Requiring equality would refuse every request,
+/// because two honest nodes legitimately disagree about what the next block
+/// will cost. What is available instead is a median: draw estimates from
 /// the configured endpoints until `agree` of them have answered, and take the
 /// middle of each field. With a majority honest, the middle value is one no
 /// single operator picked — which is the whole of what `m_of_n` promises and
@@ -368,9 +228,6 @@ pub async fn median_head(network: &NetworkConfig) -> Result<Option<u64>> {
     // honest third endpoint is never asked. Every other endpoint then
     // simulates against the state the liar chose, agrees honestly about it,
     // and the quorum is real while the thing agreed on is the attacker's.
-    //
-    // This is the same mistake `agree_across_endpoints` made, fixed the same
-    // way and at the same cost: one request per configured endpoint.
     //
     // Each head is asked for together with the chain it belongs to. Nothing
     // requires every configured endpoint to serve the configured chain —

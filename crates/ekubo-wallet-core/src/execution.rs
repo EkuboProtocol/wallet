@@ -274,9 +274,9 @@ pub async fn prepare_execution(
         "RPC returned invalid EIP-1559 fee fields"
     );
     // Under `m_of_n` the fee is not whatever the first endpoint said. Fee
-    // estimates are not deterministic across honest nodes, so they cannot go
-    // through `agree_across_endpoints`, which requires equality — but a median
-    // of several answers is a value no single endpoint chooses, which is the
+    // estimates are not deterministic across honest nodes, so requiring
+    // equality would refuse ordinary answers — but a median of several answers
+    // is a value no single endpoint chooses, which is the
     // property `m_of_n` was configured for and did not have here.
     let (max_fee_per_gas, max_priority_fee_per_gas) = crate::rpc::median_fee_estimate(
         network,

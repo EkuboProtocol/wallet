@@ -265,99 +265,6 @@ fn strategy_network(strategy: RpcStrategy, rpc_urls: Vec<Url>) -> NetworkConfig 
     network
 }
 
-/// `m_of_n` returns an answer only once the required number of endpoints have
-/// returned the same one.
-#[tokio::test]
-async fn agreement_returns_the_answer_two_endpoints_share() {
-    let (first, _a) = stub_endpoint(7, 500);
-    let (second, _b) = stub_endpoint(7, 500);
-    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![first, second]);
-    let block = crate::rpc::agree_across_endpoints(&network, |provider| async move {
-        with_timeout(provider.get_block_number()).await
-    })
-    .await
-    .expect("both endpoints said the same thing");
-    assert_eq!(block, 500);
-}
-
-/// The property the strategy exists for: one endpoint's word is not enough,
-/// and a contradiction is refused rather than resolved by picking a side.
-#[tokio::test]
-async fn agreement_refuses_a_contradiction_instead_of_choosing() {
-    let (honest, _a) = stub_endpoint(7, 500);
-    let (liar, _b) = stub_endpoint(7, 999_999);
-    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![honest, liar]);
-    let error = format!(
-        "{:#}",
-        crate::rpc::agree_across_endpoints(&network, |provider| async move {
-            with_timeout(provider.get_block_number()).await
-        })
-        .await
-        .expect_err("a disagreement must not produce an answer")
-    );
-    assert!(error.contains("do not agree"), "unexpected: {error}");
-    // Naming the endpoints on each side is what makes the report actionable.
-    assert!(error.contains("2 distinct answers"), "unexpected: {error}");
-}
-
-/// An endpoint that fails is a missing witness, not a dissenting one: it must
-/// neither count toward agreement nor be mistaken for a contradiction.
-#[tokio::test]
-async fn a_dead_endpoint_is_not_a_dissenting_vote() {
-    let (first, _a) = stub_endpoint(7, 500);
-    let (second, _b) = stub_endpoint(7, 500);
-    let network = strategy_network(
-        RpcStrategy::MOfN { agree: 2 },
-        vec![dead_endpoint(), first, second],
-    );
-    assert_eq!(
-        crate::rpc::agree_across_endpoints(&network, |provider| async move {
-            with_timeout(provider.get_block_number()).await
-        })
-        .await
-        .expect("two live endpoints agreed"),
-        500
-    );
-}
-
-/// Too few witnesses is reported as unavailability, not as a disagreement:
-/// they are different problems and lead to different fixes.
-#[tokio::test]
-async fn too_few_answers_reads_as_unavailable() {
-    let (only, _a) = stub_endpoint(7, 500);
-    let network = strategy_network(RpcStrategy::MOfN { agree: 2 }, vec![only, dead_endpoint()]);
-    let error = format!(
-        "{:#}",
-        crate::rpc::agree_across_endpoints(&network, |provider| async move {
-            with_timeout(provider.get_block_number()).await
-        })
-        .await
-        .expect_err("one witness is not two")
-    );
-    assert!(error.contains("requires 2 endpoints to agree"), "{error}");
-    assert!(error.contains("only 1 answered"), "{error}");
-}
-
-/// Under `ordered` and `random` the agreement helper is plain failover: one
-/// answer, from whoever answers first.
-#[tokio::test]
-async fn a_single_answer_is_enough_without_m_of_n() {
-    for strategy in [RpcStrategy::Ordered, RpcStrategy::Random] {
-        let (first, _a) = stub_endpoint(7, 500);
-        let (second, _b) = stub_endpoint(7, 999_999);
-        let network = strategy_network(strategy, vec![first, second]);
-        let block = crate::rpc::agree_across_endpoints(&network, |provider| async move {
-            with_timeout(provider.get_block_number()).await
-        })
-        .await
-        .expect("one answer suffices");
-        assert!(
-            block == 500 || block == 999_999,
-            "{strategy} took an answer"
-        );
-    }
-}
-
 #[test]
 fn the_median_fee_is_one_an_endpoint_returned() {
     // The lower middle for an even count, so the answer is always a value some
@@ -480,9 +387,7 @@ async fn median_fee_estimate_requires_quorum_before_returning() {
     );
 }
 
-/// One endpoint answering is one witness short under `agree: 2`. Without this
-/// the loop's own `required` bookkeeping — not just `agree_across_endpoints`'s,
-/// which this function does not call — is what has to reject it.
+/// One endpoint answering is one witness short under `agree: 2`.
 #[tokio::test]
 async fn median_fee_estimate_refuses_to_answer_on_one_witness() {
     let (only, _a) = fee_history_stub(100, 20);
@@ -541,82 +446,6 @@ fn a_receipt_the_lifecycle_cannot_store_is_the_endpoints_failure() {
     let highest = u64::try_from(i64::MAX).unwrap();
     assert!(storable_receipt_fields(highest, highest).is_ok());
     assert!(storable_receipt_fields(highest + 1, 0).is_err());
-}
-
-/// The gap the two-endpoint contradiction test could not see. With `agree`
-/// equal to the endpoint count a quorum is only ever reached on the last
-/// endpoint, so the early return at the threshold never fired and the
-/// disagreement branch always ran. Give the quorum room -- `m_of_n(2)` over
-/// three endpoints, which `validate_network` explicitly permits -- and the
-/// two agreeing endpoints ended the loop before the third could contradict
-/// them. Whether the wallet noticed depended on the order the endpoints were
-/// visited in, and under `random` that is a coin flip per request.
-#[tokio::test]
-async fn agreement_hears_every_endpoint_before_accepting_a_quorum() {
-    let (first, _a) = stub_endpoint(7, 500);
-    let (second, _b) = stub_endpoint(7, 500);
-    let (dissenter, _c) = stub_endpoint(7, 999_999);
-    let network = strategy_network(
-        RpcStrategy::MOfN { agree: 2 },
-        vec![first, second, dissenter],
-    );
-    let error = format!(
-        "{:#}",
-        crate::rpc::agree_across_endpoints(&network, |provider| async move {
-            with_timeout(provider.get_block_number()).await
-        })
-        .await
-        .expect_err("a witness that contradicts the quorum must still be heard")
-    );
-    assert!(error.contains("do not agree"), "unexpected: {error}");
-    assert!(error.contains("2 distinct answers"), "unexpected: {error}");
-}
-
-/// The other half: reaching the threshold early must still succeed once every
-/// endpoint has been heard and none of them dissented. A dead third endpoint
-/// is a missing witness, so it neither blocks the answer nor forges a
-/// contradiction.
-#[tokio::test]
-async fn a_quorum_still_answers_when_the_remaining_endpoint_is_silent() {
-    let (first, _a) = stub_endpoint(7, 500);
-    let (second, _b) = stub_endpoint(7, 500);
-    let network = strategy_network(
-        RpcStrategy::MOfN { agree: 2 },
-        vec![first, second, dead_endpoint()],
-    );
-    assert_eq!(
-        crate::rpc::agree_across_endpoints(&network, |provider| async move {
-            with_timeout(provider.get_block_number()).await
-        })
-        .await
-        .expect("two endpoints agreed and the third said nothing"),
-        500
-    );
-}
-
-/// The rule both quorums obey, tested once because both now read it from the
-/// same function rather than each deciding for itself. The historical defect
-/// is the third case: a tally in which one answer has already reached the
-/// threshold *and* another endpoint contradicted it is a refusal, not a win
-/// for whichever bucket filled first.
-#[test]
-fn a_quorum_verdict_refuses_any_tally_that_contains_a_contradiction() {
-    use crate::rpc::{QuorumVerdict, quorum_verdict};
-
-    assert_eq!(quorum_verdict(&[2], 2), QuorumVerdict::Agreed(0));
-    assert_eq!(quorum_verdict(&[3], 2), QuorumVerdict::Agreed(0));
-    assert_eq!(
-        quorum_verdict(&[2, 1], 2),
-        QuorumVerdict::Contradicted,
-        "a bucket at the threshold does not outrank a dissenting witness"
-    );
-    assert_eq!(
-        quorum_verdict(&[1, 1], 2),
-        QuorumVerdict::Contradicted,
-        "and neither does one below it"
-    );
-    assert_eq!(quorum_verdict(&[1], 2), QuorumVerdict::TooFewWitnesses(1));
-    assert_eq!(quorum_verdict(&[], 2), QuorumVerdict::TooFewWitnesses(0));
 }
 
 /// The pin the whole quorum simulates against, chosen by one stale endpoint.

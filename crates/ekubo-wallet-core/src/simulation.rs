@@ -398,20 +398,8 @@ pub async fn simulate_execution(
     }
 
     if required > 1 {
-        // The same rule the generic read quorum uses, from the same function,
-        // so the two cannot drift apart again.
-        let counts: Vec<usize> = agreed
-            .iter()
-            .map(|(_, witnesses, _)| witnesses.len())
-            .collect();
-        if let crate::rpc::QuorumVerdict::Agreed(index) =
-            crate::rpc::quorum_verdict(&counts, required)
-        {
-            return Ok(agreed
-                .into_iter()
-                .nth(index)
-                .map(|(_, _, result)| result)
-                .expect("the bucket the verdict names is still there"));
+        if agreed.len() == 1 && agreed[0].1.len() >= required {
+            return Ok(agreed.pop().expect("the sole bucket is still there").2);
         }
         // Endpoints that answered and contradicted each other. This is
         // reported as a simulation failure rather than an error so it lands
