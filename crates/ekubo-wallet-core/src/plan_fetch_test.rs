@@ -445,6 +445,7 @@ mod file_references {
             .await
             .unwrap_err()
             .to_string();
+        let length_mismatch = error.clone();
         assert!(error.contains("rebuild the reference"), "{error}");
         assert!(
             !error.contains(&replacement.len().to_string()),
@@ -461,6 +462,10 @@ mod file_references {
             .await
             .unwrap_err()
             .to_string();
+        assert_eq!(
+            error, length_mismatch,
+            "length and digest guesses must receive one indistinguishable answer"
+        );
         assert!(error.contains("must not be simulated or signed"), "{error}");
         assert!(
             !error.contains(digest_of(&replacement).trim_start_matches("0x")),

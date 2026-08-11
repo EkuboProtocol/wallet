@@ -465,24 +465,38 @@ pub async fn fetch_reference(
     // module docs); for the other two the caller wrote or hosted the bytes,
     // so naming what was actually found is free and much easier to debug.
     let describe_body = source != ArtifactSource::LocalFile;
-    if let Some(expected_bytes) = reference.bytes {
-        if describe_body {
+    if describe_body {
+        if let Some(expected_bytes) = reference.bytes {
             ensure!(
                 body.len() as u64 == expected_bytes,
                 "the reference promised {expected_bytes} bytes but the {noun} body is {} bytes; \
                  the artifact was altered or truncated",
                 body.len()
             );
-        } else {
-            ensure!(
-                body.len() as u64 == expected_bytes,
-                "the file does not hold the {expected_bytes} bytes the {noun} reference promised; \
-                 rebuild the reference for the file as it is now"
-            );
         }
-    }
-    if let Some(integrity) = &reference.integrity {
-        verify_digest(&body, &integrity.value, expected_type, describe_body)?;
+        if let Some(integrity) = &reference.integrity {
+            verify_digest(&body, &integrity.value, expected_type)?;
+        }
+    } else {
+        // `require_verifiable` established both fields before the local read.
+        // Evaluate both before returning one answer: returning early on a
+        // length mismatch and a different error on a digest mismatch made the
+        // file reference an exact-size oracle for anything this process could
+        // read.
+        let expected_bytes = reference
+            .bytes
+            .context("local reference has no byte count")?;
+        let integrity = reference
+            .integrity
+            .as_ref()
+            .context("local reference has no integrity digest")?;
+        let (digest_matches, _, _) = digest_check(&body, &integrity.value)?;
+        ensure!(
+            body.len() as u64 == expected_bytes && digest_matches,
+            "the file does not match the byte count and integrity promised for the {noun}, so {}; \
+             rebuild the reference for the file as it is now",
+            expected_type.mismatch_consequence()
+        );
     }
     Ok(FetchedArtifact {
         bytes: body,
@@ -831,48 +845,32 @@ fn pinned_client(key: PinnedKey) -> Result<reqwest::Client> {
     Ok(client)
 }
 
-/// Check a body against the digest its reference promised.
-///
-/// `describe_body` decides whether the failure may name the digest that was
-/// actually computed. It may when the caller supplied or hosted the bytes,
-/// where it is the fact that makes a stale reference obvious. It may not for
-/// a local file: a caller that cannot produce a file's digest must not be
-/// handed it for guessing at, which is the difference between a `file:`
-/// reference reading a body its caller already had and one fingerprinting a
-/// body it did not.
-fn verify_digest(
-    bytes: &[u8],
-    expected: &str,
-    artifact_type: ArtifactType,
-    describe_body: bool,
-) -> Result<()> {
+/// Check a caller-supplied or remotely hosted body against its promised
+/// digest, naming both sides when they differ. Local files use
+/// [`digest_check`] and the combined, non-disclosing verification above.
+fn verify_digest(bytes: &[u8], expected: &str, artifact_type: ArtifactType) -> Result<()> {
+    let (matched, actual, normalized) = digest_check(bytes, expected)?;
+    ensure!(
+        matched,
+        "fetched {} bytes hash to 0x{actual} but the reference promised 0x{normalized}; \
+         the body was altered or the reference is stale, so {}",
+        artifact_type.noun(),
+        artifact_type.mismatch_consequence()
+    );
+    Ok(())
+}
+
+/// Validate one promised digest and compare it without deciding how much of
+/// the answer its caller may disclose.
+fn digest_check(bytes: &[u8], expected: &str) -> Result<(bool, String, String)> {
     let normalized = expected.strip_prefix("0x").unwrap_or(expected);
     ensure!(
         normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()),
         "integrity.value must be a 32-byte hex keccak256 digest"
     );
     let actual = format!("{:x}", keccak256(bytes));
-    let matched = actual == normalized.to_ascii_lowercase();
-    if describe_body {
-        ensure!(
-            matched,
-            "fetched {} bytes hash to 0x{actual} but the reference promised 0x{}; \
-             the body was altered or the reference is stale, so {}",
-            artifact_type.noun(),
-            normalized.to_ascii_lowercase(),
-            artifact_type.mismatch_consequence()
-        );
-    } else {
-        ensure!(
-            matched,
-            "the file does not hold the {} the reference promised 0x{} for, so {}; \
-             rebuild the reference for the file as it is now",
-            artifact_type.noun(),
-            normalized.to_ascii_lowercase(),
-            artifact_type.mismatch_consequence()
-        );
-    }
-    Ok(())
+    let normalized = normalized.to_ascii_lowercase();
+    Ok((actual == normalized, actual, normalized))
 }
 
 /// The hostname to resolve and pin, once the host itself has been admitted.
