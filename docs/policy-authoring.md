@@ -18,5 +18,5 @@ Never bare hex: selector rules name the complete canonical ABI signature.
 The only variable there is the signing wallet's own address; labels and
 simulation facts are not authorization variables.
 
-Never rely on display labels, token symbols, simulation output, or address-book
-aliases as authorization. They are review context, not policy inputs.
+Never rely on display labels, token symbols, or simulation output as
+authorization. They are review context, not policy inputs.

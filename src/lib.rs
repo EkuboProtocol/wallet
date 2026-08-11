@@ -13,6 +13,7 @@ pub mod desktop;
 pub mod events;
 pub mod gui_review;
 pub mod http_server;
+pub mod launch_at_login;
 pub mod mcp;
 pub mod notifications;
 pub mod release_check;

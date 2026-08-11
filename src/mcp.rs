@@ -2668,9 +2668,8 @@ impl WalletMcpServer {
     }
 
     /// Everything a policy may consult beyond the plan itself: the wallet the
-    /// plan is being signed for, and nothing else. Neither store is read here
-    /// any more — token names and address-book aliases describe a transaction
-    /// to a person and never decide whether it may be signed.
+    /// plan is being signed for, and nothing else. Token names are display
+    /// metadata for a person and never decide whether a plan may be signed.
     fn policy_context(
         wallet: &crate::config::WalletMetadata,
     ) -> crate::core::predicate::PolicyContext {

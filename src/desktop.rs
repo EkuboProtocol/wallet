@@ -16,7 +16,8 @@ use crate::{
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
     updater::{UpdateSummary, VerifiedUpdate},
     walletconnect::{
-        ProposalCommand, ProposalPresenter, ProposalPrompt, WalletConnectManager, run_session,
+        ProposalCommand, ProposalPresenter, ProposalPrompt, SessionSummary, WalletConnectManager,
+        run_session,
     },
 };
 use anyhow::{Context as _, Result, ensure};
@@ -209,6 +210,22 @@ fn upsert_detected_agents() -> Result<String> {
     ))
 }
 
+fn detect_agents() -> Result<Vec<DetectedAgent>> {
+    Ok(AgentAdapter::supported()?
+        .into_iter()
+        .filter(AgentAdapter::detected)
+        .map(|adapter| DetectedAgent {
+            kind: adapter.kind,
+            display_name: adapter.display_name,
+            config_path: adapter.config_path.display().to_string(),
+            installed: adapter
+                .preview_install(true)
+                .map(|preview| !preview.has_changes())
+                .map_err(|error| format!("{error:#}").into()),
+        })
+        .collect())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Route {
     Overview,
@@ -383,6 +400,8 @@ pub struct WalletWindow {
     review_flow: ReviewFlowState,
     pending_agent_install: Option<PendingAgentInstall>,
     agent_reinstall: AgentReinstallState,
+    detected_agents: AgentDetectionState,
+    detected_agents_generation: u64,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
     account_id_error: Option<SharedString>,
@@ -405,6 +424,7 @@ pub struct WalletWindow {
     policy_editor_anchor: ScrollAnchor,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
+    walletconnect_sessions: Vec<SessionSummary>,
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
     network_json_input: Option<Entity<InputState>>,
@@ -690,6 +710,20 @@ struct TokenEditorErrors {
 struct ActivityFeedback {
     message: SharedString,
     error: bool,
+}
+
+#[derive(Clone)]
+struct DetectedAgent {
+    kind: AgentKind,
+    display_name: &'static str,
+    config_path: String,
+    installed: std::result::Result<bool, SharedString>,
+}
+
+enum AgentDetectionState {
+    Loading,
+    Ready(Vec<DetectedAgent>),
+    Failed(SharedString),
 }
 
 struct TokenProposalListDelegate {
@@ -1451,6 +1485,8 @@ impl WalletWindow {
             review_flow: ReviewFlowState::Ready,
             pending_agent_install: None,
             agent_reinstall: AgentReinstallState::Idle,
+            detected_agents: AgentDetectionState::Loading,
+            detected_agents_generation: 0,
             account_id_input: None,
             private_key_input: None,
             account_id_error: None,
@@ -1473,6 +1509,7 @@ impl WalletWindow {
             route_scroll_handle,
             modal_focus: cx.focus_handle(),
             walletconnect,
+            walletconnect_sessions: Vec::new(),
             walletconnect_presenter,
             walletconnect_uri_input: None,
             network_json_input: None,
@@ -1492,6 +1529,7 @@ impl WalletWindow {
             pending_software_update,
         };
         window.open_next_required_legal(cx);
+        window.reload_detected_agents(cx);
         window.reload_desktop_snapshot(cx);
         if !window.legal_gate && window.automatic_update_checks {
             window.check_for_updates(cx);
@@ -1616,6 +1654,31 @@ impl WalletWindow {
 
     fn clear_route_error(&mut self, route: Route) {
         self.route_errors.remove(&route);
+    }
+
+    fn reload_detected_agents(&mut self, cx: &mut Context<Self>) {
+        self.detected_agents_generation = self.detected_agents_generation.wrapping_add(1);
+        let generation = self.detected_agents_generation;
+        self.detected_agents = AgentDetectionState::Loading;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(detect_agents)
+                .await
+                .context("agent detection task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.detected_agents_generation != generation {
+                    return;
+                }
+                view.detected_agents = match result {
+                    Ok(agents) => AgentDetectionState::Ready(agents),
+                    Err(error) => AgentDetectionState::Failed(format!("{error:#}").into()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn reload_desktop_snapshot(&mut self, cx: &mut Context<Self>) {
@@ -2685,7 +2748,11 @@ impl WalletWindow {
         }
         self.clear_route_error(Route::Settings);
         self.agent_reinstall = AgentReinstallState::Running;
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move { upsert_detected_agents() });
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(upsert_detected_agents)
+                .await
+                .context("agent configuration repair task failed")?
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -2696,6 +2763,7 @@ impl WalletWindow {
                         format!("Could not reinstall MCP server: {error:#}"),
                     );
                 }
+                view.reload_detected_agents(cx);
                 cx.notify();
             });
         })
@@ -3501,10 +3569,9 @@ impl WalletWindow {
 
     fn prepare_agent_repair(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
         let kind = self
-            .owner
-            .clients()
+            .cached_clients()
             .ok()
-            .and_then(|clients| clients.into_iter().find(|client| client.id == client_id))
+            .and_then(|clients| clients.iter().find(|client| client.id == client_id))
             .map(|client| client.agent_kind);
         if let Some(kind) = kind {
             self.prepare_detected_agent_install(kind, cx);
@@ -3519,34 +3586,43 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        let result = (|| -> Result<PendingAgentInstall> {
-            let adapter = AgentAdapter::supported()?
-                .into_iter()
-                .find(|adapter| adapter.kind == kind)
-                .context("the selected agent has no managed configuration adapter")?;
-            ensure!(
-                adapter.detected(),
-                "the selected agent is no longer detected"
-            );
-            let preview = adapter.preview_install(true)?;
-            Ok(PendingAgentInstall {
-                display_name: format!("Install {}", adapter.display_name),
-                preview: Some(preview),
-                remove_client_id: None,
-            })
-        })();
-        match result {
-            Ok(pending) => {
-                self.pending_agent_install = Some(pending);
-                self.clear_route_error(Route::Settings);
-            }
-            Err(error) => {
-                self.set_route_error(
-                    Route::Settings,
-                    format!("Could not prepare agent installation: {error:#}"),
+        self.agent_reinstall = AgentReinstallState::Running;
+        self.clear_route_error(Route::Settings);
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                let adapter = AgentAdapter::supported()?
+                    .into_iter()
+                    .find(|adapter| adapter.kind == kind)
+                    .context("the selected agent has no managed configuration adapter")?;
+                ensure!(
+                    adapter.detected(),
+                    "the selected agent is no longer detected"
                 );
-            }
-        }
+                let preview = adapter.preview_install(true)?;
+                Ok::<_, anyhow::Error>(PendingAgentInstall {
+                    display_name: format!("Install {}", adapter.display_name),
+                    preview: Some(preview),
+                    remove_client_id: None,
+                })
+            })
+            .await
+            .context("agent installation preview task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.agent_reinstall = AgentReinstallState::Idle;
+                match result {
+                    Ok(pending) => view.pending_agent_install = Some(pending),
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not prepare agent installation: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -3556,35 +3632,55 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        let result = (|| -> Result<PendingAgentInstall> {
-            let client = self
-                .owner
-                .clients()?
-                .into_iter()
+        let client_kind = match self.cached_clients().and_then(|clients| {
+            clients
+                .iter()
                 .find(|client| client.id == client_id)
-                .context("the selected agent registration no longer exists")?;
-            let adapter = AgentAdapter::supported()?
-                .into_iter()
-                .find(|adapter| adapter.kind == client.agent_kind)
-                .context("the selected agent has no managed configuration adapter")?;
-            Ok(PendingAgentInstall {
-                display_name: format!("Remove {}", adapter.display_name),
-                preview: Some(adapter.preview_remove(false)?),
-                remove_client_id: Some(client_id),
-            })
-        })();
-        match result {
-            Ok(pending) => {
-                self.pending_agent_install = Some(pending);
-                self.clear_route_error(Route::Settings);
-            }
+                .map(|client| client.agent_kind)
+                .context("the selected agent registration no longer exists")
+        }) {
+            Ok(kind) => kind,
             Err(error) => {
                 self.set_route_error(
                     Route::Settings,
                     format!("Could not prepare agent change: {error:#}"),
                 );
+                cx.notify();
+                return;
             }
-        }
+        };
+        self.agent_reinstall = AgentReinstallState::Running;
+        self.clear_route_error(Route::Settings);
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                let adapter = AgentAdapter::supported()?
+                    .into_iter()
+                    .find(|adapter| adapter.kind == client_kind)
+                    .context("the selected agent has no managed configuration adapter")?;
+                Ok::<_, anyhow::Error>(PendingAgentInstall {
+                    display_name: format!("Remove {}", adapter.display_name),
+                    preview: Some(adapter.preview_remove(false)?),
+                    remove_client_id: Some(client_id),
+                })
+            })
+            .await
+            .context("agent removal preview task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.agent_reinstall = AgentReinstallState::Idle;
+                match result {
+                    Ok(pending) => view.pending_agent_install = Some(pending),
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not prepare agent change: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -3598,10 +3694,11 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        match self.owner.clients().and_then(|clients| {
+        match self.cached_clients().and_then(|clients| {
             clients
-                .into_iter()
+                .iter()
                 .find(|client| client.id == client_id && client.revoked_at.is_none())
+                .cloned()
                 .context("the selected agent registration is no longer active")
         }) {
             Ok(client) => {
@@ -3635,13 +3732,30 @@ impl WalletWindow {
         let preview = pending.preview.take();
         let Some(client_id) = pending.remove_client_id else {
             let preview = preview.expect("an installation always has its preview");
-            match preview.install() {
-                Ok(_) => self.clear_route_error(Route::Settings),
-                Err(error) => self.set_route_error(
-                    Route::Settings,
-                    format!("Could not install {display_name}: {error:#}"),
-                ),
-            }
+            self.agent_reinstall = AgentReinstallState::Running;
+            self.clear_route_error(Route::Settings);
+            let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                tokio::task::spawn_blocking(move || preview.install())
+                    .await
+                    .context("agent configuration installation task failed")??;
+                Ok::<_, anyhow::Error>(())
+            });
+            cx.spawn(async move |view, cx| {
+                let result = task.await;
+                let _ = view.update(cx, |view, cx| {
+                    view.agent_reinstall = AgentReinstallState::Idle;
+                    match result {
+                        Ok(()) => view.clear_route_error(Route::Settings),
+                        Err(error) => view.set_route_error(
+                            Route::Settings,
+                            format!("Could not install {display_name}: {error:#}"),
+                        ),
+                    }
+                    view.reload_detected_agents(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
             cx.notify();
             return;
         };
@@ -3676,6 +3790,7 @@ impl WalletWindow {
                         format!("Could not complete {display_name}: {error:#}"),
                     ),
                 }
+                view.reload_detected_agents(cx);
                 cx.notify();
             });
         })
@@ -5022,73 +5137,103 @@ impl WalletWindow {
                     .child("No agent registrations have been created."),
             );
         }
-        let adapters = match AgentAdapter::supported() {
-            Ok(adapters) => adapters,
-            Err(error) => {
-                return div().child(Alert::error(
-                    "agent-detection-error",
-                    format!("Agent detection unavailable: {error:#}"),
-                ));
+        match &self.detected_agents {
+            AgentDetectionState::Loading => {
+                agents = agents.child(h_flex().gap_2().child(Spinner::new()).child("Detecting…"));
             }
-        };
-        let mut detected = 0;
-        for adapter in adapters.into_iter().filter(AgentAdapter::detected) {
-            detected += 1;
-            let installed = adapter
-                .preview_install(true)
-                .is_ok_and(|preview| !preview.has_changes());
-            let display_name = adapter.display_name;
-            let config_path = adapter.config_path.display().to_string();
-            let kind = adapter.kind;
-            agents = agents.child(
-                ListItem::new(SharedString::from(format!("detected-agent-{detected}"))).child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .gap_4()
-                        .child(
-                            div().flex_1().min_w_0().child(display_name).child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .truncate()
-                                    .child(config_path),
-                            ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_3()
+            AgentDetectionState::Failed(error) => {
+                agents = agents.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(format!("Agent detection unavailable: {error}")),
+                );
+            }
+            AgentDetectionState::Ready(detected) if detected.is_empty() => {
+                agents = agents.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No supported agent installation was detected."),
+                );
+            }
+            AgentDetectionState::Ready(detected) => {
+                for (index, agent) in detected.iter().enumerate() {
+                    let installed = agent.installed.as_ref().copied().unwrap_or(false);
+                    let config_error = agent.installed.as_ref().err().cloned();
+                    let kind = agent.kind;
+                    agents = agents.child(
+                        ListItem::new(SharedString::from(format!("detected-agent-{index}"))).child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
                                 .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(if installed {
-                                            "Automatically managed"
-                                        } else {
-                                            "Not installed"
-                                        }),
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .gap_4()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(agent.display_name)
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .truncate()
+                                                        .child(agent.config_path.clone()),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_3()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(if installed {
+                                                            "Automatically managed"
+                                                        } else if config_error.is_some() {
+                                                            "Configuration needs attention"
+                                                        } else {
+                                                            "Not installed"
+                                                        }),
+                                                )
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "install-detected-agent-{index}"
+                                                    )))
+                                                    .label(if installed {
+                                                        "Reinstall"
+                                                    } else if config_error.is_some() {
+                                                        "Repair"
+                                                    } else {
+                                                        "Install"
+                                                    })
+                                                    .disabled(
+                                                        self.agent_reinstall
+                                                            == AgentReinstallState::Running,
+                                                    )
+                                                    .when(!installed, ButtonVariants::primary)
+                                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                                        view.prepare_detected_agent_install(
+                                                            kind, cx,
+                                                        );
+                                                    })),
+                                                ),
+                                        ),
                                 )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "install-detected-agent-{detected}"
-                                    )))
-                                    .label(if installed { "Reinstall" } else { "Install" })
-                                    .disabled(self.agent_reinstall == AgentReinstallState::Running)
-                                    .when(!installed, ButtonVariants::primary)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.prepare_detected_agent_install(kind, cx);
-                                    })),
-                                ),
+                                .when_some(config_error, |row, error| {
+                                    row.child(
+                                        div().text_sm().text_color(cx.theme().danger).child(error),
+                                    )
+                                }),
                         ),
-                ),
-            );
-        }
-        if detected == 0 {
-            agents = agents.child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("No supported agent installation was detected."),
-            );
+                    );
+                }
+            }
         }
 
         let detailed = self.detailed_notification_previews.load(Ordering::Relaxed);
@@ -5766,19 +5911,15 @@ impl WalletWindow {
                 panel = panel.child(div().text_sm().text_color(cx.theme().danger).child(error));
             }
         }
-        let sessions = self
-            .walletconnect
-            .lock()
-            .map(|manager| manager.sessions())
-            .unwrap_or_default();
-        if sessions.is_empty() {
+        if self.walletconnect_sessions.is_empty() {
             return panel.child("No active WalletConnect sessions.");
         }
-        panel.children(sessions.into_iter().map(|session| {
+        panel.children(self.walletconnect_sessions.iter().cloned().map(|session| {
             let session_id = session.id;
             div()
-                .py_2()
-                .border_t_1()
+                .p_3()
+                .rounded_lg()
+                .border_1()
                 .border_color(cx.theme().border)
                 .flex()
                 .items_center()
@@ -7720,6 +7861,14 @@ fn show_wallet_window(
 }
 
 pub fn run_desktop() -> Result<()> {
+    run_desktop_with_visibility(false)
+}
+
+pub fn run_desktop_hidden() -> Result<()> {
+    run_desktop_with_visibility(true)
+}
+
+fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let config = crate::config::ConfigStore::production()?;
     let (activation_tx, activation_rx) = std::sync::mpsc::channel();
     let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
@@ -7854,8 +8003,10 @@ pub fn run_desktop() -> Result<()> {
                 });
             });
             let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
-            show_wallet_window(cx, &wallet_view, &window_slot)
-                .expect("failed to open the wallet window");
+            if !hidden_startup || tray.borrow().is_none() {
+                show_wallet_window(cx, &wallet_view, &window_slot)
+                    .expect("failed to open the wallet window");
+            }
             let review_view = wallet_view.clone();
             let review_window = window_slot.clone();
             cx.spawn(async move |cx| {
@@ -7900,6 +8051,10 @@ pub fn run_desktop() -> Result<()> {
                 loop {
                     let changed = match view_events.recv().await {
                         Ok(event) => {
+                            let agent_connection_changed = matches!(
+                                &event.kind,
+                                crate::events::DomainEventKind::AgentConnectionChanged { .. }
+                            );
                             if matches!(
                                 &event.kind,
                                 crate::events::DomainEventKind::OAuthAuthorizationRequested { .. }
@@ -7951,6 +8106,34 @@ pub fn run_desktop() -> Result<()> {
                                     }
                                 });
                             }
+                            if agent_connection_changed {
+                                let owner = event_owner.clone();
+                                let login_result = event_tokio
+                                    .spawn_blocking(move || {
+                                        if owner.clients()?.iter().any(|client| {
+                                            client.authorized_at.is_some()
+                                                && client.revoked_at.is_none()
+                                        }) {
+                                            crate::launch_at_login::enable()?;
+                                        }
+                                        Ok::<_, anyhow::Error>(())
+                                    })
+                                    .await;
+                                if let Err(error) = login_result
+                                    .context("launch-at-login task failed")
+                                    .and_then(|result| result)
+                                {
+                                    event_view.update(cx, |view, cx| {
+                                        view.set_route_error(
+                                            Route::Settings,
+                                            format!(
+                                                "Could not enable launch at login: {error:#}"
+                                            ),
+                                        );
+                                        cx.notify();
+                                    });
+                                }
+                            }
                             true
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
@@ -7958,29 +8141,34 @@ pub fn run_desktop() -> Result<()> {
                     };
                     if changed {
                         let owner = event_owner.clone();
+                        let walletconnect = event_walletconnect.clone();
                         let counts = event_tokio
                             .spawn_blocking(move || {
-                            (
-                                owner
-                                    .reviews(None)
-                                    .map_or(0, |queues| review_queue_decision_count(&queues)),
-                                owner.clients().map_or(0, |clients| clients.len()),
-                            )
-                        })
-                        .await
-                        .unwrap_or_default();
-                        let walletconnect_sessions = event_walletconnect
-                            .lock()
-                            .map_or(0, |sessions| sessions.sessions().len());
+                                let sessions = walletconnect
+                                    .lock()
+                                    .map_or_else(|_| Vec::new(), |manager| manager.sessions());
+                                (
+                                    owner.reviews(None).map_or(0, |queues| {
+                                        review_queue_decision_count(&queues)
+                                    }),
+                                    owner.clients().map_or(0, |clients| clients.len()),
+                                    sessions,
+                                )
+                            })
+                            .await
+                            .unwrap_or_default();
                         if let Some(tray) = event_tray.borrow_mut().as_mut() {
                             tray.update(&TraySnapshot {
                                 pending_reviews: counts.0,
                                 mcp_online,
                                 connected_agents: counts.1,
-                                walletconnect_sessions,
+                                walletconnect_sessions: counts.2.len(),
                             });
                         }
-                        event_view.update(cx, |_, cx| cx.notify());
+                        event_view.update(cx, |view, cx| {
+                            view.walletconnect_sessions = counts.2;
+                            cx.notify();
+                        });
                     } else {
                         break;
                     }

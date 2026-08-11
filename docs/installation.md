@@ -32,6 +32,11 @@ granted. Access tokens last 10 minutes and refresh rotation cannot extend the
 selected absolute expiry. The harness is responsible for its OAuth credential
 storage.
 
+After the first agent authorization, the app installs a current-user
+launch-at-login entry. Login startup stays hidden when the native tray is
+available. If Linux has no StatusNotifierItem host, the compact wallet window
+opens instead so the service cannot become inaccessible.
+
 ## Running locally on macOS
 
 `cargo run --release` runs an unbundled Unix executable. macOS can show its
