@@ -26,10 +26,7 @@ already running as the same OS user.
 - WalletConnect pairings are concurrent and memory-only. Screen-capture frames
   and decoded pairing URIs are never persisted.
 
-The first desktop launch atomically archives a pre-desktop data directory beside
-the new one as `legacy-pre-desktop-<timestamp>`. It imports nothing and creates
-a fresh SQLCipher `wallet.db`. Old database and keychain entries remain
-untouched.
+The application initializes a fresh SQLCipher `wallet.db` on first launch.
 
 ## Development
 

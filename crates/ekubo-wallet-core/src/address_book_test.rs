@@ -16,9 +16,8 @@ fn open(directory: &Path) -> AddressBookStore {
 
 #[test]
 fn an_alias_that_would_be_refused_today_can_still_be_deleted() {
-    // A row written before a validity rule, or by something else, must
-    // stay removable. Enforcing a write-time rule on the way out leaves
-    // the owner able to see an entry and unable to get rid of it.
+    // A malformed row must stay removable. Enforcing a write-time rule on
+    // the way out leaves the owner able to see an entry and unable to remove it.
     let directory = tempfile::tempdir().unwrap();
     let mut store = open(directory.path());
     store
@@ -40,7 +39,7 @@ fn an_alias_that_would_be_refused_today_can_still_be_deleted() {
             .unwrap()
             .alias,
         "not a valid alias!",
-        "the removal review must be able to show the exact legacy row"
+        "the removal review must be able to show the exact stored row"
     );
     // Removal reaches it anyway, and returns what it deleted.
     let removed = store.remove(1, "not a valid alias!").unwrap();

@@ -3396,9 +3396,9 @@ impl WalletMcpServer {
     /// The per-call legal gate: every tool except the two below requires
     /// current acceptance of the terms of service and privacy policy. Before
     /// either, every tool re-checks the database schema version, so a database
-    /// migrated underneath this process (for example by a newer build) refuses
-    /// all requests with a restart instruction instead of being written to
-    /// through a stale understanding of its shape.
+    /// replaced underneath this process refuses all requests with a restart
+    /// instruction instead of being written through a stale understanding of
+    /// its shape.
     ///
     /// `wallet_get_legal` is exempt because it is how the documents are read
     /// in order to be accepted. `wallet_check_for_updates` is exempt because

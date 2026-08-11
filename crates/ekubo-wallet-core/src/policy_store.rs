@@ -21,33 +21,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// The shape of the encrypted database. There is one, and this build creates
-/// it: the ladder of pre-release versions that preceded 1.0.0 described
-/// databases nobody outside development ever held, so carrying upgrade steps
-/// for them would have been machinery for a population of zero — and it would
-/// have told a first-time owner that their brand-new database had a history.
-// The shape changed on 2026-08-08, when every value with a byte representation
-// of its own — hashes, addresses, signatures, signed envelopes, request IDs —
-// moved from hex text to `BLOB`, every moment moved from RFC 3339 text to epoch
-// milliseconds, and `chain_id` became `INTEGER` in the three tables that still
-// spelled it as text. That rewrites the type of most columns in the file, so no
-// database written by an earlier build can be read by this one.
-//
-// The marker for it was briefly reset to 1, on the reasoning that this is the
-// first shape that ships and a first-time owner should not be told their new
-// database has a history. That was wrong, and dangerously so: the retired
-// pre-release ladder had already written 1 through 10, and a database carrying
-// the *old* schema 1 would have passed the equality check below and been read as
-// though its TEXT hashes were `BLOB`s and its RFC 3339 timestamps were epoch
-// milliseconds. Refusal is the whole safety property of this number, and it does
-// not work if the same value can mean two different shapes.
-//
-// So the number climbs past everything ever written instead. What it costs is
-// the cosmetic point it was reset for; what it buys is that no marker in this
-// file has ever meant anything but the shape it means now.
-// Desktop storage deliberately starts a new lineage. The launcher archives
-// any pre-desktop directory before this file is opened, so version 1 can only
-// mean the desktop schema and is never interpreted as a pre-desktop schema.
+/// The first and only encrypted database schema shipped by the desktop wallet.
 const SCHEMA_VERSION: i64 = 1;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
@@ -58,7 +32,7 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// queues, the address book, and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.db.v2";
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
 const KEYRING_USER: &str = "default";
 
 /// A raw 256-bit `SQLCipher` key. Debug output never exposes its contents.
@@ -294,12 +268,6 @@ impl PolicyStore {
         // Schema management happens before any write: the version is read
         // first, so a database this build refuses is left byte-identical.
         //
-        // The pre-release upgrade ladder (schemas 1 through 10) was retired
-        // after v0.3.0-rc.0, and the current schema numbers above all of them
-        // so no retired marker can be mistaken for it. A database predating
-        // the current schema is refused with upgrade guidance rather than
-        // carried forever; future migrations append below and run on every
-        // open, so a schema change upgrades the database at the next startup.
         let version = match schema_version(&connection)? {
             None => {
                 let objects: i64 =
@@ -349,18 +317,11 @@ impl PolicyStore {
             }
             Some(version) => version,
         };
-        // Older or newer is not a distinction worth drawing, because there is
-        // no migration machinery for either answer to lead to: this build
-        // creates schema SCHEMA_VERSION and reads nothing else. One message
-        // says what to do about it.
         ensure!(
             version == SCHEMA_VERSION,
             "policy database schema {version} is not the schema this build understands \
-             ({SCHEMA_VERSION}); this pre-release build does not migrate databases — move it \
-             aside and let Ekubo Wallet create a fresh one (any in-flight pending rows are \
-             lost with it)"
+             ({SCHEMA_VERSION})"
         );
-        ensure_desktop_lineage(&connection)?;
         verify_integrity(&connection)?;
         // Narrowed through a handle that refuses to follow a link, not through
         // the name. This runs after the connection is open, which is exactly
@@ -371,8 +332,8 @@ impl PolicyStore {
     }
 
     /// Re-reads the schema version through this connection. A long-running
-    /// server holds its stores open, so a database migrated underneath it —
-    /// for example by a newer desktop build — would otherwise be written to
+    /// server holds its stores open, so a database replaced underneath it
+    /// would otherwise be written to
     /// through a stale understanding of its shape. Refusing here turns that
     /// into an explicit "restart the server" error on every request.
     pub fn assert_schema_current(&self) -> Result<()> {
@@ -384,7 +345,6 @@ impl PolicyStore {
             "policy database schema changed from {SCHEMA_VERSION} to {version} underneath \
              this process; restart the ekubo-wallet MCP server"
         );
-        ensure_desktop_lineage(&self.connection)?;
         Ok(())
     }
 
@@ -971,25 +931,6 @@ fn schema_version(connection: &Connection) -> Result<Option<i64>> {
     Ok(Some(version))
 }
 
-/// Version numbers alone cannot distinguish the retired pre-desktop schema 1
-/// from desktop schema 1. A literal lineage value makes that boundary
-/// self-authenticating even if a database is opened outside the launcher.
-fn ensure_desktop_lineage(connection: &Connection) -> Result<()> {
-    let lineage = connection
-        .query_row(
-            "SELECT lineage FROM schema_metadata WHERE singleton = 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .context("policy database schema 1 is not a desktop schema")?;
-    ensure!(
-        lineage.as_deref() == Some("desktop-v1"),
-        "policy database schema 1 is not a desktop schema"
-    );
-    Ok(())
-}
-
 /// Creates the complete current schema in one transaction on an empty
 /// database. Every statement runs individually: passing one multi-statement
 /// string to `execute_batch` overflows the stack on Windows against the
@@ -1002,17 +943,14 @@ fn ensure_desktop_lineage(connection: &Connection) -> Result<()> {
 /// after some moment carries that deadline in the calldata the user approved,
 /// where the chain enforces it and simulation surfaces it.
 fn create_current_schema(connection: &Connection) -> Result<()> {
-    let record_version = format!(
-        "INSERT INTO schema_metadata(singleton, version, lineage) \
-         VALUES (1, {SCHEMA_VERSION}, 'desktop-v1')"
-    );
+    let record_version =
+        format!("INSERT INTO schema_metadata(singleton, version) VALUES (1, {SCHEMA_VERSION})");
     run_transaction(
         connection,
         &[
             "CREATE TABLE schema_metadata (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                 version INTEGER NOT NULL,
-                 lineage TEXT NOT NULL CHECK (lineage = 'desktop-v1')
+                 version INTEGER NOT NULL
              ) STRICT",
             "CREATE TABLE application_settings (
                  key TEXT PRIMARY KEY NOT NULL,

@@ -8,7 +8,7 @@ use alloy::primitives::Address;
 use anyhow::{Context, Result};
 use ekubo_wallet_core::{
     address_book::{AddressBookEntry, AddressBookStore},
-    approval::ReviewPresenter,
+    approval::{ApprovalKind, ApprovalRequest, ReviewDocument, ReviewPresenter},
     config::{
         ConfigStore, NetworkConfig, WalletConfig, WalletMetadata, remove_configured_network,
         replace_configured_network,
@@ -307,11 +307,66 @@ impl OwnerApi {
                 stage: crate::events::TransactionStage::Signed,
             });
         }
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
         Ok(result)
     }
 
     pub fn reject_transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
-        PendingStore::production(self.config.data_dir())?.reject(request_id)
+        let rejected = PendingStore::production(self.config.data_dir())?.reject(request_id)?;
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
+        Ok(rejected)
+    }
+
+    pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
+        let request = MessageStore::production(self.config.data_dir())?.get(request_id)?;
+        let mut summary = ApprovalRequest::new(
+            ApprovalKind::MessageSignature,
+            "Review message signature",
+            "This signature can prove account control. It does not submit a transaction.",
+        )
+        .fact("Wallet", request.wallet_id)
+        .fact(
+            "Chain context",
+            request.chain_id.unwrap_or_else(|| "Not specified".into()),
+        )
+        .fact("Encoding", format!("{:?}", request.encoding))
+        .fact(
+            "Requester",
+            request.requester.unwrap_or_else(|| "Unknown requester".into()),
+        )
+        .warning(
+            "Treat message text as untrusted. Review the exact bytes and digest, including any control or bidirectional characters.",
+        )
+        .digest(request.digest);
+        summary.id = request_id;
+        Ok(ReviewDocument::from_request(
+            summary,
+            vec![request.message_hex],
+        ))
+    }
+
+    pub fn typed_data_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
+        let request = TypedDataStore::production(self.config.data_dir())?.get(request_id)?;
+        let exact = serde_json::to_string_pretty(&request.typed_data)?;
+        let mut summary = ApprovalRequest::new(
+            ApprovalKind::TypedDataSignature,
+            "Review typed-data signature",
+            "EIP-712 typed data may grant permissions or authorize off-chain actions.",
+        )
+        .fact("Wallet", request.wallet_id)
+        .fact("Chain", request.chain_id)
+        .fact(
+            "Requester",
+            request.requester.unwrap_or_else(|| "Unknown requester".into()),
+        )
+        .warning(
+            "Review every type, domain, and value. Names are untrusted and Unicode may contain confusable or bidirectional characters.",
+        )
+        .digest(request.digest);
+        summary.id = request_id;
+        Ok(ReviewDocument::from_request(summary, vec![exact]))
     }
 
     pub async fn sign_message(
@@ -325,7 +380,7 @@ impl OwnerApi {
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
         let policies = PolicyStore::production(self.config.data_dir())?;
-        sign_reviewed_message(
+        let signed = sign_reviewed_message(
             &self.config,
             &policies,
             &mut store,
@@ -335,11 +390,17 @@ impl OwnerApi {
             &PlatformHumanPresence,
             &OsKeyStore,
         )
-        .await
+        .await?;
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
+        Ok(signed)
     }
 
     pub fn reject_message(&self, request_id: Uuid) -> Result<PendingMessage> {
-        MessageStore::production(self.config.data_dir())?.reject(request_id)
+        let rejected = MessageStore::production(self.config.data_dir())?.reject(request_id)?;
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
+        Ok(rejected)
     }
 
     pub async fn sign_typed_data(
@@ -353,7 +414,7 @@ impl OwnerApi {
         let digest = request.digest.parse()?;
         let wallet = self.config.wallet(&request.wallet_id)?;
         let policies = PolicyStore::production(self.config.data_dir())?;
-        sign_reviewed_typed_data(
+        let signed = sign_reviewed_typed_data(
             &self.config,
             &policies,
             &mut store,
@@ -363,11 +424,17 @@ impl OwnerApi {
             &PlatformHumanPresence,
             &OsKeyStore,
         )
-        .await
+        .await?;
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
+        Ok(signed)
     }
 
     pub fn reject_typed_data(&self, request_id: Uuid) -> Result<PendingTypedData> {
-        TypedDataStore::production(self.config.data_dir())?.reject(request_id)
+        let rejected = TypedDataStore::production(self.config.data_dir())?.reject(request_id)?;
+        self.events
+            .publish(DomainEventKind::ReviewChanged { request_id });
+        Ok(rejected)
     }
 
     pub fn discard_unsent_transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {

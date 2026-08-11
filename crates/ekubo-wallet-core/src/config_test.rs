@@ -98,75 +98,8 @@ fn round_trips_private_configuration() {
     }
 }
 
-/// A configuration as 0.1.0 through 0.3.0-rc.0 wrote it: one wallet
-/// carrying the retired `custody` enum.
-fn legacy_store(custody: &str, exported_at: Option<&str>) -> (tempfile::TempDir, ConfigStore) {
-    let directory = tempfile::tempdir().unwrap();
-    let store = ConfigStore::new(directory.path());
-    let mut config = store.load().unwrap();
-    config.wallets.push(WalletMetadata {
-        id: "primary".into(),
-        address: Address::ZERO,
-        created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
-        source: WalletSource::Created,
-        exported_at: None,
-    });
-    store.save(&config).unwrap();
-
-    let mut document: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(store.file()).unwrap()).unwrap();
-    let wallet = &mut document["wallets"][0];
-    wallet["custody"] = custody.into();
-    if let Some(exported_at) = exported_at {
-        wallet["exported_at"] = exported_at.into();
-    }
-    fs::write(store.file(), serde_json::to_string(&document).unwrap()).unwrap();
-    (directory, store)
-}
-
 #[test]
-fn legacy_sealed_custody_loads_as_no_recorded_export() {
-    let (_directory, store) = legacy_store("sealed", None);
-    let wallet = store.load().unwrap().wallets.remove(0);
-    assert_eq!(wallet.source, WalletSource::Created);
-    assert!(wallet.exported_at.is_none());
-}
-
-#[test]
-fn legacy_externally_known_custody_survives_as_its_import_source() {
-    let (_directory, store) = legacy_store("externally_known", None);
-    assert!(store.load().unwrap().wallets[0].exported_at.is_none());
-}
-
-#[test]
-fn legacy_export_keeps_its_timestamp_and_is_rewritten_without_the_enum() {
-    let (_directory, store) = legacy_store("exported", Some("2026-02-02T03:04:05Z"));
-    let config = store.load().unwrap();
-    assert_eq!(
-        config.wallets[0].exported_at,
-        Some("2026-02-02T03:04:05Z".parse().unwrap())
-    );
-
-    store.save(&config).unwrap();
-    let document = fs::read_to_string(store.file()).unwrap();
-    assert!(!document.contains("custody"));
-    assert!(document.contains("exported_at"));
-    assert_eq!(store.load().unwrap(), config);
-}
-
-/// Only a hand-edited file can disagree with itself, and resolving it in
-/// favour of either field would either invent or forget an export.
-#[test]
-fn contradictory_legacy_custody_fails_closed() {
-    let (_exported_without_timestamp, store) = legacy_store("exported", None);
-    assert!(store.load().is_err());
-
-    let (_sealed_with_timestamp, store) = legacy_store("sealed", Some("2026-02-02T03:04:05Z"));
-    assert!(store.load().is_err());
-}
-
-#[test]
-fn cli_replacement_takes_over_the_name_or_the_chain_id() {
+fn desktop_replacement_takes_over_the_name_or_the_chain_id() {
     let mut networks = default_networks();
     let count = networks.len();
     let mut ethereum = networks
@@ -221,7 +154,7 @@ fn a_replacement_never_evicts_a_chain_by_reusing_its_name() {
 }
 
 #[test]
-fn cli_replacement_still_rejects_an_identifier_taken_by_another_chain() {
+fn desktop_replacement_still_rejects_an_identifier_taken_by_another_chain() {
     let mut networks = default_networks();
     let mut candidate = networks
         .iter()
@@ -348,18 +281,15 @@ fn rpc_strategies_round_trip_through_the_spellings_people_type() {
     assert!("m_of_n(2)".parse::<RpcStrategy>().is_err());
 }
 
-/// The setting is absent from a configuration written before it existed, and
-/// is left out again when it holds the default, so upgrading and downgrading
-/// do not rewrite every network.
 #[test]
-fn the_default_strategy_is_neither_required_nor_written() {
+fn the_default_strategy_is_optional_and_not_written() {
     use crate::config::RpcStrategy;
     let stored: crate::config::NetworkConfig = serde_json::from_value(serde_json::json!({
-        "name": "legacy",
+        "name": "custom",
         "chain_id": 1,
-        "rpc_url": "https://legacy.example.invalid/rpc",
+        "rpc_urls": ["https://custom.example.invalid/rpc"],
     }))
-    .expect("a pre-strategy network still loads");
+    .expect("a network may omit the default strategy");
     assert_eq!(stored.rpc_strategy, RpcStrategy::Ordered);
     let written = serde_json::to_value(&stored).unwrap();
     assert!(

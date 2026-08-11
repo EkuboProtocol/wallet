@@ -51,7 +51,7 @@ pub struct NativeCurrency {
     pub decimals: u8,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct NetworkConfig {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +68,7 @@ pub struct NetworkConfig {
     /// single healthy endpoint anywhere in the list is enough, and the order
     /// is the order they are tried in.
     #[schemars(with = "Vec<String>")]
+    #[serde(deserialize_with = "deserialize_rpc_urls")]
     pub rpc_urls: Vec<Url>,
     /// Whether endpoints are tried in configured or fresh random order.
     #[serde(default, skip_serializing_if = "RpcStrategy::is_default")]
@@ -99,6 +100,19 @@ pub struct NetworkConfig {
     pub documentation_url: Option<Url>,
 }
 
+fn deserialize_rpc_urls<'de, D>(deserializer: D) -> std::result::Result<Vec<Url>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let urls = Vec::<Url>::deserialize(deserializer)?;
+    if urls.is_empty() {
+        return Err(serde::de::Error::custom(
+            "a network must contain at least one RPC URL",
+        ));
+    }
+    Ok(urls)
+}
+
 /// How a network's endpoints are ordered for one request.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -125,8 +139,7 @@ impl RpcStrategy {
         matches!(self, Self::Random)
     }
 
-    /// Serialization skips the default, so a configuration written before
-    /// this setting existed round-trips unchanged.
+    /// Serialization skips the default to keep the configuration concise.
     #[must_use]
     pub fn is_default(&self) -> bool {
         *self == Self::Ordered
@@ -166,184 +179,12 @@ impl NetworkConfig {
     }
 }
 
-/// The on-disk shape of a network, which still accepts the single `rpc_url`
-/// that every release through 1.0.0-rc.0 wrote.
-///
-/// Fallbacks turned the one endpoint into a list, and a configuration written
-/// before that change names exactly one. Reading it as a one-element list is
-/// the whole migration: the endpoint keeps working, and the next write records
-/// it in the new shape.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredNetwork {
-    name: String,
-    #[serde(default)]
-    display_name: Option<String>,
-    #[serde(default)]
-    aliases: Vec<String>,
-    chain_id: u64,
-    #[serde(default)]
-    rpc_url: Option<Url>,
-    #[serde(default)]
-    rpc_urls: Vec<Url>,
-    #[serde(default)]
-    rpc_strategy: RpcStrategy,
-    #[serde(default)]
-    max_gas_limit: Option<String>,
-    #[serde(default)]
-    max_fee_per_gas: Option<String>,
-    #[serde(default)]
-    native_currency: Option<NativeCurrency>,
-    #[serde(default)]
-    block_explorer_url: Option<Url>,
-    #[serde(default)]
-    documentation_url: Option<Url>,
-}
-
-// Written by hand rather than derived through `#[serde(try_from)]`: the
-// derive would make the published JSON schema the *stored* shape, advertising
-// a legacy `rpc_url` alongside `rpc_urls` to every MCP caller reading the
-// schema. What this type accepts and what it documents are allowed to differ,
-// and here they must.
-impl<'de> Deserialize<'de> for NetworkConfig {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        Self::try_from(StoredNetwork::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-    }
-}
-
-impl TryFrom<StoredNetwork> for NetworkConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(stored: StoredNetwork) -> Result<Self> {
-        // Both spellings at once is a file edited by hand into a state no
-        // build produces, and the two can disagree about which endpoint is
-        // primary. Refuse it rather than pick one.
-        ensure!(
-            stored.rpc_url.is_none() || stored.rpc_urls.is_empty(),
-            "network {} sets both rpc_url and rpc_urls; keep only rpc_urls",
-            stored.name
-        );
-        let rpc_urls = match stored.rpc_url {
-            Some(single) => vec![single],
-            None => stored.rpc_urls,
-        };
-        ensure!(
-            !rpc_urls.is_empty(),
-            "network {} has no RPC URL",
-            stored.name
-        );
-        Ok(Self {
-            name: stored.name,
-            display_name: stored.display_name,
-            aliases: stored.aliases,
-            chain_id: stored.chain_id,
-            rpc_urls,
-            rpc_strategy: stored.rpc_strategy,
-            max_gas_limit: stored.max_gas_limit,
-            max_fee_per_gas: stored.max_fee_per_gas,
-            native_currency: stored.native_currency,
-            block_explorer_url: stored.block_explorer_url,
-            documentation_url: stored.documentation_url,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WalletConfig {
     pub version: u8,
     pub wallets: Vec<WalletMetadata>,
     pub networks: Vec<NetworkConfig>,
-}
-
-/// The on-disk shape, which still accepts the `custody` enum that 0.1.0
-/// through 0.3.0-rc.0 wrote.
-///
-/// That enum held no information `source` and `exported_at` do not already
-/// carry, and held it less precisely: an imported key that was later exported
-/// collapsed to `exported` and lost the fact that it arrived externally known.
-/// It is therefore folded into those two fields on load and never written
-/// again. Reading the file through a dedicated type keeps `WalletMetadata`
-/// free of a field that exists only for compatibility.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredConfig {
-    version: u8,
-    wallets: Vec<StoredWallet>,
-    networks: Vec<NetworkConfig>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredWallet {
-    id: String,
-    address: Address,
-    created_at: DateTime<Utc>,
-    source: WalletSource,
-    #[serde(default)]
-    custody: Option<LegacyCustodyStatus>,
-    #[serde(default)]
-    exported_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum LegacyCustodyStatus {
-    Sealed,
-    ExternallyKnown,
-    Exported,
-}
-
-impl TryFrom<StoredWallet> for WalletMetadata {
-    type Error = anyhow::Error;
-
-    fn try_from(stored: StoredWallet) -> Result<Self> {
-        // Every released build set `custody` and `exported_at` inside one
-        // atomic configuration update, so the two can only disagree in a file
-        // edited by hand. Refuse that file rather than resolve it: silently
-        // trusting `exported_at` would downgrade a wallet whose key is
-        // recorded as copied into one that reads as never exported, which is
-        // the one direction this record must never fail in.
-        if let Some(custody) = stored.custody {
-            ensure!(
-                (custody == LegacyCustodyStatus::Exported) == stored.exported_at.is_some(),
-                "wallet {} records custody {:?} but {}; the two disagree, \
-                 so correct the configuration by hand before continuing",
-                stored.id,
-                custody,
-                if stored.exported_at.is_some() {
-                    "carries an export timestamp"
-                } else {
-                    "carries no export timestamp"
-                },
-            );
-        }
-        Ok(Self {
-            id: stored.id,
-            address: stored.address,
-            created_at: stored.created_at,
-            source: stored.source,
-            exported_at: stored.exported_at,
-        })
-    }
-}
-
-impl TryFrom<StoredConfig> for WalletConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(stored: StoredConfig) -> Result<Self> {
-        Ok(Self {
-            version: stored.version,
-            wallets: stored
-                .wallets
-                .into_iter()
-                .map(WalletMetadata::try_from)
-                .collect::<Result<Vec<_>>>()?,
-            networks: stored.networks,
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -419,10 +260,8 @@ impl ConfigStore {
             self.file.display()
         );
         let reader = bytes.as_slice();
-        let stored: StoredConfig = serde_json::from_reader(reader)
+        let config: WalletConfig = serde_json::from_reader(reader)
             .with_context(|| format!("failed to parse {}", self.file.display()))?;
-        let config = WalletConfig::try_from(stored)
-            .with_context(|| format!("failed to load {}", self.file.display()))?;
         validate_config(&config)?;
         Ok(config)
     }

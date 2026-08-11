@@ -15,101 +15,19 @@ fn key(byte: u8) -> DatabaseKey {
     DatabaseKey::new([byte; 32])
 }
 
-/// Build a database in the shape schema 9 left behind: every queue still
-/// carries `expires_at`, and some rows are already terminally `expired`.
-fn write_legacy_database(path: &Path, key: &DatabaseKey, version: i64) {
+fn write_unknown_schema(path: &Path, key: &DatabaseKey, version: i64) {
     let connection = Connection::open(path).unwrap();
     key.with_sqlcipher_literal(|literal| connection.pragma_update(None, "key", literal))
         .unwrap();
-    let insert_version =
-        format!("INSERT INTO schema_metadata(singleton, version) VALUES (1, {version})");
-    let statements = [
-        "CREATE TABLE schema_metadata (
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE schema_metadata (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  version INTEGER NOT NULL
-             ) STRICT",
-        insert_version.as_str(),
-        "CREATE TABLE pending_transactions (
-                 request_id TEXT PRIMARY KEY NOT NULL,
-                 wallet_id TEXT NOT NULL,
-                 network_name TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
-                 plan_json TEXT NOT NULL,
-                 plan_digest TEXT NOT NULL,
-                 policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
-                 status TEXT NOT NULL,
-                 created_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 serialized_transaction TEXT,
-                 signed_transaction_hash TEXT,
-                 broadcast_transaction_hash TEXT,
-                 block_number TEXT,
-                 approval_required INTEGER NOT NULL DEFAULT 1,
-                 review_digest TEXT,
-                 cancel_serialized_transaction TEXT,
-                 cancel_transaction_hashes TEXT
-             ) STRICT",
-        "CREATE TABLE pending_typed_data (
-                 request_id TEXT PRIMARY KEY NOT NULL,
-                 wallet_id TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
-                 typed_data_json TEXT NOT NULL,
-                 digest TEXT NOT NULL,
-                 status TEXT NOT NULL,
-                 approval_required INTEGER NOT NULL DEFAULT 1,
-                 policy_revision INTEGER,
-                 created_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 signature TEXT
-             ) STRICT",
-        "CREATE TABLE pending_messages (
-                 request_id TEXT PRIMARY KEY NOT NULL,
-                 wallet_id TEXT NOT NULL,
-                 chain_id TEXT NOT NULL,
-                 message_hex TEXT NOT NULL,
-                 message_encoding TEXT NOT NULL,
-                 digest TEXT NOT NULL,
-                 status TEXT NOT NULL,
-                 created_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 approved_at TEXT,
-                 rejected_at TEXT,
-                 signature TEXT
-             ) STRICT",
-        // One request the old rule had already closed, and one that never
-        // reached its deadline, in each queue that has one.
-        "INSERT INTO pending_transactions(
-                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
-                 policy_revision, status, created_at, expires_at, updated_at
-             ) VALUES ('lapsed', 'primary', 'ethereum', '1', '{}', '0xaa', 1,
-                       'expired', 't0', 't1', 't1')",
-        "INSERT INTO pending_transactions(
-                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
-                 policy_revision, status, created_at, expires_at, updated_at,
-                 serialized_transaction, signed_transaction_hash, broadcast_transaction_hash,
-                 block_number
-             ) VALUES ('mined', 'primary', 'ethereum', '1', '{}', '0xbb', 1,
-                       'confirmed', 't0', 't1', 't2', '0x0102', '0xcc', '0xcc', '17')",
-        "INSERT INTO pending_typed_data(
-                 request_id, wallet_id, chain_id, typed_data_json, digest, status,
-                 created_at, expires_at, updated_at
-             ) VALUES ('td-lapsed', 'primary', '1', '{}', '0xdd', 'expired', 't0', 't1', 't1')",
-        "INSERT INTO pending_messages(
-                 request_id, wallet_id, chain_id, message_hex, message_encoding, digest,
-                 status, created_at, expires_at, updated_at
-             ) VALUES ('msg-queued', 'primary', '', '0x6869', 'text', '0xee',
-                       'awaiting_approval', 't0', 't1', 't1')",
-    ];
-    for statement in statements {
-        connection.execute_batch(statement).unwrap();
-    }
+             ) STRICT;
+             INSERT INTO schema_metadata(singleton, version) VALUES (1, {version});"
+        ))
+        .unwrap();
     drop(connection);
 }
 
@@ -259,12 +177,11 @@ fn purging_a_wallet_leaves_nothing_for_the_next_one_to_inherit() {
 
 #[test]
 fn any_other_schema_is_refused_and_left_untouched() {
-    // There is one schema. A database carrying any other version is not
-    // upgraded in place — it is refused, and the refusal writes nothing,
-    // so whatever wrote the file still has it byte for byte.
+    // There is one schema. A database carrying any other version is refused,
+    // and the refusal writes nothing.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
-    write_legacy_database(&path, &key(11), 9);
+    write_unknown_schema(&path, &key(11), 9);
     let before = std::fs::read(&path).unwrap();
 
     let error = PolicyStore::open(&path, &key(11))
@@ -304,8 +221,7 @@ fn a_fresh_database_is_created_at_the_only_schema_there_is() {
         schema_version(&store.connection).unwrap(),
         Some(SCHEMA_VERSION)
     );
-    // Every table the build expects exists from creation; nothing arrives
-    // by later upgrade.
+    // Every table the build expects exists at creation.
     for table in [
         "wallet_policies",
         "pending_transactions",
@@ -328,9 +244,9 @@ fn a_fresh_database_is_created_at_the_only_schema_there_is() {
 
 #[test]
 fn schema_change_underneath_a_live_connection_is_refused() {
-    // A long-running server re-checks the version on every request; once
-    // another process migrates the database, every request fails with a
-    // restart instruction instead of writing through the old shape.
+    // A long-running server re-checks the version on every request. If the
+    // file changes underneath it, requests fail instead of writing through an
+    // unknown shape.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
     let store = PolicyStore::open(&path, &key(3)).unwrap();
@@ -602,27 +518,6 @@ fn committed_state_does_not_depend_on_a_persistent_wal() {
             .unwrap()
             .is_some()
     );
-}
-
-#[test]
-fn a_legacy_database_claiming_schema_one_is_refused() {
-    // The marker was briefly reset to 1 while databases carrying the retired
-    // schema 1 still existed. Both wore the same number and only one of them
-    // could be read; this pins that the number no longer collides.
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("policies.db");
-    write_legacy_database(&path, &key(13), 1);
-    let before = std::fs::read(&path).unwrap();
-
-    let error = PolicyStore::open(&path, &key(13))
-        .err()
-        .expect("a legacy schema 1 database must be refused")
-        .to_string();
-    assert!(
-        error.contains("schema 1 is not a desktop schema"),
-        "{error}"
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 mod in_flight_tests {

@@ -63,3 +63,37 @@ async fn a_closed_review_is_not_a_rejection() {
             .contains("closed")
     );
 }
+
+struct ChangedRefresh;
+
+#[async_trait::async_trait]
+impl ReviewRefresh for ChangedRefresh {
+    async fn resimulate(&self) -> anyhow::Result<Refreshed> {
+        let mut changed = document();
+        changed.request.summary = "Refreshed exact request".into();
+        changed = ReviewDocument::from_request(changed.request, vec!["0x5678".into()]);
+        Ok(Refreshed {
+            document: changed,
+            simulation: simulation(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn refresh_issues_a_new_single_use_review_frame() {
+    let (presenter, mut prompts) = GuiReviewPresenter::channel();
+    let task = tokio::spawn(async move {
+        presenter
+            .review_transaction(&document(), &simulation(), &ChangedRefresh)
+            .await
+    });
+    let first = prompts.recv().await.unwrap();
+    let first_identity = first.document.identity;
+    first.response.send(GuiReviewCommand::Refresh).unwrap();
+
+    let refreshed = prompts.recv().await.unwrap();
+    assert_ne!(refreshed.document.identity, first_identity);
+    assert_eq!(refreshed.document.exact_payloads, ["0x5678"]);
+    refreshed.response.send(GuiReviewCommand::Reject).unwrap();
+    assert_eq!(task.await.unwrap().unwrap(), ApprovalDecision::Rejected);
+}

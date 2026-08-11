@@ -860,6 +860,10 @@ pub async fn sign_reviewed_message(
         })
         .await?;
 
+    // Presence can remain open while the owner changes or removes this
+    // account's policy in another window. Re-read provisioning after the OS
+    // prompt so the signature cannot cross that configuration boundary.
+    require_provisioned_wallet(policies, &wallet.id)?;
     let current = store.get(request.request_id)?;
     ensure!(
         current.status == MessageStatus::AwaitingApproval
@@ -911,6 +915,7 @@ pub async fn sign_reviewed_typed_data(
         })
         .await?;
 
+    require_provisioned_wallet(policies, &wallet.id)?;
     let current = store.get(request.request_id)?;
     ensure!(
         current.status == TypedDataStatus::AwaitingApproval

@@ -19,11 +19,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use schemars::JsonSchema;
 use serde::Serialize;
-use std::{fs, path::Path};
-
-/// Plain-SQLite file used before the table moved into the encrypted
-/// database. Never trusted or imported: deleted on sight.
-const LEGACY_DATABASE_FILE: &str = "address_book.db";
+use std::path::Path;
 pub const MAX_NOTE_LEN: usize = 256;
 
 /// One stored alias, the address rendered checksummed.
@@ -49,9 +45,6 @@ pub struct AddressBookStore {
 
 impl AddressBookStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
-        }
         Ok(Self {
             database: PolicyStore::production(data_dir)?,
         })
@@ -127,11 +120,9 @@ impl AddressBookStore {
 
     /// Read one exact stored alias for a removal review.
     ///
-    /// Unlike [`Self::get`], this deliberately does not apply today's
-    /// write-time alias grammar. A legacy row must remain nameable on the
-    /// screen that authorizes its deletion; otherwise the owner can list it
-    /// and [`Self::remove`] can delete it, but the supported wrapper refuses
-    /// before either is reached.
+    /// Unlike [`Self::get`], this deliberately does not apply the write-time
+    /// alias grammar. A row remains nameable for deletion if validation rules
+    /// become stricter in a future build.
     pub fn get_for_removal(&self, chain_id: u64, alias: &str) -> Result<Option<AddressBookEntry>> {
         self.read(chain_id, alias)
     }

@@ -1,23 +1,28 @@
 use crate::{
     BUILD_VERSION,
+    agent_config::{AgentAdapter, ConfigPreview},
     authority::{ApplicationAuthority, OwnerApi},
+    gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     http_server::{MCP_REQUEST_LIMIT_BYTES, McpHttpServer},
-    migration::prepare_desktop_data_dir,
     notifications::{
         NotificationPreferences, NotificationRoute, NotificationService as _,
         PlatformNotificationService, notification_for,
     },
+    review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result, ensure};
+use ekubo_wallet_core::approval::ReviewDecision;
+use ekubo_wallet_core::desktop_store::AgentKind;
 use gpui::{
-    App, Context, KeyBinding, QuitMode, Render, SharedString, Window, WindowBounds, WindowOptions,
-    actions, div, prelude::*, px, size,
+    App, Context, Entity, KeyBinding, QuitMode, Render, SharedString, Window, WindowAppearance,
+    WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Root, StyledExt,
+    ActiveTheme, Disableable, Root, StyledExt,
     button::{Button, ButtonVariants},
+    scroll::ScrollableElement,
 };
 use std::{
     cell::RefCell,
@@ -25,6 +30,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio::sync::oneshot;
 
 actions!(ekubo_wallet, [OpenCommandPalette, Quit]);
 
@@ -92,21 +98,386 @@ impl Route {
 
 pub struct WalletWindow {
     owner: OwnerApi,
+    review_presenter: GuiReviewPresenter,
     route: Route,
     command_palette: bool,
     mcp_status: SharedString,
     selected_record: Option<uuid::Uuid>,
+    active_review: Option<ActiveReview>,
+    pending_agent_install: Option<PendingAgentInstall>,
+    operation_status: Option<SharedString>,
+}
+
+struct PendingAgentInstall {
+    display_name: String,
+    client_id: uuid::Uuid,
+    preview: Option<ConfigPreview>,
+    owner: OwnerApi,
+    committed: bool,
+}
+
+impl Drop for PendingAgentInstall {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.owner.remove_client(self.client_id);
+        }
+    }
+}
+
+struct ActiveReview {
+    state: ReviewState,
+    simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
+    completion: Option<ActiveReviewCompletion>,
+    awaiting_refresh: bool,
+}
+
+enum ActiveReviewCompletion {
+    Transaction(oneshot::Sender<GuiReviewCommand>),
+    Message {
+        request_id: uuid::Uuid,
+        digest: String,
+    },
+    TypedData {
+        request_id: uuid::Uuid,
+        digest: String,
+    },
 }
 
 impl WalletWindow {
-    fn new(owner: OwnerApi) -> Self {
+    fn new(owner: OwnerApi, review_presenter: GuiReviewPresenter) -> Self {
         Self {
             owner,
+            review_presenter,
             route: Route::Overview,
             command_palette: false,
             mcp_status: "MCP starting…".into(),
             selected_record: None,
+            active_review: None,
+            pending_agent_install: None,
+            operation_status: None,
         }
+    }
+
+    fn prepare_agent_install(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        if self.pending_agent_install.is_some() {
+            self.operation_status = Some("Finish the current agent installation first.".into());
+            cx.notify();
+            return;
+        }
+        let result = (|| -> Result<PendingAgentInstall> {
+            let adapter = AgentAdapter::supported()?
+                .into_iter()
+                .find(|adapter| adapter.kind == kind)
+                .context("the selected agent is not supported")?;
+            ensure!(
+                adapter.detected(),
+                "the selected agent is no longer detected"
+            );
+            let port = self
+                .owner
+                .mcp_port()?
+                .context("the MCP server has not selected its loopback port yet")?;
+            let registration = serde_json::json!({
+                "config_path": adapter.config_path,
+                "install_companion": true,
+            });
+            let registered = self.owner.register_client(
+                adapter.display_name,
+                adapter.kind,
+                Some(&registration),
+            )?;
+            let client_id = registered.client.id;
+            let token = registered.token.expose_base64url();
+            let preview = match adapter.preview_install(port, &token, true) {
+                Ok(preview) => preview,
+                Err(error) => {
+                    let _ = self.owner.remove_client(client_id);
+                    return Err(error);
+                }
+            };
+            Ok(PendingAgentInstall {
+                display_name: adapter.display_name.to_owned(),
+                client_id,
+                preview: Some(preview),
+                owner: self.owner.clone(),
+                committed: false,
+            })
+        })();
+        match result {
+            Ok(pending) => {
+                self.pending_agent_install = Some(pending);
+                self.operation_status = None;
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not prepare agent installation: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_agent_install(&mut self, cx: &mut Context<Self>) {
+        if self.pending_agent_install.take().is_some() {
+            self.operation_status = Some("Agent installation cancelled.".into());
+        }
+        cx.notify();
+    }
+
+    fn confirm_agent_install(&mut self, cx: &mut Context<Self>) {
+        let Some(mut pending) = self.pending_agent_install.take() else {
+            return;
+        };
+        let display_name = pending.display_name.clone();
+        let result = pending
+            .preview
+            .take()
+            .expect("a pending installation always has its preview")
+            .install();
+        self.operation_status = Some(match result {
+            Ok(backup) if backup.as_os_str().is_empty() => {
+                pending.committed = true;
+                format!("Installed {display_name} MCP configuration.").into()
+            }
+            Ok(backup) => {
+                pending.committed = true;
+                format!(
+                    "Installed {display_name} MCP configuration. Backup: {}",
+                    backup.display()
+                )
+                .into()
+            }
+            Err(error) => format!("Could not install {display_name}: {error:#}").into(),
+        });
+        cx.notify();
+    }
+
+    fn install_review_prompt(&mut self, prompt: GuiReviewPrompt) {
+        if let Some(active) = self.active_review.as_mut() {
+            active.state.refresh(prompt.document);
+            active.simulation = Some(prompt.simulation);
+            active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
+            active.awaiting_refresh = false;
+        } else {
+            self.active_review = Some(ActiveReview {
+                state: ReviewState::new(prompt.document),
+                simulation: Some(prompt.simulation),
+                completion: Some(ActiveReviewCompletion::Transaction(prompt.response)),
+                awaiting_refresh: false,
+            });
+        }
+    }
+
+    fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        match self.owner.message_review_document(request_id) {
+            Ok(document) => {
+                let digest = document.request.digest.clone().unwrap_or_default();
+                self.active_review = Some(ActiveReview {
+                    state: ReviewState::new(document),
+                    simulation: None,
+                    completion: Some(ActiveReviewCompletion::Message { request_id, digest }),
+                    awaiting_refresh: false,
+                });
+                self.operation_status = None;
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not open message review: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn begin_typed_data_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        match self.owner.typed_data_review_document(request_id) {
+            Ok(document) => {
+                let digest = document.request.digest.clone().unwrap_or_default();
+                self.active_review = Some(ActiveReview {
+                    state: ReviewState::new(document),
+                    simulation: None,
+                    completion: Some(ActiveReviewCompletion::TypedData { request_id, digest }),
+                    awaiting_refresh: false,
+                });
+                self.operation_status = None;
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not open typed-data review: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn begin_transaction_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self.active_review.is_some() {
+            self.operation_status = Some("Finish or close the current review first.".into());
+            cx.notify();
+            return;
+        }
+        self.operation_status = Some(format!("Opening review {request_id}…").into());
+        let owner = self.owner.clone();
+        let presenter = self.review_presenter.clone();
+        cx.spawn(async move |view, cx| {
+            let result = owner.review_transaction(request_id, &presenter).await;
+            let _ = view.update(cx, |view, cx| {
+                view.operation_status = Some(match result {
+                    Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Signed(_)) => {
+                        "Review approved and transaction signed.".into()
+                    }
+                    Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Rejected(_)) => {
+                        "Review rejected. No signature was produced.".into()
+                    }
+                    Err(error) if error.to_string().contains("closed without a decision") => {
+                        "Review closed. The request remains pending.".into()
+                    }
+                    Err(error) => format!("Review failed: {error:#}").into(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn mark_review_viewed(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self
+            .active_review
+            .as_mut()
+            .is_some_and(|review| review.state.mark_viewed_to_end(generation))
+        {
+            cx.notify();
+        }
+    }
+
+    fn select_review(&mut self, generation: u64, decision: ReviewDecision, cx: &mut Context<Self>) {
+        if self
+            .active_review
+            .as_mut()
+            .is_some_and(|review| review.state.select(generation, decision))
+        {
+            cx.notify();
+        }
+    }
+
+    fn send_review_command(
+        &mut self,
+        generation: u64,
+        command: GuiReviewCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(active) = self.active_review.as_mut() else {
+            return;
+        };
+        if active.state.generation() != generation {
+            return;
+        }
+        let permitted = match command {
+            GuiReviewCommand::Approve => {
+                active.state.selected() == ReviewDecision::Approve && active.state.approve_enabled()
+            }
+            GuiReviewCommand::Reject => active.state.selected() == ReviewDecision::Reject,
+            GuiReviewCommand::Refresh | GuiReviewCommand::Close => true,
+        };
+        if !permitted {
+            return;
+        }
+        let completion = active.completion.take();
+        let owner = self.owner.clone();
+        match (command, completion) {
+            (GuiReviewCommand::Refresh, Some(ActiveReviewCompletion::Transaction(response))) => {
+                active.awaiting_refresh = true;
+                if response.send(command).is_err() {
+                    self.operation_status = Some("The review request is no longer active.".into());
+                    self.active_review = None;
+                }
+            }
+            (GuiReviewCommand::Close, Some(ActiveReviewCompletion::Transaction(response))) => {
+                let _ = response.send(command);
+                self.active_review = None;
+            }
+            (
+                GuiReviewCommand::Approve | GuiReviewCommand::Reject,
+                Some(ActiveReviewCompletion::Transaction(response)),
+            ) => {
+                if response.send(command).is_err() {
+                    self.operation_status = Some("The review request is no longer active.".into());
+                }
+                self.active_review = None;
+            }
+            (
+                GuiReviewCommand::Close,
+                Some(
+                    ActiveReviewCompletion::Message { .. }
+                    | ActiveReviewCompletion::TypedData { .. },
+                ),
+            ) => {
+                self.active_review = None;
+                self.operation_status = Some("Review closed. The request remains pending.".into());
+            }
+            (
+                GuiReviewCommand::Reject,
+                Some(ActiveReviewCompletion::Message { request_id, .. }),
+            ) => {
+                self.active_review = None;
+                self.operation_status = Some(match owner.reject_message(request_id) {
+                    Ok(_) => "Message signature rejected.".into(),
+                    Err(error) => format!("Could not reject message: {error:#}").into(),
+                });
+            }
+            (
+                GuiReviewCommand::Reject,
+                Some(ActiveReviewCompletion::TypedData { request_id, .. }),
+            ) => {
+                self.active_review = None;
+                self.operation_status = Some(match owner.reject_typed_data(request_id) {
+                    Ok(_) => "Typed-data signature rejected.".into(),
+                    Err(error) => format!("Could not reject typed data: {error:#}").into(),
+                });
+            }
+            (
+                GuiReviewCommand::Approve,
+                Some(ActiveReviewCompletion::Message { request_id, digest }),
+            ) => {
+                self.active_review = None;
+                cx.spawn(async move |view, cx| {
+                    let result = owner.sign_message(request_id, &digest).await;
+                    let _ = view.update(cx, |view, cx| {
+                        view.operation_status = Some(match result {
+                            Ok(_) => "Message reviewed, authenticated, and signed.".into(),
+                            Err(error) => format!("Message signing failed: {error:#}").into(),
+                        });
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            (
+                GuiReviewCommand::Approve,
+                Some(ActiveReviewCompletion::TypedData { request_id, digest }),
+            ) => {
+                self.active_review = None;
+                cx.spawn(async move |view, cx| {
+                    let result = owner.sign_typed_data(request_id, &digest).await;
+                    let _ = view.update(cx, |view, cx| {
+                        view.operation_status = Some(match result {
+                            Ok(_) => "Typed data reviewed, authenticated, and signed.".into(),
+                            Err(error) => format!("Typed-data signing failed: {error:#}").into(),
+                        });
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            (GuiReviewCommand::Refresh, completion) => {
+                active.completion = completion;
+                self.operation_status =
+                    Some("Only transaction reviews can be re-simulated.".into());
+            }
+            (_, None) => {
+                self.operation_status = Some("The review request is no longer active.".into());
+                self.active_review = None;
+            }
+        }
+        cx.notify();
     }
 
     fn toggle_palette(&mut self, _: &OpenCommandPalette, _: &mut Window, cx: &mut Context<Self>) {
@@ -141,9 +512,638 @@ impl WalletWindow {
         sidebar
     }
 
+    fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut content = div().flex().flex_col().gap_3();
+        match self.owner.reviews(None) {
+            Ok(queues) => {
+                let total =
+                    queues.transactions.len() + queues.typed_data.len() + queues.messages.len();
+                content = content.child(format!("{total} request(s) awaiting an owner decision"));
+                for request in queues.transactions {
+                    let request_id = request.request_id;
+                    content =
+                        content.child(
+                            div()
+                                .p_3()
+                                .border_1()
+                                .rounded_lg()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(format!(
+                                            "Transaction · {} · {}",
+                                            request.wallet_id, request.network_name
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "{} · {}",
+                                                    request_id, request.created_at
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "review-transaction-{request_id}"
+                                    )))
+                                    .label("Review")
+                                    .primary()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.begin_transaction_review(request_id, cx);
+                                    })),
+                                ),
+                        );
+                }
+                for request in queues.typed_data {
+                    let request_id = request.request_id;
+                    content =
+                        content.child(
+                            div()
+                                .p_3()
+                                .border_1()
+                                .rounded_lg()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(format!(
+                                    "Typed data · {} · {} · {}",
+                                    request.wallet_id, request.chain_id, request_id
+                                ))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "review-typed-data-{request_id}"
+                                    )))
+                                    .label("Review")
+                                    .primary()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.begin_typed_data_review(request_id, cx);
+                                    })),
+                                ),
+                        );
+                }
+                for request in queues.messages {
+                    let request_id = request.request_id;
+                    content =
+                        content.child(
+                            div()
+                                .p_3()
+                                .border_1()
+                                .rounded_lg()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(format!("Message · {} · {}", request.wallet_id, request_id))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "review-message-{request_id}"
+                                    )))
+                                    .label("Review")
+                                    .primary()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.begin_message_review(request_id, cx);
+                                    })),
+                                ),
+                        );
+                }
+                if total == 0 {
+                    content = content.child(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Nothing is waiting for review."),
+                    );
+                }
+            }
+            Err(error) => {
+                content = content.child(format!("Reviews unavailable: {error:#}"));
+            }
+        }
+        content
+    }
+
+    fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut panel = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(self.mcp_status.clone())
+            .child(format!(
+                "Request limit: {} MiB",
+                MCP_REQUEST_LIMIT_BYTES / 1024 / 1024
+            ))
+            .child("Notifications hide transaction details by default.")
+            .child(div().mt_3().font_semibold().child("Detected agents"));
+        let clients = self.owner.clients().unwrap_or_default();
+        let adapters = match AgentAdapter::supported() {
+            Ok(adapters) => adapters,
+            Err(error) => return panel.child(format!("Agent detection unavailable: {error:#}")),
+        };
+        let mut detected = 0;
+        for adapter in adapters.into_iter().filter(AgentAdapter::detected) {
+            detected += 1;
+            let kind = adapter.kind;
+            let installed = clients
+                .iter()
+                .any(|client| client.agent_kind == kind && client.revoked_at.is_none());
+            panel = panel.child(
+                div()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div().child(adapter.display_name).child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(adapter.config_path.display().to_string()),
+                        ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("install-agent-{kind:?}")))
+                            .label(if installed { "Installed" } else { "Install" })
+                            .disabled(installed || self.pending_agent_install.is_some())
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.prepare_agent_install(kind, cx);
+                            })),
+                    ),
+            );
+        }
+        if detected == 0 {
+            panel = panel.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No supported agent installation was detected."),
+            );
+        }
+        panel
+    }
+
+    fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let panel = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_2();
+        match self.route {
+            Route::Overview => {
+                let accounts = self.owner.accounts().map_or(0, |items| items.len());
+                let agents = self.owner.clients().map_or(0, |items| items.len());
+                let reviews = self.owner.reviews(None).map_or(0, |queues| {
+                    queues.transactions.len() + queues.typed_data.len() + queues.messages.len()
+                });
+                panel
+                    .child(format!("{accounts} account(s)"))
+                    .child(format!("{agents} registered agent(s)"))
+                    .child(format!("{reviews} pending review(s)"))
+                    .child(self.mcp_status.clone())
+            }
+            Route::Activity => match self.owner.transactions(None, 200) {
+                Ok(items) => panel.children(items.into_iter().map(|item| {
+                    div()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(format!(
+                            "{:?} · {} · {} · {}",
+                            item.status, item.wallet_id, item.network_name, item.request_id
+                        ))
+                })),
+                Err(error) => panel.child(format!("Activity unavailable: {error:#}")),
+            },
+            Route::Accounts => match self.owner.accounts() {
+                Ok(items) => panel.children(items.into_iter().map(|item| {
+                    div()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(format!("{} · {:#x}", item.id, item.address))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("{:?} · created {}", item.source, item.created_at)),
+                        )
+                })),
+                Err(error) => panel.child(format!("Accounts unavailable: {error:#}")),
+            },
+            Route::Policies => match self.owner.accounts() {
+                Ok(accounts) => {
+                    let mut content = panel;
+                    for account in accounts {
+                        content = content.child(match self.owner.policy(&account.id) {
+                            Ok(Some(policy)) => div()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(cx.theme().border)
+                                .child(format!(
+                                    "{} · revision {} · updated {}",
+                                    policy.wallet_id, policy.revision, policy.updated_at
+                                )),
+                            Ok(None) => {
+                                div().child(format!("{} · signing disabled: no policy", account.id))
+                            }
+                            Err(error) => div()
+                                .child(format!("{} · policy unavailable: {error:#}", account.id)),
+                        });
+                    }
+                    content
+                }
+                Err(error) => panel.child(format!("Policies unavailable: {error:#}")),
+            },
+            Route::Networks => match self.owner.networks() {
+                Ok(items) => panel.children(items.into_iter().map(|item| {
+                    div()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(format!(
+                            "{} · chain {}",
+                            item.display_name.as_deref().unwrap_or(&item.name),
+                            item.chain_id
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("{} RPC endpoint(s)", item.rpc_urls.len())),
+                        )
+                })),
+                Err(error) => panel.child(format!("Networks unavailable: {error:#}")),
+            },
+            Route::Tokens => match self.owner.tokens(None, 500, 0) {
+                Ok(items) => panel.children(items.into_iter().map(|item| {
+                    div()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(format!(
+                            "{} · chain {} · {}",
+                            item.symbol.as_deref().unwrap_or("Unnamed token"),
+                            item.chain_id,
+                            item.address
+                        ))
+                })),
+                Err(error) => panel.child(format!("Tokens unavailable: {error:#}")),
+            },
+            Route::AddressBook => match self.owner.address_book(None, 500, 0) {
+                Ok(items) => panel.children(items.into_iter().map(|item| {
+                    div()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(format!(
+                            "{} · chain {} · {}",
+                            item.alias, item.chain_id, item.address
+                        ))
+                        .when_some(item.note, |row, note| {
+                            row.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(note),
+                            )
+                        })
+                })),
+                Err(error) => panel.child(format!("Address book unavailable: {error:#}")),
+            },
+            Route::Agents => match self.owner.clients() {
+                Ok(items) => panel.children(items.into_iter().map(|item| {
+                    div()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(format!("{} · {:?}", item.display_name, item.agent_kind))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if let Some(revoked) = item.revoked_at {
+                                    format!("Revoked {revoked}")
+                                } else if let Some(last_used) = item.last_used_at {
+                                    format!("Last used {last_used}")
+                                } else {
+                                    "Registered, not yet used".into()
+                                }),
+                        )
+                })),
+                Err(error) => panel.child(format!("Agents unavailable: {error:#}")),
+            },
+            Route::WalletConnect => panel
+                .child("Pairings are kept only in memory and are disconnected on Quit.")
+                .child("Paste and screen-scan controls will appear here."),
+            Route::Settings => self.render_settings(cx),
+            Route::Legal => match self.owner.legal_status() {
+                Ok(status) => panel
+                    .child(format!("Signing enabled: {}", status.signing_allowed))
+                    .child(format!(
+                        "Terms accepted: {}",
+                        status.terms_of_service.accepted
+                    ))
+                    .child(format!(
+                        "Privacy policy accepted: {}",
+                        status.privacy_policy.accepted
+                    ))
+                    .child(format!("Version {BUILD_VERSION}")),
+                Err(error) => panel.child(format!("Legal status unavailable: {error:#}")),
+            },
+            Route::Updates => panel
+                .child(format!("Installed version: {BUILD_VERSION}"))
+                .child("Updates are downloaded and signature-verified only after confirmation."),
+            Route::Reviews => self.render_reviews(cx),
+        }
+    }
+
+    fn render_review_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(active) = &self.active_review else {
+            return div();
+        };
+        let generation = active.state.generation();
+        let document = active.state.document();
+        let selected = active.state.selected();
+        let approve_enabled = active.state.approve_enabled() && !active.awaiting_refresh;
+        let can_refresh = matches!(
+            active.completion,
+            Some(ActiveReviewCompletion::Transaction(_))
+        );
+        let mut review_body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_xl()
+                    .font_semibold()
+                    .child(document.request.title.clone()),
+            )
+            .child(document.request.summary.clone());
+        for fact in &document.request.facts {
+            review_body = review_body.child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(div().w(px(150.0)).font_semibold().child(fact.label.clone()))
+                    .child(div().flex_1().child(fact.value.clone())),
+            );
+        }
+        for section in &document.request.sections {
+            review_body =
+                review_body.child(div().mt_3().font_semibold().child(section.heading.clone()));
+            for fact in &section.facts {
+                review_body = review_body.child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(div().w(px(150.0)).child(fact.label.clone()))
+                        .child(div().flex_1().child(fact.value.clone())),
+                );
+            }
+        }
+        for warning in &document.request.warnings {
+            review_body = review_body.child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(format!("Warning: {warning}")),
+            );
+        }
+        if let Some(digest) = &document.request.digest {
+            review_body = review_body.child(
+                div()
+                    .child("Digest")
+                    .child(div().font_family("monospace").child(digest.clone())),
+            );
+        }
+        for (index, payload) in document.exact_payloads.iter().enumerate() {
+            review_body = review_body.child(
+                div()
+                    .mt_3()
+                    .child(format!("Exact payload {}", index + 1))
+                    .child(
+                        div()
+                            .mt_1()
+                            .p_3()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .font_family("monospace")
+                            .whitespace_normal()
+                            .child(payload.clone()),
+                    ),
+            );
+        }
+        if let Some(simulation) = &active.simulation {
+            review_body = review_body
+                .child(div().mt_3().font_semibold().child("Fresh simulation"))
+                .child(format!(
+                    "Block {} · success {} · policy {:?} · mode {:?}",
+                    simulation.block_number,
+                    simulation.simulation.success,
+                    simulation.policy_outcome,
+                    simulation.execution_mode
+                ));
+        }
+        review_body = review_body.child(
+            Button::new(("review-viewed", generation))
+                .label(if active.state.approve_enabled() {
+                    "Complete review viewed"
+                } else {
+                    "Mark complete review as viewed"
+                })
+                .disabled(active.state.approve_enabled())
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.mark_review_viewed(generation, cx);
+                })),
+        );
+
+        div()
+            .absolute()
+            .inset_4()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(div().font_semibold().child("Security review"))
+                    .child(
+                        Button::new(("review-close", generation))
+                            .label("Close")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.send_review_command(generation, GuiReviewCommand::Close, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id(("review-scroll", generation))
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .pr_2()
+                    .child(review_body),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        Button::new(("review-refresh", generation))
+                            .label("Re-simulate")
+                            .loading(active.awaiting_refresh)
+                            .disabled(active.awaiting_refresh || !can_refresh)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.send_review_command(generation, GuiReviewCommand::Refresh, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new(("review-select-reject", generation))
+                                    .label("Reject")
+                                    .when(
+                                        selected == ReviewDecision::Reject,
+                                        ButtonVariants::primary,
+                                    )
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.select_review(generation, ReviewDecision::Reject, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(("review-select-approve", generation))
+                                    .label("Approve")
+                                    .disabled(!approve_enabled)
+                                    .when(
+                                        selected == ReviewDecision::Approve,
+                                        ButtonVariants::primary,
+                                    )
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.select_review(generation, ReviewDecision::Approve, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new(("review-confirm", generation))
+                                    .label(if selected == ReviewDecision::Reject {
+                                        "Reject request"
+                                    } else {
+                                        "Authenticate & approve"
+                                    })
+                                    .danger()
+                                    .when(
+                                        selected == ReviewDecision::Approve,
+                                        ButtonVariants::primary,
+                                    )
+                                    .disabled(
+                                        active.awaiting_refresh
+                                            || (selected == ReviewDecision::Approve
+                                                && !approve_enabled),
+                                    )
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        let command = if selected == ReviewDecision::Reject {
+                                            GuiReviewCommand::Reject
+                                        } else {
+                                            GuiReviewCommand::Approve
+                                        };
+                                        view.send_review_command(generation, command, cx);
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_agent_install_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(pending) = &self.pending_agent_install else {
+            return div();
+        };
+        div()
+            .absolute()
+            .inset_4()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .font_semibold()
+                    .child(format!("Install {} MCP configuration", pending.display_name)),
+            )
+            .child("Review the exact configuration change. A timestamped backup is created before installation.")
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .font_family("monospace")
+                    .child(
+                        pending
+                            .preview
+                            .as_ref()
+                            .expect("a pending installation always has its preview")
+                            .exact_diff()
+                            .to_owned(),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-agent-install")
+                            .label("Cancel")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.cancel_agent_install(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("confirm-agent-install")
+                            .label("Install")
+                            .primary()
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.confirm_agent_install(cx);
+                            })),
+                    ),
+            )
+    }
+
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let accounts = self.owner.accounts().map_or(0, |accounts| accounts.len());
-        let agents = self.owner.clients().map_or(0, |agents| agents.len());
         div()
             .flex_1()
             .h_full()
@@ -155,34 +1155,19 @@ impl WalletWindow {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(div().text_2xl().font_semibold().child(self.route.label()))
-                    .child(
-                        Button::new("command-palette")
-                            .label("Search  ⌘K")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.command_palette = true;
-                                cx.notify();
-                            })),
-                    ),
+                    .child(div().text_2xl().font_semibold().child(self.route.label())),
             )
-            .child(
-                div()
-                    .p_4()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(format!("{accounts} account(s)"))
-                    .child(format!("{agents} registered agent(s)"))
-                    .child(self.mcp_status.clone())
-                    .child(format!(
-                        "Loopback requests are limited to {} MiB",
-                        MCP_REQUEST_LIMIT_BYTES / 1024 / 1024
-                    )),
-            )
+            .child(self.route_panel(cx))
+            .when_some(self.operation_status.clone(), |view, status| {
+                view.child(
+                    div()
+                        .p_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .child(status),
+                )
+            })
             .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
                 "Agent tokens protect this endpoint from accidental or unauthorized local clients. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user.",
             ))
@@ -228,12 +1213,58 @@ impl Render for WalletWindow {
             .when(self.command_palette, |view| {
                 view.child(Self::render_palette(cx))
             })
+            .when(self.active_review.is_some(), |view| {
+                view.child(self.render_review_overlay(cx))
+            })
+            .when(self.pending_agent_install.is_some(), |view| {
+                view.child(self.render_agent_install_overlay(cx))
+            })
     }
+}
+
+type WalletWindowSlot = Rc<RefCell<Option<WindowHandle<Root>>>>;
+
+fn dark_appearance(appearance: WindowAppearance) -> bool {
+    matches!(
+        appearance,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    )
+}
+
+fn show_wallet_window(
+    cx: &mut App,
+    wallet_view: &Entity<WalletWindow>,
+    window_slot: &WalletWindowSlot,
+) -> Result<()> {
+    let existing = *window_slot.borrow();
+    if let Some(window_handle) = existing
+        && window_handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+    {
+        cx.activate(true);
+        return Ok(());
+    }
+
+    let root_view = wallet_view.clone();
+    let window_handle = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(960.0), px(650.0)), cx)),
+            ..Default::default()
+        },
+        |window, cx| {
+            window.set_window_title(&format!("Ekubo Wallet {BUILD_VERSION}"));
+            cx.new(|cx| Root::new(root_view, window, cx))
+        },
+    )?;
+    window_handle.update(cx, |_, window, _| window.activate_window())?;
+    *window_slot.borrow_mut() = Some(window_handle);
+    cx.activate(true);
+    Ok(())
 }
 
 pub fn run_desktop() -> Result<()> {
     let config = crate::config::ConfigStore::production()?;
-    let _legacy_archive = prepare_desktop_data_dir(config.data_dir())?;
     let (activation_tx, activation_rx) = std::sync::mpsc::channel();
     let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
         InstanceOutcome::Primary(instance) => instance,
@@ -248,12 +1279,15 @@ pub fn run_desktop() -> Result<()> {
     let walletconnect = Arc::new(Mutex::new(
         crate::walletconnect::WalletConnectManager::default(),
     ));
+    let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
 
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
         gpui_tokio::init(cx);
         cx.set_quit_mode(QuitMode::Explicit);
-        let tray = Rc::new(RefCell::new(PlatformTray::new().ok()));
+        let tray = Rc::new(RefCell::new(
+            PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
+        ));
         let initial_agents = owner.clients().map_or(0, |clients| clients.len());
         if let Some(tray) = tray.borrow_mut().as_mut() {
             tray.update(&TraySnapshot {
@@ -298,36 +1332,78 @@ pub fn run_desktop() -> Result<()> {
         })
         .detach();
 
-        let wallet_view = cx.new(|_| WalletWindow::new(owner.clone()));
-        let root_view = wallet_view.clone();
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::centered(size(px(960.0), px(650.0)), cx)),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    window.set_window_title(&format!("Ekubo Wallet {BUILD_VERSION}"));
-                    window.on_window_should_close(cx, |window, _| {
-                        window.minimize_window();
-                        false
-                    });
-                    cx.new(|cx| Root::new(root_view, window, cx))
-                },
-            )
+        let wallet_view = cx.new(|_| WalletWindow::new(owner.clone(), review_presenter.clone()));
+        let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
+        show_wallet_window(cx, &wallet_view, &window_slot)
             .expect("failed to open the wallet window");
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .ok();
-
+        let review_view = wallet_view.clone();
+        let review_window = window_slot.clone();
+        cx.spawn(async move |cx| {
+            while let Some(prompt) = review_prompts.recv().await {
+                review_view.update(cx, |view, cx| {
+                    view.install_review_prompt(prompt);
+                    view.route = Route::Reviews;
+                    cx.notify();
+                });
+                let _ = cx.update(|cx| show_wallet_window(cx, &review_view, &review_window));
+            }
+        })
+        .detach();
+        let mut view_events = events.subscribe();
+        let event_view = wallet_view.clone();
+        let event_owner = owner.clone();
+        let event_tray = tray.clone();
+        let event_walletconnect = walletconnect.clone();
+        cx.spawn(async move |cx| {
+            let mut mcp_online = false;
+            loop {
+                let changed = match view_events.recv().await {
+                    Ok(event) => {
+                        if let crate::events::DomainEventKind::McpStatusChanged { online } =
+                            event.kind
+                        {
+                            mcp_online = online;
+                        }
+                        true
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+                };
+                if changed {
+                    let pending_reviews = event_owner.reviews(None).map_or(0, |queues| {
+                        queues.transactions.len() + queues.typed_data.len() + queues.messages.len()
+                    });
+                    let connected_agents = event_owner.clients().map_or(0, |clients| clients.len());
+                    let walletconnect_sessions = event_walletconnect
+                        .lock()
+                        .map_or(0, |sessions| sessions.sessions().len());
+                    if let Some(tray) = event_tray.borrow_mut().as_mut() {
+                        tray.update(&TraySnapshot {
+                            pending_reviews,
+                            mcp_online,
+                            connected_agents,
+                            walletconnect_sessions,
+                        });
+                    }
+                    event_view.update(cx, |_, cx| cx.notify());
+                } else {
+                    break;
+                }
+            }
+        })
+        .detach();
         let tray_events = tray.clone();
-        let tray_window = window;
+        let tray_window = window_slot.clone();
         let tray_view = wallet_view.clone();
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
+                let dark_mode = cx.update(|cx| dark_appearance(cx.window_appearance()));
+                if let Some(tray) = tray_events.borrow_mut().as_mut() {
+                    tray.set_dark_mode(dark_mode);
+                }
                 let commands = tray_events
                     .borrow_mut()
                     .as_mut()
@@ -335,28 +1411,32 @@ pub fn run_desktop() -> Result<()> {
                 for command in commands {
                     match command {
                         TrayCommand::OpenWallet => {
-                            let _ = tray_window.update(cx, |_, window, _| window.activate_window());
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
                         }
                         TrayCommand::OpenRoute(route) => {
                             tray_view.update(cx, |view, cx| {
                                 view.route = route;
                                 cx.notify();
                             });
-                            let _ = tray_window.update(cx, |_, window, _| window.activate_window());
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
                         }
                         TrayCommand::ConnectDapp => {
                             tray_view.update(cx, |view, cx| {
                                 view.route = Route::WalletConnect;
                                 cx.notify();
                             });
-                            let _ = tray_window.update(cx, |_, window, _| window.activate_window());
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
                         }
                         TrayCommand::CheckForUpdates => {
                             tray_view.update(cx, |view, cx| {
                                 view.route = Route::Updates;
                                 cx.notify();
                             });
-                            let _ = tray_window.update(cx, |_, window, _| window.activate_window());
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
                         }
                         TrayCommand::Quit => {
                             cx.update(|cx| cx.quit());
@@ -394,7 +1474,7 @@ pub fn run_desktop() -> Result<()> {
         })
         .detach();
 
-        let notification_window = window;
+        let notification_window = window_slot.clone();
         let notification_view = wallet_view.clone();
         cx.spawn(async move |cx| {
             while let Some(route) = clicked_notifications.recv().await {
@@ -411,12 +1491,14 @@ pub fn run_desktop() -> Result<()> {
                     }
                     cx.notify();
                 });
-                let _ = notification_window.update(cx, |_, window, _| window.activate_window());
+                let _ = cx
+                    .update(|cx| show_wallet_window(cx, &notification_view, &notification_window));
             }
         })
         .detach();
 
-        let activation_window = window;
+        let activation_window = window_slot;
+        let activation_view = wallet_view.clone();
         cx.spawn(async move |cx| {
             let mut receiver = activation_rx;
             loop {
@@ -432,7 +1514,8 @@ pub fn run_desktop() -> Result<()> {
                     break;
                 };
                 receiver = next;
-                let _ = activation_window.update(cx, |_, window, _| window.activate_window());
+                let _ =
+                    cx.update(|cx| show_wallet_window(cx, &activation_view, &activation_window));
             }
         })
         .detach();
@@ -471,3 +1554,7 @@ pub fn run_desktop() -> Result<()> {
     });
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "desktop_test.rs"]
+mod tests;

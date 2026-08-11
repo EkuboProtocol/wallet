@@ -26,10 +26,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Write as _, fs, path::Path};
-
-/// The pre-database acceptance file, deleted on sight.
-const LEGACY_ACCEPTANCE_FILE: &str = "legal.json";
+use std::{fmt::Write as _, path::Path};
 
 /// Shipped attribution document for third-party dependencies. Regenerate with
 /// `contrib/generate-third-party-licenses.py`; `tests/shipped_assets.rs`
@@ -405,10 +402,6 @@ pub struct LegalStore {
 
 impl LegalStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
-        // Acceptance recorded by pre-database builds lived in a plain JSON
-        // file, which is exactly the forgeable state this store replaces.
-        // Remove it; those installations re-accept once.
-        let _ = fs::remove_file(data_dir.join(LEGACY_ACCEPTANCE_FILE));
         Ok(Self {
             database: PolicyStore::production(data_dir)?,
         })

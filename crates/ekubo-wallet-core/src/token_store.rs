@@ -50,23 +50,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, str::FromStr, time::Duration};
 
-/// Plain-SQLite file used before the table moved into the encrypted
-/// database. Never trusted or imported: deleted on sight.
-const LEGACY_DATABASE_FILE: &str = "tokens.db";
-
-/// Remove any pre-encryption token file, exactly as the address book treats
-/// its own. A plain file in the data directory has no curator behind it: the
-/// filesystem is untrusted, so anything that read one would be an
-/// unauthenticated writer to the table the review screen presents as
-/// owner-confirmed.
-///
-/// Separate from `production` so it can be tested without opening the
-/// encrypted database, which needs the OS credential store.
-fn discard_legacy_database(data_dir: &Path) {
-    for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(data_dir.join(format!("{LEGACY_DATABASE_FILE}{suffix}")));
-    }
-}
 /// Balance reads per Multicall3 request.
 const BALANCE_CHUNK: usize = 200;
 /// Tokens one import may carry.
@@ -279,7 +262,6 @@ impl ProposalSource<'_> {
 
 impl TokenStore {
     pub fn production(data_dir: &Path) -> Result<Self> {
-        discard_legacy_database(data_dir);
         Ok(Self {
             database: PolicyStore::production(data_dir)?,
         })

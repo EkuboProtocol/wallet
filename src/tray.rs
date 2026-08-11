@@ -44,10 +44,11 @@ pub struct PlatformTray {
     reviews: MenuItem,
     agents: MenuItem,
     snapshot: TraySnapshot,
+    dark_mode: bool,
 }
 
 impl PlatformTray {
-    pub fn new() -> Result<Self> {
+    pub fn new(dark_mode: bool) -> Result<Self> {
         let menu = Menu::new();
         let open = MenuItem::with_id(OPEN_ID, "Open Wallet", true, None);
         let reviews = MenuItem::with_id(REVIEWS_ID, "No pending reviews", true, None);
@@ -75,8 +76,8 @@ impl PlatformTray {
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(true)
             .with_tooltip("Ekubo Wallet")
-            .with_icon(wallet_icon()?)
-            .with_icon_as_template(cfg!(target_os = "macos"))
+            .with_icon(wallet_icon(dark_mode)?)
+            .with_icon_as_template(false)
             .build()
             .context("the desktop has no usable tray host")?;
 
@@ -90,7 +91,19 @@ impl PlatformTray {
                 connected_agents: 0,
                 walletconnect_sessions: 0,
             },
+            dark_mode,
         })
+    }
+
+    pub fn set_dark_mode(&mut self, dark_mode: bool) {
+        if self.dark_mode == dark_mode {
+            return;
+        }
+        if let Ok(icon) = wallet_icon(dark_mode)
+            && self.tray.set_icon(Some(icon)).is_ok()
+        {
+            self.dark_mode = dark_mode;
+        }
     }
 }
 
@@ -138,7 +151,23 @@ impl TrayService for PlatformTray {
     }
 }
 
-fn wallet_icon() -> Result<Icon> {
+#[cfg(target_os = "macos")]
+fn wallet_icon(dark_mode: bool) -> Result<Icon> {
+    let encoded = if dark_mode {
+        include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice()
+    } else {
+        include_bytes!("../assets/tray/light_mode_tray_icon.png").as_slice()
+    };
+    let image = image::load_from_memory_with_format(encoded, image::ImageFormat::Png)
+        .context("failed to decode the macOS tray artwork")?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), width, height)
+        .context("failed to construct the macOS tray icon pixels")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn wallet_icon(_dark_mode: bool) -> Result<Icon> {
     const SIDE: u32 = 20;
     let mut rgba = vec![0_u8; (SIDE * SIDE * 4) as usize];
     for y in 3..17 {

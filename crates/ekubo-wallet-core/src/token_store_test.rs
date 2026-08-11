@@ -7,7 +7,6 @@
 
 use super::*;
 use crate::policy_store::DatabaseKey;
-use rusqlite::Connection;
 
 fn open(directory: &Path) -> TokenStore {
     TokenStore::new(
@@ -414,40 +413,6 @@ async fn live_balances_read_isolates_bad_tokens_and_filters_zeroes() {
             .iter()
             .any(|entry| entry.token == usdc.to_checksum(None))
     );
-}
-
-#[test]
-fn a_legacy_plain_database_names_nothing_and_is_deleted() {
-    // A file anyone can write is not a curator. Planting one must not put
-    // a single name into the table the review screen trusts, however
-    // well-formed its rows are.
-    let directory = tempfile::tempdir().unwrap();
-    let legacy_path = directory.path().join(LEGACY_DATABASE_FILE);
-    let legacy = Connection::open(&legacy_path).unwrap();
-    legacy
-        .execute_batch(
-            "CREATE TABLE tokens (
-                     chain_id INTEGER NOT NULL,
-                     address TEXT NOT NULL,
-                     symbol TEXT, name TEXT, decimals INTEGER,
-                     source TEXT NOT NULL, added_at TEXT NOT NULL,
-                     PRIMARY KEY (chain_id, address)
-                 );
-                 INSERT INTO tokens VALUES
-                     (1, '0x1111111111111111111111111111111111111111',
-                      'USDC', 'USD Coin', 6, 'manual', '2026-01-01T00:00:00Z');",
-        )
-        .unwrap();
-    drop(legacy);
-
-    // What `production` does before it opens the encrypted database. Called
-    // directly so the test does not touch the OS credential store.
-    discard_legacy_database(directory.path());
-    let store = open(directory.path());
-    assert_eq!(store.count(None).unwrap(), 0);
-    assert!(store.get(1, Address::repeat_byte(0x11)).unwrap().is_none());
-    assert_eq!(store.count_proposals().unwrap(), 0);
-    assert!(!legacy_path.exists());
 }
 
 #[test]

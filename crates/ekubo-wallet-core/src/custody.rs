@@ -9,8 +9,7 @@ use keyring::{Entry, Error as KeyringError};
 use std::{fmt, sync::Arc};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-// The desktop release never reads or mutates pre-desktop keychain entries.
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.v2";
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key";
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKeyMaterial([u8; 32]);
