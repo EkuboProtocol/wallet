@@ -100,6 +100,7 @@ impl SymKey {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }

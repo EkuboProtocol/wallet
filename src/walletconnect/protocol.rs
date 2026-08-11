@@ -48,7 +48,6 @@ pub mod ttl {
     pub const SESSION_SETTLE: u64 = 300;
     pub const SESSION_REQUEST_RESPONSE: u64 = 300;
     pub const SESSION_DELETE: u64 = 86_400;
-    pub const ONE_DAY: u64 = 86_400;
 }
 
 /// The subset of the protocol's error codes this wallet ever sends.
@@ -62,8 +61,6 @@ pub mod error_code {
     pub const UNSUPPORTED_CHAINS: i64 = 5100;
     /// The request named a method this wallet does not implement.
     pub const UNSUPPORTED_METHODS: i64 = 5101;
-    /// The proposal asked to subscribe to an event this wallet never emits.
-    pub const UNSUPPORTED_EVENTS: i64 = 5102;
     /// The request named an address this session does not sign for.
     pub const UNSUPPORTED_ACCOUNTS: i64 = 5103;
     /// EIP-3326's "the wallet does not have this chain", which is the answer a

@@ -64,15 +64,6 @@ pub struct NetworkProfile {
     pub fork_endpoints: usize,
 }
 
-impl NetworkProfile {
-    /// Whether this wallet can simulate — and therefore sign — on this chain
-    /// through the endpoints it ships.
-    #[must_use]
-    pub fn supports_simulation(&self) -> bool {
-        self.simulate_endpoints > 0
-    }
-}
-
 #[derive(Deserialize)]
 struct Registry {
     chains: Vec<RegistryChain>,
@@ -193,21 +184,6 @@ pub fn known_network(chain_id: u64) -> Option<&'static NetworkProfile> {
     known_networks()
         .iter()
         .find(|profile| profile.config.chain_id == chain_id)
-}
-
-/// The registry entry matching a name or alias, if any. Names are unique
-/// across the registry and defaults own the unqualified spellings, so this
-/// cannot be ambiguous.
-#[must_use]
-pub fn known_network_by_identifier(identifier: &str) -> Option<&'static NetworkProfile> {
-    known_networks().iter().find(|profile| {
-        profile.config.name == identifier
-            || profile
-                .config
-                .aliases
-                .iter()
-                .any(|alias| alias == identifier)
-    })
 }
 
 /// The networks a configuration starts with when there is no file yet.

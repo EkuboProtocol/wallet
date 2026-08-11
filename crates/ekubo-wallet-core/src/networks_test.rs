@@ -155,12 +155,6 @@ fn simulation_counts_never_exceed_the_endpoints_they_count() {
             "chain {} claims more simulating endpoints than it lists",
             profile.config.chain_id
         );
-        assert_eq!(
-            profile.supports_simulation(),
-            profile.simulate_endpoints > 0,
-            "chain {} disagrees with itself about simulation support",
-            profile.config.chain_id
-        );
     }
 }
 
@@ -168,21 +162,6 @@ fn simulation_counts_never_exceed_the_endpoints_they_count() {
 fn lookups_agree_with_the_list() {
     let profile = known_network(1).expect("Ethereum is in the registry");
     assert_eq!(profile.config.chain_id, 1);
-    assert_eq!(
-        known_network_by_identifier("mainnet")
-            .expect("alias resolves")
-            .config
-            .chain_id,
-        1
-    );
-    assert_eq!(
-        known_network_by_identifier("ethereum")
-            .expect("name resolves")
-            .config
-            .chain_id,
-        1
-    );
-    assert!(known_network_by_identifier("no-such-network").is_none());
     assert!(known_network(u64::MAX).is_none());
 }
 

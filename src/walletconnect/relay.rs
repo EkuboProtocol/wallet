@@ -294,13 +294,6 @@ impl RelayConnection {
         self.incoming.recv().await
     }
 
-    /// Whether the reader task has finished, which is the only durable signal
-    /// that the socket is gone.
-    #[must_use]
-    pub fn is_closed(&self) -> bool {
-        self.reader.is_finished()
-    }
-
     /// Close the socket and stop both tasks.
     pub fn close(self) {
         drop(self.outgoing);

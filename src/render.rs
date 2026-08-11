@@ -97,35 +97,11 @@ pub fn print_json(value: &impl Serialize) -> Result<()> {
 
 pub use crate::sanitize::{terminal_safe_line, terminal_safe_multiline};
 
-/// Rows below which an interactive list stops being scrollable at all.
-const MINIMUM_LIST_ROWS: usize = 3;
-/// Assumed terminal height when the real one cannot be read.
-const FALLBACK_TERMINAL_ROWS: usize = 24;
 /// Assumed terminal width when the real one cannot be read.
 const FALLBACK_TERMINAL_COLUMNS: usize = 80;
 /// Columns the prompt draws to the left of an option's label: the cursor
 /// prefix (`●`, `▲`, `▼`, or a space) and the space that follows it.
 const LIST_LABEL_CHROME_COLUMNS: usize = 2;
-
-/// How many list rows one interactive prompt may draw.
-///
-/// An interactive prompt redraws its entire body on every keystroke. A body
-/// taller than the terminal therefore scrolls the view to the bottom each time
-/// a cursor key is pressed, which makes a long list unusable. Sizing the
-/// visible page to the live terminal height keeps the whole prompt on one
-/// screen and lets the prompt's own paging scroll the list instead.
-///
-/// `chrome_rows` is what the prompt draws around the list — header, footer,
-/// and any lines already printed above it. Every interactive list must pass
-/// the result to `max_rows`; the height is recomputed on each render, so a
-/// terminal resized between prompts is respected.
-#[must_use]
-pub fn interactive_list_rows(chrome_rows: usize) -> usize {
-    let rows = crossterm::terminal::size()
-        .map_or(FALLBACK_TERMINAL_ROWS, |(_, rows)| rows as usize)
-        .max(1);
-    rows.saturating_sub(chrome_rows).max(MINIMUM_LIST_ROWS)
-}
 
 /// Fit one interactive list label onto exactly one terminal row.
 ///

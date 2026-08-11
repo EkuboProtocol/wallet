@@ -981,13 +981,6 @@ impl<'a> Session<'a> {
         self.salt = self.salt.wrapping_add(1);
         request_id(Utc::now().timestamp_millis(), self.salt)
     }
-
-    /// The dapp's own description of itself, for a caller that wants to name it
-    /// after the session settles.
-    #[must_use]
-    pub fn dapp_metadata(&self) -> Option<&AppMetadata> {
-        self.settled.as_ref().map(|settled| &settled.metadata)
-    }
 }
 
 /// How this wallet describes itself to a dapp.

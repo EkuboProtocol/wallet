@@ -50,16 +50,6 @@ fn explorer_links_join_cleanly() {
 }
 
 #[test]
-fn interactive_lists_never_shrink_below_a_scrollable_page() {
-    // Chrome can never eat the list: a tiny or unreadable terminal still
-    // leaves enough rows for the page to scroll through.
-    assert_eq!(interactive_list_rows(usize::MAX), MINIMUM_LIST_ROWS);
-    assert!(interactive_list_rows(6) >= MINIMUM_LIST_ROWS);
-    // Reserving more rows never yields a taller list.
-    assert!(interactive_list_rows(10) <= interactive_list_rows(4));
-}
-
-#[test]
 fn list_labels_never_exceed_one_row_at_any_width() {
     // A wrapped label would make the prompt draw more rows than it sized
     // its page for, which is what turns a cursor key into a full-screen
