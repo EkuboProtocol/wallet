@@ -18,7 +18,7 @@ use ekubo_wallet_core::{
     desktop_store::{AgentKind, ClientToken, DesktopStore, McpClient, RegisteredClient},
     human_presence::{HumanPresence as _, PlatformHumanPresence, PresenceRequest},
     legal::{LegalDocument, LegalStatus, LegalStore},
-    message::{MessageStore, PendingMessage},
+    message::{MessageStore, PendingMessage, describe_message},
     orchestrator::{
         ApprovalOutcome, approve_transaction, sign_reviewed_message, sign_reviewed_typed_data,
     },
@@ -321,6 +321,7 @@ impl OwnerApi {
 
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
         let request = MessageStore::production(self.config.data_dir())?.get(request_id)?;
+        let display = describe_message(&request.message_bytes()?);
         let mut summary = ApprovalRequest::new(
             ApprovalKind::MessageSignature,
             "Review message signature",
@@ -332,24 +333,36 @@ impl OwnerApi {
             request.chain_id.unwrap_or_else(|| "Not specified".into()),
         )
         .fact("Encoding", format!("{:?}", request.encoding))
+        .fact("Byte length", display.byte_length.to_string())
+        .fact("Line count", display.line_count.to_string())
         .fact(
             "Requester",
-            request.requester.unwrap_or_else(|| "Unknown requester".into()),
-        )
-        .warning(
-            "Treat message text as untrusted. Review the exact bytes and digest, including any control or bidirectional characters.",
+            request
+                .requester
+                .unwrap_or_else(|| "Unknown requester".into()),
         )
         .digest(request.digest);
         summary.id = request_id;
-        Ok(ReviewDocument::from_request(
-            summary,
-            vec![request.message_hex],
-        ))
+        for warning in display.warnings {
+            summary = summary.warning(warning);
+        }
+        let mut payloads = Vec::with_capacity(2);
+        if let Some(escaped) = display.escaped_text {
+            payloads.push(format!(
+                "Visible text (unsafe characters escaped):\n{escaped}"
+            ));
+        }
+        payloads.push(format!("Exact message bytes:\n{}", request.message_hex));
+        Ok(ReviewDocument::from_request(summary, payloads))
     }
 
     pub fn typed_data_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
         let request = TypedDataStore::production(self.config.data_dir())?.get(request_id)?;
-        let exact = serde_json::to_string_pretty(&request.typed_data)?;
+        let exact_json = serde_json::to_string_pretty(&request.typed_data)?;
+        let dangerous_display = exact_json.chars().any(|character| {
+            character != '\n' && ekubo_wallet_core::sanitize::is_disallowed(character)
+        });
+        let exact = escape_review_payload(&exact_json);
         let mut summary = ApprovalRequest::new(
             ApprovalKind::TypedDataSignature,
             "Review typed-data signature",
@@ -366,6 +379,11 @@ impl OwnerApi {
         )
         .digest(request.digest);
         summary.id = request_id;
+        if dangerous_display {
+            summary = summary.warning(
+                "The typed data contains control, bidirectional, invisible, or glyph-changing characters. They are escaped in the exact payload below.",
+            );
+        }
         Ok(ReviewDocument::from_request(summary, vec![exact]))
     }
 
@@ -510,6 +528,19 @@ impl OwnerApi {
     }
 }
 
+fn escape_review_payload(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| {
+            if character != '\n' && ekubo_wallet_core::sanitize::is_disallowed(character) {
+                character.escape_unicode().collect::<Vec<_>>()
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
+}
+
 fn ensure_revision(reviewed: u64, current: u64) -> Result<()> {
     anyhow::ensure!(
         reviewed == current,
@@ -633,3 +664,7 @@ impl ApplicationAuthority {
         self.events.clone()
     }
 }
+
+#[cfg(test)]
+#[path = "authority_test.rs"]
+mod tests;

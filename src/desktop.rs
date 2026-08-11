@@ -14,7 +14,9 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::ReviewDecision;
+use ekubo_wallet_core::core::policy::WalletPolicy;
 use ekubo_wallet_core::desktop_store::AgentKind;
+use ekubo_wallet_core::legal::LegalDocument;
 use gpui::{
     App, Context, Entity, KeyBinding, QuitMode, Render, SharedString, Window, WindowAppearance,
     WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px, size,
@@ -22,6 +24,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Disableable, Root, StyledExt,
     button::{Button, ButtonVariants},
+    input::{Input, InputState},
     scroll::ScrollableElement,
 };
 use std::{
@@ -105,7 +108,16 @@ pub struct WalletWindow {
     selected_record: Option<uuid::Uuid>,
     active_review: Option<ActiveReview>,
     pending_agent_install: Option<PendingAgentInstall>,
+    account_id_input: Option<Entity<InputState>>,
+    legal_review: Option<LegalReview>,
     operation_status: Option<SharedString>,
+}
+
+struct LegalReview {
+    document: LegalDocument,
+    text: String,
+    digest: String,
+    viewed: bool,
 }
 
 struct PendingAgentInstall {
@@ -154,8 +166,79 @@ impl WalletWindow {
             selected_record: None,
             active_review: None,
             pending_agent_install: None,
+            account_id_input: None,
+            legal_review: None,
             operation_status: None,
         }
+    }
+
+    fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.account_id_input.is_none() {
+            self.account_id_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Account name, for example primary")
+            }));
+        }
+    }
+
+    fn create_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.account_id_input.as_ref() else {
+            return;
+        };
+        let wallet_id = input.read(cx).value().trim().to_owned();
+        match self
+            .owner
+            .create_account(&wallet_id, &WalletPolicy::require_approval_for_everything())
+        {
+            Ok(account) => {
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+                self.operation_status = Some(
+                    format!(
+                        "Created account {} at {:#x}. Every transaction requires review.",
+                        account.id, account.address
+                    )
+                    .into(),
+                );
+            }
+            Err(error) => {
+                self.operation_status = Some(format!("Could not create account: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_legal_review(&mut self, document: LegalDocument, cx: &mut Context<Self>) {
+        let (text, digest) = self.owner.legal_document(document);
+        self.legal_review = Some(LegalReview {
+            document,
+            text,
+            digest,
+            viewed: false,
+        });
+        cx.notify();
+    }
+
+    fn mark_legal_viewed(&mut self, cx: &mut Context<Self>) {
+        if let Some(review) = self.legal_review.as_mut() {
+            review.viewed = true;
+        }
+        cx.notify();
+    }
+
+    fn accept_legal(&mut self, cx: &mut Context<Self>) {
+        let Some(review) = self.legal_review.as_ref() else {
+            return;
+        };
+        if !review.viewed {
+            return;
+        }
+        self.operation_status = Some(
+            match self.owner.accept_legal(review.document, &review.digest) {
+                Ok(()) => format!("Accepted the current {}.", review.document.title()).into(),
+                Err(error) => format!("Could not accept document: {error:#}").into(),
+            },
+        );
+        self.legal_review = None;
+        cx.notify();
     }
 
     fn prepare_agent_install(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
@@ -694,6 +777,125 @@ impl WalletWindow {
         panel
     }
 
+    fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut panel = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().font_semibold().child("Create account"));
+        if let Some(input) = &self.account_id_input {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(input)))
+                    .child(
+                        Button::new("create-account")
+                            .label("Create")
+                            .primary()
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.create_account(window, cx);
+                            })),
+                    ),
+            );
+        }
+        panel = panel.child(
+            div()
+                .mt_3()
+                .font_semibold()
+                .child("Accounts on this device"),
+        );
+        match self.owner.accounts() {
+            Ok(items) if items.is_empty() => panel.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No accounts yet."),
+            ),
+            Ok(items) => panel.children(items.into_iter().map(|item| {
+                div()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(format!("{} · {:#x}", item.id, item.address))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{:?} · created {}", item.source, item.created_at)),
+                    )
+            })),
+            Err(error) => panel.child(format!("Accounts unavailable: {error:#}")),
+        }
+    }
+
+    fn render_legal(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let panel = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_2();
+        match self.owner.legal_status() {
+            Ok(status) => {
+                panel
+                    .child(format!("Signing enabled: {}", status.signing_allowed))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(format!(
+                                "Terms of Service · {}",
+                                if status.terms_of_service.accepted {
+                                    "Accepted"
+                                } else {
+                                    "Review required"
+                                }
+                            ))
+                            .child(Button::new("review-terms").label("Review").on_click(
+                                cx.listener(|view, _, _, cx| {
+                                    view.open_legal_review(LegalDocument::TermsOfService, cx);
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(format!(
+                                "Privacy Policy · {}",
+                                if status.privacy_policy.accepted {
+                                    "Accepted"
+                                } else {
+                                    "Review required"
+                                }
+                            ))
+                            .child(Button::new("review-privacy").label("Review").on_click(
+                                cx.listener(|view, _, _, cx| {
+                                    view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
+                                }),
+                            )),
+                    )
+                    .child(
+                        Button::new("review-licenses")
+                            .label("Third-Party Licenses")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
+                            })),
+                    )
+                    .child(format!("Version {BUILD_VERSION}"))
+            }
+            Err(error) => panel.child(format!("Legal status unavailable: {error:#}")),
+        }
+    }
+
     fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
@@ -729,22 +931,7 @@ impl WalletWindow {
                 })),
                 Err(error) => panel.child(format!("Activity unavailable: {error:#}")),
             },
-            Route::Accounts => match self.owner.accounts() {
-                Ok(items) => panel.children(items.into_iter().map(|item| {
-                    div()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(format!("{} · {:#x}", item.id, item.address))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{:?} · created {}", item.source, item.created_at)),
-                        )
-                })),
-                Err(error) => panel.child(format!("Accounts unavailable: {error:#}")),
-            },
+            Route::Accounts => self.render_accounts(cx),
             Route::Policies => match self.owner.accounts() {
                 Ok(accounts) => {
                     let mut content = panel;
@@ -851,20 +1038,7 @@ impl WalletWindow {
                 .child("Pairings are kept only in memory and are disconnected on Quit.")
                 .child("Paste and screen-scan controls will appear here."),
             Route::Settings => self.render_settings(cx),
-            Route::Legal => match self.owner.legal_status() {
-                Ok(status) => panel
-                    .child(format!("Signing enabled: {}", status.signing_allowed))
-                    .child(format!(
-                        "Terms accepted: {}",
-                        status.terms_of_service.accepted
-                    ))
-                    .child(format!(
-                        "Privacy policy accepted: {}",
-                        status.privacy_policy.accepted
-                    ))
-                    .child(format!("Version {BUILD_VERSION}")),
-                Err(error) => panel.child(format!("Legal status unavailable: {error:#}")),
-            },
+            Route::Legal => self.render_legal(cx),
             Route::Updates => panel
                 .child(format!("Installed version: {BUILD_VERSION}"))
                 .child("Updates are downloaded and signature-verified only after confirmation."),
@@ -1143,6 +1317,82 @@ impl WalletWindow {
             )
     }
 
+    fn render_legal_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(review) = &self.legal_review else {
+            return div();
+        };
+        let informational = review.document == LegalDocument::ThirdPartyLicenses;
+        div()
+            .absolute()
+            .inset_4()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().font_semibold().child(review.document.title()))
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_y_scrollbar()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(review.text.clone()),
+            )
+            .child(
+                div()
+                    .font_family("monospace")
+                    .text_sm()
+                    .child(format!("Document digest: {}", review.digest)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(
+                        Button::new("close-legal-review")
+                            .label("Close")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.legal_review = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new("legal-viewed")
+                                    .label(if review.viewed {
+                                        "Complete document viewed"
+                                    } else {
+                                        "Mark complete document as viewed"
+                                    })
+                                    .disabled(review.viewed)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.mark_legal_viewed(cx);
+                                    })),
+                            )
+                            .when(!informational, |buttons| {
+                                buttons.child(
+                                    Button::new("accept-legal")
+                                        .label("Accept")
+                                        .primary()
+                                        .disabled(!review.viewed)
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.accept_legal(cx);
+                                        })),
+                                )
+                            }),
+                    ),
+            )
+    }
+
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
@@ -1199,7 +1449,8 @@ impl WalletWindow {
 }
 
 impl Render for WalletWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.attach_window(window, cx);
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
@@ -1218,6 +1469,9 @@ impl Render for WalletWindow {
             })
             .when(self.pending_agent_install.is_some(), |view| {
                 view.child(self.render_agent_install_overlay(cx))
+            })
+            .when(self.legal_review.is_some(), |view| {
+                view.child(self.render_legal_overlay(cx))
             })
     }
 }
@@ -1246,6 +1500,10 @@ fn show_wallet_window(
         return Ok(());
     }
 
+    wallet_view.update(cx, |view, cx| {
+        view.account_id_input = None;
+        cx.notify();
+    });
     let root_view = wallet_view.clone();
     let window_handle = cx.open_window(
         WindowOptions {
