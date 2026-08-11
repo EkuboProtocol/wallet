@@ -389,6 +389,67 @@ impl TokenStore {
         self.consume_proposals(proposals)
     }
 
+    /// Add or replace the owner-authored display metadata for one token.
+    ///
+    /// Token metadata is not consulted by policy enforcement, but it names
+    /// and scales values on the approval screen. It therefore remains an
+    /// owner-only, human-present mutation even though it cannot authorize a
+    /// transaction by itself. The existing `added_at` value is deliberately
+    /// preserved when metadata is corrected.
+    pub fn upsert_authorized(
+        &mut self,
+        token: &ListedToken,
+        source: &str,
+        authorization: &OwnerAuthorization,
+    ) -> Result<StoredToken> {
+        authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
+        ensure!(token.chain_id > 0, "chain ID must be positive");
+        let symbol = sanitize(&token.symbol);
+        ensure!(
+            !symbol.is_empty(),
+            "token {} on chain {} has an empty symbol once sanitized",
+            token.address.to_checksum(None),
+            token.chain_id
+        );
+        let source = sanitize(source);
+        ensure!(!source.is_empty(), "token source must not be empty");
+        let name = token
+            .name
+            .as_deref()
+            .map(sanitize)
+            .filter(|name| !name.is_empty());
+        let chain_id = i64::try_from(token.chain_id).context("chain ID out of range")?;
+        let now = Millis(sql::now());
+        let transaction = self.database.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(chain_id, address) DO UPDATE SET
+               symbol = excluded.symbol,
+               name = excluded.name,
+               decimals = excluded.decimals,
+               source = excluded.source",
+            params![
+                chain_id,
+                Blob(token.address),
+                symbol,
+                name,
+                token.decimals,
+                source,
+                now,
+            ],
+        )?;
+        // Once the owner has supplied exact metadata there is no remaining
+        // proposal for this identity to review, regardless of its generation.
+        transaction.execute(
+            "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+            params![chain_id, Blob(token.address)],
+        )?;
+        transaction.commit()?;
+        self.get(token.chain_id, token.address)?
+            .context("upserted token missing")
+    }
+
     pub(crate) fn consume_proposals(&mut self, proposals: &[TokenProposal]) -> Result<u64> {
         ensure!(!proposals.is_empty(), "no token proposals were selected");
         let transaction = self.database.connection.transaction()?;

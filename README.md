@@ -8,9 +8,10 @@ mode.
 The application exposes Streamable HTTP MCP only at
 `http://127.0.0.1:61744/mcp`. Managed agent files contain that URL and OAuth
 mode only. A harness must explicitly start OAuth login; the wallet then brings
-its native window forward and requires operating-system human presence before
-issuing a one-time PKCE-bound authorization code. The harness owns storage of
-its short-lived access token and rotated refresh token.
+its native window forward. A script-free local consent page lets the owner
+choose a one-day, one-week, or one-month session before operating-system human
+presence and issuance of a one-time PKCE-bound authorization code. The harness
+owns storage of its 10-minute access token and rotated refresh token.
 
 Every request must carry the exact loopback `Host`; `Origin`, every
 `Access-Control-*` request header, and `OPTIONS` are rejected before a body is
@@ -49,6 +50,14 @@ Apache-2.0 GPUI infrastructure, not Zed's GPL workspace/UI crates.
 See [architecture](docs/architecture.md), [installation](docs/installation.md),
 [security boundary](docs/security-boundary.md), and
 [release process](docs/releasing.md).
+
+## Protocol integration note
+
+Legacy limit orders are deprecated because they do not provide guaranteed
+execution: a limit order can be un-executed. Integrators building current
+signed swap flows should refer to the
+[`SignedExclusiveSwap` extension source](https://github.com/EkuboProtocol/evm-contracts/blob/main/src/extensions/SignedExclusiveSwap.sol)
+in `EkuboProtocol/evm-contracts`.
 
 ## License
 

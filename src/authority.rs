@@ -12,7 +12,10 @@ use ekubo_wallet_core::{
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
-    desktop_store::{AgentKind, DesktopStore, McpClient, OAuthAuthorizationCode, OAuthTokenPair},
+    desktop_store::{
+        AgentKind, DesktopStore, McpClient, OAuthAuthorizationCode, OAuthSessionDuration,
+        OAuthTokenPair,
+    },
     execution::BroadcastResult,
     human_presence::{
         HumanPresence as _, OwnerAuthorization, OwnerAuthorizationScope, PlatformHumanPresence,
@@ -30,7 +33,7 @@ use ekubo_wallet_core::{
     reconcile::{attempt_cancellation, reconcile_record, submit_claimed},
     rpc::transaction_known,
     token_store::{
-        MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
+        ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
         TokenProposal, TokenStore, read_portfolio,
     },
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
@@ -284,6 +287,7 @@ impl OwnerApi {
         code_challenge: &str,
         scope: &str,
         resource: &str,
+        session_duration: OAuthSessionDuration,
     ) -> Result<OAuthAuthorizationCode> {
         let client = self.desktop()?.validate_oauth_authorization_request(
             client_id,
@@ -297,12 +301,13 @@ impl OwnerApi {
         tokio::task::yield_now().await;
         require_current_acceptance(self.config.data_dir())?;
         let authorization = authorize_oauth_client(&client.display_name, redirect_uri).await?;
-        let code = self.desktop()?.issue_authorization_code(
+        let code = self.desktop()?.issue_authorization_code_with_session(
             client_id,
             redirect_uri,
             code_challenge,
             scope,
             resource,
+            session_duration,
             &authorization,
         )?;
         self.events
@@ -1087,6 +1092,27 @@ impl OwnerApi {
         limit: usize,
     ) -> Result<Vec<StoredToken>> {
         TokenStore::production(self.config.data_dir())?.search(query, chain_id, limit)
+    }
+
+    pub async fn upsert_token(&self, token: ListedToken) -> Result<StoredToken> {
+        ensure!(
+            contains_configured_chain(&self.config.load()?, token.chain_id),
+            "chain {} is not a configured network",
+            token.chain_id
+        );
+        let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
+        ensure!(
+            contains_configured_chain(&self.config.load()?, token.chain_id),
+            "chain {} was removed during authentication",
+            token.chain_id
+        );
+        let stored = TokenStore::production(self.config.data_dir())?.upsert_authorized(
+            &token,
+            "Manual entry",
+            &authorization,
+        )?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(stored)
     }
 
     pub async fn remove_token(&self, chain_id: u64, address: Address) -> Result<bool> {

@@ -11,12 +11,15 @@ use axum::{
     body::to_bytes,
     extract::{Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::any,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ekubo_wallet_core::desktop_store::{
-    AgentKind, AuthenticatedClient, DesktopStore, MCP_PORT, MCP_RESOURCE, MCP_SCOPE, OAuthTokenPair,
+    AgentKind, AuthenticatedClient, DesktopStore, MCP_PORT, MCP_RESOURCE, MCP_SCOPE,
+    OAuthSessionDuration, OAuthTokenPair,
 };
+use rand::TryRng as _;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -24,8 +27,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, hash_map::Entry},
+    fmt::Write as _,
     net::SocketAddr,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -36,6 +41,8 @@ pub const MCP_REQUEST_LIMIT_BYTES: usize = 24 * 1024 * 1024;
 const OAUTH_REQUEST_LIMIT_BYTES: usize = 64 * 1024;
 const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
 const AUTHORIZATION_SERVER_PATH: &str = "/.well-known/oauth-authorization-server";
+const CONSENT_TTL: Duration = Duration::from_mins(5);
+const MAX_PENDING_CONSENTS: usize = 128;
 
 type ClientService = StreamableHttpService<WalletMcpServer, LocalSessionManager>;
 
@@ -46,7 +53,13 @@ struct HttpState {
     clients: Arc<Mutex<DesktopStore>>,
     agent: AgentApi,
     services: Mutex<HashMap<Uuid, ClientService>>,
+    pending_consents: Mutex<HashMap<String, PendingConsent>>,
     cancellation: CancellationToken,
+}
+
+struct PendingConsent {
+    request: AuthorizationRequest,
+    created_at: Instant,
 }
 
 pub struct McpHttpServer {
@@ -85,6 +98,7 @@ impl McpHttpServer {
             clients,
             agent,
             services: Mutex::new(HashMap::new()),
+            pending_consents: Mutex::new(HashMap::new()),
             cancellation: cancellation.clone(),
         });
         let router = Router::new().fallback(any(dispatch)).with_state(state);
@@ -231,7 +245,7 @@ async fn register_client(state: Arc<HttpState>, request: Request) -> Response {
     response
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct AuthorizationRequest {
     response_type: String,
     client_id: Uuid,
@@ -243,9 +257,37 @@ struct AuthorizationRequest {
     resource: String,
 }
 
+#[derive(Deserialize)]
+struct ConsentSelection {
+    consent: Option<String>,
+    duration: Option<String>,
+}
+
 async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
     if encoded_query.len() > OAUTH_REQUEST_LIMIT_BYTES {
         return oauth_error(StatusCode::URI_TOO_LONG, "invalid_request");
+    }
+    let Ok(selection) = serde_urlencoded::from_str::<ConsentSelection>(&encoded_query) else {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    if selection.consent.is_some() || selection.duration.is_some() {
+        let (Some(consent), Some(duration)) = (selection.consent, selection.duration) else {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        };
+        let Ok(session_duration) = OAuthSessionDuration::parse_query_value(&duration) else {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        };
+        let pending = {
+            let Ok(mut pending) = state.pending_consents.lock() else {
+                return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+            };
+            pending.retain(|_, consent| consent.created_at.elapsed() < CONSENT_TTL);
+            pending.remove(&consent)
+        };
+        let Some(pending) = pending else {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        };
+        return finish_authorization(state, pending.request, session_duration).await;
     }
     let query: AuthorizationRequest = match serde_urlencoded::from_str(&encoded_query) {
         Ok(query) => query,
@@ -254,23 +296,31 @@ async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
     if query.response_type != "code" || query.code_challenge_method != "S256" {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
     }
+    let scope = query.scope.clone().unwrap_or_else(|| MCP_SCOPE.to_owned());
+    let Ok(client) = state.owner.validate_oauth_authorization_request(
+        query.client_id,
+        &query.redirect_uri,
+        &query.code_challenge,
+        &scope,
+        &query.resource,
+    ) else {
+        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    let Ok(consent) = create_pending_consent(&state, query) else {
+        return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+    };
+    consent_page(&client.display_name, &scope, &consent)
+}
+
+async fn finish_authorization(
+    state: Arc<HttpState>,
+    query: AuthorizationRequest,
+    session_duration: OAuthSessionDuration,
+) -> Response {
     let Ok(mut redirect) = url::Url::parse(&query.redirect_uri) else {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
     };
     let scope = query.scope.as_deref().unwrap_or(MCP_SCOPE);
-    if state
-        .owner
-        .validate_oauth_authorization_request(
-            query.client_id,
-            &query.redirect_uri,
-            &query.code_challenge,
-            scope,
-            &query.resource,
-        )
-        .is_err()
-    {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
-    }
     let result = state
         .owner
         .authorize_oauth_client(
@@ -279,6 +329,7 @@ async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
             &query.code_challenge,
             scope,
             &query.resource,
+            session_duration,
         )
         .await;
     match result {
@@ -297,6 +348,88 @@ async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
         redirect.query_pairs_mut().append_pair("state", &state);
     }
     Redirect::to(redirect.as_str()).into_response()
+}
+
+fn create_pending_consent(state: &HttpState, request: AuthorizationRequest) -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    rand::rng()
+        .try_fill_bytes(&mut bytes)
+        .context("operating-system randomness is unavailable")?;
+    let consent = URL_SAFE_NO_PAD.encode(bytes);
+    let mut pending = state
+        .pending_consents
+        .lock()
+        .map_err(|_| anyhow::anyhow!("OAuth consent store is unavailable"))?;
+    pending.retain(|_, consent| consent.created_at.elapsed() < CONSENT_TTL);
+    ensure!(
+        pending.len() < MAX_PENDING_CONSENTS,
+        "too many pending OAuth consent requests"
+    );
+    ensure!(
+        !pending.contains_key(&consent),
+        "OAuth consent nonce collision"
+    );
+    pending.insert(
+        consent.clone(),
+        PendingConsent {
+            request,
+            created_at: Instant::now(),
+        },
+    );
+    Ok(consent)
+}
+
+fn consent_page(client_name: &str, scope: &str, consent: &str) -> Response {
+    let choices = [
+        OAuthSessionDuration::OneDay,
+        OAuthSessionDuration::OneWeek,
+        OAuthSessionDuration::OneMonth,
+    ];
+    let mut buttons = String::new();
+    for duration in choices {
+        let query = serde_urlencoded::to_string([
+            ("consent", consent),
+            ("duration", duration.as_query_value()),
+        ])
+        .expect("fixed OAuth consent query is serializable");
+        write!(
+            buttons,
+            "<a class=\"choice\" href=\"/authorize?{}\">{}</a>",
+            escape_html(&query),
+            duration.label()
+        )
+        .expect("writing OAuth consent HTML to a string cannot fail");
+    }
+    let body = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Authorize Ekubo Wallet</title><style>:root{{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}}main{{width:min(32rem,calc(100% - 2rem));padding:2rem;border:1px solid GrayText;border-radius:1rem;box-sizing:border-box}}h1{{font-size:1.35rem;margin:0 0 1rem}}p{{line-height:1.5}}code{{font-family:ui-monospace,monospace}}.choices{{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;margin-top:1.5rem}}.choice{{padding:.8rem .5rem;text-align:center;text-decoration:none;border:1px solid LinkText;border-radius:.6rem;color:LinkText;font-weight:600}}.choice:focus,.choice:hover{{outline:2px solid LinkText;outline-offset:2px}}small{{display:block;margin-top:1.25rem;color:GrayText;line-height:1.4}}@media(max-width:28rem){{.choices{{grid-template-columns:1fr}}}}</style></head><body><main><h1>Authorize {}</h1><p><strong>{}</strong> is requesting <code>{}</code> access to this wallet.</p><p>Choose how long its refresh session may remain valid. Access tokens themselves expire after 10 minutes.</p><div class=\"choices\">{buttons}</div><small>The wallet will ask for operating-system authentication after you choose. You can revoke this client at any time in Settings.</small></main></body></html>",
+        escape_html(client_name),
+        escape_html(client_name),
+        escape_html(scope),
+    );
+    let mut response = Html(body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        ),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 #[derive(Deserialize)]

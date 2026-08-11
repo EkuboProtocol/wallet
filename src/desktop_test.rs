@@ -176,6 +176,63 @@ fn token_removal_confirmation_is_bound_to_the_exact_row() {
 }
 
 #[test]
+fn token_editor_parses_a_complete_owner_authored_row() {
+    let (token, errors) = parse_token_editor_fields(
+        " 8453 ",
+        "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        " USDC ",
+        " USD Coin ",
+        "6",
+    );
+    let token = token.unwrap();
+
+    assert_eq!(errors, TokenEditorErrors::default());
+    assert_eq!(token.chain_id, 8453);
+    assert_eq!(
+        token.address,
+        "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            .parse::<alloy::primitives::Address>()
+            .unwrap()
+    );
+    assert_eq!(token.symbol, "USDC");
+    assert_eq!(token.name.as_deref(), Some("USD Coin"));
+    assert_eq!(token.decimals, 6);
+}
+
+#[test]
+fn token_editor_reports_each_invalid_field_next_to_that_field() {
+    let (token, errors) = parse_token_editor_fields(
+        "0",
+        "not-an-address",
+        "\u{202e}",
+        "unsafe\u{200b}name",
+        "256",
+    );
+
+    assert!(token.is_none());
+    assert!(errors.chain_id.is_some());
+    assert!(errors.address.is_some());
+    assert!(errors.symbol.is_some());
+    assert!(errors.name.is_some());
+    assert!(errors.decimals.is_some());
+    assert!(errors.form.is_none());
+}
+
+#[test]
+fn token_editor_allows_an_omitted_full_name() {
+    let (token, errors) = parse_token_editor_fields(
+        "1",
+        "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "USDC",
+        "  ",
+        "6",
+    );
+
+    assert_eq!(errors, TokenEditorErrors::default());
+    assert_eq!(token.unwrap().name, None);
+}
+
+#[test]
 fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
     let token = StoredToken {
         chain_id: "1".into(),

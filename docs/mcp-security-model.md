@@ -12,10 +12,13 @@ Agent configuration carries only `http://127.0.0.1:61744/mcp`; installing or
 repairing it creates no credential and requests no owner authentication. OAuth
 uses Dynamic Client Registration for public client metadata, Authorization Code
 with S256 PKCE, exact redirect-URI matching, the canonical MCP resource
-indicator, one-hour access tokens, and rotating 30-day refresh tokens. The
-native OS prompt names both the requesting client and callback host. Only after
-the owner authenticates can a one-time code be minted, and only the token
-endpoint returns credentials to the harness.
+indicator, 10-minute access tokens, and rotating refresh tokens with an
+owner-selected absolute lifetime of one day, one week, or one month. The local,
+script-free consent page cannot be framed (`X-Frame-Options: DENY` and CSP
+`frame-ancestors 'none'`) and requires an opaque, one-use server nonce before
+human presence. The native OS prompt names both the requesting client and
+callback host. Only after the owner authenticates can a one-time code be
+minted, and only the token endpoint returns credentials to the harness.
 
 SQLCipher stores one-way credential hashes and client attribution. Access-token
 authentication scans active hashes using constant-time byte comparison. Refresh

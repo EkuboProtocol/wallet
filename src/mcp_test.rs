@@ -1742,6 +1742,9 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
     // ...and the same sentence has to deny it any privileged standing,
     // because nothing in this process treats a plan's origin as special.
     assert!(SERVER_INSTRUCTIONS.contains("grants that server no extra trust"));
+    assert!(SERVER_INSTRUCTIONS.contains("Legacy limit-order workflows are deprecated"));
+    assert!(SERVER_INSTRUCTIONS.contains("can be un-executed"));
+    assert!(SERVER_INSTRUCTIONS.contains("src/extensions/SignedExclusiveSwap.sol"));
     // Nothing outside the instruction text may mention it: no tool
     // description, no resource, and above all no code path.
     let router = WalletMcpServer::sanitized_tool_router();

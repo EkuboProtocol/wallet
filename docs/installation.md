@@ -26,8 +26,11 @@ Codex entries use the fixed Streamable HTTP `url` and `auth = "oauth"`; no
 static header, bearer token, refresh token, or client secret is written to any
 managed configuration. The user starts authentication from the harness (for
 Codex, **Authenticate** or `codex mcp login ekubo-wallet`). Ekubo Wallet must be
-running and requires operating-system human presence before access is granted.
-The harness is responsible for its OAuth credential storage.
+running. Its local consent page offers one-day, one-week, and one-month session
+lifetimes, then requires operating-system human presence before access is
+granted. Access tokens last 10 minutes and refresh rotation cannot extend the
+selected absolute expiry. The harness is responsible for its OAuth credential
+storage.
 
 ## Running locally on macOS
 

@@ -29,12 +29,13 @@ use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::PendingStatus;
 use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
-use ekubo_wallet_core::token_store::{StoredToken, TokenProposal};
+use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, QuitMode, Render,
-    ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, Window, WindowAppearance,
-    WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px, size,
+    ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window,
+    WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px,
+    size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Sizable,
@@ -359,6 +360,15 @@ pub struct WalletWindow {
     token_list: Option<Entity<ListState<TokenListDelegate>>>,
     token_proposal_list: Option<Entity<ListState<TokenProposalListDelegate>>>,
     token_list_url_input: Option<Entity<InputState>>,
+    token_chain_id_input: Option<Entity<InputState>>,
+    token_address_input: Option<Entity<InputState>>,
+    token_symbol_input: Option<Entity<InputState>>,
+    token_name_input: Option<Entity<InputState>>,
+    token_decimals_input: Option<Entity<InputState>>,
+    token_editor_open: bool,
+    token_editor_identity: Option<(u64, alloy::primitives::Address)>,
+    token_editor_errors: TokenEditorErrors,
+    token_editor_busy: bool,
     token_import_state: TokenImportState,
     token_import_error: Option<SharedString>,
     token_import_status: Option<SharedString>,
@@ -391,6 +401,7 @@ pub struct WalletWindow {
     portfolio_chain_id: Option<u64>,
     route_scroll_handle: ScrollHandle,
     network_editor_anchor: ScrollAnchor,
+    token_editor_anchor: ScrollAnchor,
     policy_editor_anchor: ScrollAnchor,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
@@ -653,6 +664,7 @@ struct RouteListDelegate {
 
 struct TokenListDelegate {
     owner: OwnerApi,
+    editor: WeakEntity<WalletWindow>,
     all_tokens: Vec<StoredToken>,
     visible_tokens: Vec<StoredToken>,
     query: String,
@@ -662,6 +674,16 @@ struct TokenListDelegate {
     selected: Option<IndexPath>,
     pending_removal: Option<(u64, alloy::primitives::Address)>,
     removing: BTreeSet<(u64, alloy::primitives::Address)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TokenEditorErrors {
+    chain_id: Option<String>,
+    address: Option<String>,
+    symbol: Option<String>,
+    name: Option<String>,
+    decimals: Option<String>,
+    form: Option<String>,
 }
 
 #[derive(Clone)]
@@ -703,9 +725,10 @@ impl TokenProposalListDelegate {
 }
 
 impl TokenListDelegate {
-    fn new(owner: OwnerApi) -> Self {
+    fn new(owner: OwnerApi, editor: WeakEntity<WalletWindow>) -> Self {
         Self {
             owner,
+            editor,
             all_tokens: Vec::new(),
             visible_tokens: Vec::new(),
             query: String::new(),
@@ -757,6 +780,81 @@ fn token_matches_search(token: &StoredToken, query: &str) -> bool {
             .name
             .as_deref()
             .is_some_and(|value| value.to_lowercase().contains(&query))
+}
+
+fn parse_token_editor_fields(
+    chain_id: &str,
+    address: &str,
+    symbol: &str,
+    name: &str,
+    decimals: &str,
+) -> (Option<ListedToken>, TokenEditorErrors) {
+    let mut errors = TokenEditorErrors::default();
+    let chain_id = match chain_id.trim().parse::<u64>() {
+        Ok(value) if value > 0 => Some(value),
+        _ => {
+            errors.chain_id = Some("Enter a positive decimal chain ID.".to_owned());
+            None
+        }
+    };
+    let address = if let Ok(value) = address.trim().parse::<alloy::primitives::Address>() {
+        Some(value)
+    } else {
+        errors.address = Some("Enter a 0x-prefixed 20-byte address.".to_owned());
+        None
+    };
+    let symbol = validate_token_text(symbol, "symbol", false, &mut errors.symbol);
+    let name = validate_token_text(name, "name", true, &mut errors.name);
+    let decimals = if let Ok(value) = decimals.trim().parse::<u8>() {
+        Some(value)
+    } else {
+        errors.decimals = Some("Enter a whole number from 0 through 255.".to_owned());
+        None
+    };
+
+    let token = chain_id.zip(address).zip(symbol).zip(decimals).map(
+        |(((chain_id, address), symbol), decimals)| ListedToken {
+            chain_id,
+            address,
+            symbol,
+            name,
+            decimals,
+        },
+    );
+    if errors.chain_id.is_some()
+        || errors.address.is_some()
+        || errors.symbol.is_some()
+        || errors.name.is_some()
+        || errors.decimals.is_some()
+    {
+        (None, errors)
+    } else {
+        (token, errors)
+    }
+}
+
+fn validate_token_text(
+    value: &str,
+    label: &str,
+    optional: bool,
+    error: &mut Option<String>,
+) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        if optional {
+            return None;
+        }
+        *error = Some(format!("Enter a token {label}."));
+        return None;
+    }
+    let sanitized = ekubo_wallet_core::sanitize::stripped_capped(value, 64);
+    if sanitized != value || value.chars().count() > 64 {
+        *error = Some(format!(
+            "Token {label} must be at most 64 characters and contain no control characters."
+        ));
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 const LEGAL_SECTION_TARGET_BYTES: usize = 8 * 1024;
@@ -968,6 +1066,8 @@ impl ListDelegate for TokenListDelegate {
         let chain_id = token.chain_id.parse::<u64>().ok();
         let address = token.address.parse::<alloy::primitives::Address>().ok();
         let state = cx.entity().downgrade();
+        let editor = self.editor.clone();
+        let edit_token = token.clone();
         let removing = chain_id
             .zip(address)
             .is_some_and(|identity| self.removing.contains(&identity));
@@ -1067,23 +1167,34 @@ impl ListDelegate for TokenListDelegate {
                         }),
                 );
         } else {
-            actions = actions.child(
-                Button::new(("remove-token", index.row))
-                    .label("Remove")
-                    .danger()
-                    .disabled(chain_id.zip(address).is_none() || removing)
-                    .on_click(move |_, _, cx| {
-                        let Some(identity) = chain_id.zip(address) else {
-                            return;
-                        };
-                        let _ = state.update(cx, |list, cx| {
-                            let delegate = list.delegate_mut();
-                            delegate.action_errors.remove(&identity);
-                            delegate.pending_removal = Some(identity);
-                            cx.notify();
-                        });
-                    }),
-            );
+            actions = actions
+                .child(
+                    Button::new(("edit-token", index.row))
+                        .label("Edit")
+                        .disabled(chain_id.zip(address).is_none() || removing)
+                        .on_click(move |_, window, cx| {
+                            let _ = editor.update(cx, |view, cx| {
+                                view.edit_token(&edit_token, window, cx);
+                            });
+                        }),
+                )
+                .child(
+                    Button::new(("remove-token", index.row))
+                        .label("Remove")
+                        .danger()
+                        .disabled(chain_id.zip(address).is_none() || removing)
+                        .on_click(move |_, _, cx| {
+                            let Some(identity) = chain_id.zip(address) else {
+                                return;
+                            };
+                            let _ = state.update(cx, |list, cx| {
+                                let delegate = list.delegate_mut();
+                                delegate.action_errors.remove(&identity);
+                                delegate.pending_removal = Some(identity);
+                                cx.notify();
+                            });
+                        }),
+                );
         }
         Some(
             ListItem::new(SharedString::from(row_id))
@@ -1115,6 +1226,20 @@ impl ListDelegate for TokenListDelegate {
                                                 .text_color(cx.theme().muted_foreground)
                                                 .truncate()
                                                 .child(token.address.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "{} · {} decimals · {}",
+                                                    token.name.as_deref().unwrap_or("No full name"),
+                                                    token.decimals.map_or_else(
+                                                        || "unknown".to_owned(),
+                                                        |value| value.to_string()
+                                                    ),
+                                                    token.source
+                                                )),
                                         ),
                                 )
                                 .child(actions),
@@ -1303,6 +1428,15 @@ impl WalletWindow {
             token_list: None,
             token_proposal_list: None,
             token_list_url_input: None,
+            token_chain_id_input: None,
+            token_address_input: None,
+            token_symbol_input: None,
+            token_name_input: None,
+            token_decimals_input: None,
+            token_editor_open: false,
+            token_editor_identity: None,
+            token_editor_errors: TokenEditorErrors::default(),
+            token_editor_busy: false,
             token_import_state: TokenImportState::Idle,
             token_import_error: None,
             token_import_status: None,
@@ -1334,6 +1468,7 @@ impl WalletWindow {
             portfolio_generation: 0,
             portfolio_chain_id: None,
             network_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
+            token_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
             policy_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
             route_scroll_handle,
             modal_focus: cx.focus_handle(),
@@ -1401,8 +1536,9 @@ impl WalletWindow {
         }
         if self.token_list.is_none() {
             let owner = self.owner.clone();
+            let editor = cx.entity().downgrade();
             self.token_list = Some(cx.new(|cx| {
-                ListState::new(TokenListDelegate::new(owner), window, cx)
+                ListState::new(TokenListDelegate::new(owner, editor), window, cx)
                     .searchable(true)
                     .selectable(false)
             }));
@@ -1417,6 +1553,28 @@ impl WalletWindow {
             self.token_list_url_input = Some(cx.new(|cx| {
                 InputState::new(window, cx).placeholder("https://tokens.example.org/tokens.json")
             }));
+        }
+        if self.token_chain_id_input.is_none() {
+            self.token_chain_id_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("1")));
+        }
+        if self.token_address_input.is_none() {
+            self.token_address_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("0x0000000000000000000000000000000000000000")
+            }));
+        }
+        if self.token_symbol_input.is_none() {
+            self.token_symbol_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("USDC")));
+        }
+        if self.token_name_input.is_none() {
+            self.token_name_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("USD Coin (optional)")));
+        }
+        if self.token_decimals_input.is_none() {
+            self.token_decimals_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("18")));
         }
         if self.account_id_input.is_none() {
             self.account_id_input = Some(cx.new(|cx| {
@@ -1606,6 +1764,189 @@ impl WalletWindow {
                     list.delegate_mut().replace_tokens(result);
                     cx.notify();
                 });
+            });
+        })
+        .detach();
+    }
+
+    fn open_new_token_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chain_id) = self.token_chain_id_input.as_ref() else {
+            return;
+        };
+        let Some(address) = self.token_address_input.as_ref() else {
+            return;
+        };
+        let Some(symbol) = self.token_symbol_input.as_ref() else {
+            return;
+        };
+        let Some(name) = self.token_name_input.as_ref() else {
+            return;
+        };
+        let Some(decimals) = self.token_decimals_input.as_ref() else {
+            return;
+        };
+        for input in [chain_id, address, symbol, name, decimals] {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.token_editor_open = true;
+        self.token_editor_identity = None;
+        self.token_editor_errors = TokenEditorErrors::default();
+        chain_id.update(cx, |input, cx| input.focus(window, cx));
+        self.token_editor_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    fn edit_token(&mut self, token: &StoredToken, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chain_id_input) = self.token_chain_id_input.as_ref() else {
+            return;
+        };
+        let Some(address_input) = self.token_address_input.as_ref() else {
+            return;
+        };
+        let Some(symbol_input) = self.token_symbol_input.as_ref() else {
+            return;
+        };
+        let Some(name_input) = self.token_name_input.as_ref() else {
+            return;
+        };
+        let Some(decimals_input) = self.token_decimals_input.as_ref() else {
+            return;
+        };
+        let Ok(chain_id) = token.chain_id.parse::<u64>() else {
+            self.token_editor_errors.form =
+                Some("This stored token has an invalid chain ID.".to_owned());
+            self.token_editor_open = true;
+            cx.notify();
+            return;
+        };
+        let Ok(address) = token.address.parse::<alloy::primitives::Address>() else {
+            self.token_editor_errors.form =
+                Some("This stored token has an invalid address.".to_owned());
+            self.token_editor_open = true;
+            cx.notify();
+            return;
+        };
+        chain_id_input.update(cx, |input, cx| {
+            input.set_value(chain_id.to_string(), window, cx);
+        });
+        address_input.update(cx, |input, cx| {
+            input.set_value(address.to_checksum(None), window, cx);
+        });
+        symbol_input.update(cx, |input, cx| {
+            input.set_value(token.symbol.clone().unwrap_or_default(), window, cx);
+            input.set_selected_range(0..input.value().len(), cx);
+            input.focus(window, cx);
+        });
+        name_input.update(cx, |input, cx| {
+            input.set_value(token.name.clone().unwrap_or_default(), window, cx);
+        });
+        decimals_input.update(cx, |input, cx| {
+            input.set_value(
+                token
+                    .decimals
+                    .map_or_else(String::new, |value| value.to_string()),
+                window,
+                cx,
+            );
+        });
+        self.token_editor_open = true;
+        self.token_editor_identity = Some((chain_id, address));
+        self.token_editor_errors = TokenEditorErrors::default();
+        self.token_editor_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    fn close_token_editor(&mut self, cx: &mut Context<Self>) {
+        if self.token_editor_busy {
+            return;
+        }
+        self.token_editor_open = false;
+        self.token_editor_identity = None;
+        self.token_editor_errors = TokenEditorErrors::default();
+        cx.notify();
+    }
+
+    fn save_token_editor(&mut self, cx: &mut Context<Self>) {
+        if self.token_editor_busy {
+            return;
+        }
+        let Some(chain_id_input) = self.token_chain_id_input.as_ref() else {
+            return;
+        };
+        let Some(address_input) = self.token_address_input.as_ref() else {
+            return;
+        };
+        let Some(symbol_input) = self.token_symbol_input.as_ref() else {
+            return;
+        };
+        let Some(name_input) = self.token_name_input.as_ref() else {
+            return;
+        };
+        let Some(decimals_input) = self.token_decimals_input.as_ref() else {
+            return;
+        };
+        let (token, mut errors) = parse_token_editor_fields(
+            &chain_id_input.read(cx).value(),
+            &address_input.read(cx).value(),
+            &symbol_input.read(cx).value(),
+            &name_input.read(cx).value(),
+            &decimals_input.read(cx).value(),
+        );
+        let Some(token) = token else {
+            self.token_editor_errors = errors;
+            cx.notify();
+            return;
+        };
+        if let Some(identity) = self.token_editor_identity
+            && identity != (token.chain_id, token.address)
+        {
+            errors.chain_id = Some("Chain ID cannot change while editing a token.".to_owned());
+            errors.address = Some("Address cannot change while editing a token.".to_owned());
+            self.token_editor_errors = errors;
+            cx.notify();
+            return;
+        }
+        match self.cached_networks() {
+            Ok(networks)
+                if networks
+                    .iter()
+                    .any(|network| network.chain_id == token.chain_id) => {}
+            Ok(_) => {
+                errors.chain_id = Some("Choose a chain ID that exists in Networks.".to_owned());
+                self.token_editor_errors = errors;
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                errors.form = Some(format!("Could not validate the network: {error:#}"));
+                self.token_editor_errors = errors;
+                cx.notify();
+                return;
+            }
+        }
+
+        self.token_editor_errors = TokenEditorErrors::default();
+        self.token_editor_busy = true;
+        let owner = self.owner.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(cx, async move { owner.upsert_token(token).await });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.token_editor_busy = false;
+                match result {
+                    Ok(_) => {
+                        view.token_editor_open = false;
+                        view.token_editor_identity = None;
+                        view.reload_tokens(cx);
+                        view.reload_desktop_snapshot(cx);
+                    }
+                    Err(error) => {
+                        view.token_editor_errors.form =
+                            Some(format!("Could not save token: {error:#}"));
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -4769,7 +5110,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("OAuth access tokens are issued only after wallet-mediated human presence. Agent configuration files contain no credential; Codex is forced to use the OS keyring, while other harnesses control their own credential storage. Access tokens last 10 minutes and the refresh family expires after 12 hours. A stolen bearer token can exercise the same Agent API and policy as its harness, so use narrowly scoped policies—an allow-all policy intentionally grants full unattended signing authority. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user."),
+                            .child("OAuth access tokens are issued only after you choose a one-day, one-week, or one-month session and complete wallet-mediated human presence. Agent configuration files contain no credential; Codex is forced to use the OS keyring, while other harnesses control their own credential storage. Access tokens last 10 minutes and refresh rotation cannot extend your selected absolute expiry. A stolen bearer token can exercise the same Agent API and policy as its harness, so use narrowly scoped policies—an allow-all policy intentionally grants full unattended signing authority. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user."),
                     ),
             )
             .child(
@@ -6147,6 +6488,196 @@ impl WalletWindow {
             .when_some(self.token_proposal_error.clone(), |content, error| {
                 content.child(div().text_sm().text_color(cx.theme().danger).child(error))
             });
+        if self.token_editor_open {
+            if let (Some(chain_id), Some(address), Some(symbol), Some(name), Some(decimals)) = (
+                self.token_chain_id_input.as_ref(),
+                self.token_address_input.as_ref(),
+                self.token_symbol_input.as_ref(),
+                self.token_name_input.as_ref(),
+                self.token_decimals_input.as_ref(),
+            ) {
+                let editing = self.token_editor_identity.is_some();
+                let busy = self.token_editor_busy;
+                content = content.child(
+                    div()
+                        .id("token-editor-anchor")
+                        .anchor_scroll(Some(self.token_editor_anchor.clone()))
+                        .child(
+                            GroupBox::new()
+                                .id("token-editor")
+                                .outline()
+                                .title(if editing { "Edit token" } else { "Add token" })
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(if editing {
+                                            "Correct the owner-authored name, symbol, or decimals. Chain ID and address identify the row and cannot be changed."
+                                        } else {
+                                            "Add display metadata for an address on a configured network. Saving requires operating-system authentication."
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .flex_1()
+                                                .min_w(px(150.0))
+                                                .child(div().text_sm().child("Chain ID"))
+                                                .child(
+                                                    Input::new(chain_id)
+                                                        .disabled(editing || busy),
+                                                )
+                                                .when_some(
+                                                    self.token_editor_errors.chain_id.clone(),
+                                                    |field, error| {
+                                                        field.child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(cx.theme().danger)
+                                                                .child(error),
+                                                        )
+                                                    },
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .flex_1()
+                                                .min_w(px(150.0))
+                                                .child(div().text_sm().child("Symbol"))
+                                                .child(Input::new(symbol).disabled(busy))
+                                                .when_some(
+                                                    self.token_editor_errors.symbol.clone(),
+                                                    |field, error| {
+                                                        field.child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(cx.theme().danger)
+                                                                .child(error),
+                                                        )
+                                                    },
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_1()
+                                                .flex_1()
+                                                .min_w(px(150.0))
+                                                .child(div().text_sm().child("Decimals"))
+                                                .child(Input::new(decimals).disabled(busy))
+                                                .when_some(
+                                                    self.token_editor_errors.decimals.clone(),
+                                                    |field, error| {
+                                                        field.child(
+                                                            div()
+                                                                .text_sm()
+                                                                .text_color(cx.theme().danger)
+                                                                .child(error),
+                                                        )
+                                                    },
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(div().text_sm().child("Token address"))
+                                        .child(Input::new(address).disabled(editing || busy))
+                                        .when_some(
+                                            self.token_editor_errors.address.clone(),
+                                            |field, error| {
+                                                field.child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().danger)
+                                                        .child(error),
+                                                )
+                                            },
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(div().text_sm().child("Full name (optional)"))
+                                        .child(Input::new(name).disabled(busy))
+                                        .when_some(
+                                            self.token_editor_errors.name.clone(),
+                                            |field, error| {
+                                                field.child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().danger)
+                                                        .child(error),
+                                                )
+                                            },
+                                        ),
+                                )
+                                .when_some(
+                                    self.token_editor_errors.form.clone(),
+                                    |panel, error| {
+                                        panel.child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().danger)
+                                                .child(error),
+                                        )
+                                    },
+                                )
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("save-token-editor")
+                                                .label(if busy {
+                                                    "Authenticating…"
+                                                } else if editing {
+                                                    "Authenticate & save"
+                                                } else {
+                                                    "Authenticate & add"
+                                                })
+                                                .primary()
+                                                .disabled(busy)
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    view.save_token_editor(cx);
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("close-token-editor")
+                                                .label("Cancel")
+                                                .disabled(busy)
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    view.close_token_editor(cx);
+                                                })),
+                                        ),
+                                ),
+                        ),
+                );
+            }
+        } else {
+            content = content.child(
+                Button::new("open-token-editor")
+                    .label("Add token")
+                    .primary()
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.open_new_token_editor(window, cx);
+                    })),
+            );
+        }
         if let Some(input) = self.token_list_url_input.as_ref() {
             content = content.child(
                 GroupBox::new()

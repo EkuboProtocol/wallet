@@ -1,6 +1,6 @@
 use super::*;
 use axum::http::HeaderValue;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ekubo_wallet_core::{
     desktop_store::{MCP_RESOURCE, MCP_SCOPE},
     human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
@@ -147,4 +147,41 @@ fn unauthorized_challenge_points_to_protected_resource_metadata() {
         .unwrap();
     assert!(challenge.contains("/.well-known/oauth-protected-resource"));
     assert!(challenge.contains(MCP_SCOPE));
+}
+
+#[tokio::test]
+async fn oauth_consent_page_has_exact_duration_choices_and_cannot_be_framed() {
+    let response = consent_page("Codex <local>", MCP_SCOPE, "opaque-consent");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+        "DENY"
+    );
+    let csp = response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("default-src 'none'"));
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    assert_eq!(
+        response.headers().get(header::REFERRER_POLICY).unwrap(),
+        "no-referrer"
+    );
+
+    let body = to_bytes(response.into_body(), OAUTH_REQUEST_LIMIT_BYTES)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("1 day"));
+    assert!(body.contains("1 week"));
+    assert!(body.contains("1 month"));
+    assert!(body.contains("Codex &lt;local&gt;"));
+    assert!(!body.contains("<script"));
+    assert!(!body.contains("forever"));
 }

@@ -70,23 +70,70 @@ fn oauth_refresh_families_have_a_hard_non_sliding_session_expiry() {
     let client = register(&mut store);
     let pair = authorize_and_exchange(&mut store, &client);
     let refresh = pair.refresh_token.expose_base64url();
-    let now = chrono::Utc::now();
-    store
+    let original_expiration = store
         .connection
-        .execute(
-            "UPDATE oauth_refresh_tokens SET created_at = ?1, expires_at = ?2",
-            rusqlite::params![
-                crate::sql::Millis(now - chrono::Duration::hours(13)),
-                crate::sql::Millis(now + chrono::Duration::hours(1)),
-            ],
+        .query_row(
+            "SELECT expires_at FROM oauth_refresh_tokens WHERE consumed_at IS NULL",
+            [],
+            |row| Ok(row.get::<_, crate::sql::Millis>(0)?.0),
         )
         .unwrap();
 
-    let error = store
+    store
         .refresh_access_token(&refresh, client.id, MCP_RESOURCE)
-        .err()
         .unwrap();
-    assert!(error.to_string().contains("session expired"), "{error:#}");
+    let rotated_expiration = store
+        .connection
+        .query_row(
+            "SELECT expires_at FROM oauth_refresh_tokens WHERE consumed_at IS NULL",
+            [],
+            |row| Ok(row.get::<_, crate::sql::Millis>(0)?.0),
+        )
+        .unwrap();
+    assert_eq!(rotated_expiration, original_expiration);
+}
+
+#[test]
+fn owner_selected_oauth_session_lifetime_is_bound_to_the_authorization_code() {
+    let mut store = store(37);
+    let client = register(&mut store);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
+    let before = chrono::Utc::now();
+    let code = store
+        .issue_authorization_code_with_session(
+            client.id,
+            REDIRECT,
+            &challenge,
+            MCP_SCOPE,
+            MCP_RESOURCE,
+            OAuthSessionDuration::OneWeek,
+            &agent_authorization(),
+        )
+        .unwrap();
+    let pair = store
+        .exchange_authorization_code(
+            &code.code.expose_base64url(),
+            client.id,
+            REDIRECT,
+            VERIFIER,
+            MCP_RESOURCE,
+        )
+        .unwrap();
+    let expiration = store
+        .connection
+        .query_row(
+            "SELECT expires_at FROM oauth_refresh_tokens WHERE consumed_at IS NULL",
+            [],
+            |row| Ok(row.get::<_, crate::sql::Millis>(0)?.0),
+        )
+        .unwrap();
+
+    assert!(expiration >= before + chrono::Duration::weeks(1) - chrono::Duration::seconds(1));
+    assert!(expiration <= chrono::Utc::now() + chrono::Duration::weeks(1));
+    assert_eq!(pair.expires_in, 10 * 60);
+    assert_eq!(OAuthSessionDuration::OneDay.as_query_value(), "day");
+    assert_eq!(OAuthSessionDuration::OneMonth.label(), "1 month");
+    assert!(OAuthSessionDuration::parse_query_value("forever").is_err());
 }
 
 #[test]

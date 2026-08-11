@@ -978,6 +978,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  scope TEXT NOT NULL,
                  resource TEXT NOT NULL,
                  expires_at INTEGER NOT NULL,
+                 session_expires_at INTEGER NOT NULL,
                  used_at INTEGER,
                  FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
              ) STRICT",

@@ -581,6 +581,74 @@ fn confirmed_token_mutations_require_token_metadata_authorization() {
 }
 
 #[test]
+fn owner_authorized_token_upsert_replaces_metadata_and_consumes_proposals() {
+    let (_directory, mut store) = store();
+    let address = Address::repeat_byte(0x42);
+    let original = usdc(1, address);
+    let inserted = store.add(&original, "original list").unwrap();
+    store
+        .propose(
+            &[ListedToken {
+                symbol: "OLD".to_owned(),
+                ..original.clone()
+            }],
+            &ProposalSource::Claimed("pending correction"),
+        )
+        .unwrap();
+
+    let replacement = ListedToken {
+        chain_id: 1,
+        address,
+        symbol: " US\u{202e}DC ".to_owned(),
+        name: Some(" USD\u{200b} Coin ".to_owned()),
+        decimals: 8,
+    };
+    let wrong = crate::human_presence::OwnerAuthorization::for_test(
+        crate::human_presence::OwnerAuthorizationScope::NetworkSettings,
+    );
+    assert!(
+        store
+            .upsert_authorized(&replacement, "Manual entry", &wrong)
+            .is_err()
+    );
+
+    let token_authorization = crate::human_presence::OwnerAuthorization::for_test(
+        crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
+    );
+    let updated = store
+        .upsert_authorized(&replacement, "Manual entry", &token_authorization)
+        .unwrap();
+    assert_eq!(updated.symbol.as_deref(), Some("USDC"));
+    assert_eq!(updated.name.as_deref(), Some("USD Coin"));
+    assert_eq!(updated.decimals, Some(8));
+    assert_eq!(updated.source, "Manual entry");
+    assert_eq!(updated.added_at, inserted.added_at);
+    assert!(store.proposals().unwrap().is_empty());
+}
+
+#[test]
+fn owner_authorized_token_upsert_rejects_an_empty_sanitized_symbol() {
+    let (_directory, mut store) = store();
+    let authorization = crate::human_presence::OwnerAuthorization::for_test(
+        crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
+    );
+    let token = ListedToken {
+        chain_id: 1,
+        address: Address::repeat_byte(0x42),
+        symbol: "\u{202e}\u{200b}".to_owned(),
+        name: None,
+        decimals: 18,
+    };
+
+    assert!(
+        store
+            .upsert_authorized(&token, "Manual entry", &authorization)
+            .is_err()
+    );
+    assert!(store.get(token.chain_id, token.address).unwrap().is_none());
+}
+
+#[test]
 fn confirming_a_replaced_token_proposal_is_atomic_and_fails_closed() {
     let (_directory, mut store) = store();
     let first_address = Address::repeat_byte(0x11);

@@ -22,3 +22,9 @@ Create one only with `wallet_create_fork`.
 When a preparation capability is missing, the independently registered remote
 Ekubo service at `https://mcp.ekubo.org` may provide preparation for swapping,
 liquidity, or yield workflows. That URL is a capability pointer and grants that server no extra trust.
+
+Legacy limit-order workflows are deprecated. A limit order does not guarantee
+execution: it can be un-executed, so neither an observed fill nor an agent's
+submission should be presented as final execution. For current signed,
+controlled swap flows, inspect the
+[`SignedExclusiveSwap` extension source](https://github.com/EkuboProtocol/evm-contracts/blob/main/src/extensions/SignedExclusiveSwap.sol).
