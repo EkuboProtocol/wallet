@@ -45,6 +45,7 @@ use gpui_component::{
 };
 use std::{
     cell::RefCell,
+    collections::VecDeque,
     rc::Rc,
     sync::{
         Arc, Mutex,
@@ -232,6 +233,8 @@ pub struct WalletWindow {
     mcp_status: SharedString,
     selected_record: Option<uuid::Uuid>,
     active_review: Option<ActiveReview>,
+    queued_reviews: SerialQueue<QueuedReview>,
+    review_flow: ReviewFlowState,
     pending_agent_install: Option<PendingAgentInstall>,
     agent_reinstall: AgentReinstallState,
     account_id_input: Option<Entity<InputState>>,
@@ -265,6 +268,12 @@ enum PortfolioState {
 enum AgentReinstallState {
     Idle,
     Running,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReviewFlowState {
+    Ready,
+    Busy,
 }
 
 struct LegalReview {
@@ -343,6 +352,46 @@ enum ActiveReviewCompletion {
     },
 }
 
+enum QueuedReview {
+    Transaction(Box<GuiReviewPrompt>),
+    WalletConnect(ProposalPrompt),
+}
+
+struct SerialQueue<T> {
+    pending: VecDeque<T>,
+}
+
+impl<T> Default for SerialQueue<T> {
+    fn default() -> Self {
+        Self {
+            pending: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> SerialQueue<T> {
+    fn receive(&mut self, active: bool, item: T) -> Option<T> {
+        if active {
+            self.pending.push_back(item);
+            None
+        } else {
+            Some(item)
+        }
+    }
+
+    fn next(&mut self, active: bool) -> Option<T> {
+        (!active).then(|| self.pending.pop_front()).flatten()
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
 impl WalletWindow {
     fn new(
         owner: OwnerApi,
@@ -360,6 +409,8 @@ impl WalletWindow {
             mcp_status: "MCP starting…".into(),
             selected_record: None,
             active_review: None,
+            queued_reviews: SerialQueue::default(),
+            review_flow: ReviewFlowState::Ready,
             pending_agent_install: None,
             agent_reinstall: AgentReinstallState::Idle,
             account_id_input: None,
@@ -474,7 +525,17 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn install_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+    fn receive_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+        let Some(QueuedReview::WalletConnect(prompt)) = self.queued_reviews.receive(
+            self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy,
+            QueuedReview::WalletConnect(prompt),
+        ) else {
+            return;
+        };
+        self.activate_walletconnect_prompt(prompt);
+    }
+
+    fn activate_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
         let document = prompt.choices[0].document.clone();
         self.active_review = Some(ActiveReview {
             state: ReviewState::new(document),
@@ -486,6 +547,40 @@ impl WalletWindow {
             }),
             awaiting_refresh: false,
         });
+    }
+
+    fn activate_next_queued_review(&mut self) {
+        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+            return;
+        }
+        match self.queued_reviews.next(self.active_review.is_some()) {
+            Some(QueuedReview::Transaction(prompt)) => self.activate_transaction_prompt(*prompt),
+            Some(QueuedReview::WalletConnect(prompt)) => {
+                self.activate_walletconnect_prompt(prompt);
+            }
+            None => {}
+        }
+    }
+
+    fn active_review_route(&self) -> Route {
+        if self.active_review.as_ref().is_some_and(|active| {
+            matches!(
+                active.completion,
+                Some(ActiveReviewCompletion::WalletConnect { .. })
+            )
+        }) {
+            Route::WalletConnect
+        } else {
+            Route::Reviews
+        }
+    }
+
+    fn finish_review_flow(&mut self) {
+        self.review_flow = ReviewFlowState::Ready;
+        self.activate_next_queued_review();
+        if self.active_review.is_some() {
+            self.route = self.active_review_route();
+        }
     }
 
     fn select_walletconnect_account(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -638,6 +733,11 @@ impl WalletWindow {
     }
 
     fn begin_account_removal(&mut self, wallet_id: String, cx: &mut Context<Self>) {
+        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+            self.operation_status = Some("Finish or close the current review first.".into());
+            cx.notify();
+            return;
+        }
         match self.owner.account_removal_document(&wallet_id) {
             Ok(document) => {
                 self.active_review = Some(ActiveReview {
@@ -1058,23 +1158,41 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn install_review_prompt(&mut self, prompt: GuiReviewPrompt) {
-        if let Some(active) = self.active_review.as_mut() {
+    fn receive_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
+        if let Some(active) = self.active_review.as_mut()
+            && active.awaiting_refresh
+            && active.completion.is_none()
+        {
             active.state.refresh(prompt.document);
             active.simulation = Some(prompt.simulation);
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
             active.awaiting_refresh = false;
-        } else {
-            self.active_review = Some(ActiveReview {
-                state: ReviewState::new(prompt.document),
-                simulation: Some(prompt.simulation),
-                completion: Some(ActiveReviewCompletion::Transaction(prompt.response)),
-                awaiting_refresh: false,
-            });
+            return;
         }
+        let Some(QueuedReview::Transaction(prompt)) = self.queued_reviews.receive(
+            self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy,
+            QueuedReview::Transaction(Box::new(prompt)),
+        ) else {
+            return;
+        };
+        self.activate_transaction_prompt(*prompt);
+    }
+
+    fn activate_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
+        self.active_review = Some(ActiveReview {
+            state: ReviewState::new(prompt.document),
+            simulation: Some(prompt.simulation),
+            completion: Some(ActiveReviewCompletion::Transaction(prompt.response)),
+            awaiting_refresh: false,
+        });
     }
 
     fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+            self.operation_status = Some("Finish or close the current review first.".into());
+            cx.notify();
+            return;
+        }
         match self.owner.message_review_document(request_id) {
             Ok(document) => {
                 let digest = document.request.digest.clone().unwrap_or_default();
@@ -1095,6 +1213,11 @@ impl WalletWindow {
     }
 
     fn begin_typed_data_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+            self.operation_status = Some("Finish or close the current review first.".into());
+            cx.notify();
+            return;
+        }
         match self.owner.typed_data_review_document(request_id) {
             Ok(document) => {
                 let digest = document.request.digest.clone().unwrap_or_default();
@@ -1115,7 +1238,7 @@ impl WalletWindow {
     }
 
     fn begin_transaction_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.active_review.is_some() {
+        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
             self.operation_status = Some("Finish or close the current review first.".into());
             cx.notify();
             return;
@@ -1125,21 +1248,28 @@ impl WalletWindow {
         let presenter = self.review_presenter.clone();
         cx.spawn(async move |view, cx| {
             let result = owner.review_transaction(request_id, &presenter).await;
-            let _ = view.update(cx, |view, cx| {
-                view.operation_status = Some(match result {
-                    Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Signed(_)) => {
-                        "Review approved and transaction signed.".into()
+            let _ =
+                view.update(cx, |view, cx| {
+                    if view.active_review.as_ref().is_some_and(|active| {
+                        active.awaiting_refresh && active.completion.is_none()
+                    }) {
+                        view.active_review = None;
                     }
-                    Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Rejected(_)) => {
-                        "Review rejected. No signature was produced.".into()
-                    }
-                    Err(error) if error.to_string().contains("closed without a decision") => {
-                        "Review closed. The request remains pending.".into()
-                    }
-                    Err(error) => format!("Review failed: {error:#}").into(),
+                    view.finish_review_flow();
+                    view.operation_status = Some(match result {
+                        Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Signed(_)) => {
+                            "Review approved and transaction signed.".into()
+                        }
+                        Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Rejected(_)) => {
+                            "Review rejected. No signature was produced.".into()
+                        }
+                        Err(error) if error.to_string().contains("closed without a decision") => {
+                            "Review closed. The request remains pending.".into()
+                        }
+                        Err(error) => format!("Review failed: {error:#}").into(),
+                    });
+                    cx.notify();
                 });
-                cx.notify();
-            });
         })
         .detach();
         cx.notify();
@@ -1189,6 +1319,7 @@ impl WalletWindow {
         }
         let completion = active.completion.take();
         let owner = self.owner.clone();
+        let mut wait_for_flow = false;
         match (command, completion) {
             (GuiReviewCommand::Refresh, Some(ActiveReviewCompletion::Transaction(response))) => {
                 active.awaiting_refresh = true;
@@ -1198,6 +1329,7 @@ impl WalletWindow {
                 }
             }
             (GuiReviewCommand::Close, Some(ActiveReviewCompletion::Transaction(response))) => {
+                wait_for_flow = true;
                 let _ = response.send(command);
                 self.active_review = None;
             }
@@ -1205,6 +1337,7 @@ impl WalletWindow {
                 GuiReviewCommand::Approve | GuiReviewCommand::Reject,
                 Some(ActiveReviewCompletion::Transaction(response)),
             ) => {
+                wait_for_flow = true;
                 if response.send(command).is_err() {
                     self.operation_status = Some("The review request is no longer active.".into());
                 }
@@ -1251,10 +1384,12 @@ impl WalletWindow {
                 GuiReviewCommand::Approve,
                 Some(ActiveReviewCompletion::Message { request_id, digest }),
             ) => {
+                wait_for_flow = true;
                 self.active_review = None;
                 cx.spawn(async move |view, cx| {
                     let result = owner.sign_message(request_id, &digest).await;
                     let _ = view.update(cx, |view, cx| {
+                        view.finish_review_flow();
                         view.operation_status = Some(match result {
                             Ok(_) => "Message reviewed, authenticated, and signed.".into(),
                             Err(error) => format!("Message signing failed: {error:#}").into(),
@@ -1268,10 +1403,12 @@ impl WalletWindow {
                 GuiReviewCommand::Approve,
                 Some(ActiveReviewCompletion::TypedData { request_id, digest }),
             ) => {
+                wait_for_flow = true;
                 self.active_review = None;
                 cx.spawn(async move |view, cx| {
                     let result = owner.sign_typed_data(request_id, &digest).await;
                     let _ = view.update(cx, |view, cx| {
+                        view.finish_review_flow();
                         view.operation_status = Some(match result {
                             Ok(_) => "Typed data reviewed, authenticated, and signed.".into(),
                             Err(error) => format!("Typed-data signing failed: {error:#}").into(),
@@ -1285,10 +1422,12 @@ impl WalletWindow {
                 GuiReviewCommand::Approve,
                 Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
             ) => {
+                wait_for_flow = true;
                 self.active_review = None;
                 cx.spawn(async move |view, cx| {
                     let result = owner.remove_account(&wallet_id).await;
                     let _ = view.update(cx, |view, cx| {
+                        view.finish_review_flow();
                         view.operation_status = Some(match result {
                             Ok(_) => {
                                 format!("Removed account {wallet_id} and its local policy.").into()
@@ -1342,6 +1481,13 @@ impl WalletWindow {
                 self.operation_status = Some("The review request is no longer active.".into());
                 self.active_review = None;
             }
+        }
+        if wait_for_flow {
+            self.review_flow = ReviewFlowState::Busy;
+        }
+        self.activate_next_queued_review();
+        if self.active_review.is_some() {
+            self.route = self.active_review_route();
         }
         cx.notify();
     }
@@ -2526,10 +2672,25 @@ impl WalletWindow {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(div().font_semibold().child("Security review"))
+                    .child(div().font_semibold().child("Security review").when(
+                        !self.queued_reviews.is_empty(),
+                        |title| {
+                            title.child(
+                                div()
+                                    .text_sm()
+                                    .font_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{} additional review(s) waiting",
+                                        self.queued_reviews.len()
+                                    )),
+                            )
+                        },
+                    ))
                     .child(
                         Button::new(("review-close", generation))
                             .label("Close")
+                            .disabled(active.awaiting_refresh)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 view.send_review_command(generation, GuiReviewCommand::Close, cx);
                             })),
@@ -3090,8 +3251,8 @@ pub fn run_desktop() -> Result<()> {
             cx.spawn(async move |cx| {
                 while let Some(prompt) = review_prompts.recv().await {
                     review_view.update(cx, |view, cx| {
-                        view.install_review_prompt(prompt);
-                        view.route = Route::Reviews;
+                        view.receive_transaction_prompt(prompt);
+                        view.route = view.active_review_route();
                         cx.notify();
                     });
                     let _ = cx.update(|cx| show_wallet_window(cx, &review_view, &review_window));
@@ -3103,8 +3264,8 @@ pub fn run_desktop() -> Result<()> {
             cx.spawn(async move |cx| {
                 while let Some(prompt) = walletconnect_prompts.recv().await {
                     walletconnect_review_view.update(cx, |view, cx| {
-                        view.install_walletconnect_prompt(prompt);
-                        view.route = Route::WalletConnect;
+                        view.receive_walletconnect_prompt(prompt);
+                        view.route = view.active_review_route();
                         cx.notify();
                     });
                     let _ = cx.update(|cx| {

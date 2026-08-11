@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn serial_review_queue_never_overwrites_and_preserves_arrival_order() {
+    let mut queue = SerialQueue::default();
+
+    assert_eq!(queue.receive(false, "first"), Some("first"));
+    assert_eq!(queue.receive(true, "second"), None);
+    assert_eq!(queue.receive(true, "third"), None);
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue.next(true), None);
+    assert_eq!(queue.next(false), Some("second"));
+    assert_eq!(queue.next(false), Some("third"));
+    assert!(queue.is_empty());
+}
+
+#[test]
 fn portfolio_amounts_preserve_every_significant_digit() {
     assert_eq!(
         format_asset_balance("123450000", Some(6), Some("USDC"), "base units"),
