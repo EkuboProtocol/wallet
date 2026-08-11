@@ -21,11 +21,12 @@ use crate::{
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::ReviewDecision;
 use ekubo_wallet_core::config::NetworkConfig;
-use ekubo_wallet_core::core::policy::WalletPolicy;
+use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::AgentKind;
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::pending::PendingStatus;
+use ekubo_wallet_core::policy_store::PolicyProposal;
 use ekubo_wallet_core::token_store::StoredToken;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, QuitMode, Render,
@@ -298,6 +299,9 @@ pub struct WalletWindow {
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
     network_json_input: Option<Entity<InputState>>,
+    policy_json_input: Option<Entity<InputState>>,
+    policy_editor: Option<PolicyEditor>,
+    policy_installing: bool,
 }
 
 enum PortfolioState {
@@ -330,6 +334,23 @@ struct AccountExport {
     wallet_id: String,
     lease: Option<ExportLease>,
     copied: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PolicyDraftReview {
+    wallet_id: String,
+    source_revision: Option<u64>,
+    document: String,
+    policy: WalletPolicy,
+    diff: Vec<String>,
+}
+
+struct PolicyEditor {
+    wallet_id: String,
+    source_revision: Option<u64>,
+    current_policy: Option<WalletPolicy>,
+    proposal: Option<PolicyProposal>,
+    validation: Option<std::result::Result<PolicyDraftReview, SharedString>>,
 }
 
 struct PendingAgentInstall {
@@ -754,6 +775,30 @@ fn fuzzy_route_score(label: &str, query: &str) -> Option<usize> {
     Some(score)
 }
 
+fn review_policy_draft(
+    wallet_id: &str,
+    source_revision: Option<u64>,
+    current_policy: Option<&WalletPolicy>,
+    document: &str,
+) -> Result<PolicyDraftReview> {
+    ensure!(!document.trim().is_empty(), "policy document is empty");
+    let value: serde_json::Value =
+        serde_json::from_str(document).context("policy document is not valid JSON")?;
+    let policy = WalletPolicy::parse(value)?;
+    let document = serde_json::to_string_pretty(&policy)?;
+    let baseline = current_policy
+        .cloned()
+        .unwrap_or_else(WalletPolicy::require_approval_for_everything);
+    let diff = diff_policies(&baseline, &policy);
+    Ok(PolicyDraftReview {
+        wallet_id: wallet_id.to_owned(),
+        source_revision,
+        document,
+        policy,
+        diff,
+    })
+}
+
 impl WalletWindow {
     fn new(
         owner: OwnerApi,
@@ -794,6 +839,9 @@ impl WalletWindow {
             walletconnect_presenter,
             walletconnect_uri_input: None,
             network_json_input: None,
+            policy_json_input: None,
+            policy_editor: None,
+            policy_installing: false,
         };
         window.open_next_required_legal();
         window
@@ -856,6 +904,14 @@ impl WalletWindow {
                     .code_editor("json")
                     .rows(12)
                     .placeholder("Paste a complete network JSON object")
+            }));
+        }
+        if self.policy_json_input.is_none() {
+            self.policy_json_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .code_editor("json")
+                    .rows(20)
+                    .placeholder("Select an account to inspect and edit its policy")
             }));
         }
     }
@@ -1153,6 +1209,258 @@ impl WalletWindow {
                 {
                     cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
                 }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_policy_editor(&mut self, wallet_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.policy_json_input.as_ref() else {
+            return;
+        };
+        match self.owner.policy(wallet_id) {
+            Ok(stored) => {
+                let source_revision = stored.as_ref().map(|policy| policy.revision);
+                let current_policy = stored.map(|policy| policy.policy);
+                let document = serde_json::to_string_pretty(
+                    current_policy
+                        .as_ref()
+                        .unwrap_or(&WalletPolicy::require_approval_for_everything()),
+                );
+                match document {
+                    Ok(document) => {
+                        input.update(cx, |input, cx| input.set_value(document, window, cx));
+                        self.policy_editor = Some(PolicyEditor {
+                            wallet_id: wallet_id.to_owned(),
+                            source_revision,
+                            current_policy,
+                            proposal: None,
+                            validation: None,
+                        });
+                        self.operation_status = None;
+                    }
+                    Err(error) => {
+                        self.operation_status =
+                            Some(format!("Could not serialize policy: {error:#}").into());
+                    }
+                }
+            }
+            Err(error) => {
+                self.operation_status = Some(format!("Could not read policy: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_policy_proposal(
+        &mut self,
+        proposal: PolicyProposal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.policy_json_input.as_ref() else {
+            return;
+        };
+        match self.owner.policy(&proposal.wallet_id) {
+            Ok(current) => {
+                let current_policy = current.as_ref().map(|policy| policy.policy.clone());
+                let review = serde_json::to_string_pretty(&proposal.policy)
+                    .context("could not serialize proposed policy")
+                    .and_then(|document| {
+                        review_policy_draft(
+                            &proposal.wallet_id,
+                            Some(proposal.source_revision),
+                            current_policy.as_ref(),
+                            &document,
+                        )
+                    });
+                match review {
+                    Ok(review) => {
+                        input.update(cx, |input, cx| {
+                            input.set_value(review.document.clone(), window, cx);
+                        });
+                        self.policy_editor = Some(PolicyEditor {
+                            wallet_id: proposal.wallet_id.clone(),
+                            source_revision: Some(proposal.source_revision),
+                            current_policy,
+                            proposal: Some(proposal),
+                            validation: Some(Ok(review)),
+                        });
+                        self.operation_status = Some(
+                            "Opened the exact agent proposal. Review its rationale and permission diff before installing or rejecting it."
+                                .into(),
+                        );
+                    }
+                    Err(error) => {
+                        self.operation_status =
+                            Some(format!("Could not prepare proposal review: {error:#}").into());
+                    }
+                }
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not read the active policy: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn reject_policy_proposal(&mut self, proposal: &PolicyProposal, cx: &mut Context<Self>) {
+        self.operation_status = Some(match self.owner.reject_policy_proposal(proposal) {
+            Ok(true) => {
+                if self
+                    .policy_editor
+                    .as_ref()
+                    .and_then(|editor| editor.proposal.as_ref())
+                    == Some(proposal)
+                {
+                    self.policy_editor = None;
+                }
+                format!("Rejected the policy proposal for {}.", proposal.wallet_id).into()
+            }
+            Ok(false) => "The proposal changed while it was open. Review the current one.".into(),
+            Err(error) => format!("Could not reject proposal: {error:#}").into(),
+        });
+        cx.notify();
+    }
+
+    fn reset_policy_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(editor), Some(input)) =
+            (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
+        else {
+            return;
+        };
+        match serde_json::to_string_pretty(&WalletPolicy::require_approval_for_everything()) {
+            Ok(document) => {
+                input.update(cx, |input, cx| input.set_value(document, window, cx));
+                editor.validation = None;
+                self.operation_status = Some(
+                    "Reset the draft to require explicit approval for every transaction. Validate the permission diff before installing."
+                        .into(),
+                );
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not prepare the reset policy: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn validate_policy_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(editor), Some(input)) =
+            (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
+        else {
+            return;
+        };
+        let document = input.read(cx).value().to_string();
+        let review = review_policy_draft(
+            &editor.wallet_id,
+            editor.source_revision,
+            editor.current_policy.as_ref(),
+            &document,
+        );
+        editor.validation = Some(match review {
+            Ok(review) => {
+                input.update(cx, |input, cx| {
+                    input.set_value(review.document.clone(), window, cx);
+                });
+                self.operation_status = Some(
+                    "Policy is valid and canonical. Review every permission change before installing."
+                        .into(),
+                );
+                Ok(review)
+            }
+            Err(error) => {
+                let message: SharedString = format!("Policy validation failed: {error:#}").into();
+                self.operation_status = Some(message.clone());
+                Err(message)
+            }
+        });
+        cx.notify();
+    }
+
+    fn install_policy_editor(&mut self, cx: &mut Context<Self>) {
+        if self.policy_installing {
+            return;
+        }
+        let (Some(editor), Some(input)) =
+            (self.policy_editor.as_ref(), self.policy_json_input.as_ref())
+        else {
+            return;
+        };
+        let Some(Ok(review)) = editor.validation.as_ref() else {
+            self.operation_status = Some("Validate the policy and review its diff first.".into());
+            cx.notify();
+            return;
+        };
+        if input.read(cx).value().as_ref() != review.document {
+            self.operation_status = Some(
+                "The policy changed after validation. Validate it again before installing.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let review = review.clone();
+        let proposal = editor.proposal.clone();
+        let owner = self.owner.clone();
+        self.policy_installing = true;
+        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        cx.spawn(async move |view, cx| {
+            let proposal_is_exact = proposal.as_ref().is_some_and(|proposal| {
+                proposal.wallet_id == review.wallet_id
+                    && Some(proposal.source_revision) == review.source_revision
+                    && proposal.policy == review.policy
+            });
+            let result = if proposal_is_exact {
+                owner
+                    .apply_policy_proposal(proposal.as_ref().expect("checked above"))
+                    .await
+            } else {
+                owner
+                    .install_policy(&review.wallet_id, &review.policy, review.source_revision)
+                    .await
+            };
+            let proposal_cleanup = if result.is_ok() && !proposal_is_exact {
+                proposal
+                    .as_ref()
+                    .map(|proposal| owner.reject_policy_proposal(proposal))
+                    .transpose()
+            } else {
+                Ok(None)
+            };
+            let _ = view.update(cx, |view, cx| {
+                view.policy_installing = false;
+                match result {
+                    Ok(installed) => {
+                        if let Some(editor) = view.policy_editor.as_mut()
+                            && editor.wallet_id == review.wallet_id
+                        {
+                            editor.source_revision = Some(installed.revision);
+                            editor.current_policy = Some(installed.policy);
+                            editor.proposal = None;
+                            editor.validation = None;
+                        }
+                        view.operation_status = Some(match proposal_cleanup {
+                            Ok(_) => format!(
+                                "Installed policy revision {} for {}.",
+                                installed.revision, review.wallet_id
+                            )
+                            .into(),
+                            Err(error) => format!(
+                                "Installed policy revision {} for {}, but could not clear the superseded proposal: {error:#}",
+                                installed.revision, review.wallet_id
+                            )
+                            .into(),
+                        });
+                    }
+                    Err(error) => {
+                        view.operation_status =
+                            Some(format!("Policy installation cancelled: {error:#}").into());
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -2078,8 +2386,10 @@ impl WalletWindow {
         let mut content = div().flex().flex_col().gap_3();
         match self.owner.reviews(None) {
             Ok(queues) => {
-                let total =
-                    queues.transactions.len() + queues.typed_data.len() + queues.messages.len();
+                let total = queues.transactions.len()
+                    + queues.typed_data.len()
+                    + queues.messages.len()
+                    + queues.policy_proposals.len();
                 content = content.child(format!("{total} request(s) awaiting an owner decision"));
                 for request in queues.transactions {
                     let request_id = request.request_id;
@@ -2173,6 +2483,36 @@ impl WalletWindow {
                                     .primary()
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.begin_message_review(request_id, cx);
+                                    })),
+                                ),
+                        );
+                }
+                for proposal in queues.policy_proposals {
+                    let wallet_id = proposal.wallet_id;
+                    content =
+                        content.child(
+                            div()
+                                .p_3()
+                                .border_1()
+                                .rounded_lg()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(format!(
+                                    "Policy proposal · {wallet_id} · revision {}",
+                                    proposal.source_revision
+                                ))
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "open-policy-proposal-{wallet_id}"
+                                    )))
+                                    .label("Open Policies")
+                                    .primary()
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.route = Route::Policies;
+                                        cx.notify();
                                     })),
                                 ),
                         );
@@ -2546,6 +2886,287 @@ impl WalletWindow {
                 }))
             }
             Err(error) => panel.child(format!("Accounts unavailable: {error:#}")),
+        }
+    }
+
+    fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut content = div().flex().flex_col().gap_4();
+        let accounts = match self.owner.accounts() {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                return content.child(Alert::error(
+                    "policy-account-error",
+                    format!("Accounts unavailable: {error:#}"),
+                ));
+            }
+        };
+        match self.owner.policy_proposals() {
+            Ok(proposals) if !proposals.is_empty() => {
+                let mut proposal_list = div().flex().flex_col().gap_3();
+                for proposal in proposals {
+                    let current = self.owner.policy(&proposal.wallet_id).ok().flatten();
+                    let current_revision = current.as_ref().map(|policy| policy.revision);
+                    let current_policy = current
+                        .as_ref()
+                        .map_or_else(WalletPolicy::require_approval_for_everything, |policy| {
+                            policy.policy.clone()
+                        });
+                    let applicable = current_revision == Some(proposal.source_revision);
+                    let mut changes = div().flex().flex_col().gap_1();
+                    for line in diff_policies(&current_policy, &proposal.policy) {
+                        changes =
+                            changes.child(div().font_family("monospace").text_sm().child(line));
+                    }
+                    let review_proposal = proposal.clone();
+                    let reject_proposal = proposal.clone();
+                    proposal_list =
+                        proposal_list.child(
+                            div()
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(div().font_semibold().child(format!(
+                                            "{} · based on revision {}",
+                                            proposal.wallet_id, proposal.source_revision
+                                        )))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(if applicable {
+                                                    cx.theme().primary
+                                                } else {
+                                                    cx.theme().danger
+                                                })
+                                                .child(if applicable {
+                                                    "Ready for review"
+                                                } else {
+                                                    "Superseded by a policy change"
+                                                }),
+                                        ),
+                                )
+                                .child(div().text_sm().child(
+                                    ekubo_wallet_core::sanitize::terminal_safe_multiline(
+                                        &proposal.rationale,
+                                    ),
+                                ))
+                                .child(changes)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "review-policy-proposal-{}",
+                                                proposal.wallet_id
+                                            )))
+                                            .label("Review in editor")
+                                            .primary()
+                                            .disabled(!applicable)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.open_policy_proposal(
+                                                    review_proposal.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "reject-policy-proposal-{}",
+                                                proposal.wallet_id
+                                            )))
+                                            .label("Reject proposal")
+                                            .danger()
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.reject_policy_proposal(&reject_proposal, cx);
+                                            })),
+                                        ),
+                                ),
+                        );
+                }
+                content = content.child(
+                    GroupBox::new()
+                        .id("policy-proposals")
+                        .outline()
+                        .title("Agent proposals")
+                        .child(proposal_list),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                content = content.child(Alert::error(
+                    "policy-proposal-error",
+                    format!("Policy proposals unavailable: {error:#}"),
+                ));
+            }
+        }
+        if accounts.is_empty() {
+            return content.child(
+                GroupBox::new()
+                    .id("policy-empty")
+                    .outline()
+                    .title("Signing policies")
+                    .child("Create an account before configuring signing permissions.")
+                    .child(
+                        Button::new("policy-go-to-accounts")
+                            .label("Go to Accounts")
+                            .primary()
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.route = Route::Accounts;
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+
+        let selected_wallet = self
+            .policy_editor
+            .as_ref()
+            .map(|editor| editor.wallet_id.as_str());
+        let mut account_picker = div().flex().flex_wrap().gap_2();
+        for account in accounts {
+            let wallet_id = account.id.clone();
+            let selected = selected_wallet == Some(wallet_id.as_str());
+            account_picker = account_picker.child(
+                Button::new(SharedString::from(format!("policy-wallet-{wallet_id}")))
+                    .label(wallet_id.clone())
+                    .when(selected, ButtonVariants::primary)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.open_policy_editor(&wallet_id, window, cx);
+                    })),
+            );
+        }
+        content = content.child(
+            GroupBox::new()
+                .id("policy-account-picker")
+                .outline()
+                .title("Account")
+                .child(account_picker),
+        );
+
+        let (Some(editor), Some(input)) =
+            (self.policy_editor.as_ref(), self.policy_json_input.as_ref())
+        else {
+            return content.child(
+                div()
+                    .p_5()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Select an account to inspect its exact policy document."),
+            );
+        };
+
+        let current_document = input.read(cx).value();
+        let validated = editor
+            .validation
+            .as_ref()
+            .and_then(|result| result.as_ref().ok());
+        let reviewed_exact_document =
+            validated.is_some_and(|review| current_document.as_ref() == review.document.as_str());
+        let revision = editor.source_revision.map_or_else(
+            || "No installed policy · signing disabled".to_owned(),
+            |revision| format!("Installed revision {revision}"),
+        );
+        let editor_panel = GroupBox::new()
+            .id("policy-json-editor")
+            .outline()
+            .title(format!("{} policy", editor.wallet_id))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(revision),
+            )
+            .child(Input::new(input).w_full())
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("reset-policy-draft")
+                            .label("Reset to review everything")
+                            .disabled(self.policy_installing)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.reset_policy_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("validate-policy-draft")
+                            .label("Validate and preview diff")
+                            .disabled(self.policy_installing)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.validate_policy_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("install-policy-draft")
+                            .label(if self.policy_installing {
+                                "Authenticating…"
+                            } else {
+                                "Install policy"
+                            })
+                            .primary()
+                            .disabled(self.policy_installing || !reviewed_exact_document)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.install_policy_editor(cx);
+                            })),
+                    ),
+            );
+        content = content.child(editor_panel);
+
+        match editor.validation.as_ref() {
+            Some(Ok(review)) if reviewed_exact_document => {
+                let mut changes = div().flex().flex_col().gap_2();
+                for (index, line) in review.diff.iter().enumerate() {
+                    changes = changes.child(
+                        div()
+                            .id(SharedString::from(format!("policy-diff-{index}")))
+                            .p_2()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().secondary)
+                            .font_family("monospace")
+                            .text_sm()
+                            .child(line.clone()),
+                    );
+                }
+                content.child(
+                    GroupBox::new()
+                        .id("policy-permission-diff")
+                        .outline()
+                        .title("Permission changes")
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Installing requires operating-system authentication and rechecks the policy revision immediately before the write."),
+                        )
+                        .child(changes),
+                )
+            }
+            Some(Ok(_)) => content.child(Alert::warning(
+                "policy-diff-stale",
+                "The document changed after validation. Validate it again to refresh the permission diff.",
+            )),
+            Some(Err(error)) => content.child(Alert::error(
+                "policy-validation-error",
+                error.clone(),
+            )),
+            None => content,
         }
     }
 
@@ -3195,30 +3816,7 @@ impl WalletWindow {
                 Err(error) => panel.child(format!("Activity unavailable: {error:#}")),
             },
             Route::Accounts => self.render_accounts(cx),
-            Route::Policies => match self.owner.accounts() {
-                Ok(accounts) => {
-                    let mut content = panel;
-                    for account in accounts {
-                        content = content.child(match self.owner.policy(&account.id) {
-                            Ok(Some(policy)) => div()
-                                .py_2()
-                                .border_b_1()
-                                .border_color(cx.theme().border)
-                                .child(format!(
-                                    "{} · revision {} · updated {}",
-                                    policy.wallet_id, policy.revision, policy.updated_at
-                                )),
-                            Ok(None) => {
-                                div().child(format!("{} · signing disabled: no policy", account.id))
-                            }
-                            Err(error) => div()
-                                .child(format!("{} · policy unavailable: {error:#}", account.id)),
-                        });
-                    }
-                    content
-                }
-                Err(error) => panel.child(format!("Policies unavailable: {error:#}")),
-            },
+            Route::Policies => self.render_policies(cx),
             Route::Networks => self.render_networks(cx),
             Route::Tokens => self.render_tokens(cx),
             Route::WalletConnect => self.render_walletconnect(cx),
@@ -3854,6 +4452,9 @@ fn show_wallet_window(
         view.private_key_input = None;
         view.walletconnect_uri_input = None;
         view.network_json_input = None;
+        view.policy_json_input = None;
+        view.policy_editor = None;
+        view.policy_installing = false;
         cx.notify();
     });
     let root_view = wallet_view.clone();
@@ -4190,6 +4791,7 @@ pub fn run_desktop() -> Result<()> {
                             queues.transactions.len()
                                 + queues.typed_data.len()
                                 + queues.messages.len()
+                                + queues.policy_proposals.len()
                         });
                         let connected_agents =
                             event_owner.clients().map_or(0, |clients| clients.len());

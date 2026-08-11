@@ -22,7 +22,7 @@ use ekubo_wallet_core::{
         ApprovalOutcome, approve_transaction, sign_reviewed_message, sign_reviewed_typed_data,
     },
     pending::{PendingStore, PendingTransaction},
-    policy_store::{PolicyStore, StoredPolicy},
+    policy_store::{PolicyProposal, PolicyStore, StoredPolicy},
     token_store::{MAX_PORTFOLIO_TOKENS, Portfolio, StoredToken, TokenStore, read_portfolio},
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
@@ -89,6 +89,7 @@ pub struct OwnerReviewQueues {
     pub transactions: Vec<PendingTransaction>,
     pub typed_data: Vec<PendingTypedData>,
     pub messages: Vec<PendingMessage>,
+    pub policy_proposals: Vec<PolicyProposal>,
 }
 
 impl OwnerApi {
@@ -286,23 +287,60 @@ impl OwnerApi {
         &self,
         wallet_id: &str,
         policy: &WalletPolicy,
-        reviewed_revision: u64,
+        reviewed_revision: Option<u64>,
     ) -> Result<StoredPolicy> {
-        let before = self
-            .policy(wallet_id)?
-            .context("wallet has no installed policy")?;
-        ensure_revision(reviewed_revision, before.revision)?;
+        self.account(wallet_id)?;
+        let before = self.policy(wallet_id)?;
+        ensure_optional_revision(
+            reviewed_revision,
+            before.as_ref().map(|policy| policy.revision),
+        )?;
         PlatformHumanPresence
             .confirm(&PresenceRequest::ReplacePolicy {
                 wallet: wallet_id.to_owned(),
             })
             .await?;
         let mut store = PolicyStore::production(self.config.data_dir())?;
-        let current = store.get(wallet_id)?.context("wallet policy disappeared")?;
-        ensure_revision(reviewed_revision, current.revision)?;
-        let installed = store.put(wallet_id, policy, Some(reviewed_revision))?;
+        let current = store.get(wallet_id)?;
+        ensure_optional_revision(
+            reviewed_revision,
+            current.as_ref().map(|policy| policy.revision),
+        )?;
+        let installed = store.put(wallet_id, policy, reviewed_revision)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(installed)
+    }
+
+    pub fn policy_proposals(&self) -> Result<Vec<PolicyProposal>> {
+        PolicyStore::production(self.config.data_dir())?.list_proposals()
+    }
+
+    pub async fn apply_policy_proposal(&self, proposal: &PolicyProposal) -> Result<StoredPolicy> {
+        self.account(&proposal.wallet_id)?;
+        let before = PolicyStore::production(self.config.data_dir())?
+            .proposal(&proposal.wallet_id)?
+            .context("the policy proposal no longer exists")?;
+        ensure!(
+            before == *proposal,
+            "the policy proposal changed before authentication; review it again"
+        );
+        PlatformHumanPresence
+            .confirm(&PresenceRequest::ReplacePolicy {
+                wallet: proposal.wallet_id.clone(),
+            })
+            .await?;
+        let mut store = PolicyStore::production(self.config.data_dir())?;
+        let installed = store.consume_proposal(proposal)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(installed)
+    }
+
+    pub fn reject_policy_proposal(&self, proposal: &PolicyProposal) -> Result<bool> {
+        let removed = PolicyStore::production(self.config.data_dir())?.delete_proposal(proposal)?;
+        if removed {
+            self.events.publish(DomainEventKind::ConfigurationChanged);
+        }
+        Ok(removed)
     }
 
     pub fn networks(&self) -> Result<Vec<NetworkConfig>> {
@@ -442,6 +480,11 @@ impl OwnerApi {
                 .awaiting_approval(wallet_id)?,
             messages: MessageStore::production(self.config.data_dir())?
                 .awaiting_approval(wallet_id)?,
+            policy_proposals: PolicyStore::production(self.config.data_dir())?
+                .list_proposals()?
+                .into_iter()
+                .filter(|proposal| wallet_id.is_none_or(|wallet| proposal.wallet_id == wallet))
+                .collect(),
         })
     }
 
@@ -742,10 +785,10 @@ fn escape_review_payload(value: &str) -> String {
         .collect()
 }
 
-fn ensure_revision(reviewed: u64, current: u64) -> Result<()> {
+fn ensure_optional_revision(reviewed: Option<u64>, current: Option<u64>) -> Result<()> {
     anyhow::ensure!(
         reviewed == current,
-        "policy changed during review (reviewed {reviewed}, current {current})"
+        "policy changed during review (reviewed {reviewed:?}, current {current:?})"
     );
     Ok(())
 }

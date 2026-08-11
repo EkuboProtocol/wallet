@@ -80,3 +80,12 @@ fn notification_preview_preference_is_owner_controlled_and_persisted() {
     owner.set_detailed_notification_previews(false).unwrap();
     assert!(!owner.detailed_notification_previews().unwrap());
 }
+
+#[test]
+fn policy_revision_revalidation_handles_initial_and_replacement_writes() {
+    assert!(ensure_optional_revision(None, None).is_ok());
+    assert!(ensure_optional_revision(Some(3), Some(3)).is_ok());
+    assert!(ensure_optional_revision(None, Some(1)).is_err());
+    assert!(ensure_optional_revision(Some(1), None).is_err());
+    assert!(ensure_optional_revision(Some(2), Some(3)).is_err());
+}

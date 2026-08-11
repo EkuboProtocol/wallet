@@ -139,3 +139,30 @@ fn third_party_licenses_are_informational_not_acceptance_gated() {
         LegalDocument::ThirdPartyLicenses
     ));
 }
+
+#[test]
+fn policy_draft_validation_canonicalizes_and_previews_permission_changes() {
+    let current = WalletPolicy::require_approval_for_everything();
+    let proposed = WalletPolicy::allow_all_with_approval();
+    let compact = serde_json::to_string(&proposed).unwrap();
+    let reviewed = review_policy_draft("primary", Some(7), Some(&current), &compact).unwrap();
+
+    assert_eq!(reviewed.wallet_id, "primary");
+    assert_eq!(reviewed.source_revision, Some(7));
+    assert_eq!(reviewed.policy, proposed);
+    assert!(reviewed.document.contains('\n'));
+    assert!(reviewed.diff.iter().any(|line| line.starts_with('+')));
+}
+
+#[test]
+fn policy_draft_validation_rejects_non_policy_json() {
+    let error = review_policy_draft(
+        "primary",
+        Some(1),
+        Some(&WalletPolicy::require_approval_for_everything()),
+        r#"{"version":1,"chains":{},"unexpected":true}"#,
+    )
+    .unwrap_err();
+
+    assert!(format!("{error:#}").contains("unknown field"));
+}
