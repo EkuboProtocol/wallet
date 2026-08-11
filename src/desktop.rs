@@ -9,7 +9,7 @@ use crate::{
     http_server::{MCP_REQUEST_LIMIT_BYTES, McpHttpServer},
     notifications::{
         NotificationPreferences, NotificationRoute, NotificationService as _,
-        PlatformNotificationService, notification_for,
+        PlatformNotificationService, initialize_platform_notifications, notification_for,
     },
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
@@ -39,9 +39,10 @@ use gpui::{
     prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Sizable,
-    StyledExt, WindowExt as _,
+    ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
+    Sizable, StyledExt, Theme, WindowExt as _,
     alert::Alert,
+    badge::Badge,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     group_box::{GroupBox, GroupBoxVariants as _},
@@ -49,12 +50,12 @@ use gpui_component::{
     input::{Input, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     scroll::ScrollableElement,
-    sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
     spinner::Spinner,
     switch::Switch,
     text::TextView,
 };
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
@@ -67,6 +68,33 @@ use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 actions!(ekubo_wallet, [OpenCommandPalette, Quit]);
+
+const UI_FONT_FAMILY: &str = "Suisse Intl";
+const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
+const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
+const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
+
+const EMBEDDED_FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/SuisseIntl-Regular.ttf"),
+    include_bytes!("../assets/fonts/SuisseIntl-Medium.ttf"),
+    include_bytes!("../assets/fonts/SuisseIntl-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/SuisseIntl-Bold.ttf"),
+    include_bytes!("../assets/fonts/SuisseIntlMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/SuisseIntlMono-Bold.ttf"),
+];
+
+fn load_application_fonts(cx: &mut App) -> Result<()> {
+    cx.text_system().add_fonts(
+        EMBEDDED_FONTS
+            .iter()
+            .map(|font| Cow::Borrowed(*font))
+            .collect(),
+    )?;
+    let theme = cx.global_mut::<Theme>();
+    theme.font_family = UI_FONT_FAMILY.into();
+    theme.mono_font_family = MONO_FONT_FAMILY.into();
+    Ok(())
+}
 
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = ekubo_wallet, no_json)]
@@ -242,8 +270,8 @@ pub enum Route {
 
 impl Route {
     const ALL: [Self; 9] = [
-        Self::Overview,
         Self::Reviews,
+        Self::Overview,
         Self::Activity,
         Self::Accounts,
         Self::Policies,
@@ -256,7 +284,7 @@ impl Route {
     const fn label(self) -> &'static str {
         match self {
             Self::Overview => "Portfolio",
-            Self::Reviews => "Reviews",
+            Self::Reviews => "Inbox",
             Self::Activity => "Activity",
             Self::Accounts => "Accounts",
             Self::Policies => "Policies",
@@ -291,8 +319,8 @@ impl Route {
     #[cfg(target_os = "macos")]
     const fn shortcut(self) -> &'static str {
         match self {
-            Self::Overview => "⌘1",
-            Self::Reviews => "⌘2",
+            Self::Reviews => "⌘1",
+            Self::Overview => "⌘2",
             Self::Activity => "⌘3",
             Self::Accounts => "⌘4",
             Self::Policies => "⌘5",
@@ -306,8 +334,8 @@ impl Route {
     #[cfg(not(target_os = "macos"))]
     const fn shortcut(self) -> &'static str {
         match self {
-            Self::Overview => "Ctrl+1",
-            Self::Reviews => "Ctrl+2",
+            Self::Reviews => "Ctrl+1",
+            Self::Overview => "Ctrl+2",
             Self::Activity => "Ctrl+3",
             Self::Accounts => "Ctrl+4",
             Self::Policies => "Ctrl+5",
@@ -321,8 +349,8 @@ impl Route {
     #[cfg(target_os = "macos")]
     const fn key_binding(self) -> &'static str {
         match self {
-            Self::Overview => "cmd-1",
-            Self::Reviews => "cmd-2",
+            Self::Reviews => "cmd-1",
+            Self::Overview => "cmd-2",
             Self::Activity => "cmd-3",
             Self::Accounts => "cmd-4",
             Self::Policies => "cmd-5",
@@ -336,8 +364,8 @@ impl Route {
     #[cfg(not(target_os = "macos"))]
     const fn key_binding(self) -> &'static str {
         match self {
-            Self::Overview => "ctrl-1",
-            Self::Reviews => "ctrl-2",
+            Self::Reviews => "ctrl-1",
+            Self::Overview => "ctrl-2",
             Self::Activity => "ctrl-3",
             Self::Accounts => "ctrl-4",
             Self::Policies => "ctrl-5",
@@ -875,7 +903,7 @@ fn render_activity_row(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .font_family("monospace")
+                                .font_family(MONO_FONT_FAMILY)
                                 .truncate()
                                 .child(request_id.to_string()),
                         ),
@@ -986,7 +1014,7 @@ fn render_activity_row(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .font_family("monospace")
+                                .font_family(MONO_FONT_FAMILY)
                                 .truncate()
                                 .child(request_id.to_string()),
                         ),
@@ -1041,7 +1069,7 @@ fn render_activity_row(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .font_family("monospace")
+                                .font_family(MONO_FONT_FAMILY)
                                 .truncate()
                                 .child(request_id.to_string()),
                         ),
@@ -1208,6 +1236,16 @@ impl TokenListDelegate {
             .filter(|token| token_matches_search(token, &self.query))
             .cloned()
             .collect();
+        let query = self.query.trim().to_lowercase();
+        if !query.is_empty() {
+            self.visible_tokens.sort_by_key(|token| {
+                (
+                    token_search_rank(token, &query),
+                    token.chain_id.parse::<u64>().unwrap_or(u64::MAX),
+                    token.address.clone(),
+                )
+            });
+        }
         self.selected = None;
     }
 
@@ -1245,6 +1283,41 @@ fn token_matches_search(token: &StoredToken, query: &str) -> bool {
             .name
             .as_deref()
             .is_some_and(|value| value.to_lowercase().contains(&query))
+}
+
+fn token_search_rank(token: &StoredToken, query: &str) -> (usize, usize, usize) {
+    let symbol = token.symbol.as_deref().unwrap_or_default().to_lowercase();
+    let name = token.name.as_deref().unwrap_or_default().to_lowercase();
+    let address = token.address.to_lowercase();
+    let chain_id = token.chain_id.to_lowercase();
+    let fields = [
+        symbol.as_str(),
+        name.as_str(),
+        address.as_str(),
+        chain_id.as_str(),
+    ];
+
+    fields
+        .iter()
+        .enumerate()
+        .filter_map(|(field_index, value)| {
+            let position = value.find(query)?;
+            let match_kind = if value.len() == query.len() {
+                0
+            } else if position == 0 {
+                1
+            } else {
+                2
+            };
+            Some((match_kind, position, value.len() - query.len(), field_index))
+        })
+        .min()
+        .map_or(
+            (usize::MAX, usize::MAX, usize::MAX),
+            |(match_kind, position, extra, field_index)| {
+                (match_kind * fields.len() + field_index, position, extra)
+            },
+        )
 }
 
 fn parse_token_editor_fields(
@@ -1369,13 +1442,7 @@ fn legal_markdown_sections(text: &str) -> Arc<[SharedString]> {
 }
 
 fn legal_list_reached_end(state: &gpui::ListState) -> bool {
-    let Some(last_index) = state.item_count().checked_sub(1) else {
-        return true;
-    };
-    let Some(item) = state.bounds_for_item(last_index) else {
-        return false;
-    };
-    item.bottom() <= state.viewport_bounds().bottom() + px(1.0)
+    state.item_count() == 0 || state.is_scrolled_to_end() == Some(true)
 }
 
 fn network_can_be_removed(network: &NetworkConfig) -> bool {
@@ -1705,7 +1772,7 @@ impl ListDelegate for TokenListDelegate {
                                         )
                                         .child(
                                             div()
-                                                .font_family("monospace")
+                                                .font_family(MONO_FONT_FAMILY)
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .truncate()
@@ -1819,7 +1886,7 @@ impl ListDelegate for TokenProposalListDelegate {
                         )
                         .child(
                             div()
-                                .font_family("monospace")
+                                .font_family(MONO_FONT_FAMILY)
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .truncate()
@@ -4268,8 +4335,11 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) -> LegalReview {
         let sections = legal_markdown_sections(text);
-        let list_state = gpui::ListState::new(sections.len(), gpui::ListAlignment::Top, px(600.0))
-            .with_uniform_item_height(px(180.0));
+        // Legal sections have intentionally variable rich-text heights. Measure them once
+        // before presenting the scrollbar so its extent is exact from the first frame;
+        // subsequent frames still render only the visible sections and overdraw.
+        let list_state =
+            gpui::ListState::new(sections.len(), gpui::ListAlignment::Top, px(600.0)).measure_all();
         let view = cx.entity().downgrade();
         let review_digest = digest.clone();
         list_state.set_scroll_handler(move |event, _, cx| {
@@ -5935,21 +6005,54 @@ impl WalletWindow {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let menu = SidebarMenu::new().children(Route::ALL.into_iter().map(|route| {
-            SidebarMenuItem::new(format!("{}  {}", route.label(), route.shortcut()))
-                .icon(route.icon())
-                .active(route == self.route)
-                .disable(self.legal_gate)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.route = route;
-                    this.command_palette = false;
-                    cx.notify();
-                }))
-        }));
-        Sidebar::new("wallet-sidebar")
-            .w(px(48.0))
-            .collapsed(true)
-            .child(menu)
+        let pending_reviews = self
+            .cached_reviews()
+            .map(review_queue_decision_count)
+            .unwrap_or_default();
+        let mut menu = div()
+            .id("wallet-sidebar")
+            .w(NAVIGATION_RAIL_WIDTH)
+            .h_full()
+            .flex_none()
+            .overflow_y_scroll()
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .bg(cx.theme().tokens.sidebar)
+            .p_3()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_1();
+        for route in Route::ALL {
+            let button = Button::new(SharedString::from(format!(
+                "sidebar-route-{}",
+                route.label()
+            )))
+            .with_size(NAVIGATION_BUTTON_SIZE)
+            .icon(route.icon())
+            .ghost()
+            .selected(route == self.route)
+            .disabled(self.legal_gate)
+            .accessibility_id(route.label())
+            .tooltip(format!("{}  {}", route.label(), route.shortcut()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.route = route;
+                this.command_palette = false;
+                cx.notify();
+            }));
+            if route == Route::Reviews {
+                menu = menu.child(
+                    Badge::new()
+                        .large()
+                        .max(99)
+                        .count(pending_reviews)
+                        .child(button),
+                );
+            } else {
+                menu = menu.child(button);
+            }
+        }
+        menu
     }
 
     fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -6203,18 +6306,22 @@ impl WalletWindow {
                     ))
                     .child(format!("Policy revision: {}", item.policy_revision))
                     .child(
-                        div()
-                            .child("Plan digest")
-                            .child(div().font_family("monospace").child(item.digest.clone())),
+                        div().child("Plan digest").child(
+                            div()
+                                .font_family(MONO_FONT_FAMILY)
+                                .child(item.digest.clone()),
+                        ),
                     );
                 if let Some(source) = item.plan_source.as_ref() {
                     detail = detail.child(format!("Plan source: {source}"));
                 }
                 if let Some(review_digest) = item.review_digest.as_ref() {
                     detail = detail.child(
-                        div()
-                            .child("Review digest")
-                            .child(div().font_family("monospace").child(review_digest.clone())),
+                        div().child("Review digest").child(
+                            div()
+                                .font_family(MONO_FONT_FAMILY)
+                                .child(review_digest.clone()),
+                        ),
                     );
                 }
                 for (label, value) in [
@@ -6226,7 +6333,7 @@ impl WalletWindow {
                         detail = detail.child(
                             div()
                                 .child(label)
-                                .child(div().font_family("monospace").child(value.clone())),
+                                .child(div().font_family(MONO_FONT_FAMILY).child(value.clone())),
                         );
                     }
                 }
@@ -6237,14 +6344,12 @@ impl WalletWindow {
                     ));
                 }
                 if !item.cancel_transaction_hashes.is_empty() {
-                    detail = detail
-                        .child(div().font_semibold().child("Cancellation attempts"))
-                        .children(
-                            item.cancel_transaction_hashes
-                                .iter()
-                                .cloned()
-                                .map(|hash| div().font_family("monospace").text_sm().child(hash)),
-                        );
+                    detail =
+                        detail
+                            .child(div().font_semibold().child("Cancellation attempts"))
+                            .children(item.cancel_transaction_hashes.iter().cloned().map(|hash| {
+                                div().font_family(MONO_FONT_FAMILY).text_sm().child(hash)
+                            }));
                 }
                 detail
                     .child(
@@ -6256,7 +6361,7 @@ impl WalletWindow {
                                 .rounded_lg()
                                 .border_1()
                                 .border_color(cx.theme().border)
-                                .font_family("monospace")
+                                .font_family(MONO_FONT_FAMILY)
                                 .text_sm()
                                 .whitespace_normal()
                                 .child(exact_plan),
@@ -6285,9 +6390,11 @@ impl WalletWindow {
                         item.created_at, item.updated_at
                     ))
                     .child(
-                        div()
-                            .child("Digest")
-                            .child(div().font_family("monospace").child(item.digest.clone())),
+                        div().child("Digest").child(
+                            div()
+                                .font_family(MONO_FONT_FAMILY)
+                                .child(item.digest.clone()),
+                        ),
                     );
                 if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
                     detail = detail.child(format!("Decision recorded: {decided_at}"));
@@ -6296,7 +6403,7 @@ impl WalletWindow {
                     detail = detail.child(
                         div()
                             .child("Signature")
-                            .child(div().font_family("monospace").child(signature.clone())),
+                            .child(div().font_family(MONO_FONT_FAMILY).child(signature.clone())),
                     );
                 }
                 match document {
@@ -6310,7 +6417,7 @@ impl WalletWindow {
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(cx.theme().border)
-                                    .font_family("monospace")
+                                    .font_family(MONO_FONT_FAMILY)
                                     .text_sm()
                                     .whitespace_normal()
                                     .child(payload)
@@ -6345,9 +6452,11 @@ impl WalletWindow {
                         item.created_at, item.updated_at
                     ))
                     .child(
-                        div()
-                            .child("Digest")
-                            .child(div().font_family("monospace").child(item.digest.clone())),
+                        div().child("Digest").child(
+                            div()
+                                .font_family(MONO_FONT_FAMILY)
+                                .child(item.digest.clone()),
+                        ),
                     );
                 if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
                     detail = detail.child(format!("Decision recorded: {decided_at}"));
@@ -6356,7 +6465,7 @@ impl WalletWindow {
                     detail = detail.child(
                         div()
                             .child("Signature")
-                            .child(div().font_family("monospace").child(signature.clone())),
+                            .child(div().font_family(MONO_FONT_FAMILY).child(signature.clone())),
                     );
                 }
                 match document {
@@ -6370,7 +6479,7 @@ impl WalletWindow {
                                     .rounded_lg()
                                     .border_1()
                                     .border_color(cx.theme().border)
-                                    .font_family("monospace")
+                                    .font_family(MONO_FONT_FAMILY)
                                     .text_sm()
                                     .whitespace_normal()
                                     .child(payload)
@@ -7400,8 +7509,8 @@ impl WalletWindow {
                     let applicable = current_revision == Some(proposal.source_revision);
                     let mut changes = div().flex().flex_col().gap_1();
                     for line in diff_policies(&current_policy, &proposal.policy) {
-                        changes =
-                            changes.child(div().font_family("monospace").text_sm().child(line));
+                        changes = changes
+                            .child(div().font_family(MONO_FONT_FAMILY).text_sm().child(line));
                     }
                     let review_proposal = proposal.clone();
                     let reject_proposal = proposal.clone();
@@ -7688,7 +7797,7 @@ impl WalletWindow {
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
-                                                .font_family("monospace")
+                                                .font_family(MONO_FONT_FAMILY)
                                                 .text_sm()
                                                 .child(rule.describe()),
                                         )
@@ -7901,7 +8010,7 @@ impl WalletWindow {
                             .p_2()
                             .rounded(cx.theme().radius)
                             .bg(cx.theme().secondary)
-                            .font_family("monospace")
+                            .font_family(MONO_FONT_FAMILY)
                             .text_sm()
                             .child(line.clone()),
                     );
@@ -8214,7 +8323,7 @@ impl WalletWindow {
                                     .p_3()
                                     .rounded(cx.theme().radius)
                                     .bg(cx.theme().secondary)
-                                    .font_family("monospace")
+                                    .font_family(MONO_FONT_FAMILY)
                                     .text_sm()
                                     .child(exact),
                             ),
@@ -8312,22 +8421,35 @@ impl WalletWindow {
                         .flex_col()
                         .gap_3()
                         .child(
-                            h_flex()
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_start()
                                 .w_full()
                                 .justify_between()
                                 .gap_3()
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex_basis(px(220.0))
                                         .child(
-                                            h_flex()
+                                            div()
+                                                .flex()
+                                                .flex_wrap()
+                                                .items_center()
                                                 .gap_2()
                                                 .child(
-                                                    div().font_semibold().child(
-                                                        network
-                                                            .display_name
-                                                            .clone()
-                                                            .unwrap_or_else(|| name.clone()),
-                                                    ),
+                                                    div()
+                                                        .min_w_0()
+                                                        .font_semibold()
+                                                        .truncate()
+                                                        .child(
+                                                            network
+                                                                .display_name
+                                                                .clone()
+                                                                .unwrap_or_else(|| name.clone()),
+                                                        ),
                                                 )
                                                 .child(
                                                     div()
@@ -8364,7 +8486,11 @@ impl WalletWindow {
                                         ),
                                 )
                                 .child(
-                                    h_flex()
+                                    div()
+                                        .max_w_full()
+                                        .flex()
+                                        .flex_wrap()
+                                        .justify_end()
                                         .gap_2()
                                         .child(
                                             Button::new(SharedString::from(format!(
@@ -8431,10 +8557,12 @@ impl WalletWindow {
                         .when(expanded, |card| {
                             card.child(
                                 div()
+                                    .max_w_full()
+                                    .overflow_x_hidden()
                                     .p_3()
                                     .rounded(cx.theme().radius)
                                     .bg(cx.theme().secondary)
-                                    .font_family("monospace")
+                                    .font_family(MONO_FONT_FAMILY)
                                     .text_sm()
                                     .child(exact),
                             )
@@ -8457,7 +8585,9 @@ impl WalletWindow {
                                             )),
                                     )
                                     .child(
-                                        h_flex()
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
                                             .gap_2()
                                             .child(
                                                 Button::new(SharedString::from(format!(
@@ -8687,7 +8817,7 @@ impl WalletWindow {
                                             .child("Native")
                                             .child(
                                                 div()
-                                                    .font_family("monospace")
+                                                    .font_family(MONO_FONT_FAMILY)
                                                     .text_sm()
                                                     .child(native_balance),
                                             ),
@@ -8720,14 +8850,14 @@ impl WalletWindow {
                                                 div().min_w_0().child(label).child(
                                                     div()
                                                         .text_xs()
-                                                        .font_family("monospace")
+                                                        .font_family(MONO_FONT_FAMILY)
                                                         .text_color(cx.theme().muted_foreground)
                                                         .child(token.address.clone()),
                                                 ),
                                             )
                                             .child(
                                                 div()
-                                                    .font_family("monospace")
+                                                    .font_family(MONO_FONT_FAMILY)
                                                     .text_sm()
                                                     .child(balance),
                                             ),
@@ -8762,7 +8892,7 @@ impl WalletWindow {
                                         )
                                         .child(
                                             div()
-                                                .font_family("monospace")
+                                                .font_family(MONO_FONT_FAMILY)
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(account.wallet.address.to_checksum(None)),
@@ -9423,7 +9553,7 @@ impl WalletWindow {
             review_body = review_body.child(
                 div()
                     .child("Digest")
-                    .child(div().font_family("monospace").child(digest.clone())),
+                    .child(div().font_family(MONO_FONT_FAMILY).child(digest.clone())),
             );
         }
         for (index, payload) in document.exact_payloads.iter().enumerate() {
@@ -9438,7 +9568,7 @@ impl WalletWindow {
                             .rounded_lg()
                             .border_1()
                             .border_color(cx.theme().border)
-                            .font_family("monospace")
+                            .font_family(MONO_FONT_FAMILY)
                             .whitespace_normal()
                             .child(payload.clone()),
                     ),
@@ -9606,7 +9736,7 @@ impl WalletWindow {
                         .p_3()
                         .border_1()
                         .border_color(cx.theme().border)
-                        .font_family("monospace")
+                        .font_family(MONO_FONT_FAMILY)
                         .child(preview.exact_diff().to_owned()),
                 )
             })
@@ -9766,7 +9896,7 @@ impl WalletWindow {
                         .p_3()
                         .border_1()
                         .border_color(cx.theme().border)
-                        .font_family("monospace")
+                        .font_family(MONO_FONT_FAMILY)
                         .child(value.to_string()),
                 )
             })
@@ -10055,6 +10185,7 @@ pub fn run_desktop_hidden() -> Result<()> {
 }
 
 fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
+    initialize_platform_notifications();
     let config = crate::config::ConfigStore::production()?;
     let (activation_tx, activation_rx) = std::sync::mpsc::channel();
     let instance = match SingleInstance::acquire(config.data_dir(), activation_tx)? {
@@ -10079,6 +10210,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            load_application_fonts(cx).expect("embedded Suisse fonts must be valid");
             gpui_tokio::init(cx);
             cx.set_quit_mode(QuitMode::Explicit);
             let tray = Rc::new(RefCell::new(

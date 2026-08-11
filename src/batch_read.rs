@@ -92,8 +92,9 @@ pub struct BatchEthCallInput {
     /// execution-plan admission policy — public https on the default port, a
     /// bounded `data:application/json` URI, then verified against the envelope's
     /// integrity digest and byte count. The body's `chain_id` must equal
-    /// `chain_id` above, and the body alone supplies `block_parameter`,
-    /// `from`, and `calls`.
+    /// `chain_id` above. The body supplies `calls`; a redundant matching
+    /// `from` or non-default `block_parameter` is accepted, but conflicting
+    /// values are rejected.
     #[serde(default)]
     pub reference: Option<ArtifactReference>,
     /// Read the hypothetical state of this temporary simulation fork instead
@@ -190,14 +191,6 @@ pub async fn resolve_read_input(
         input.calls.is_empty(),
         "pass exactly one of calls and reference"
     );
-    ensure!(
-        input.from.is_none(),
-        "a referenced bundle carries its own from; leave it unset"
-    );
-    ensure!(
-        input.block_parameter == default_block_parameter(),
-        "a referenced bundle carries its own block_parameter; leave it at latest"
-    );
     let fetched = fetch_reference(&reference, ArtifactType::ReadCalls, policy).await?;
     let body: ReadCallsBody = serde_json::from_slice(&fetched.bytes)
         .context("read-call bundle is not a valid wallet_batch_eth_call argument object")?;
@@ -208,14 +201,43 @@ pub async fn resolve_read_input(
         body.chain_id,
         input.chain_id
     );
+    let from = merge_reference_from(input.from.as_deref(), body.from.as_deref())?;
+    let block_parameter =
+        merge_reference_block_parameter(&input.block_parameter, &body.block_parameter)?;
     Ok(BatchEthCallInput {
         chain_id: input.chain_id,
-        block_parameter: body.block_parameter,
-        from: body.from,
+        block_parameter,
+        from,
         calls: body.calls,
         reference: None,
         fork_id: input.fork_id,
     })
+}
+
+fn merge_reference_from(outer: Option<&str>, bundled: Option<&str>) -> Result<Option<String>> {
+    match (outer, bundled) {
+        (None, None) => Ok(None),
+        (Some(from), None) | (None, Some(from)) => Ok(Some(from.to_owned())),
+        (Some(outer), Some(bundled)) => {
+            let outer_address =
+                Address::from_str(outer).context("top-level from must be a 20-byte EVM address")?;
+            let bundled_address = Address::from_str(bundled)
+                .context("referenced bundle from must be a 20-byte EVM address")?;
+            ensure!(
+                outer_address == bundled_address,
+                "top-level from conflicts with the referenced bundle from"
+            );
+            Ok(Some(bundled.to_owned()))
+        }
+    }
+}
+
+fn merge_reference_block_parameter(outer: &str, bundled: &str) -> Result<String> {
+    if outer == default_block_parameter() || outer == bundled {
+        Ok(bundled.to_owned())
+    } else {
+        anyhow::bail!("top-level block_parameter conflicts with the referenced bundle")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -741,7 +763,7 @@ fn format_result(
     }
 }
 
-fn validate_input(input: &BatchEthCallInput) -> Result<()> {
+pub(crate) fn validate_input(input: &BatchEthCallInput) -> Result<()> {
     ensure!(
         input.reference.is_none(),
         "resolve the reference into inline calls before executing the batch"

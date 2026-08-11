@@ -544,7 +544,7 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
             )
             .unwrap(),
         ),
-        &TokenStore::new(
+        TokenStore::new(
             PolicyStore::open(
                 &directory.path().join("policies.db"),
                 &DatabaseKey::new([9; 32]),
@@ -741,7 +741,7 @@ async fn a_reviewer_can_re_simulate_before_approving() {
             )
             .unwrap(),
         ),
-        &TokenStore::new(
+        TokenStore::new(
             PolicyStore::open(
                 &directory.path().join("policies.db"),
                 &DatabaseKey::new([9; 32]),
@@ -844,7 +844,7 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
             )
             .unwrap(),
         ),
-        &TokenStore::new(
+        TokenStore::new(
             PolicyStore::open(
                 &directory.path().join("policies.db"),
                 &DatabaseKey::new([9; 32]),

@@ -1,6 +1,13 @@
 use super::*;
 use chrono::Utc;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_notifications_name_the_packaged_wallet_instead_of_the_fallback_placeholder() {
+    assert_eq!(MACOS_BUNDLE_IDENTIFIER, "org.ekubo.wallet");
+    assert_ne!(MACOS_BUNDLE_IDENTIFIER, "use_default");
+}
+
 #[test]
 fn every_transaction_lifecycle_stage_has_a_lock_screen_safe_notification() {
     for stage in [

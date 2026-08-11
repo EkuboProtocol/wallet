@@ -174,8 +174,8 @@ fn read_calls_body_rejects_anything_beyond_the_inline_surface() {
 
 #[tokio::test]
 async fn resolve_read_input_enforces_reference_exclusivity_before_fetching() {
-    // A URL that would fail loudly if it were ever fetched: every case
-    // below must error on exclusivity alone.
+    // A URL that would fail loudly if it were ever fetched: inline calls and
+    // a reference must error on exclusivity alone.
     let url = "https://never.fetched.invalid/read/x";
 
     let mut both = inline_input();
@@ -184,24 +184,47 @@ async fn resolve_read_input_enforces_reference_exclusivity_before_fetching() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("exactly one of calls"));
+}
 
-    let mut with_from = inline_input();
-    with_from.calls.clear();
-    with_from.reference = Some(reference_for(url, Some("{}")));
-    with_from.from = Some("0x1111111111111111111111111111111111111111".into());
-    let error = resolve_read_input(with_from, FetchPolicy::production())
+#[tokio::test]
+async fn resolve_read_input_accepts_redundant_reference_context_and_rejects_conflicts() {
+    use base64::Engine as _;
+    let bundled_from = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+    let body = serde_json::json!({
+        "chain_id": "1",
+        "block_parameter": "pending",
+        "from": bundled_from,
+        "calls": [{
+            "to": "0x2222222222222222222222222222222222222222",
+            "data": "0x1234",
+        }],
+    })
+    .to_string();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&body);
+    let reference = reference_for(
+        format!("data:application/json;base64,{encoded}"),
+        Some(&body),
+    );
+
+    let mut matching = inline_input();
+    matching.calls.clear();
+    matching.reference = Some(reference.clone());
+    matching.from = Some(bundled_from.to_uppercase().replacen("0X", "0x", 1));
+    matching.block_parameter = "pending".into();
+    let resolved = resolve_read_input(matching, FetchPolicy::production())
+        .await
+        .unwrap();
+    assert_eq!(resolved.from.as_deref(), Some(bundled_from));
+    assert_eq!(resolved.block_parameter, "pending");
+
+    let mut conflicting = inline_input();
+    conflicting.calls.clear();
+    conflicting.reference = Some(reference);
+    conflicting.from = Some("0x3333333333333333333333333333333333333333".into());
+    let error = resolve_read_input(conflicting, FetchPolicy::production())
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("its own from"));
-
-    let mut with_block = inline_input();
-    with_block.calls.clear();
-    with_block.reference = Some(reference_for(url, Some("{}")));
-    with_block.block_parameter = "pending".into();
-    let error = resolve_read_input(with_block, FetchPolicy::production())
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("its own block_parameter"));
+    assert!(error.to_string().contains("conflicts"));
 }
 
 #[tokio::test]

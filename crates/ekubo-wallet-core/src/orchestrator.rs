@@ -298,7 +298,7 @@ pub enum ApprovalOutcome {
 pub async fn approve_transaction(
     config: &ConfigStore,
     pending: PendingStore,
-    tokens: &crate::token_store::TokenStore,
+    tokens: crate::token_store::TokenStore,
     read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
     request: PendingTransaction,
     presenter: &dyn ReviewPresenter,
@@ -342,23 +342,13 @@ pub async fn approve_transaction(
         wallet: wallet.address,
     };
     let overrides = SigningOverrides::reviewed();
-    // Display metadata only, and only ever from the owner's token database: a
-    // token contract must not get to name itself on the screen where the owner
-    // decides. A token with no confirmed row renders by address in base units,
-    // which never blocks or alters the approval decision.
-    let token_metadata = tokens
-        .display_metadata(
-            network.chain_id,
-            &plan_token_targets(&request.execution_plan.ordered_steps).await,
-        )
-        .unwrap_or_default();
     let review = TransactionReview {
         wallet: &wallet,
         network: &network,
         request: &request,
         stored_policy: &stored_policy,
         policy_context: &policy_context,
-        token_metadata,
+        tokens: Mutex::new(tokens),
         overrides,
         generation: AtomicU64::new(0),
         latest: Mutex::new(None),
@@ -487,12 +477,10 @@ struct TransactionReview<'a> {
     request: &'a PendingTransaction,
     stored_policy: &'a StoredPolicy,
     policy_context: &'a crate::core::predicate::PolicyContext,
-    /// Resolved once, before the review opens. Token names come from the
-    /// owner's local database, which nothing in a review can change, so
-    /// re-reading them per refresh would query a store that cannot have a
-    /// different answer — and would need that store to be shareable across
-    /// threads purely to say the same thing again.
-    token_metadata: TokenMetadataMap,
+    /// Kept behind a mutex because rusqlite connections are Send but not Sync,
+    /// while a refresh author must be shareable with the presenter. The lock
+    /// is held only for local indexed reads after simulation has completed.
+    tokens: Mutex<crate::token_store::TokenStore>,
     overrides: SigningOverrides,
     /// The newest authoring attempt, successful or not. A failed refresh has
     /// to supersede the document before it, and concurrent refreshes must not
@@ -548,12 +536,25 @@ impl TransactionReview<'_> {
             self.overrides,
         )
         .await?;
+        // A swap's output token may appear only in the simulation's observed
+        // balance changes, not as the target of a standard token call in the
+        // plan. Resolve names after every fresh simulation so all displayed
+        // token addresses get the owner-confirmed metadata already stored for
+        // them. This remains display-only and never consults token contracts.
+        let token_targets =
+            review_token_targets(&self.request.execution_plan.ordered_steps, &simulation).await;
+        let token_metadata = self
+            .tokens
+            .lock()
+            .map_err(|_| anyhow::anyhow!("token database lock was poisoned"))?
+            .display_metadata(self.network.chain_id, &token_targets)
+            .context("failed to load confirmed token metadata for review")?;
         let approval = transaction_approval_request(
             self.request,
             &simulation,
             &prepared,
             self.network,
-            &self.token_metadata,
+            &token_metadata,
         )
         .await?;
         let mut latest = self
@@ -609,6 +610,31 @@ impl TransactionReview<'_> {
         );
         Ok(authored)
     }
+}
+
+async fn review_token_targets(
+    steps: &[crate::core::execution_plan::ExecutionStep],
+    simulation: &SimulationResult,
+) -> Vec<alloy::primitives::Address> {
+    let mut targets = plan_token_targets(steps)
+        .await
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(changes) = simulation.balance_changes.as_ref() {
+        targets.extend(
+            changes
+                .tokens
+                .keys()
+                .filter_map(|address| address.parse::<alloy::primitives::Address>().ok()),
+        );
+    }
+    targets.extend(
+        simulation
+            .token_spends
+            .keys()
+            .filter_map(|address| address.parse::<alloy::primitives::Address>().ok()),
+    );
+    targets.into_iter().collect()
 }
 
 #[async_trait::async_trait]
@@ -956,3 +982,7 @@ mod rejection_tests;
 #[cfg(test)]
 #[path = "orchestrator_provisioning_test.rs"]
 mod provisioning_tests;
+
+#[cfg(test)]
+#[path = "orchestrator_token_metadata_test.rs"]
+mod token_metadata_tests;

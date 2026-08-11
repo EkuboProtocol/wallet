@@ -45,6 +45,12 @@ fn tool_errors_keep_the_anyhow_cause_chain() {
     assert!(message.contains("permission denied"), "{message}");
 }
 
+#[test]
+fn tool_input_errors_use_invalid_params_instead_of_internal_error() {
+    let error = tool_input_error(&"top-level from conflicts with referenced bundle");
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+}
+
 fn server() -> (tempfile::TempDir, WalletMcpServer) {
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());

@@ -2,6 +2,23 @@ use crate::events::{DomainEvent, DomainEventKind, TransactionStage};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+const MACOS_BUNDLE_IDENTIFIER: &str = "org.ekubo.wallet";
+
+/// Select the wallet as the notification sender before notify-rust performs
+/// its macOS fallback lookup. That fallback asks `AppleScript` to find an app
+/// literally named `use_default`, which opens an application picker when the
+/// wallet is run directly through Cargo rather than from an installed bundle.
+pub fn initialize_platform_notifications() {
+    #[cfg(target_os = "macos")]
+    {
+        // An unbundled development binary has no Launch Services registration,
+        // so this may fail. Calling it still consumes notify-rust's one-time
+        // sender initialization and prevents its interactive fallback lookup.
+        let _ = notify_rust::set_application(MACOS_BUNDLE_IDENTIFIER);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationRoute {
     Review(Uuid),

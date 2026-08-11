@@ -1450,7 +1450,8 @@ impl WalletMcpServer {
             .map_err(|error| tool_error(&error))?;
         let input = resolve_read_input(input, FetchPolicy::production())
             .await
-            .map_err(|error| tool_error(&error))?;
+            .map_err(|error| tool_input_error(&error))?;
+        crate::batch_read::validate_input(&input).map_err(|error| tool_input_error(&error))?;
         let session = self.fork_session(input.fork_id, &input.chain_id, None)?;
         let preface = session.as_ref().map(ForkSession::preface);
         let mut output = batch_eth_call(&network, &input, preface.as_ref())
@@ -3233,6 +3234,13 @@ fn tool_error(error: &impl std::fmt::Display) -> ErrorData {
     // `String`, the literals most tests pass here — render identically
     // either way.
     ErrorData::internal_error(
+        crate::sanitize::stripped_capped(&format!("{error:#}"), MAX_TOOL_ERROR_CHARS),
+        None,
+    )
+}
+
+fn tool_input_error(error: &impl std::fmt::Display) -> ErrorData {
+    ErrorData::invalid_params(
         crate::sanitize::stripped_capped(&format!("{error:#}"), MAX_TOOL_ERROR_CHARS),
         None,
     )

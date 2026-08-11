@@ -850,7 +850,7 @@ impl OwnerApi {
         let result = approve_transaction(
             &self.config,
             pending,
-            &tokens,
+            tokens,
             &read_policy,
             request,
             presenter,

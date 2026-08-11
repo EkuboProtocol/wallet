@@ -245,7 +245,11 @@ fn command_palette_reaches_every_desktop_route() {
     assert_eq!(Route::ALL.len(), 9);
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
+    assert_eq!(Route::ALL.first(), Some(&Route::Reviews));
+    assert_eq!(Route::Reviews.label(), "Inbox");
     assert_eq!(Route::Overview.label(), "Portfolio");
+    assert!(NAVIGATION_RAIL_WIDTH >= px(80.0));
+    assert!(NAVIGATION_BUTTON_SIZE >= px(52.0));
     assert_eq!(Route::ALL.last(), Some(&Route::Settings));
 }
 
@@ -320,6 +324,23 @@ fn token_search_matches_metadata_address_and_chain_id() {
 }
 
 #[test]
+fn token_search_ranks_exact_symbols_before_longer_prefix_matches() {
+    let token = |symbol: &str, address: &str| StoredToken {
+        chain_id: "1".into(),
+        address: address.into(),
+        symbol: Some(symbol.into()),
+        name: None,
+        decimals: Some(18),
+        source: "test".into(),
+        added_at: chrono::Utc::now(),
+    };
+    let exact = token("USDe", "0x1111111111111111111111111111111111111111");
+    let prefix = token("USDEBT", "0x2222222222222222222222222222222222222222");
+
+    assert!(token_search_rank(&exact, "usde") < token_search_rank(&prefix, "usde"));
+}
+
+#[test]
 fn legal_markdown_is_split_without_changing_content_or_splitting_fences() {
     let long_paragraph = "x".repeat(LEGAL_SECTION_TARGET_BYTES);
     let source = format!(
@@ -336,6 +357,27 @@ fn legal_markdown_is_split_without_changing_content_or_splitting_fences() {
     );
     assert_eq!(sections.len(), 3);
     assert!(sections[1].contains("# not a heading"));
+}
+
+#[test]
+fn embedded_suisse_fonts_are_true_type_and_name_both_application_families() {
+    assert_eq!(EMBEDDED_FONTS.len(), 6);
+    assert!(
+        EMBEDDED_FONTS
+            .iter()
+            .all(|font| font.starts_with(&[0, 1, 0, 0]))
+    );
+
+    for family in [UI_FONT_FAMILY, MONO_FONT_FAMILY] {
+        let utf16_name = family
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert!(EMBEDDED_FONTS.iter().any(|font| {
+            font.windows(utf16_name.len())
+                .any(|name| name == utf16_name)
+        }));
+    }
 }
 
 #[test]
