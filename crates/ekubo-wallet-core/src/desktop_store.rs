@@ -205,6 +205,27 @@ impl DesktopStore {
         Ok(token)
     }
 
+    /// Recover an active managed client's token for an owner-approved repair.
+    ///
+    /// Callers must keep the returned value inside the configuration repair
+    /// flow; it must never be displayed, logged, or included in diagnostics.
+    pub fn repair_client_token(&self, client_id: Uuid) -> Result<ClientToken> {
+        let stored: Vec<u8> = self
+            .connection
+            .query_row(
+                "SELECT token FROM mcp_clients
+                 WHERE client_id = ?1 AND revoked_at IS NULL",
+                [Blob(*client_id.as_bytes())],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("unknown or revoked MCP client")?;
+        let bytes: [u8; 32] = stored
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("stored MCP token has invalid length"))?;
+        Ok(ClientToken(bytes))
+    }
+
     pub fn revoke_client(&mut self, client_id: Uuid) -> Result<()> {
         let changed = self.connection.execute(
             "UPDATE mcp_clients SET revoked_at = ?1

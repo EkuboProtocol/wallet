@@ -74,3 +74,16 @@ fn a_failed_install_restores_the_timestamped_backup() {
         .count();
     assert_eq!(backups, 1);
 }
+
+#[test]
+fn repair_diffs_can_hide_a_token_without_changing_installed_bytes() {
+    let mut preview = ConfigPreview {
+        path: PathBuf::from("mcp.json"),
+        before: String::new(),
+        after: format!("Bearer {TOKEN}"),
+        diff: format!("+Bearer {TOKEN}"),
+    };
+    preview.redact_diff_secret(TOKEN);
+    assert_eq!(preview.exact_diff(), "+Bearer <redacted-token>");
+    assert_eq!(preview.after, format!("Bearer {TOKEN}"));
+}

@@ -182,6 +182,10 @@ impl OwnerApi {
         Ok(token)
     }
 
+    pub fn repair_client_token(&self, client_id: Uuid) -> Result<ClientToken> {
+        self.desktop()?.repair_client_token(client_id)
+    }
+
     pub fn revoke_client(&self, client_id: Uuid) -> Result<()> {
         self.desktop()?.revoke_client(client_id)?;
         self.events

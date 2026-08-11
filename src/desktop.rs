@@ -129,16 +129,40 @@ struct LegalReview {
 
 struct PendingAgentInstall {
     display_name: String,
-    client_id: uuid::Uuid,
     preview: Option<ConfigPreview>,
     owner: OwnerApi,
+    completion: AgentConfigCompletion,
     committed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum AgentConfigCompletion {
+    Register {
+        client_id: uuid::Uuid,
+    },
+    Repair,
+    Rotate {
+        previous_client_id: uuid::Uuid,
+        replacement_client_id: uuid::Uuid,
+    },
+    Remove {
+        client_id: uuid::Uuid,
+    },
 }
 
 impl Drop for PendingAgentInstall {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = self.owner.remove_client(self.client_id);
+            match self.completion {
+                AgentConfigCompletion::Register { client_id }
+                | AgentConfigCompletion::Rotate {
+                    replacement_client_id: client_id,
+                    ..
+                } => {
+                    let _ = self.owner.remove_client(client_id);
+                }
+                AgentConfigCompletion::Repair | AgentConfigCompletion::Remove { .. } => {}
+            }
         }
     }
 }
@@ -413,9 +437,9 @@ impl WalletWindow {
             };
             Ok(PendingAgentInstall {
                 display_name: adapter.display_name.to_owned(),
-                client_id,
                 preview: Some(preview),
                 owner: self.owner.clone(),
+                completion: AgentConfigCompletion::Register { client_id },
                 committed: false,
             })
         })();
@@ -427,6 +451,119 @@ impl WalletWindow {
             Err(error) => {
                 self.operation_status =
                     Some(format!("Could not prepare agent installation: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn prepare_agent_repair(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.prepare_existing_agent_change(client_id, false, false, cx);
+    }
+
+    fn prepare_agent_rotation(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.prepare_existing_agent_change(client_id, true, false, cx);
+    }
+
+    fn prepare_agent_removal(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.prepare_existing_agent_change(client_id, false, true, cx);
+    }
+
+    fn prepare_existing_agent_change(
+        &mut self,
+        client_id: uuid::Uuid,
+        rotate: bool,
+        remove: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_agent_install.is_some() {
+            self.operation_status = Some("Finish the current agent change first.".into());
+            cx.notify();
+            return;
+        }
+        let result = (|| -> Result<PendingAgentInstall> {
+            let client = self
+                .owner
+                .clients()?
+                .into_iter()
+                .find(|client| client.id == client_id)
+                .context("the selected agent registration no longer exists")?;
+            ensure!(client.revoked_at.is_none(), "the selected agent is revoked");
+            let install_companion = client
+                .registration
+                .as_ref()
+                .and_then(|registration| registration["install_companion"].as_bool())
+                .unwrap_or(true);
+            let adapter = AgentAdapter::supported()?
+                .into_iter()
+                .find(|adapter| adapter.kind == client.agent_kind)
+                .context("the selected agent has no managed configuration adapter")?;
+            if remove {
+                return Ok(PendingAgentInstall {
+                    display_name: format!("Remove {}", adapter.display_name),
+                    preview: Some(adapter.preview_remove(false)?),
+                    owner: self.owner.clone(),
+                    completion: AgentConfigCompletion::Remove { client_id },
+                    committed: false,
+                });
+            }
+            let port = self
+                .owner
+                .mcp_port()?
+                .context("the MCP server has not selected its loopback port yet")?;
+            if rotate {
+                let registration = serde_json::json!({
+                    "config_path": adapter.config_path,
+                    "install_companion": install_companion,
+                });
+                let replacement = self.owner.register_client(
+                    adapter.display_name,
+                    adapter.kind,
+                    Some(&registration),
+                )?;
+                let replacement_id = replacement.client.id;
+                let token = zeroize::Zeroizing::new(replacement.token.expose_base64url());
+                let mut preview = match adapter.preview_install(port, &token, install_companion) {
+                    Ok(preview) => preview,
+                    Err(error) => {
+                        let _ = self.owner.remove_client(replacement_id);
+                        return Err(error);
+                    }
+                };
+                preview.redact_diff_secret(&token);
+                return Ok(PendingAgentInstall {
+                    display_name: format!("Rotate {} token", adapter.display_name),
+                    preview: Some(preview),
+                    owner: self.owner.clone(),
+                    completion: AgentConfigCompletion::Rotate {
+                        previous_client_id: client_id,
+                        replacement_client_id: replacement_id,
+                    },
+                    committed: false,
+                });
+            }
+            let token = zeroize::Zeroizing::new(
+                self.owner
+                    .repair_client_token(client_id)?
+                    .expose_base64url(),
+            );
+            let mut preview = adapter.preview_install(port, &token, install_companion)?;
+            preview.redact_diff_secret(&token);
+            Ok(PendingAgentInstall {
+                display_name: format!("Repair {}", adapter.display_name),
+                preview: Some(preview),
+                owner: self.owner.clone(),
+                completion: AgentConfigCompletion::Repair,
+                committed: false,
+            })
+        })();
+        match result {
+            Ok(pending) => {
+                self.pending_agent_install = Some(pending);
+                self.operation_status = None;
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not prepare agent change: {error:#}").into());
             }
         }
         cx.notify();
@@ -450,17 +587,33 @@ impl WalletWindow {
             .expect("a pending installation always has its preview")
             .install();
         self.operation_status = Some(match result {
-            Ok(backup) if backup.as_os_str().is_empty() => {
-                pending.committed = true;
-                format!("Installed {display_name} MCP configuration.").into()
-            }
             Ok(backup) => {
                 pending.committed = true;
-                format!(
-                    "Installed {display_name} MCP configuration. Backup: {}",
-                    backup.display()
-                )
-                .into()
+                let database_result = match pending.completion {
+                    AgentConfigCompletion::Register { .. } | AgentConfigCompletion::Repair => {
+                        Ok(())
+                    }
+                    AgentConfigCompletion::Rotate {
+                        previous_client_id, ..
+                    }
+                    | AgentConfigCompletion::Remove {
+                        client_id: previous_client_id,
+                    } => pending.owner.remove_client(previous_client_id),
+                };
+                match database_result {
+                    Ok(()) if backup.as_os_str().is_empty() => {
+                        format!("Completed {display_name} configuration change.").into()
+                    }
+                    Ok(()) => format!(
+                        "Completed {display_name} configuration change. Backup: {}",
+                        backup.display()
+                    )
+                    .into(),
+                    Err(error) => {
+                        format!("Configuration changed, but registration cleanup failed: {error:#}")
+                            .into()
+                    }
+                }
             }
             Err(error) => format!("Could not install {display_name}: {error:#}").into(),
         });
@@ -1271,6 +1424,7 @@ impl WalletWindow {
                     Ok(items) => panel.children(items.into_iter().map(|item| {
                         let client_id = item.id;
                         let active = item.revoked_at.is_none();
+                        let managed = item.agent_kind != AgentKind::Other;
                         div()
                             .py_2()
                             .border_b_1()
@@ -1288,6 +1442,41 @@ impl WalletWindow {
                                         "Registered, not yet used".into()
                                     }),
                             )
+                            .when(active && managed, |row| {
+                                row.child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "repair-agent-{client_id}"
+                                            )))
+                                            .label("Repair")
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.prepare_agent_repair(client_id, cx);
+                                            })),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "rotate-agent-{client_id}"
+                                            )))
+                                            .label("Rotate token")
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.prepare_agent_rotation(client_id, cx);
+                                            })),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "remove-agent-{client_id}"
+                                            )))
+                                            .label("Remove")
+                                            .danger()
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.prepare_agent_removal(client_id, cx);
+                                            })),
+                                        ),
+                                )
+                            })
                             .when(active, |row| {
                                 row.child(
                                     Button::new(SharedString::from(format!(
@@ -1564,7 +1753,7 @@ impl WalletWindow {
             .child(
                 div()
                     .font_semibold()
-                    .child(format!("Install {} MCP configuration", pending.display_name)),
+                    .child(format!("{} MCP configuration", pending.display_name)),
             )
             .child("Review the exact configuration change. A timestamped backup is created before installation.")
             .child(
@@ -1598,7 +1787,7 @@ impl WalletWindow {
                     )
                     .child(
                         Button::new("confirm-agent-install")
-                            .label("Install")
+                            .label("Apply")
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.confirm_agent_install(cx);

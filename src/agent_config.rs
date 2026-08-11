@@ -39,6 +39,12 @@ impl ConfigPreview {
         &self.diff
     }
 
+    /// Conceal a bearer token in the human-facing diff while retaining it in
+    /// the in-memory document that will be atomically installed.
+    pub fn redact_diff_secret(&mut self, secret: &str) {
+        self.diff = self.diff.replace(secret, "<redacted-token>");
+    }
+
     pub fn install(mut self) -> Result<PathBuf> {
         let parent = self.path.parent().context("agent config has no parent")?;
         fs::create_dir_all(parent)?;
