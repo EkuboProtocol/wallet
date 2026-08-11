@@ -337,7 +337,7 @@ fn rpc_strategies_round_trip_through_the_spellings_people_type() {
             "parsing {text}"
         );
     }
-    // Display round-trips, so what `network list` prints can be typed back in.
+    // Display round-trips, so what `settings network list` prints can be typed back in.
     for strategy in [RpcStrategy::Ordered, RpcStrategy::Random] {
         assert_eq!(
             strategy.to_string().parse::<RpcStrategy>().unwrap(),

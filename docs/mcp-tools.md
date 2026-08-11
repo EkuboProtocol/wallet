@@ -3,7 +3,7 @@
 | Tool | Purpose |
 | --- | --- |
 | `wallet_list` | Public wallet metadata plus configured network names, chain IDs, and every RPC URL each one may use. Never key material. |
-| `wallet_propose_network` | Suggest a complete network profile for the owner to accept in `ekubo-wallet network review`. Writes nothing: a proposal for a configured chain ID is an edit of that network, one for an unconfigured chain ID is an addition, and neither resolves until accepted. The endpoint is admitted when proposed and its chain ID verified when accepted. A name or alias belonging to a different chain is refused outright, since no confirmation could resolve it. |
+| `wallet_propose_network` | Suggest a complete network profile for the owner to accept in `ekubo-wallet review`. Writes nothing: a proposal for a configured chain ID is an edit of that network, one for an unconfigured chain ID is an addition, and neither resolves until accepted. The endpoint is admitted when proposed and its chain ID verified when accepted. A name or alias belonging to a different chain is refused outright, since no confirmation could resolve it. |
 | `wallet_get_status` | Address, native balance, transaction count, and current EIP-7702 delegation. |
 | `wallet_get_policy` | The active policy and its revision. |
 | `wallet_batch_eth_call` | One to 128 ordered reads with optional inline decoding. Accepts a `fork_id` to read simulated state. |
@@ -14,7 +14,7 @@
 | `wallet_get_portfolio` | Native balance plus every known token's nonzero balance for any address, over the same lens-or-Multicall3 path as `wallet_get_balances`, pinned to a reported block. At most 8000 known tokens are checked; the rest are reported as `tokens_skipped`. |
 | `wallet_get_balances` | Balances for an explicit list of up to 1000 token addresses (0x0 = native), via the Ekubo TokenDataFetcher lens where deployed, else per-token Multicall3 reads. Failures read as zero; only nonzero balances return. |
 | `wallet_decode_abi_result` | Local decoding of previously obtained bytes. No RPC or transaction work. |
-| `wallet_simulate_execution_plan` | Resolve the exact plan from the producer's `artifact_reference` envelope, passed through verbatim as `reference` — the wallet fetches the body (public https, an inline `data:application/json` URI, or a `file:` path described with `ekubo-wallet meta-reference`) and verifies the envelope's integrity digest and byte count — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
+| `wallet_simulate_execution_plan` | Resolve the exact plan from the producer's `artifact_reference` envelope, passed through verbatim as `reference` — the wallet fetches the body (public https, an inline `data:application/json` URI, or a `file:` path described with `ekubo-wallet mcp reference`) and verifies the envelope's integrity digest and byte count — then simulate and policy-evaluate it without signing. Against real chain state it returns a `simulation_id` the send can consume instead of simulating again. With a `fork_id`, simulates on top of that fork and appends the plan on success, and returns no `simulation_id`: fork results are hypothetical. |
 | `wallet_create_fork` | Open a temporary simulation fork pinned to the current block, for simulating a sequence of dependent actions end to end. |
 | `wallet_discard_fork` | Discard a fork and everything applied to it. Forks also expire on their own. |
 | `wallet_send_transfers` | Any non-empty list of `{token, to, amount}` items (`token` `0x0` = native), which may mix the native token and any number of ERC-20 contracts, sent as one transaction. Takes the same `on_simulation_failure` choice as `wallet_send_execution_plan`. |
@@ -30,7 +30,7 @@
 | `wallet_address_book` | Read-only lookups of user-configured per-chain address aliases. Mutations are CLI-only and confirmed in the terminal. |
 | `wallet_get_legal` | Legal acceptance status plus the full Terms of Service, Privacy Policy, or Third-Party Licenses text. One of the two tools available before acceptance. |
 | `wallet_check_for_updates` | Whether a newer release than the running one has been published, and the command that installs it. Touches no wallet, key, or policy, and is the other tool available before acceptance — being told the build is stale should not require accepting anything. Installs nothing: the wallet has no tool that does, because replacing the binary would replace the approval surface that would have confirmed it. The command is the user's to run, or the agent's if the user asks; the running server keeps its version until it is restarted. |
-| `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet policy review`, which shows a minimized permission diff. |
+| `wallet_propose_policy` | Propose a complete replacement policy for human review, bound to the active revision, with a required rationale. One proposal per wallet; the latest prevails. Applied only via `ekubo-wallet review`, which shows a minimized permission diff. |
 
 MCP operations select networks only with canonical decimal `chain_id` strings
 such as `"1"` or `"4663"`; profile names are CLI and display metadata. No tool
@@ -66,7 +66,7 @@ URL is a `data:application/json;base64` URI of its exact bytes and touches no
 network (there the bytes are the reference, so integrity is verified only
 when supplied). A plan an agent assembled itself, which is too large to want
 in its context and which no producer has published a digest for, travels as
-an envelope whose URL is a `file:` URL: `ekubo-wallet meta-reference <path>`
+an envelope whose URL is a `file:` URL: `ekubo-wallet mcp reference <path>`
 checks the body and prints the envelope, and the wallet reads the file, which
 must be a regular file within the same 16 MiB cap, and verifies it against
 that digest and byte count — both mandatory there, because a path is not
@@ -126,14 +126,14 @@ answer is a claim by the counterparty they are being protected from.
 
 **Only the owner can name a token.** `wallet_propose_tokens` writes to a
 separate proposals table that no display path reads. Suggestions become names
-only when the owner confirms them with `ekubo-wallet meta-tokens review`, which
+only when the owner confirms them with `ekubo-wallet review`, which
 groups them by the list that vouched for them so a whole list is one decision
 rather than hundreds. The owner can also import a list themselves with
-`ekubo-wallet meta-tokens import <file>`, which reads the standard token-list shape,
-or pipe one in with `ekubo-wallet meta-tokens import -`:
+`ekubo-wallet settings tokens import <file>`, which reads the standard token-list shape,
+or pipe one in with `ekubo-wallet settings tokens import -`:
 
 ```sh
-curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet meta-tokens import -
+curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet settings tokens import -
 ```
 
 The pipe exists because a list is the largest thing an agent is ever asked to
@@ -184,8 +184,8 @@ as `tokens_skipped` rather than reading them. Zero balances are always
 omitted; balances are raw smallest-unit decimal strings with the stored
 decimals/symbols attached.
 
-Inspect the database from the CLI with `ekubo-wallet meta-tokens list [chain-id]`,
-or find one with `ekubo-wallet meta-tokens search <query>`.
+Inspect the database from the CLI with `ekubo-wallet settings tokens list [chain-id]`,
+or find one with `ekubo-wallet settings tokens search <query>`.
 
 ## Simulation forks
 
@@ -275,7 +275,7 @@ digest anyone could quote for what it says today.
 That exception is affordable because of what a list can do. A plan reference
 names bytes that get simulated and signed, so its digest is the only thing
 tying what was reviewed to what executes. A list names nothing — every entry
-becomes a suggestion waiting in `ekubo-wallet meta-tokens review`, and that review
+becomes a suggestion waiting in `ekubo-wallet review`, and that review
 is the check the digest would otherwise stand in for. A digest would also
 answer the wrong question: it proves the bytes are the ones the *caller*
 described, while what the owner is deciding is whether the curator is worth
@@ -300,7 +300,7 @@ than trimmed, and the error names the fix that applies — fewer chains when
 several are selected, a more specific list when one is.
 
 That cap is deliberately loose, because the decision it bounds is not per-row.
-`meta-tokens review` groups suggestions by the list that vouched for them and the
+`review` groups suggestions by the list that vouched for them and the
 owner accepts or rejects a whole list at once: what they are judging is
 whether the curator is trustworthy, and that reads the same at ten entries as
 at ten thousand. A tighter cap bought no extra scrutiny while refusing
@@ -318,7 +318,7 @@ chain gets a complete-as-far-as-it-went read with the remainder in
 
 Tolerance here costs nothing, because a token list authorizes nothing. It
 carries display names that reach a proposals table no display path reads, and
-every one of them still waits for the owner in `ekubo-wallet meta-tokens review`.
+every one of them still waits for the owner in `ekubo-wallet review`.
 `wallet_get_balances` does not even read the names: it takes the addresses on
 the selected chain and ignores the rest, so one canonical multi-chain list
 serves every chain without being restated.

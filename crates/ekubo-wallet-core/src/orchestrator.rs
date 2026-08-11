@@ -811,7 +811,7 @@ fn require_provisioned_wallet(policies: &PolicyStore, wallet_id: &str) -> Result
     ensure!(
         policies.get(wallet_id)?.is_some(),
         "wallet {wallet_id} has no policy, so nothing it holds can be signed. It was created or \
-         imported while policy initialization failed. Give it one with `ekubo-wallet policy \
+         imported while policy initialization failed. Give it one with `ekubo-wallet account policy \
          require-approval {wallet_id}`, or remove it with `ekubo-wallet account remove \
          {wallet_id}`."
     );

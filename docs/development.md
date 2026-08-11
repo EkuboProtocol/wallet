@@ -36,8 +36,8 @@ you are trusting your own working tree:
 (a shorthand for `EKUBO_WALLET_LOCAL_SOURCE=. sh install.sh`; every other
 installer environment variable still applies)
 
-Or point an MCP client directly at `target/release/ekubo-wallet server`. Regenerate the committed policy schema
-with `cargo run --bin ekubo-wallet -- policy schema > schemas/policy.schema.json`;
+Or point an MCP client directly at `target/release/ekubo-wallet mcp serve`. Regenerate the committed policy schema
+with `cargo run --bin ekubo-wallet -- account policy schema > schemas/policy.schema.json`;
 a test fails if it is stale.
 
 ## Scratch sessions
@@ -46,7 +46,7 @@ a test fails if it is stale.
 the platform credential store under one machine-wide entry, not per directory,
 so a scratch directory still reaches for the real wallet's credential — and on
 a locked keychain that blocks on a dialog, which a non-interactive shell never
-gets to answer. That is why `ekubo-wallet --data-dir /tmp/scratch server`
+gets to answer. That is why `ekubo-wallet --data-dir /tmp/scratch mcp serve`
 appears to hang rather than start.
 
 `--ephemeral` keeps the key in `--data-dir` instead:

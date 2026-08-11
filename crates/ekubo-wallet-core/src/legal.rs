@@ -177,7 +177,7 @@ wallet tries them in the order shown and moves to the next when one fails, so
 over time your requests for a network may reach any endpoint listed under it.
 Which one serves a given request depends on which are healthy at that moment,
 and is not something you select per request; to send your traffic to one
-operator only, replace the list with `ekubo-wallet network edit`.
+operator only, replace the list with `ekubo-wallet settings network edit`.
 
 ## 3. Default RPC endpoints in this release
 ";

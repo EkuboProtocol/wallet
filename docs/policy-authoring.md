@@ -153,7 +153,7 @@ policy predicate.
 - Propose the complete replacement document, never a patch, with
   `source_revision` set to the active revision from `wallet_get_policy`.
 - The user reviews a minimized permission diff plus your rationale and applies
-  it with `ekubo-wallet policy review <wallet-id>` in their own terminal; no MCP
+  it with `ekubo-wallet review` in their own terminal; no MCP
   tool can change the active policy. Write the rationale for a human: what they
   asked for, which rules enable it, and why the predicates are drawn where they
   are.

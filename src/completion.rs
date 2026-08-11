@@ -5,7 +5,7 @@
 //! an account, a queued request, a confirmed token, an alias in the address
 //! book. A completion that offers subcommand names and then stops at
 //! `--network ` is the shape that makes a person open a second terminal to run
-//! `network list` and copy a word back. So the candidates come from the same
+//! `settings network list` and copy a word back. So the candidates come from the same
 //! stores the command itself will read.
 //!
 //! The three shipped scripts used to answer this question themselves, each in
@@ -24,8 +24,8 @@
 //! subcommand names (with their `about` as the description) and the values of
 //! a `ValueEnum` argument. The table is only for arguments whose values live
 //! in a store — and it is written per command rather than per argument name,
-//! because `meta-address-book add`'s `address` is one the owner is about to invent
-//! while `meta-tokens remove`'s is one they must already have.
+//! because `settings address-book add`'s `address` is one the owner is about to
+//! invent while `settings tokens remove`'s is one they must already have.
 
 use crate::{
     address_book::AddressBookStore,
@@ -67,7 +67,7 @@ pub enum Offer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Source {
     Networks,
-    /// The built-in presets, which is what `network add` is choosing among —
+    /// The built-in presets, which is what `settings network add` is choosing among —
     /// the configured list is what it would be adding *to*.
     Presets,
     Wallets,
@@ -100,7 +100,7 @@ struct SourceRule {
 /// A table rather than a `match` because the keys are strings the compiler
 /// cannot check against the command tree: renaming a command leaves a key
 /// nothing matches, `source_of` answers `None`, and the argument quietly stops
-/// completing — no error anywhere. Renaming `token` to `meta-tokens` did
+/// completing — no error anywhere. Moving a command into a namespace can do
 /// exactly that. As a table the keys can be walked, and
 /// `every_source_rule_names_a_real_command_and_argument` walks them.
 const SOURCE_RULES: &[SourceRule] = &[
@@ -113,50 +113,49 @@ const SOURCE_RULES: &[SourceRule] = &[
         paths: &[
             "account export",
             "account remove",
-            "policy show",
-            "policy set",
-            "policy allow-all",
-            "policy require-approval",
-            "policy review",
+            "account policy show",
+            "account policy set",
+            "account policy allow-all",
+            "account policy require-approval",
         ],
         arguments: &["wallet_id"],
         source: Source::Wallets,
     },
     SourceRule {
-        paths: &["network add"],
+        paths: &["settings network add"],
         arguments: &["name"],
         source: Source::Presets,
     },
     SourceRule {
-        paths: &["network add"],
+        paths: &["settings network add"],
         arguments: &["rpc_strategy"],
         source: Source::RpcStrategies,
     },
     SourceRule {
-        paths: &["network edit", "network remove"],
+        paths: &["settings network edit", "settings network remove"],
         arguments: &["name"],
         source: Source::Networks,
     },
     SourceRule {
         paths: &[
             "portfolio",
-            "meta-tokens list",
-            "meta-tokens search",
-            "meta-tokens remove",
-            "meta-address-book list",
-            "meta-address-book add",
-            "meta-address-book remove",
+            "settings tokens list",
+            "settings tokens search",
+            "settings tokens remove",
+            "settings address-book list",
+            "settings address-book add",
+            "settings address-book remove",
         ],
         arguments: &["network", "chain"],
         source: Source::Networks,
     },
     SourceRule {
-        paths: &["meta-address-book add", "meta-address-book remove"],
+        paths: &["settings address-book add", "settings address-book remove"],
         arguments: &["alias"],
         source: Source::Aliases,
     },
     SourceRule {
-        paths: &["meta-tokens remove"],
+        paths: &["settings tokens remove"],
         arguments: &["address"],
         source: Source::Tokens,
     },
@@ -176,12 +175,12 @@ const SOURCE_RULES: &[SourceRule] = &[
         source: Source::Transactions,
     },
     SourceRule {
-        paths: &["policy set", "policy validate"],
+        paths: &["account policy set", "account policy validate"],
         arguments: &["policy_file"],
         source: Source::Files,
     },
     SourceRule {
-        paths: &["meta-reference", "meta-tokens import"],
+        paths: &["mcp reference", "settings tokens import"],
         arguments: &["path"],
         source: Source::Files,
     },
@@ -215,7 +214,7 @@ fn takes_a_value(argument: &clap::Arg) -> bool {
 /// built first. Building is what copies `--data-dir` and `--json` down into
 /// every subcommand and what assigns the positional indices this module looks
 /// arguments up by, and an unbuilt tree answers both questions with nothing
-/// rather than with an error — `policy validate` offered flags where it should
+/// rather than with an error — `account policy validate` offered flags where it should
 /// have offered a file, and said so no more loudly than that.
 fn arguments(command: &clap::Command) -> impl Iterator<Item = &clap::Arg> {
     command.get_arguments()
@@ -254,7 +253,7 @@ struct Position<'a> {
     /// Space-joined subcommand names, as `source_of` keys them.
     path: String,
     /// Positional values already given to `command`, in order. They are what
-    /// scopes a later positional: the network in `meta-address-book remove` decides
+    /// scopes a later positional: the network in `settings address-book remove` decides
     /// which aliases the alias argument can mean.
     positionals: Vec<String>,
     /// Set when the line ends in a flag that is still waiting for its value.
@@ -354,7 +353,7 @@ fn enumerated(argument: &clap::Arg) -> Option<Vec<Candidate>> {
 }
 
 /// What to offer after the given words.
-pub fn offer(config: &ConfigStore, words: &[String]) -> Result<Offer> {
+pub fn offer(config: &ConfigStore, words: &[String], current: &str) -> Result<Offer> {
     let mut root = <crate::cli::Cli as clap::CommandFactory>::command();
     root.build();
     let position = locate(&root, words);
@@ -366,17 +365,22 @@ pub fn offer(config: &ConfigStore, words: &[String]) -> Result<Offer> {
 
     // Before any positional, a command with subcommands is choosing one.
     if position.positionals.is_empty() && position.command.get_subcommands().next().is_some() {
-        let mut candidates: Vec<Candidate> = position
+        let mut candidates = Vec::new();
+        for sub in position
             .command
             .get_subcommands()
             .filter(|sub| !sub.is_hide_set())
-            .map(|sub| {
-                Candidate::new(
-                    sub.get_name(),
-                    sub.get_about().map(ToString::to_string).unwrap_or_default(),
-                )
-            })
-            .collect();
+        {
+            let description = sub.get_about().map(ToString::to_string).unwrap_or_default();
+            candidates.push(Candidate::new(sub.get_name(), &description));
+            candidates.extend(
+                sub.get_visible_aliases()
+                    .map(|alias| Candidate::new(alias, format!("Alias for {}", sub.get_name()))),
+            );
+        }
+        if position.path.is_empty() && current == "s" {
+            candidates.retain(|candidate| candidate.value == "status");
+        }
         candidates.extend(flags(position.command));
         return Ok(Offer::Values(candidates));
     }

@@ -7,7 +7,7 @@ ekubo-wallet legal show terms      # or: privacy, licenses
 ekubo-wallet legal accept          # separate terms + privacy acknowledgments
 ekubo-wallet account create primary
 ekubo-wallet account list
-ekubo-wallet policy show primary
+ekubo-wallet account policy show primary
 ```
 
 `ekubo-wallet status` answers "is this set up, and does it need me?" in one
@@ -41,16 +41,16 @@ under the require-approval profile still runs the full simulation and decoded
 review before you approve it in the terminal:
 
 ```sh
-ekubo-wallet policy require-approval primary   # every transaction needs explicit CLI approval
-ekubo-wallet policy allow-all primary          # simulated + policy-clean transactions sign automatically
-ekubo-wallet policy validate ./policy.json     # or draft something in between
-ekubo-wallet policy set primary ./policy.json
-ekubo-wallet policy review primary             # review an agent-proposed policy change
+ekubo-wallet account policy require-approval primary   # every transaction needs explicit CLI approval
+ekubo-wallet account policy allow-all primary          # simulated + policy-clean transactions sign automatically
+ekubo-wallet account policy validate ./policy.json     # or draft something in between
+ekubo-wallet account policy set primary ./policy.json
+ekubo-wallet review             # review an agent-proposed policy change
 ```
 
 Agents can propose policy changes with the `wallet_propose_policy` tool
 (guided by the `wallet://docs/policy-authoring` and `wallet://schemas/policy`
-resources), but only `policy review` applies one: it shows a minimized
+resources), but only `review` applies one: it shows a minimized
 human-readable diff of the permissions against the current policy together
 with the agent's rationale, asks you to confirm it in the terminal and
 authenticate against the OS, and fails closed if the policy changed since the
@@ -61,7 +61,7 @@ Signing a transaction, signing typed data or a message, exporting a private
 key, and removing a wallet are the moments the key itself is used or
 destroyed, so each is reviewed in the terminal and then authenticated against
 the OS — Touch ID, Windows Hello, or polkit. Replacing a policy — a preset,
-a file, or an agent proposal through `policy review` — asks the same two
+a file, or an agent proposal through `review` — asks the same two
 ways: the policy decides what signs without you present, so rewriting it is
 authenticated like signing even though it never touches the key. Network,
 address book, and token changes touch neither the key nor the policy and are
@@ -90,13 +90,14 @@ recipient, and the simulated result are what the review is actually for.
 Seeding happens only at creation. Nothing re-seeds on later launches, so a
 token you remove stays removed, and the database is yours after the first
 run. Filters are named and take a network name, alias, or chain ID —
-`meta-tokens list --chain base`, `meta-address-book list --network arbitrum`,
+`settings tokens list --chain base`, `settings address-book list --network arbitrum`,
 `transaction list --account primary`. Drop one name with
-`ekubo-wallet meta-tokens remove <network> <address>`.
+`ekubo-wallet settings tokens remove <network> <address>`.
 
-Add more at any time with `ekubo-wallet meta-tokens import`, and confirm what
-an agent suggests with `ekubo-wallet meta-tokens review` — an agent's suggestion is
-never a name until you accept it.
+Add more at any time with `ekubo-wallet settings tokens import`, and confirm what
+an agent suggests with `ekubo-wallet review`. The inbox groups suggestions by
+source, shows a three-token sample, and opens the full filterable batch before
+you decide; an agent's suggestion is never a name until you accept it.
 
 On Linux, install the polkit action shipped in the archive before signing.
 `install.sh` already does this — it stages the file read-only and prints a
@@ -124,22 +125,22 @@ Linux also needs a working Secret Service provider for credential storage. If
 polkit, Windows Hello, or macOS Local Authentication is unavailable, sensitive
 operations fail closed.
 
-`ekubo-wallet meta-agent list` shows which supported agents are installed here
-and whether this server is registered with each; `meta-agent add` registers it
-with everything detected, and `meta-agent add <name>` with one. The installer does
+`ekubo-wallet mcp status` shows which supported agents are installed here
+and whether this server is registered with each; `mcp register` registers it
+with everything detected, and `mcp register <name>` with one. The installer does
 this once, so reach for it after moving the binary or installing a new agent.
 
-`meta-agent add` also registers the Ekubo protocol server at
+`mcp register` also registers the Ekubo protocol server at
 `https://mcp.ekubo.org/mcp`, which is what gives a new install something to do
 — quotes, swaps, bridging, liquidity — beyond holding keys. It prepares
 unsigned plans and holds no key; what it returns is checked, simulated, and
-policy-checked here like any other plan. `meta-agent add --no-companion` leaves it
+policy-checked here like any other plan. `mcp register --no-companion` leaves it
 out. See [installation](installation.md#the-companion-server).
 
-Start the MCP server over stdio with `ekubo-wallet server`. It publishes the
+Start the MCP server over stdio with `ekubo-wallet mcp serve`. It publishes the
 `wallet://docs/security-model` resource. Run `ekubo-wallet --help` for the
 complete CLI, or install a packaged completion:
 
 ```sh
-ekubo-wallet shell-completion zsh > ~/.zfunc/_ekubo-wallet
+ekubo-wallet settings completion zsh > ~/.zfunc/_ekubo-wallet
 ```

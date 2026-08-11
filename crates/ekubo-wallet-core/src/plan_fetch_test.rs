@@ -419,7 +419,7 @@ mod file_references {
             .unwrap_err()
             .to_string();
         assert!(error.contains("integrity block"), "{error}");
-        assert!(error.contains("ekubo-wallet meta-reference"), "{error}");
+        assert!(error.contains("ekubo-wallet mcp reference"), "{error}");
 
         let mut without_count = reference_for(ArtifactType::ExecutionPlan, url, Some(&body));
         without_count.bytes = None;

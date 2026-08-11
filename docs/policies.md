@@ -215,16 +215,16 @@ selected policy, memory, encoded transaction size, and the per-chain gas cap.
 
 Policy documents have a generated [JSON Schema](../schemas/policy.schema.json)
 derived from the same types the wallet enforces. Print the current one with
-`ekubo-wallet policy schema`, and reference it as the top-level `$schema` value
+`ekubo-wallet account policy schema`, and reference it as the top-level `$schema` value
 for editor completion. Starting points live in [`examples/`](../examples):
 
 | File | Purpose |
 | --- | --- |
 | [`policy.json`](../examples/policy.json) | The allow-all profile, one of the two choices `account create` offers. |
-| [`policies/deny-all.json`](../examples/policies/deny-all.json) | Exactly what `policy require-approval` installs, and the default for imported wallets. |
+| [`policies/deny-all.json`](../examples/policies/deny-all.json) | Exactly what `account policy require-approval` installs, and the default for imported wallets. |
 | [`policies/token-budget.template.json`](../examples/policies/token-budget.template.json) | One chain, one router, one token: a bounded approval, a swap paying back to this wallet, and a blanket deny on operator grants. |
 | [`policies/approval-wildcards.template.json`](../examples/policies/approval-wildcards.template.json) | How an exact chain entry replaces the wildcard rather than extending it. |
-| [`policies/allow-all-with-approval.template.json`](../examples/policies/allow-all-with-approval.template.json) | Exactly what `policy allow-all` installs. |
+| [`policies/allow-all-with-approval.template.json`](../examples/policies/allow-all-with-approval.template.json) | Exactly what `account policy allow-all` installs. |
 
 Worked examples, each demonstrating one thing the engine can express. Every
 verdict below is asserted in [`tests/example_policies.rs`](../tests/example_policies.rs),
@@ -250,13 +250,13 @@ before use. An agent can help draft a copy, but applying it stays an explicit
 human CLI action:
 
 ```sh
-ekubo-wallet policy validate ./my-policy.json   # parses and digests; changes nothing
-ekubo-wallet policy set primary ./my-policy.json
-ekubo-wallet policy allow-all primary
-ekubo-wallet policy show primary
+ekubo-wallet account policy validate ./my-policy.json   # parses and digests; changes nothing
+ekubo-wallet account policy set primary ./my-policy.json
+ekubo-wallet account policy allow-all primary
+ekubo-wallet account policy show primary
 ```
 
-`policy validate` needs no wallet, no database, and no authentication, so a
+`account policy validate` needs no wallet, no database, and no authentication, so a
 policy can be drafted and checked before anything exists to apply it to. It also
 type-checks every predicate against the signature it sits under, so a rule that
 could only ever fail is refused at install time rather than silently never

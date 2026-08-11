@@ -757,7 +757,7 @@ mod first_policy_clears_residue_tests {
 
     /// `purge` runs at wallet creation, but only after a *successful* custody
     /// create -- and the repair route the half-provisioned error message points
-    /// at, `ekubo-wallet policy require-approval <id>`, reaches `put` without
+    /// at, `ekubo-wallet account policy require-approval <id>`, reaches `put` without
     /// it. So a removal whose purge failed, or a creation interrupted between
     /// the credential and the policy, left the queues and any proposal in place
     /// under a name that a different key now answers to. The replacement could

@@ -307,41 +307,41 @@ esac
 # agents at it, and this script is not around for that — and a second copy of
 # the argument order each agent's `mcp add` expects is a second copy to get
 # wrong. That argument goes double now that there are two servers to register:
-# this wallet over stdio, and the Ekubo protocol server over HTTPS. `meta-agent add`
+# this wallet over stdio, and the Ekubo protocol server over HTTPS. `mcp register`
 # with no agent named configures whatever it detects, reports what it did, and
 # is safe to re-run.
 # This script is fetched from `main` while the binary it configures is the
-# latest *release*, so the two can disagree about a command's name for as long
-# as it takes to cut one. `meta-agent` and `shell-completion` were `agent` and
-# `completion` until the top-level names were spread out for tab completion, so
-# each is resolved against the binary actually installed rather than assumed.
-subcommand_name() {
-  for candidate in "$@"; do
-    if "$CLI_BIN" help "$candidate" >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  # Nothing matched: name the current spelling so the failure that follows
-  # says what was tried rather than expanding to nothing.
-  printf '%s\n' "$1"
-}
-
-AGENT_COMMAND=$(subcommand_name meta-agent agent)
-COMPLETION_COMMAND=$(subcommand_name shell-completion completion)
+# latest *release*, so the two can disagree about a command's shape for as long
+# as it takes to cut one. Resolve the complete path against the installed binary.
+if "$CLI_BIN" help mcp register >/dev/null 2>&1; then
+  AGENT_STATUS_COMMAND="mcp status"
+  register_agents() { "$CLI_BIN" mcp register "$@"; }
+  generate_completion() { "$CLI_BIN" settings completion "$1"; }
+  COMPLETION_COMMAND="settings completion"
+elif "$CLI_BIN" help meta-agent >/dev/null 2>&1; then
+  AGENT_STATUS_COMMAND="meta-agent list"
+  register_agents() { "$CLI_BIN" meta-agent add "$@"; }
+  generate_completion() { "$CLI_BIN" shell-completion "$1"; }
+  COMPLETION_COMMAND="shell-completion"
+else
+  AGENT_STATUS_COMMAND="agent list"
+  register_agents() { "$CLI_BIN" agent add "$@"; }
+  generate_completion() { "$CLI_BIN" completion "$1"; }
+  COMPLETION_COMMAND="completion"
+fi
 
 if [ "${EKUBO_WALLET_SKIP_AGENTS:-0}" != "1" ]; then
-  AGENT_ADD_ARGUMENTS=""
   # The companion server is a remote endpoint this wallet does not control the
   # network path to, so registering it is a decision the operator can decline
   # while still getting the wallet.
   if [ "${EKUBO_WALLET_SKIP_COMPANION:-0}" = "1" ]; then
-    AGENT_ADD_ARGUMENTS="--no-companion"
-  fi
-  # shellcheck disable=SC2086  # deliberate: empty must expand to no argument
-  if ! "$CLI_BIN" "$AGENT_COMMAND" add $AGENT_ADD_ARGUMENTS; then
+    if ! register_agents --no-companion; then
+      warn "no agent was configured; the binary and completion are still installed"
+      warn "run '$CLI_BIN $AGENT_STATUS_COMMAND' to see what was detected"
+    fi
+  elif ! register_agents; then
     warn "no agent was configured; the binary and completion are still installed"
-    warn "run '$CLI_BIN $AGENT_COMMAND list' to see what was detected"
+    warn "run '$CLI_BIN $AGENT_STATUS_COMMAND' to see what was detected"
   fi
 fi
 
@@ -359,7 +359,7 @@ install_completion_file() {
   # predictable path would follow whatever is already there, handing the write,
   # the chmod, and the rename to a file this script never chose.
   completion_temporary=$(mktemp "$completion_directory/.ekubo-wallet.XXXXXXXX") || return 1
-  if ! "$CLI_BIN" "$COMPLETION_COMMAND" "$completion_shell" > "$completion_temporary"; then
+  if ! generate_completion "$completion_shell" > "$completion_temporary"; then
     rm -f "$completion_temporary"
     return 1
   fi

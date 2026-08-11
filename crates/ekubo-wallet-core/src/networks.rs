@@ -28,13 +28,13 @@
 //! against its own digest rather than against what an endpoint says, and the
 //! chain ID is re-verified on every endpoint before its answer is used. An
 //! owner with funds worth protecting should still point their networks at a
-//! dedicated provider with `ekubo-wallet network edit`.
+//! dedicated provider with `ekubo-wallet settings network edit`.
 //!
 //! # Defaults and the rest
 //!
 //! [`default_networks`] is the small set a fresh configuration starts with.
 //! [`known_networks`] is everything — every chain in the registry — and backs
-//! `network add`, so configuring a chain the wallet did not default to is a
+//! `settings network add`, so configuring a chain the wallet did not default to is a
 //! chain ID rather than a research project.
 
 use crate::config::{NativeCurrency, NetworkConfig};
@@ -192,7 +192,7 @@ pub fn known_network(chain_id: u64) -> Option<&'static NetworkProfile> {
 /// configuration format caps how many one file may hold, and every one of them
 /// is re-read and re-validated on every command — so the default is the set of
 /// chains a wallet is likely to be used on, and the rest are one
-/// `network add <chain-id>` away.
+/// `settings network add <chain-id>` away.
 #[must_use]
 pub fn default_networks() -> Vec<NetworkConfig> {
     known_networks()

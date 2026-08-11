@@ -522,7 +522,7 @@ impl PolicyStore {
         // still holds.
         //
         // `purge` runs at wallet creation, but only after a *successful*
-        // custody create; and the repair route -- `ekubo-wallet policy
+        // custody create; and the repair route -- `ekubo-wallet account policy
         // require-approval <id>`, the command the error message points a
         // half-provisioned wallet at -- reaches here through `put` without it.
         // So a removal whose purge failed, or a creation interrupted between
@@ -742,7 +742,7 @@ impl PolicyStore {
         ensure!(
             replacing || pending < MAX_PENDING_NETWORK_PROPOSALS,
             "{pending} network suggestions already await review; the owner must run \
-             `ekubo-wallet network review` before more can be suggested"
+             `ekubo-wallet review` before more can be suggested"
         );
         self.connection.execute(
             "INSERT INTO network_proposals(chain_id, profile_json, proposed_at)
@@ -804,7 +804,7 @@ impl PolicyStore {
     /// Discard exactly the profile that was reviewed, if it is still the
     /// pending one for its chain. Returns whether it was.
     ///
-    /// `network review` snapshots the queue, shows the owner what would be
+    /// `review` snapshots the queue, shows the owner what would be
     /// stored, and then waits — on a confirmation, a chain-ID probe, and an OS
     /// presence check. An agent may replace the suggestion for that chain at
     /// any point in there, pointing it at a different endpoint. Deleting by
