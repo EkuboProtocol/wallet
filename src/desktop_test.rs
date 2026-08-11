@@ -242,7 +242,7 @@ fn tray_artwork_tracks_both_system_appearance_families() {
 
 #[test]
 fn command_palette_reaches_every_desktop_route() {
-    assert_eq!(Route::ALL.len(), 10);
+    assert_eq!(Route::ALL.len(), 9);
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
     assert_eq!(Route::Overview.label(), "Portfolio");
@@ -261,8 +261,7 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
         ("⌘6", "cmd-6"),
         ("⌘7", "cmd-7"),
         ("⌘8", "cmd-8"),
-        ("⌘9", "cmd-9"),
-        ("⌘,", "cmd-,"),
+        ("⌘9 / ⌘,", "cmd-9"),
     ];
     #[cfg(not(target_os = "macos"))]
     let expected = [
@@ -274,12 +273,30 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
         ("Ctrl+6", "ctrl-6"),
         ("Ctrl+7", "ctrl-7"),
         ("Ctrl+8", "ctrl-8"),
-        ("Ctrl+9", "ctrl-9"),
-        ("Ctrl+,", "ctrl-,"),
+        ("Ctrl+9 / Ctrl+,", "ctrl-9"),
     ];
 
     let actual = Route::ALL.map(|route| (route.shortcut(), route.key_binding()));
     assert_eq!(actual, expected);
+    #[cfg(target_os = "macos")]
+    assert_eq!(SETTINGS_ALTERNATE_KEY_BINDING, "cmd-,");
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(SETTINGS_ALTERNATE_KEY_BINDING, "ctrl-,");
+}
+
+#[test]
+fn token_network_labels_prefer_human_readable_configured_names() {
+    let networks = ekubo_wallet_core::networks::default_networks();
+    let labels = token_network_names(&networks);
+    let ethereum = networks
+        .iter()
+        .find(|network| network.chain_id == 1)
+        .unwrap();
+
+    assert_eq!(
+        labels.get(&1).map(AsRef::<str>::as_ref),
+        Some(ethereum.display_name.as_deref().unwrap_or(&ethereum.name))
+    );
 }
 
 #[test]

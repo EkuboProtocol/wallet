@@ -238,11 +238,10 @@ pub enum Route {
     Tokens,
     WalletConnect,
     Settings,
-    Updates,
 }
 
 impl Route {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 9] = [
         Self::Overview,
         Self::Reviews,
         Self::Activity,
@@ -251,7 +250,6 @@ impl Route {
         Self::Networks,
         Self::Tokens,
         Self::WalletConnect,
-        Self::Updates,
         Self::Settings,
     ];
 
@@ -266,7 +264,6 @@ impl Route {
             Self::Tokens => "Tokens",
             Self::WalletConnect => "WalletConnect",
             Self::Settings => "Settings",
-            Self::Updates => "Updates",
         }
     }
 
@@ -288,7 +285,6 @@ impl Route {
             Self::Tokens => IconName::Star,
             Self::WalletConnect => IconName::Globe,
             Self::Settings => IconName::Settings,
-            Self::Updates => IconName::ArrowDown,
         }
     }
 
@@ -303,8 +299,7 @@ impl Route {
             Self::Networks => "⌘6",
             Self::Tokens => "⌘7",
             Self::WalletConnect => "⌘8",
-            Self::Updates => "⌘9",
-            Self::Settings => "⌘,",
+            Self::Settings => "⌘9 / ⌘,",
         }
     }
 
@@ -319,8 +314,7 @@ impl Route {
             Self::Networks => "Ctrl+6",
             Self::Tokens => "Ctrl+7",
             Self::WalletConnect => "Ctrl+8",
-            Self::Updates => "Ctrl+9",
-            Self::Settings => "Ctrl+,",
+            Self::Settings => "Ctrl+9 / Ctrl+,",
         }
     }
 
@@ -335,8 +329,7 @@ impl Route {
             Self::Networks => "cmd-6",
             Self::Tokens => "cmd-7",
             Self::WalletConnect => "cmd-8",
-            Self::Updates => "cmd-9",
-            Self::Settings => "cmd-,",
+            Self::Settings => "cmd-9",
         }
     }
 
@@ -351,11 +344,15 @@ impl Route {
             Self::Networks => "ctrl-6",
             Self::Tokens => "ctrl-7",
             Self::WalletConnect => "ctrl-8",
-            Self::Updates => "ctrl-9",
-            Self::Settings => "ctrl-,",
+            Self::Settings => "ctrl-9",
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+const SETTINGS_ALTERNATE_KEY_BINDING: &str = "cmd-,";
+#[cfg(not(target_os = "macos"))]
+const SETTINGS_ALTERNATE_KEY_BINDING: &str = "ctrl-,";
 
 // These flags describe independent controls and async operations. Combining
 // them into one state machine would admit fewer valid combinations, not make
@@ -824,6 +821,7 @@ struct TokenListDelegate {
     selected: Option<IndexPath>,
     pending_removal: Option<(u64, alloy::primitives::Address)>,
     removing: BTreeSet<(u64, alloy::primitives::Address)>,
+    network_names: BTreeMap<u64, SharedString>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1137,6 +1135,7 @@ struct TokenProposalListDelegate {
     proposals: Vec<TokenProposal>,
     selected: Option<IndexPath>,
     viewed_to_end: bool,
+    network_names: BTreeMap<u64, SharedString>,
 }
 
 impl TokenProposalListDelegate {
@@ -1146,6 +1145,7 @@ impl TokenProposalListDelegate {
             proposals: Vec::new(),
             selected: None,
             viewed_to_end: false,
+            network_names: BTreeMap::new(),
         }
     }
 
@@ -1161,6 +1161,10 @@ impl TokenProposalListDelegate {
         self.proposals.clear();
         self.selected = None;
         self.viewed_to_end = false;
+    }
+
+    fn replace_networks(&mut self, networks: &[NetworkConfig]) {
+        self.network_names = token_network_names(networks);
     }
 }
 
@@ -1178,6 +1182,7 @@ impl TokenListDelegate {
             selected: None,
             pending_removal: None,
             removing: BTreeSet::new(),
+            network_names: BTreeMap::new(),
         }
     }
 
@@ -1205,6 +1210,26 @@ impl TokenListDelegate {
             .collect();
         self.selected = None;
     }
+
+    fn replace_networks(&mut self, networks: &[NetworkConfig]) {
+        self.network_names = token_network_names(networks);
+    }
+}
+
+fn token_network_names(networks: &[NetworkConfig]) -> BTreeMap<u64, SharedString> {
+    networks
+        .iter()
+        .map(|network| {
+            (
+                network.chain_id,
+                network
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| network.name.clone())
+                    .into(),
+            )
+        })
+        .collect()
 }
 
 fn token_matches_search(token: &StoredToken, query: &str) -> bool {
@@ -1505,6 +1530,9 @@ impl ListDelegate for TokenListDelegate {
         let token = self.visible_tokens.get(index.row)?.clone();
         let chain_id = token.chain_id.parse::<u64>().ok();
         let address = token.address.parse::<alloy::primitives::Address>().ok();
+        let network_name = chain_id
+            .and_then(|chain_id| self.network_names.get(&chain_id).cloned())
+            .unwrap_or_else(|| format!("Unknown network · chain {}", token.chain_id).into());
         let state = cx.entity().downgrade();
         let editor = self.editor.clone();
         let edit_token = token.clone();
@@ -1654,11 +1682,27 @@ impl ListDelegate for TokenListDelegate {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(format!(
-                                            "{} · chain {}",
-                                            token.symbol.as_deref().unwrap_or("Unnamed token"),
-                                            token.chain_id
-                                        ))
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .gap_3()
+                                                .child(
+                                                    div().flex_1().min_w_0().truncate().child(
+                                                        token
+                                                            .symbol
+                                                            .as_deref()
+                                                            .unwrap_or("Unnamed token")
+                                                            .to_owned(),
+                                                    ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_none()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(network_name),
+                                                ),
+                                        )
                                         .child(
                                             div()
                                                 .font_family("monospace")
@@ -1669,8 +1713,10 @@ impl ListDelegate for TokenListDelegate {
                                         )
                                         .child(
                                             div()
+                                                .min_w_0()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
+                                                .truncate()
                                                 .child(format!(
                                                     "{} · {} decimals · {}",
                                                     token.name.as_deref().unwrap_or("No full name"),
@@ -1738,34 +1784,59 @@ impl ListDelegate for TokenProposalListDelegate {
     ) -> Option<Self::Item> {
         let proposal = self.proposals.get(index.row)?;
         let token = &proposal.token;
+        let network_name = self
+            .network_names
+            .get(&token.chain_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Unknown network · chain {}", token.chain_id).into());
         Some(
             ListItem::new(("token-proposal", index.row))
                 .selected(self.selected == Some(index))
                 .child(
-                    h_flex()
+                    div()
                         .w_full()
-                        .justify_between()
-                        .gap_4()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(format!(
-                                    "{} · {} decimals · chain {}",
-                                    token.symbol, token.decimals, token.chain_id
-                                ))
+                            h_flex()
+                                .w_full()
+                                .gap_3()
                                 .child(
                                     div()
-                                        .font_family("monospace")
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(token.symbol.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .truncate()
-                                        .child(token.address.to_checksum(None)),
+                                        .child(network_name),
                                 ),
                         )
-                        .when_some(token.name.as_ref(), |row, name| {
-                            row.child(div().text_sm().child(name.clone()))
-                        }),
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(token.address.to_checksum(None)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(format!(
+                                    "{} · {} decimals",
+                                    token.name.as_deref().unwrap_or("No full name"),
+                                    token.decimals
+                                )),
+                        ),
                 ),
         )
     }
@@ -2424,6 +2495,7 @@ impl WalletWindow {
     }
 
     fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut token_lists_created = false;
         if self.appearance_subscription.is_none() {
             let tray = self.tray.clone();
             self.appearance_subscription =
@@ -2466,12 +2538,33 @@ impl WalletWindow {
                     .searchable(true)
                     .selectable(false)
             }));
+            token_lists_created = true;
             self.reload_tokens(cx);
         }
         if self.token_proposal_list.is_none() {
             self.token_proposal_list = Some(cx.new(|cx| {
                 ListState::new(TokenProposalListDelegate::new(), window, cx).selectable(false)
             }));
+            token_lists_created = true;
+        }
+        if token_lists_created
+            && let Some(networks) = self
+                .desktop_snapshot
+                .as_deref()
+                .and_then(|snapshot| snapshot.networks.as_ref().ok())
+        {
+            if let Some(list) = self.token_list.as_ref() {
+                list.update(cx, |list, cx| {
+                    list.delegate_mut().replace_networks(networks);
+                    cx.notify();
+                });
+            }
+            if let Some(list) = self.token_proposal_list.as_ref() {
+                list.update(cx, |list, cx| {
+                    list.delegate_mut().replace_networks(networks);
+                    cx.notify();
+                });
+            }
         }
         if self.token_list_url_input.is_none() {
             self.token_list_url_input = Some(cx.new(|cx| {
@@ -2651,6 +2744,20 @@ impl WalletWindow {
                 view.desktop_snapshot_loading = false;
                 match result {
                     Ok(snapshot) => {
+                        if let Ok(networks) = &snapshot.networks {
+                            if let Some(list) = view.token_list.as_ref() {
+                                list.update(cx, |list, cx| {
+                                    list.delegate_mut().replace_networks(networks);
+                                    cx.notify();
+                                });
+                            }
+                            if let Some(list) = view.token_proposal_list.as_ref() {
+                                list.update(cx, |list, cx| {
+                                    list.delegate_mut().replace_networks(networks);
+                                    cx.notify();
+                                });
+                            }
+                        }
                         view.desktop_snapshot = Some(Arc::new(snapshot));
                         view.desktop_snapshot_error = None;
                     }
@@ -4998,7 +5105,7 @@ impl WalletWindow {
             owner.confirm_software_update_install(&authorization)?;
             Ok::<_, anyhow::Error>(())
         });
-        self.clear_route_error(Route::Updates);
+        self.clear_route_error(Route::Settings);
         cx.spawn(async move |view, cx| match task.await {
             Ok(()) => {
                 let staged = pending
@@ -5033,7 +5140,7 @@ impl WalletWindow {
                         bytes,
                     };
                     view.set_route_error(
-                        Route::Updates,
+                        Route::Settings,
                         format!("Update installation was not authorized: {error:#}"),
                     );
                     cx.notify();
@@ -6651,6 +6758,7 @@ impl WalletWindow {
                     .child(managed_agents),
             )
             .child(self.render_legal(cx))
+            .child(self.render_updates(cx))
     }
 
     fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -6739,19 +6847,7 @@ impl WalletWindow {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(
-                                    div()
-                                        .child(format!("{} · {:#x}", item.id, item.address))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "{:?} · created {}",
-                                                    item.source, item.created_at
-                                                )),
-                                        ),
-                                )
+                                .child(div().child(format!("{} · {:#x}", item.id, item.address)))
                                 .child(
                                     div()
                                         .flex()
@@ -9243,7 +9339,6 @@ impl WalletWindow {
             Route::Tokens => self.render_tokens(cx),
             Route::WalletConnect => self.render_walletconnect(cx),
             Route::Settings => self.render_settings(cx),
-            Route::Updates => self.render_updates(cx),
             Route::Reviews => self.render_reviews(cx),
         }
     }
@@ -10022,6 +10117,13 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             key_bindings.extend(Route::ALL.into_iter().map(|route| {
                 KeyBinding::new(route.key_binding(), NavigateRoute { route }, None)
             }));
+            key_bindings.push(KeyBinding::new(
+                SETTINGS_ALTERNATE_KEY_BINDING,
+                NavigateRoute {
+                    route: Route::Settings,
+                },
+                None,
+            ));
             cx.bind_keys(key_bindings);
             cx.on_action(|_: &Quit, cx| cx.quit());
             let shutdown_server = server_slot.clone();
@@ -10314,7 +10416,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             }
                             TrayCommand::CheckForUpdates => {
                                 tray_view.update(cx, |view, cx| {
-                                    view.set_route(Route::Updates);
+                                    view.set_route(Route::Settings);
                                     view.check_for_updates(cx);
                                     cx.notify();
                                 });
