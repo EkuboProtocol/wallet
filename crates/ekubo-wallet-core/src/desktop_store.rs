@@ -31,8 +31,8 @@ pub const MCP_RESOURCE: &str = "http://127.0.0.1:61744/mcp";
 pub const MCP_SCOPE: &str = "wallet:use";
 
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
-const ACCESS_TOKEN_TTL: Duration = Duration::hours(1);
-const REFRESH_TOKEN_TTL: Duration = Duration::days(30);
+const ACCESS_TOKEN_TTL: Duration = Duration::minutes(10);
+const OAUTH_SESSION_TTL: Duration = Duration::hours(12);
 const MAX_OAUTH_CLIENTS: i64 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +185,19 @@ impl DesktopStore {
     ) -> Result<()> {
         authorization.require(OwnerAuthorizationScope::NotificationPrivacy)?;
         self.set_setting("notification_detailed_previews", &enabled)
+    }
+
+    pub fn automatic_update_checks(&self) -> Result<bool> {
+        Ok(self.setting("automatic_update_checks")?.unwrap_or(true))
+    }
+
+    pub fn set_automatic_update_checks(
+        &mut self,
+        enabled: bool,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::SoftwareUpdate)?;
+        self.set_setting("automatic_update_checks", &enabled)
     }
 
     /// Record public OAuth client metadata. This does not authorize the client
@@ -504,6 +517,7 @@ impl DesktopStore {
             resource,
             Uuid::new_v4(),
             now,
+            now + OAUTH_SESSION_TTL,
         )?;
         transaction.commit()?;
         Ok(pair)
@@ -524,7 +538,9 @@ impl DesktopStore {
         let stored = self
             .connection
             .query_row(
-                "SELECT t.family_id, t.scope, t.resource, t.expires_at, t.consumed_at
+                "SELECT t.family_id, t.scope, t.resource, t.expires_at, t.consumed_at,
+                        (SELECT MIN(f.created_at) FROM oauth_refresh_tokens f
+                         WHERE f.family_id = t.family_id)
                  FROM oauth_refresh_tokens t
                  JOIN mcp_clients c ON c.client_id = t.client_id
                  WHERE t.token_hash = ?1 AND t.client_id = ?2
@@ -537,6 +553,7 @@ impl DesktopStore {
                         row.get::<_, String>(2)?,
                         row.get::<_, Millis>(3)?.0,
                         row.get::<_, Option<Millis>>(4)?.map(|value| value.0),
+                        row.get::<_, Millis>(5)?.0,
                     ))
                 },
             )
@@ -547,8 +564,8 @@ impl DesktopStore {
             anyhow::bail!("OAuth refresh token reuse detected; the token family was revoked");
         }
         ensure!(
-            stored.2 == resource && stored.3 > now,
-            "OAuth refresh token expired or has the wrong audience"
+            stored.2 == resource && stored.3 > now && stored.5 + OAUTH_SESSION_TTL > now,
+            "OAuth session expired or has the wrong audience"
         );
         let transaction = self.connection.transaction()?;
         transaction.execute(
@@ -565,7 +582,15 @@ impl DesktopStore {
             params![Millis(now), token_hash.as_slice()],
         )?;
         ensure!(changed == 1, "OAuth refresh token was already consumed");
-        let pair = insert_token_pair(&transaction, client_id, &stored.1, resource, stored.0, now)?;
+        let pair = insert_token_pair(
+            &transaction,
+            client_id,
+            &stored.1,
+            resource,
+            stored.0,
+            now,
+            stored.5 + OAUTH_SESSION_TTL,
+        )?;
         transaction.commit()?;
         Ok(pair)
     }
@@ -828,6 +853,7 @@ fn insert_token_pair(
     resource: &str,
     family_id: Uuid,
     now: DateTime<Utc>,
+    session_expires_at: DateTime<Utc>,
 ) -> Result<OAuthTokenPair> {
     let access_token = OAuthSecret::generate()?;
     let refresh_token = OAuthSecret::generate()?;
@@ -855,7 +881,7 @@ fn insert_token_pair(
             scope,
             resource,
             Millis(now),
-            Millis(now + REFRESH_TOKEN_TTL),
+            Millis(session_expires_at),
         ],
     )?;
     Ok(OAuthTokenPair {

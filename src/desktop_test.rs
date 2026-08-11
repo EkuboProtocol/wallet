@@ -59,6 +59,40 @@ fn command_palette_reaches_every_desktop_route() {
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
     assert_eq!(Route::Overview.label(), "Portfolio");
+    assert_eq!(Route::ALL.last(), Some(&Route::Settings));
+}
+
+#[test]
+fn route_shortcuts_preserve_standard_text_editing_bindings() {
+    #[cfg(target_os = "macos")]
+    let expected = [
+        ("⌘1", "cmd-1"),
+        ("⌘2", "cmd-2"),
+        ("⌘3", "cmd-3"),
+        ("⌘4", "cmd-4"),
+        ("⌘5", "cmd-5"),
+        ("⌘6", "cmd-6"),
+        ("⌘7", "cmd-7"),
+        ("⌘8", "cmd-8"),
+        ("⌘9", "cmd-9"),
+        ("⌘,", "cmd-,"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let expected = [
+        ("Ctrl+1", "ctrl-1"),
+        ("Ctrl+2", "ctrl-2"),
+        ("Ctrl+3", "ctrl-3"),
+        ("Ctrl+4", "ctrl-4"),
+        ("Ctrl+5", "ctrl-5"),
+        ("Ctrl+6", "ctrl-6"),
+        ("Ctrl+7", "ctrl-7"),
+        ("Ctrl+8", "ctrl-8"),
+        ("Ctrl+9", "ctrl-9"),
+        ("Ctrl+,", "ctrl-,"),
+    ];
+
+    let actual = Route::ALL.map(|route| (route.shortcut(), route.key_binding()));
+    assert_eq!(actual, expected);
 }
 
 #[test]

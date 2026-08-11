@@ -99,6 +99,22 @@ async fn notification_preview_preference_is_owner_controlled_and_persisted() {
     assert!(!owner.detailed_notification_previews().unwrap());
 }
 
+#[tokio::test]
+async fn automatic_update_preference_is_owner_controlled_and_persisted() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.db");
+    let desktop = DesktopStore::open(&database, &DatabaseKey::new([19; 32])).unwrap();
+    let owner = OwnerApi {
+        config: ConfigStore::open(directory.path(), DatabaseKey::new([19; 32])),
+        desktop: Arc::new(Mutex::new(desktop)),
+        events: EventBus::default(),
+    };
+
+    assert!(owner.automatic_update_checks().unwrap());
+    owner.set_automatic_update_checks(false).await.unwrap();
+    assert!(!owner.automatic_update_checks().unwrap());
+}
+
 #[test]
 fn policy_revision_revalidation_handles_initial_and_replacement_writes() {
     assert!(ensure_optional_revision(None, None).is_ok());

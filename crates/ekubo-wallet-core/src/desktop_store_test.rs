@@ -52,6 +52,7 @@ fn registration_creates_no_credential_until_owner_authorizes_login() {
     assert!(store.clients().unwrap().is_empty());
 
     let pair = authorize_and_exchange(&mut store, &client);
+    assert_eq!(pair.expires_in, 10 * 60);
     assert_eq!(store.clients().unwrap()[0].id, client.id);
     assert_eq!(
         store
@@ -61,6 +62,31 @@ fn registration_creates_no_credential_until_owner_authorizes_login() {
             .id,
         client.id
     );
+}
+
+#[test]
+fn oauth_refresh_families_have_a_hard_non_sliding_session_expiry() {
+    let mut store = store(36);
+    let client = register(&mut store);
+    let pair = authorize_and_exchange(&mut store, &client);
+    let refresh = pair.refresh_token.expose_base64url();
+    let now = chrono::Utc::now();
+    store
+        .connection
+        .execute(
+            "UPDATE oauth_refresh_tokens SET created_at = ?1, expires_at = ?2",
+            rusqlite::params![
+                crate::sql::Millis(now - chrono::Duration::hours(13)),
+                crate::sql::Millis(now + chrono::Duration::hours(1)),
+            ],
+        )
+        .unwrap();
+
+    let error = store
+        .refresh_access_token(&refresh, client.id, MCP_RESOURCE)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("session expired"), "{error:#}");
 }
 
 #[test]
@@ -197,6 +223,19 @@ fn protected_desktop_settings_reject_the_wrong_authorization_scope() {
             .set_detailed_notification_previews(true, &wrong_scope)
             .is_err()
     );
+    assert!(
+        store
+            .set_automatic_update_checks(false, &wrong_scope)
+            .is_err()
+    );
+    assert!(store.automatic_update_checks().unwrap());
+    store
+        .set_automatic_update_checks(
+            false,
+            &OwnerAuthorization::for_test(OwnerAuthorizationScope::SoftwareUpdate),
+        )
+        .unwrap();
+    assert!(!store.automatic_update_checks().unwrap());
     assert!(
         store
             .issue_authorization_code(

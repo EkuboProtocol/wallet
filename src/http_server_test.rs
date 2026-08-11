@@ -48,7 +48,7 @@ fn clients() -> (Arc<Mutex<DesktopStore>>, String) {
 fn host_and_browser_cors_headers_are_rejected_before_dispatch() {
     let mut headers = HeaderMap::new();
     headers.insert("host", HeaderValue::from_static("127.0.0.1:61744"));
-    assert!(validate_request_envelope(&Method::POST, &headers, "127.0.0.1:61744").is_ok());
+    assert!(validate_request_envelope(&Method::POST, "/mcp", &headers, "127.0.0.1:61744").is_ok());
     for forbidden in [
         "origin",
         "access-control-request-method",
@@ -62,7 +62,7 @@ fn host_and_browser_cors_headers_are_rejected_before_dispatch() {
     ] {
         headers.insert(forbidden, HeaderValue::from_static("attacker"));
         assert_eq!(
-            validate_request_envelope(&Method::POST, &headers, "127.0.0.1:61744")
+            validate_request_envelope(&Method::POST, "/mcp", &headers, "127.0.0.1:61744")
                 .unwrap_err()
                 .status(),
             StatusCode::FORBIDDEN
@@ -70,17 +70,51 @@ fn host_and_browser_cors_headers_are_rejected_before_dispatch() {
         headers.remove(forbidden);
     }
     assert_eq!(
-        validate_request_envelope(&Method::OPTIONS, &headers, "127.0.0.1:61744")
+        validate_request_envelope(&Method::OPTIONS, "/mcp", &headers, "127.0.0.1:61744")
             .unwrap_err()
             .status(),
         StatusCode::METHOD_NOT_ALLOWED
     );
     headers.insert("host", HeaderValue::from_static("localhost:61744"));
     assert_eq!(
-        validate_request_envelope(&Method::GET, &headers, "127.0.0.1:61744")
+        validate_request_envelope(&Method::GET, "/mcp", &headers, "127.0.0.1:61744")
             .unwrap_err()
             .status(),
         StatusCode::MISDIRECTED_REQUEST
+    );
+}
+
+#[test]
+fn top_level_authorization_navigation_is_the_only_browser_shaped_request_allowed() {
+    let mut headers = HeaderMap::new();
+    headers.insert("host", HeaderValue::from_static("127.0.0.1:61744"));
+    headers.insert("sec-fetch-site", HeaderValue::from_static("none"));
+    headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
+    headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+    headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
+
+    assert!(
+        validate_request_envelope(&Method::GET, "/authorize", &headers, "127.0.0.1:61744").is_ok()
+    );
+    for (method, path) in [
+        (Method::GET, "/mcp"),
+        (Method::POST, "/token"),
+        (Method::POST, "/register"),
+    ] {
+        assert_eq!(
+            validate_request_envelope(&method, path, &headers, "127.0.0.1:61744")
+                .unwrap_err()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+    assert_eq!(
+        validate_request_envelope(&Method::GET, "/authorize", &headers, "127.0.0.1:61744")
+            .unwrap_err()
+            .status(),
+        StatusCode::FORBIDDEN
     );
 }
 

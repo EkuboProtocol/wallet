@@ -110,6 +110,17 @@ impl PlatformTray {
             self.dark_mode = dark_mode;
         }
     }
+
+    /// Block until the native tray backend emits a command. Desktop startup
+    /// calls this from one dedicated thread so GPUI never needs a polling
+    /// timer on its foreground executor.
+    #[must_use]
+    pub fn recv_command() -> Option<TrayCommand> {
+        MenuEvent::receiver()
+            .recv()
+            .ok()
+            .and_then(|event| command_for_id(event.id.as_ref()))
+    }
 }
 
 impl TrayService for PlatformTray {
@@ -142,17 +153,21 @@ impl TrayService for PlatformTray {
     fn drain_commands(&mut self) -> Vec<TrayCommand> {
         MenuEvent::receiver()
             .try_iter()
-            .filter_map(|event| match event.id.as_ref() {
-                OPEN_ID => Some(TrayCommand::OpenWallet),
-                REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Reviews)),
-                CONNECT_ID => Some(TrayCommand::ConnectDapp),
-                AGENTS_ID | SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
-                REINSTALL_AGENTS_ID => Some(TrayCommand::ReinstallAgents),
-                UPDATES_ID => Some(TrayCommand::CheckForUpdates),
-                QUIT_ID => Some(TrayCommand::Quit),
-                _ => None,
-            })
+            .filter_map(|event| command_for_id(event.id.as_ref()))
             .collect()
+    }
+}
+
+fn command_for_id(id: &str) -> Option<TrayCommand> {
+    match id {
+        OPEN_ID => Some(TrayCommand::OpenWallet),
+        REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Reviews)),
+        CONNECT_ID => Some(TrayCommand::ConnectDapp),
+        AGENTS_ID | SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
+        REINSTALL_AGENTS_ID => Some(TrayCommand::ReinstallAgents),
+        UPDATES_ID => Some(TrayCommand::CheckForUpdates),
+        QUIT_ID => Some(TrayCommand::Quit),
+        _ => None,
     }
 }
 

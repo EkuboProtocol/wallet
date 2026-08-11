@@ -115,9 +115,12 @@ impl McpHttpServer {
 }
 
 async fn dispatch(State(state): State<Arc<HttpState>>, request: Request) -> Response {
-    if let Err(response) =
-        validate_request_envelope(request.method(), request.headers(), &state.expected_host)
-    {
+    if let Err(response) = validate_request_envelope(
+        request.method(),
+        request.uri().path(),
+        request.headers(),
+        &state.expected_host,
+    ) {
         return response;
     }
     match (request.method().clone(), request.uri().path()) {
@@ -405,6 +408,7 @@ async fn dispatch_mcp(state: Arc<HttpState>, request: Request) -> Response {
 #[allow(clippy::result_large_err)]
 fn validate_request_envelope(
     method: &Method,
+    path: &str,
     headers: &HeaderMap,
     expected_host: &str,
 ) -> std::result::Result<(), Response> {
@@ -412,12 +416,15 @@ fn validate_request_envelope(
         return Err(StatusCode::METHOD_NOT_ALLOWED.into_response());
     }
     for name in headers.keys() {
-        if name == header::ORIGIN
-            || name.as_str().starts_with("access-control-")
-            || name.as_str().starts_with("sec-fetch-")
-        {
+        if name == header::ORIGIN || name.as_str().starts_with("access-control-") {
             return Err(StatusCode::FORBIDDEN.into_response());
         }
+    }
+    let has_fetch_metadata = headers
+        .keys()
+        .any(|name| name.as_str().starts_with("sec-fetch-"));
+    if has_fetch_metadata && !is_owner_authorization_navigation(method, path, headers) {
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
     if headers
         .get(header::HOST)
@@ -427,6 +434,25 @@ fn validate_request_envelope(
         return Err(StatusCode::MISDIRECTED_REQUEST.into_response());
     }
     Ok(())
+}
+
+fn is_owner_authorization_navigation(method: &Method, path: &str, headers: &HeaderMap) -> bool {
+    *method == Method::GET
+        && path == "/authorize"
+        && matches!(
+            headers
+                .get("sec-fetch-site")
+                .and_then(|value| value.to_str().ok()),
+            Some("none" | "same-origin")
+        )
+        && headers
+            .get("sec-fetch-mode")
+            .and_then(|value| value.to_str().ok())
+            == Some("navigate")
+        && headers
+            .get("sec-fetch-dest")
+            .and_then(|value| value.to_str().ok())
+            == Some("document")
 }
 
 #[allow(clippy::result_large_err)]

@@ -148,6 +148,7 @@ pub struct OwnerApi {
     events: EventBus,
 }
 
+#[derive(Clone, Debug)]
 pub struct OwnerReviewQueues {
     pub transactions: Vec<PendingTransaction>,
     pub typed_data: Vec<PendingTypedData>,
@@ -394,6 +395,18 @@ impl OwnerApi {
         let authorization = authorize_owner(OwnerAuthorizationScope::NotificationPrivacy).await?;
         self.desktop()?
             .set_detailed_notification_previews(enabled, &authorization)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
+    pub fn automatic_update_checks(&self) -> Result<bool> {
+        self.desktop()?.automatic_update_checks()
+    }
+
+    pub async fn set_automatic_update_checks(&self, enabled: bool) -> Result<()> {
+        let authorization = authorize_owner(OwnerAuthorizationScope::SoftwareUpdate).await?;
+        self.desktop()?
+            .set_automatic_update_checks(enabled, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }

@@ -12,6 +12,10 @@ fn codex_uses_documented_oauth_mode_without_credentials_and_preserves_unknowns()
     assert_eq!(parsed["model"].as_str(), Some("gpt"));
     assert_eq!(parsed["other"]["value"].as_integer(), Some(7));
     assert_eq!(
+        parsed["mcp_oauth_credentials_store"].as_str(),
+        Some("keyring")
+    );
+    assert_eq!(
         parsed["mcp_servers"][LOCAL_SERVER_NAME]["url"].as_str(),
         Some("http://127.0.0.1:50000/mcp")
     );
@@ -41,6 +45,25 @@ fn codex_upsert_replaces_legacy_stdio_transport() {
     assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:50000/mcp"));
     assert_eq!(local["auth"].as_str(), Some("oauth"));
     assert!(local.get("http_headers").is_none());
+    assert_eq!(
+        parsed["mcp_oauth_credentials_store"].as_str(),
+        Some("keyring")
+    );
+}
+
+#[test]
+fn codex_upsert_replaces_file_oauth_storage_with_the_os_keyring() {
+    let output = merge_codex(
+        "mcp_oauth_credentials_store = \"file\"\n",
+        "http://127.0.0.1:61744/mcp",
+        false,
+    )
+    .unwrap();
+    let parsed = output.parse::<DocumentMut>().unwrap();
+    assert_eq!(
+        parsed["mcp_oauth_credentials_store"].as_str(),
+        Some("keyring")
+    );
 }
 
 #[test]
