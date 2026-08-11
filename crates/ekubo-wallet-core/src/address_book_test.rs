@@ -33,6 +33,15 @@ fn an_alias_that_would_be_refused_today_can_still_be_deleted() {
 
     // The write-time rule still refuses it as input.
     assert!(store.get(1, "not a valid alias!").is_err());
+    assert_eq!(
+        store
+            .get_for_removal(1, "not a valid alias!")
+            .unwrap()
+            .unwrap()
+            .alias,
+        "not a valid alias!",
+        "the removal review must be able to show the exact legacy row"
+    );
     // Removal reaches it anyway, and returns what it deleted.
     let removed = store.remove(1, "not a valid alias!").unwrap();
     assert_eq!(removed.alias, "not a valid alias!");

@@ -230,7 +230,7 @@ pub async fn confirm_and_remove(
     alias: &str,
 ) -> Result<Option<AddressBookEntry>> {
     let existing = AddressBookStore::production(config.data_dir())?
-        .get(chain_id, alias)?
+        .get_for_removal(chain_id, alias)?
         .with_context(|| format!("no address book entry {alias} on chain {chain_id}"))?;
     if !remove_review(&existing, network_name, chain_id).ask()? {
         tui::outro_cancel("Address book unchanged.");

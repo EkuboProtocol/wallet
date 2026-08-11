@@ -125,6 +125,17 @@ impl AddressBookStore {
         self.read(chain_id, alias)
     }
 
+    /// Read one exact stored alias for a removal review.
+    ///
+    /// Unlike [`Self::get`], this deliberately does not apply today's
+    /// write-time alias grammar. A legacy row must remain nameable on the
+    /// screen that authorizes its deletion; otherwise the owner can list it
+    /// and [`Self::remove`] can delete it, but the supported wrapper refuses
+    /// before either is reached.
+    pub fn get_for_removal(&self, chain_id: u64, alias: &str) -> Result<Option<AddressBookEntry>> {
+        self.read(chain_id, alias)
+    }
+
     /// Read by exact stored alias, without the write-time validity rule. The
     /// removal path needs this so a row that no longer satisfies that rule is
     /// still reachable for deletion.
