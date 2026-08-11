@@ -272,35 +272,6 @@ impl ExecutionPlan {
                 step.transaction.from == self.sender,
                 "transaction sender does not match plan"
             );
-            // The zero address is not a recipient, and this is the only place
-            // that covers every plan.
-            //
-            // It lived on `transfer_plan`, which `wallet_send_transfers`
-            // reaches. `wallet_send_execution_plan` reaches the same
-            // `send_new_plan` with a plan any producer authored, and never
-            // passed through it -- so the check covered the honest, well-typed
-            // door and left the general one open. Here it is on the plan, and
-            // both doors are the same door.
-            //
-            // Refused rather than disclosed, because there is no screen to
-            // disclose it on: `execute_automatic` signs a policy-covered plan
-            // with nobody watching, and an ordinary token allowlist authorizes
-            // this. The owner's prior consent on that path is the policy they
-            // wrote, and a policy permitting transfers of a token is not
-            // consent to destroy it.
-            //
-            // Native value is what carries the argument. Sending it to `0x0`
-            // destroys it and nothing can undo that. An ERC-20 `transfer` to
-            // zero is the weaker half -- OpenZeppelin and most implementations
-            // revert -- so it is refused for consistency rather than because
-            // it is the danger.
-            ensure!(
-                !step.transaction.to.is_zero(),
-                "step {} sends to the zero address, which cannot be undone: native value sent \
-                 there is destroyed. If a burn is genuinely intended, it needs an address that \
-                 says so.",
-                step.step
-            );
             if let Some(revert_decode) = &step.revert_decode {
                 revert_decode.validate()?;
             }
