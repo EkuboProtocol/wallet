@@ -1,7 +1,6 @@
 use crate::events::{DomainEventKind, EventBus, TransactionStage};
 use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
-    address_book::{AddressBookEntry, AddressBookStore},
     batch_read::{BatchEthCallInput, BatchEthCallOutput, batch_eth_call, resolve_read_input},
     config::{ConfigStore, NativeCurrency, NetworkConfig, WalletMetadata, WalletSource},
     core::{
@@ -147,7 +146,6 @@ pub(crate) struct WalletMcpServer {
     messages: Arc<Mutex<MessageStore>>,
     legal: Arc<Mutex<LegalStore>>,
     tokens: Arc<Mutex<TokenStore>>,
-    address_book: Arc<Mutex<AddressBookStore>>,
     /// Temporary simulation forks. Deliberately in-process only: fork state
     /// is never persisted, never shown at approval time, and never survives a
     /// restart.
@@ -165,6 +163,19 @@ pub(crate) struct WalletMcpServer {
 }
 
 impl WalletMcpServer {
+    fn enabled_chain_ids(&self) -> Result<Vec<u64>> {
+        let mut chains = self
+            .config
+            .load()?
+            .networks
+            .into_iter()
+            .filter(|network| !network.disabled)
+            .map(|network| network.chain_id)
+            .collect::<Vec<_>>();
+        chains.sort_unstable();
+        Ok(chains)
+    }
+
     pub(crate) fn production(
         config: ConfigStore,
         client_id: uuid::Uuid,
@@ -195,7 +206,6 @@ impl WalletMcpServer {
         let messages = MessageStore::production(config.data_dir())?;
         let legal = LegalStore::production(config.data_dir())?;
         let tokens = TokenStore::production(config.data_dir())?;
-        let address_book = AddressBookStore::production(config.data_dir())?;
         let mut server = Self::new(
             config,
             policies,
@@ -204,7 +214,6 @@ impl WalletMcpServer {
             messages,
             legal,
             tokens,
-            address_book,
             Arc::new(OsKeyStore),
         )?;
         server.requesting_client = Some((client_id, desktop));
@@ -223,7 +232,6 @@ impl WalletMcpServer {
         messages: MessageStore,
         legal: LegalStore,
         tokens: TokenStore,
-        address_book: AddressBookStore,
         keys: Arc<dyn KeyStore>,
     ) -> Result<Self> {
         for wallet in config.load()?.wallets {
@@ -241,7 +249,6 @@ impl WalletMcpServer {
             messages: Arc::new(Mutex::new(messages)),
             legal: Arc::new(Mutex::new(legal)),
             tokens: Arc::new(Mutex::new(tokens)),
-            address_book: Arc::new(Mutex::new(address_book)),
             forks: Arc::new(Mutex::new(ForkStore::new())),
             simulations: Arc::new(Mutex::new(SimulationStore::new())),
             client_namespace: uuid::Uuid::nil(),
@@ -344,6 +351,10 @@ struct PublicNetwork {
 #[derive(Debug, Serialize, JsonSchema)]
 struct WalletInventory {
     wallets: Vec<PublicWallet>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+struct NetworkInventory {
     networks: Vec<PublicNetwork>,
 }
 
@@ -816,31 +827,6 @@ struct LegalOutput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct AddressBookInput {
-    /// Decimal chain ID filter; omitted lists every chain.
-    #[serde(default)]
-    chain_id: Option<crate::token_store::ChainIdInput>,
-    /// Exact alias to look up. Requires `chain_id`.
-    #[serde(default)]
-    alias: Option<String>,
-    /// Rows to return, default 200. Values above 1000 are silently capped at
-    /// 1000; page through the rest with `offset`.
-    #[serde(default = "default_token_limit")]
-    limit: usize,
-    /// Rows to skip before the page begins, default 0.
-    #[serde(default)]
-    offset: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-struct AddressBookOutput {
-    /// Total stored entries matching the chain filter, ignoring paging.
-    total: u64,
-    entries: Vec<AddressBookEntry>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct ProposePolicyInput {
     wallet_id: String,
     /// The policy revision this proposal was written against, from
@@ -1084,7 +1070,7 @@ struct SimulateOutput {
 impl WalletMcpServer {
     #[tool(
         name = "wallet_list",
-        description = "Discover all local wallets and globally configured networks: name, decimal chain ID, and every RPC URL each network may use. Never returns private keys.",
+        description = "Discover all local wallets: ID, address, source, and creation time. Never returns private keys. Use list_networks separately to discover configured chains and RPC endpoints.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_list(&self) -> Result<Json<WalletInventory>, ErrorData> {
@@ -1100,9 +1086,21 @@ impl WalletMcpServer {
                     created_at: wallet.created_at,
                 })
                 .collect(),
+        }))
+    }
+
+    #[tool(
+        name = "list_networks",
+        description = "List every enabled globally configured network: name, decimal chain ID, every RPC URL the wallet may use, and endpoint selection strategy. Disabled profiles are owner-only and are not disclosed. This contains no wallet or private-key information.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    fn list_networks(&self) -> Result<Json<NetworkInventory>, ErrorData> {
+        let state = self.config.load().map_err(|error| tool_error(&error))?;
+        Ok(Json(NetworkInventory {
             networks: state
                 .networks
                 .into_iter()
+                .filter(|network| !network.disabled)
                 .map(|network| PublicNetwork {
                     name: network.name,
                     chain_id: network.chain_id.to_string(),
@@ -1490,14 +1488,55 @@ impl WalletMcpServer {
             .map(crate::token_store::ChainIdInput::value)
             .transpose()
             .map_err(|error| tool_error(&error))?;
+        let enabled_chains = self
+            .enabled_chain_ids()
+            .map_err(|error| tool_error(&error))?;
+        if let Some(chain_id) = chain_id {
+            ensure_tool(
+                enabled_chains.binary_search(&chain_id).is_ok(),
+                "no enabled network has that chain ID",
+            )?;
+        }
         let store = self
             .tokens
             .lock()
             .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
-        let tokens = store
-            .list(chain_id, input.limit.min(1_000), input.offset)
-            .map_err(|error| tool_error(&error))?;
-        let total = store.count(chain_id).map_err(|error| tool_error(&error))?;
+        let limit = input.limit.min(1_000);
+        let (total, tokens) = if let Some(chain_id) = chain_id {
+            let tokens = store
+                .list(Some(chain_id), limit, input.offset)
+                .map_err(|error| tool_error(&error))?;
+            let total = store
+                .count(Some(chain_id))
+                .map_err(|error| tool_error(&error))?;
+            (total, tokens)
+        } else {
+            let mut total = 0_u64;
+            let mut remaining_offset = input.offset as u64;
+            let mut tokens = Vec::new();
+            for chain_id in enabled_chains {
+                let chain_total = store
+                    .count(Some(chain_id))
+                    .map_err(|error| tool_error(&error))?;
+                total = total.saturating_add(chain_total);
+                if remaining_offset >= chain_total {
+                    remaining_offset -= chain_total;
+                    continue;
+                }
+                if tokens.len() < limit {
+                    let page = store
+                        .list(
+                            Some(chain_id),
+                            limit - tokens.len(),
+                            usize::try_from(remaining_offset).unwrap_or(usize::MAX),
+                        )
+                        .map_err(|error| tool_error(&error))?;
+                    tokens.extend(page);
+                }
+                remaining_offset = 0;
+            }
+            (total, tokens)
+        };
         Ok(Json(TokenListOutput { total, tokens }))
     }
 
@@ -1516,13 +1555,47 @@ impl WalletMcpServer {
             .map(crate::token_store::ChainIdInput::value)
             .transpose()
             .map_err(|error| tool_error(&error))?;
+        let enabled_chains = self
+            .enabled_chain_ids()
+            .map_err(|error| tool_error(&error))?;
+        if let Some(chain_id) = chain_id {
+            ensure_tool(
+                enabled_chains.binary_search(&chain_id).is_ok(),
+                "no enabled network has that chain ID",
+            )?;
+        }
         let store = self
             .tokens
             .lock()
             .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
-        let tokens = store
-            .search(&input.query, chain_id, input.limit)
-            .map_err(|error| tool_error(&error))?;
+        let mut tokens = if let Some(chain_id) = chain_id {
+            store
+                .search(&input.query, Some(chain_id), input.limit)
+                .map_err(|error| tool_error(&error))?
+        } else {
+            let mut matches = Vec::new();
+            for chain_id in enabled_chains {
+                matches.extend(
+                    store
+                        .search(&input.query, Some(chain_id), input.limit)
+                        .map_err(|error| tool_error(&error))?,
+                );
+            }
+            matches
+        };
+        let query = input.query.trim().to_lowercase();
+        tokens.sort_by_key(|token| {
+            (
+                token
+                    .symbol
+                    .as_deref()
+                    .is_none_or(|symbol| symbol.to_lowercase() != query),
+                token.symbol.as_ref().map_or(usize::MAX, String::len),
+                token.chain_id.parse::<u64>().unwrap_or(u64::MAX),
+                token.address.clone(),
+            )
+        });
+        tokens.truncate(input.limit.min(1_000));
         Ok(Json(TokenSearchOutput {
             matches: tokens.len() as u64,
             tokens,
@@ -1608,6 +1681,15 @@ impl WalletMcpServer {
             !listed.is_empty(),
             "a proposal must contain at least one token",
         )?;
+        let enabled_chains = self
+            .enabled_chain_ids()
+            .map_err(|error| tool_error(&error))?;
+        ensure_tool(
+            listed
+                .iter()
+                .all(|token| enabled_chains.binary_search(&token.chain_id).is_ok()),
+            "token proposal includes a chain without an enabled network",
+        )?;
         let mut store = self
             .tokens
             .lock()
@@ -1672,6 +1754,7 @@ impl WalletMcpServer {
                 .map_err(|error| tool_error(&error))?
                 .networks
                 .iter()
+                .filter(|network| !network.disabled)
                 .map(|network| network.chain_id)
                 .collect::<Vec<_>>()
         } else {
@@ -1999,6 +2082,7 @@ impl WalletMcpServer {
         let chain_id = parse_chain_id(&input.chain_id).map_err(|error| tool_error(&error))?;
         let candidate = NetworkConfig {
             name: input.name,
+            disabled: false,
             display_name: Some(input.display_name),
             aliases: input.aliases,
             chain_id,
@@ -2025,12 +2109,16 @@ impl WalletMcpServer {
         let replaces = configured
             .networks
             .iter()
-            .find(|network| network.chain_id == candidate.chain_id)
+            .find(|network| !network.disabled && network.chain_id == candidate.chain_id)
             .map(|network| network.name.clone());
         // A name or alias belonging to a *different* chain is a conflict no
         // confirmation can resolve, so it fails here rather than becoming a
         // decision the owner cannot act on.
-        for network in &configured.networks {
+        for network in configured
+            .networks
+            .iter()
+            .filter(|network| !network.disabled)
+        {
             if network.chain_id == candidate.chain_id {
                 continue;
             }
@@ -2253,7 +2341,7 @@ impl WalletMcpServer {
         let instruction = if status.signing_allowed {
             "The current Terms of Service and Privacy Policy are accepted; the wallet tools are available.".into()
         } else {
-            "Every wallet tool except this one is disabled until the user accepts the current Terms of Service and separately acknowledges the Privacy Policy. Offer to display each document (this tool returns their text), then tell the user to open Legal & Version and accept both documents. Never run that command for them and never claim acceptance on their behalf.".to_string()
+            "Every wallet tool except this one is disabled until the user accepts the current Terms of Service and separately acknowledges the Privacy Policy. Offer to display each document (this tool returns their text), then tell the user to open Settings → Legal & Version and accept both documents. Never run that command for them and never claim acceptance on their behalf.".to_string()
         };
         Ok(Json(LegalOutput {
             status,
@@ -2265,45 +2353,6 @@ impl WalletMcpServer {
             }),
             instruction,
         }))
-    }
-
-    #[tool(
-        name = "wallet_address_book",
-        description = "Look up user-configured aliases for addresses on particular chains. These name an address for a human reading a transaction and decide nothing: no policy can refer to them, so an alias never widens what signs automatically. A policy that means to permit an address names it in the policy. Adding, changing, or removing entries is a native wallet review window operation the user confirms in the native wallet application, and nothing reachable from here can write one. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
-        annotations(read_only_hint = true, open_world_hint = false)
-    )]
-    fn wallet_address_book(
-        &self,
-        Parameters(input): Parameters<AddressBookInput>,
-    ) -> Result<Json<AddressBookOutput>, ErrorData> {
-        let chain_id = input
-            .chain_id
-            .as_ref()
-            .map(crate::token_store::ChainIdInput::value)
-            .transpose()
-            .map_err(|error| tool_error(&error))?;
-        let store = self
-            .address_book
-            .lock()
-            .map_err(|_| ErrorData::internal_error("address book lock was poisoned", None))?;
-        if let Some(alias) = &input.alias {
-            let chain_id = chain_id
-                .ok_or_else(|| ErrorData::invalid_params("alias lookup requires chain_id", None))?;
-            let entries = store
-                .get(chain_id, alias)
-                .map_err(|error| tool_error(&error))?
-                .into_iter()
-                .collect::<Vec<_>>();
-            return Ok(Json(AddressBookOutput {
-                total: entries.len() as u64,
-                entries,
-            }));
-        }
-        let entries = store
-            .list(chain_id, input.limit.min(1_000), input.offset)
-            .map_err(|error| tool_error(&error))?;
-        let total = store.count(chain_id).map_err(|error| tool_error(&error))?;
-        Ok(Json(AddressBookOutput { total, entries }))
     }
 
     #[tool(

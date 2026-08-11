@@ -82,6 +82,38 @@ fn default_networks_have_unique_chain_ids_and_identifiers() {
 }
 
 #[test]
+fn disabled_networks_are_not_resolvable_for_wallet_activity() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let mut config = store.load().unwrap();
+    let disabled = config
+        .networks
+        .iter()
+        .find(|network| network.disabled)
+        .unwrap()
+        .clone();
+    store.save(&config).unwrap();
+
+    assert!(store.network(&disabled.name).is_err());
+    assert!(
+        store
+            .network_by_chain_id(&disabled.chain_id.to_string())
+            .is_err()
+    );
+    config
+        .networks
+        .iter_mut()
+        .find(|network| network.chain_id == disabled.chain_id)
+        .unwrap()
+        .disabled = false;
+    store.save(&config).unwrap();
+    assert_eq!(
+        store.network(&disabled.name).unwrap().chain_id,
+        disabled.chain_id
+    );
+}
+
+#[test]
 fn round_trips_private_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
@@ -286,6 +318,7 @@ fn the_default_strategy_is_optional_and_not_written() {
     use crate::config::RpcStrategy;
     let stored: crate::config::NetworkConfig = serde_json::from_value(serde_json::json!({
         "name": "custom",
+        "disabled": false,
         "chain_id": 1,
         "rpc_urls": ["https://custom.example.invalid/rpc"],
     }))

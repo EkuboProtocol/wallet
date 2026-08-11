@@ -230,7 +230,6 @@ fn a_fresh_database_is_created_at_the_only_schema_there_is() {
         "policy_proposals",
         "tokens",
         "token_proposals",
-        "address_book",
         "legal_acceptance",
     ] {
         store

@@ -93,11 +93,6 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
         &DatabaseKey::new([4; 32]),
     )
     .unwrap();
-    let address_book_database = PolicyStore::open(
-        &directory.path().join("policies.db"),
-        &DatabaseKey::new([4; 32]),
-    )
-    .unwrap();
     let server = WalletMcpServer::new(
         config,
         policies,
@@ -106,7 +101,6 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
         MessageStore::new(message_database),
         LegalStore::new(legal_database),
         TokenStore::new(token_database),
-        AddressBookStore::new(address_book_database),
         Arc::new(crate::custody::MemoryKeyStore::default()),
     )
     .unwrap();
@@ -130,16 +124,95 @@ fn accept_legal(server: &WalletMcpServer) {
 }
 
 #[test]
-fn inventory_names_each_network_endpoint() {
+fn wallet_and_network_inventories_are_separate_and_hide_disabled_networks() {
     let (_directory, server) = server();
-    let Json(inventory) = server.wallet_list().unwrap();
-    assert_eq!(inventory.wallets[0].id, "primary");
+    let Json(wallets) = server.wallet_list().unwrap();
+    assert_eq!(wallets.wallets[0].id, "primary");
+    let wallet_json = serde_json::to_value(&wallets).unwrap();
+    assert!(wallet_json.get("networks").is_none());
+
+    let disabled = server
+        .config
+        .load()
+        .unwrap()
+        .networks
+        .into_iter()
+        .filter(|network| network.disabled)
+        .map(|network| network.chain_id.to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    let Json(inventory) = server.list_networks().unwrap();
     assert!(
         inventory
             .networks
             .iter()
             .all(|network| network.rpc_urls.iter().all(|url| url.starts_with("http")))
     );
+    assert!(
+        inventory
+            .networks
+            .iter()
+            .all(|network| !disabled.contains(&network.chain_id))
+    );
+}
+
+#[test]
+fn token_inventory_never_discloses_disabled_network_rows() {
+    let (_directory, server) = server();
+    let disabled_chain = server
+        .config
+        .load()
+        .unwrap()
+        .networks
+        .into_iter()
+        .find(|network| network.disabled)
+        .unwrap()
+        .chain_id;
+    server
+        .tokens
+        .lock()
+        .unwrap()
+        .insert_if_absent(
+            &crate::token_store::ListedToken {
+                chain_id: disabled_chain,
+                address: Address::repeat_byte(0x44),
+                symbol: "HIDDEN".into(),
+                name: Some("Disabled Network Token".into()),
+                decimals: 18,
+            },
+            "test",
+        )
+        .unwrap();
+
+    let Json(listed) = server
+        .wallet_list_tokens(Parameters(ListTokensInput {
+            chain_id: None,
+            limit: 1_000,
+            offset: 0,
+        }))
+        .unwrap();
+    assert!(
+        listed
+            .tokens
+            .iter()
+            .all(|token| token.symbol.as_deref() != Some("HIDDEN"))
+    );
+    assert!(
+        server
+            .wallet_list_tokens(Parameters(ListTokensInput {
+                chain_id: Some(crate::token_store::ChainIdInput::Number(disabled_chain)),
+                limit: 10,
+                offset: 0,
+            }))
+            .is_err()
+    );
+    let Json(found) = server
+        .wallet_search_tokens(Parameters(SearchTokensInput {
+            query: "HIDDEN".into(),
+            chain_id: None,
+            limit: 10,
+        }))
+        .unwrap();
+    assert!(found.tokens.is_empty());
 }
 
 #[test]
@@ -389,9 +462,9 @@ fn tool_inventory_exposes_implemented_parity_surface() {
     assert_eq!(
         names,
         [
+            "list_networks",
             "wallet_check_for_updates",
             "wallet_propose_network",
-            "wallet_address_book",
             "wallet_attempt_cancel",
             "wallet_batch_eth_call",
             "wallet_create_fork",
@@ -782,11 +855,6 @@ fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
         &DatabaseKey::new([5; 32]),
     )
     .unwrap();
-    let address_book_database = PolicyStore::open(
-        &directory.path().join("policies.db"),
-        &DatabaseKey::new([5; 32]),
-    )
-    .unwrap();
     let result = WalletMcpServer::new(
         config,
         policies,
@@ -795,7 +863,6 @@ fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
         MessageStore::new(message_database),
         LegalStore::new(legal_database),
         TokenStore::new(token_database),
-        AddressBookStore::new(address_book_database),
         std::sync::Arc::new(crate::custody::MemoryKeyStore::default()),
     );
     assert!(result.is_err());
@@ -1638,67 +1705,6 @@ fn legal_tool_reports_status_and_document_text() {
         .unwrap();
     assert!(output.status.signing_allowed);
     assert!(output.document.is_none());
-}
-
-#[test]
-fn address_book_tool_is_lookup_only() {
-    let (_directory, server) = server();
-    let Json(empty) = server
-        .wallet_address_book(Parameters(AddressBookInput {
-            chain_id: None,
-            alias: None,
-            limit: 10,
-            offset: 0,
-        }))
-        .unwrap();
-    assert_eq!(empty.total, 0);
-
-    // Entries written by the owner store are visible read-only.
-    let mut store = AddressBookStore::new(
-        PolicyStore::open(
-            &server.config.data_dir().join("policies.db"),
-            &DatabaseKey::new([4; 32]),
-        )
-        .unwrap(),
-    );
-    store
-        .upsert(
-            1,
-            "alice",
-            Address::from_str("0x3333333333333333333333333333333333333333").unwrap(),
-            Some("payroll"),
-        )
-        .unwrap();
-    let Json(found) = server
-        .wallet_address_book(Parameters(AddressBookInput {
-            chain_id: Some(crate::token_store::ChainIdInput::Number(1)),
-            alias: Some("alice".into()),
-            limit: 10,
-            offset: 0,
-        }))
-        .unwrap();
-    assert_eq!(found.total, 1);
-    assert_eq!(found.entries[0].note.as_deref(), Some("payroll"));
-
-    // Alias lookup without a chain is ambiguous and rejected.
-    assert!(
-        server
-            .wallet_address_book(Parameters(AddressBookInput {
-                chain_id: None,
-                alias: Some("alice".into()),
-                limit: 10,
-                offset: 0,
-            }))
-            .is_err()
-    );
-
-    // The MCP router exposes no mutation tool for the address book.
-    let router = WalletMcpServer::tool_router();
-    let tool = router.get("wallet_address_book").unwrap();
-    assert_eq!(
-        tool.annotations.as_ref().unwrap().read_only_hint,
-        Some(true)
-    );
 }
 
 #[test]

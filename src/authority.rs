@@ -5,9 +5,8 @@ use crate::{
     mcp::{GlobalAgentQuota, WalletMcpServer},
 };
 use alloy::primitives::Address;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use ekubo_wallet_core::{
-    address_book::{AddressBookEntry, AddressBookStore},
     approval::{ApprovalKind, ApprovalRequest, ReviewDocument, ReviewPresenter},
     config::{
         ConfigStore, NetworkConfig, WalletConfig, WalletMetadata, remove_configured_network,
@@ -97,6 +96,18 @@ impl OwnerApi {
         self.desktop
             .lock()
             .map_err(|_| anyhow::anyhow!("desktop database lock was poisoned"))
+    }
+
+    fn configured_network(&self, identifier: &str) -> Result<NetworkConfig> {
+        self.config
+            .load()?
+            .networks
+            .into_iter()
+            .find(|network| {
+                network.name == identifier
+                    || network.aliases.iter().any(|alias| alias == identifier)
+            })
+            .with_context(|| format!("unknown network {identifier}"))
     }
 
     pub fn snapshot(&self) -> Result<WalletConfig> {
@@ -302,13 +313,20 @@ impl OwnerApi {
         self.config.network_by_chain_id(&chain_id.to_string())
     }
 
-    /// Read every account on every configured network with bounded
-    /// concurrency. Each network is block-pinned by the same core path exposed
-    /// to agents, and failures remain local to their network card.
-    pub async fn portfolio(&self) -> Result<OwnerPortfolioSnapshot> {
+    /// Read every account on one owner-selected configured network with
+    /// bounded concurrency. The network is block-pinned by the same core path
+    /// exposed to agents, and one account's failure does not hide the others.
+    pub async fn portfolio(&self, chain_id: u64) -> Result<OwnerPortfolioSnapshot> {
         use futures::{StreamExt as _, stream};
 
-        let snapshot = self.config.load()?;
+        let mut snapshot = self.config.load()?;
+        snapshot
+            .networks
+            .retain(|network| network.chain_id == chain_id && !network.disabled);
+        ensure!(
+            snapshot.networks.len() == 1,
+            "chain {chain_id} is not an enabled configured network"
+        );
         let token_store = TokenStore::production(self.config.data_dir())?;
         let mut known_by_chain = std::collections::BTreeMap::new();
         for network in &snapshot.networks {
@@ -385,11 +403,27 @@ impl OwnerApi {
     }
 
     pub fn remove_network(&self, identifier: &str) -> Result<NetworkConfig> {
+        let network = self.configured_network(identifier)?;
+        ensure!(
+            network.disabled,
+            "disable network {} before deleting it",
+            network.name
+        );
         let removed = self
             .config
             .update(|config| remove_configured_network(&mut config.networks, identifier))?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(removed)
+    }
+
+    pub fn set_network_disabled(&self, identifier: &str, disabled: bool) -> Result<NetworkConfig> {
+        let mut network = self.configured_network(identifier)?;
+        network.disabled = disabled;
+        let updated = network.clone();
+        self.config
+            .update(|config| replace_configured_network(&mut config.networks, network))?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(updated)
     }
 
     pub fn transactions(
@@ -678,45 +712,6 @@ impl OwnerApi {
         if removed {
             self.events.publish(DomainEventKind::ConfigurationChanged);
         }
-        Ok(removed)
-    }
-
-    pub fn address_book(
-        &self,
-        chain_id: Option<u64>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<Vec<AddressBookEntry>> {
-        AddressBookStore::production(self.config.data_dir())?.list(chain_id, limit, offset)
-    }
-
-    pub async fn save_address(
-        &self,
-        chain_id: u64,
-        alias: &str,
-        address: Address,
-        note: Option<&str>,
-    ) -> Result<AddressBookEntry> {
-        PlatformHumanPresence
-            .confirm(&PresenceRequest::SaveAddressBookEntry {
-                alias: alias.to_owned(),
-            })
-            .await?;
-        let saved = AddressBookStore::production(self.config.data_dir())?
-            .upsert(chain_id, alias, address, note)?;
-        self.events.publish(DomainEventKind::ConfigurationChanged);
-        Ok(saved)
-    }
-
-    pub async fn remove_address(&self, chain_id: u64, alias: &str) -> Result<AddressBookEntry> {
-        PlatformHumanPresence
-            .confirm(&PresenceRequest::RemoveAddressBookEntry {
-                alias: alias.to_owned(),
-            })
-            .await?;
-        let removed =
-            AddressBookStore::production(self.config.data_dir())?.remove(chain_id, alias)?;
-        self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(removed)
     }
 

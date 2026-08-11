@@ -23,6 +23,17 @@ fn the_vendored_list_parses() {
 }
 
 #[test]
+fn the_vendored_snapshot_accounts_for_every_upstream_row() {
+    let document: serde_json::Value = serde_json::from_str(EMBEDDED).unwrap();
+    let upstream = document["upstream_tokens"].as_u64().unwrap();
+    let skipped = document["skipped_non_evm"].as_u64().unwrap();
+    let parsed = embedded().unwrap();
+
+    assert_eq!(upstream, parsed.tokens.len() as u64 + skipped);
+    assert_eq!(upstream, 19_646);
+}
+
+#[test]
 fn the_vendored_list_carries_no_logo_urls() {
     // Cheapest possible guard on the thing the wallet has no way to display
     // and no reason to ship: if a refresh ever stops stripping them, the file

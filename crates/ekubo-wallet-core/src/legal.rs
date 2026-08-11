@@ -284,7 +284,7 @@ TOOLING.
 ## 8. Local data
 
 Keys stay in the operating system credential store. Policies, transaction
-lifecycle records, token metadata, the address book, legal acceptance
+lifecycle records, token metadata, legal acceptance
 records, and pending policy proposals are stored in an encrypted local
 database. A resolved execution plan is stored in that database as part of the
 record of the request it becomes; the URL it was fetched from is not retained.
@@ -316,7 +316,10 @@ requires a fresh acknowledgment before signing resumes.
 #[must_use]
 pub fn privacy_policy() -> String {
     let mut text = String::from(PRIVACY_POLICY_PREAMBLE);
-    for network in crate::config::default_networks() {
+    for network in crate::config::default_networks()
+        .into_iter()
+        .filter(|network| !network.disabled)
+    {
         let _ = writeln!(text, "- {} (chain {}):", network.name, network.chain_id);
         for endpoint in &network.rpc_urls {
             let _ = writeln!(text, "  - {endpoint}");

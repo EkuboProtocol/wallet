@@ -29,20 +29,6 @@ fn reasons_read_as_one_sentence_and_carry_no_digest() {
         .reason(),
         "replace the signing policy for wallet primary"
     );
-    assert_eq!(
-        PresenceRequest::SaveAddressBookEntry {
-            alias: "alice".into()
-        }
-        .reason(),
-        "save the address book alias alice"
-    );
-    assert_eq!(
-        PresenceRequest::RemoveAddressBookEntry {
-            alias: "alice".into()
-        }
-        .reason(),
-        "remove the address book alias alice"
-    );
 }
 
 #[test]

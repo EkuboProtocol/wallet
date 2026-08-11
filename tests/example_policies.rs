@@ -134,7 +134,7 @@ fn set_approval_for_all(operator: Address, approved: bool) -> String {
 // ------------------------------------------------------------------ examples
 
 #[test]
-fn transfers_to_address_book_permits_only_named_recipients() {
+fn transfers_to_named_addresses_permits_only_named_recipients() {
     let name = "transfers-to-named-addresses.json";
     let policy = example(name);
     check(
@@ -381,7 +381,7 @@ fn the_batching_example_constrains_what_the_payload_may_carry() {
             "0",
         ),
         false,
-        "one nested call escapes the address book",
+        "one nested call escapes the named recipient set",
     );
     check(
         name,

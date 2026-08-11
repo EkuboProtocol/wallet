@@ -21,14 +21,21 @@ fn documents_have_stable_nonempty_digests() {
 }
 
 #[test]
-fn privacy_policy_discloses_every_default_endpoint() {
+fn privacy_policy_discloses_only_enabled_default_endpoints() {
     let policy = privacy_policy();
     for network in crate::config::default_networks() {
         for url in network.rpc_urls.iter().map(url::Url::as_str) {
-            assert!(
-                policy.contains(url),
-                "privacy policy does not disclose default endpoint {url}"
-            );
+            if network.disabled {
+                assert!(
+                    !policy.contains(url),
+                    "privacy policy discloses disabled endpoint {url}"
+                );
+            } else {
+                assert!(
+                    policy.contains(url),
+                    "privacy policy does not disclose enabled endpoint {url}"
+                );
+            }
         }
     }
     assert!(policy.contains("Apart from these RPC endpoints"));

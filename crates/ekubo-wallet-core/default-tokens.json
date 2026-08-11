@@ -1,7 +1,8 @@
 {
   "name": "Ekubo default tokens",
   "source_url": "https://raw.githubusercontent.com/EkuboProtocol/default-tokens/refs/heads/main/tokens.json",
-  "source_sha256": "642dda1c54641d11c0d3c56a3942cd46c805d62507a3be57e4a2bafb564d1602",
+  "source_sha256": "84cbf618f81791db5ee43b9d5cad947142bf039debd0df932cd0ec33e122474e",
+  "upstream_tokens": 19646,
   "skipped_non_evm": 2360,
   "tokens": [
     {
@@ -857,13 +858,6 @@
       "symbol": "ENX",
       "name": "Enigma",
       "decimals": 18
-    },
-    {
-      "chain_id": 1,
-      "address": "0x051fb509e4a775fabd257611eea1efaed8f91359",
-      "symbol": "CATE",
-      "name": "CateCoin",
-      "decimals": 9
     },
     {
       "chain_id": 1,
@@ -19767,6 +19761,13 @@
     },
     {
       "chain_id": 1,
+      "address": "0x7e1eff4301defc24936470b30bd1c686d2a295dc",
+      "symbol": "WTNUSDC",
+      "name": "Wise Telecom Nodes USDC",
+      "decimals": 6
+    },
+    {
+      "chain_id": 1,
       "address": "0x7e2ac793f3e692f388e66c7dc28f739d13b0b71a",
       "symbol": "GGBR",
       "name": "Goldfish Gold",
@@ -21233,6 +21234,13 @@
       "address": "0x888888888889c00c67689029d7856aac1065ec11",
       "symbol": "OPIUM",
       "name": "Opium Governance Token",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x888888f6b7570637a0c89c3290d82afdbdca6666",
+      "symbol": "PID",
+      "name": "PolyFlow Payment ID",
       "decimals": 18
     },
     {
@@ -23060,6 +23068,13 @@
       "address": "0x95172ccbe8344fecd73d0a30f54123652981bd6f",
       "symbol": "LOCK_1",
       "name": "Meridian Network",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
+      "address": "0x951f086a127e280724fd93ccc543f65065afeb5e",
+      "symbol": "DOS",
+      "name": "DAPPOS",
       "decimals": 18
     },
     {
@@ -29805,6 +29820,13 @@
     },
     {
       "chain_id": 1,
+      "address": "0xbeef3f3a04e28895f3d5163d910474901981183d",
+      "symbol": "3F-STEAKUSDC",
+      "name": "3F x Steakhouse USDC Morpho Vault",
+      "decimals": 18
+    },
+    {
+      "chain_id": 1,
       "address": "0xbeef698bd78139829e540622d5863e723e8715f1",
       "symbol": "BEEF",
       "name": "PepeBull",
@@ -32271,7 +32293,7 @@
       "chain_id": 1,
       "address": "0xcf6a0a7826fa124b7705d6f3c675ead76f1e540d",
       "symbol": "REPV2_YES_1",
-      "name": "Reputation",
+      "name": "AUGUR",
       "decimals": 18
     },
     {
@@ -60766,6 +60788,13 @@
     },
     {
       "chain_id": 56,
+      "address": "0xbc9211717353498e19201d9040021872af7656d3",
+      "symbol": "BNQ",
+      "name": "BNQ GLOBAL",
+      "decimals": 18
+    },
+    {
+      "chain_id": 56,
       "address": "0xbcb24afb019be7e93ea9c43b7e22bb55d5b7f45d",
       "symbol": "BSCS",
       "name": "BSCS Token",
@@ -83054,6 +83083,13 @@
     },
     {
       "chain_id": 4663,
+      "address": "0x05e6eae62791c92b66d2851c288cf51b8d4ca383",
+      "symbol": "NOCK",
+      "name": "Nock",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
       "address": "0x0684e19528ccfd570fb00f0ca626dac4bdab17cf",
       "symbol": "PENSION",
       "name": "Pension",
@@ -83330,6 +83366,13 @@
       "address": "0x1eebee7f74517e0279dfb09d25b0407beec3fdd6",
       "symbol": "SMR",
       "name": "NuScale Power Corporation",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x20024e485c0b22b42855589700721b28320a7777",
+      "symbol": "PRISM",
+      "name": "Prism Assets",
       "decimals": 18
     },
     {
@@ -83950,6 +83993,20 @@
     },
     {
       "chain_id": 4663,
+      "address": "0x49bac47750f3dcdba49350b5d74fd399e90f97c6",
+      "symbol": "BULL",
+      "name": "The Bull",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x49d8022cfa113dadb8cb1a5b22250524cf24b926",
+      "symbol": "BOYZ",
+      "name": "Boyz N The Hood",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
       "address": "0x49e34dbb35023d51f981558f54e5523fa9c44b03",
       "symbol": "SHITCOIN",
       "name": "shitcoin",
@@ -84258,9 +84315,23 @@
     },
     {
       "chain_id": 4663,
+      "address": "0x5e453647539d4dd766d7c4c3d6ce589900d39415",
+      "symbol": "BRACKETS",
+      "name": "Sports Brackets",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
       "address": "0x5e81213613b6b86eab4c6c50d718d34359459786",
       "symbol": "TTWO",
       "name": "Take-Two Interactive Software",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x5edb417509a869b1d8222dea05257b8c8ba00361",
+      "symbol": "DTF",
+      "name": "DeFi Traded Fund",
       "decimals": 18
     },
     {
@@ -84496,6 +84567,13 @@
     },
     {
       "chain_id": 4663,
+      "address": "0x6e7e0db14d23144ef3e78d3294aa408ac38427b8",
+      "symbol": "BLEP",
+      "name": "BLEEEP by Virtuals",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
       "address": "0x6e9acbfbdd8b57649ffeacea4d26a81ae1395367",
       "symbol": "GOAT",
       "name": "Absolute Goat",
@@ -84674,6 +84752,13 @@
       "address": "0x7fd06a4d81ccfa3f351394e144d5191874c31313",
       "symbol": "KTOS",
       "name": "Kratos Defense & Security Solutions Inc.",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0x7fe3778b2520a5868fb8bc16fea0f33dd9e7122a",
+      "symbol": "POOLS",
+      "name": "Trade Pools",
       "decimals": 18
     },
     {
@@ -85791,6 +85876,13 @@
     },
     {
       "chain_id": 4663,
+      "address": "0xc72f232a6869e6cf34dc06129affd07f8a2a246a",
+      "symbol": "MANCER",
+      "name": "Mancer",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
       "address": "0xc79d46d716b33b463b3a6574d6ee26009abf4e9a",
       "symbol": "BYCOCKET",
       "name": "Bycocket",
@@ -85843,6 +85935,13 @@
       "address": "0xcbb95bbf36099d34da091dc6fa6f49efa257cee3",
       "symbol": "CLSK",
       "name": "CleanSpark",
+      "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xcc142366735c882f7885d3c747db99e45e13e453",
+      "symbol": "STAG",
+      "name": "StagWifHood",
       "decimals": 18
     },
     {
@@ -86313,6 +86412,13 @@
       "symbol": "RANGER",
       "name": "Ranger AI",
       "decimals": 18
+    },
+    {
+      "chain_id": 4663,
+      "address": "0xf172dc5b774c52432e1e5223cd30f8e8a1096969",
+      "symbol": "WEN",
+      "name": "WEN",
+      "decimals": 9
     },
     {
       "chain_id": 4663,
@@ -87510,13 +87616,6 @@
       "symbol": "ETOR",
       "name": "eToro Group (Dinari Tokenized Stock)",
       "decimals": 18
-    },
-    {
-      "chain_id": 8453,
-      "address": "0x051fb509e4a775fabd257611eea1efaed8f91359",
-      "symbol": "CATE",
-      "name": "CateCoin",
-      "decimals": 9
     },
     {
       "chain_id": 8453,

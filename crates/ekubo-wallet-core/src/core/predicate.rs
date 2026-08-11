@@ -120,13 +120,12 @@ impl Match {
 /// decision — and the smaller this type is, the less there is to keep true.
 /// The `$self` literal is the only thing that reads it.
 ///
-/// It used to carry the confirmed-token and address-book sets, for `is_token`
-/// and `is_address_book`. Those are gone. Both stores exist to tell a person
-/// what they are looking at, and reading them into an authorization decision
+/// It used to carry confirmed-token and address-book sets, for `is_token`
+/// and `is_address_book`. Those predicates are gone. Reading display metadata
+/// into an authorization decision
 /// meant a row written to improve a label also widened what could be signed:
 /// the two uses could not be told apart afterwards, and the safer of them was
-/// paying for the other. Token and address-book metadata now only ever reaches
-/// the review display.
+/// paying for the other. Token metadata now only ever reaches the review display.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PolicyContext {
     pub wallet: Address,

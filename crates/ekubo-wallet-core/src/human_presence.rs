@@ -8,11 +8,7 @@ use thiserror::Error;
 /// still decide where value goes with nobody watching. Replacing a wallet's
 /// policy is one: the policy decides what an agent may sign unattended, so
 /// rewriting it grants signing authority even though it reads no key
-/// material. Editing the address book is the other: an alias is what an
-/// agent resolves "pay alice" to, so retargeting one redirects every future
-/// payment made by that name — the approval screen will show the new address,
-/// but it is the alias the user trusts. Both are authenticated like signing.
-/// Nothing else belongs here. Changing a network or importing a token list
+/// material. Nothing else belongs here. Changing a network or importing a token list
 /// grants no signing authority and redirects no payment, and asking for a
 /// fingerprint before each one only teaches the owner to give it without
 /// reading. Those use explicit native confirmation without a biometric prompt.
@@ -24,8 +20,6 @@ pub enum PresenceRequest {
     ExportPrivateKey { wallet: String },
     RemoveWallet { wallet: String },
     ReplacePolicy { wallet: String },
-    SaveAddressBookEntry { alias: String },
-    RemoveAddressBookEntry { alias: String },
     ConfirmTokenNames { count: usize },
     ConfirmNetwork { network: String },
 }
@@ -62,12 +56,6 @@ impl PresenceRequest {
             }
             Self::ReplacePolicy { wallet } => {
                 format!("replace the signing policy for wallet {}", subject(wallet))
-            }
-            Self::SaveAddressBookEntry { alias } => {
-                format!("save the address book alias {}", subject(alias))
-            }
-            Self::RemoveAddressBookEntry { alias } => {
-                format!("remove the address book alias {}", subject(alias))
             }
             Self::ConfirmTokenNames { count } => {
                 format!("name {count} token(s) shown when approving transfers")

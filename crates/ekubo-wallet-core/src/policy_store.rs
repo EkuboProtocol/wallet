@@ -29,7 +29,7 @@ const DATABASE_LOCK_FILE: &str = "wallet.lock";
 ///
 /// Named for the database rather than for policies, because policies are only
 /// one of the things it protects: the same file holds the pending signing
-/// queues, the address book, and the token names a reviewer reads before
+/// queues and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
 const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
@@ -1197,8 +1197,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             "CREATE INDEX pending_messages_wallet_created
                  ON pending_messages(wallet_id, created_at DESC)",
             // Integrity-sensitive display and gating state lives inside the
-            // authenticated database: token metadata, address aliases, and
-            // legal acceptance must not be forgeable by editing a plain file
+            // authenticated database: token metadata and legal acceptance
+            // must not be forgeable by editing a plain file
             // outside this process.
             "CREATE TABLE tokens (
                  chain_id INTEGER NOT NULL CHECK (chain_id > 0),
@@ -1210,15 +1210,6 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  source TEXT NOT NULL,
                  added_at INTEGER NOT NULL,
                  PRIMARY KEY (chain_id, address)
-             ) STRICT",
-            "CREATE TABLE address_book (
-                 chain_id INTEGER NOT NULL CHECK (chain_id > 0),
-                 alias TEXT NOT NULL,
-                 address BLOB NOT NULL CHECK (length(address) = 20),
-                 note TEXT,
-                 added_at INTEGER NOT NULL,
-                 updated_at INTEGER NOT NULL,
-                 PRIMARY KEY (chain_id, alias)
              ) STRICT",
             "CREATE TABLE legal_acceptance (
                  document TEXT PRIMARY KEY NOT NULL

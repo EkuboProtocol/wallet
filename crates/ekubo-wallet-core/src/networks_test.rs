@@ -90,6 +90,22 @@ fn defaults_form_a_valid_configuration() {
 }
 
 #[test]
+fn only_the_four_primary_defaults_start_enabled() {
+    let enabled = default_networks()
+        .into_iter()
+        .filter(|network| !network.disabled)
+        .map(|network| network.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        enabled,
+        ["arbitrum", "base", "ethereum", "robinhood"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+}
+
+#[test]
 fn defaults_are_mainnets_drawn_from_the_registry() {
     for profile in known_networks().iter().filter(|profile| profile.is_default) {
         assert!(

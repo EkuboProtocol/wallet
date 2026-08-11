@@ -342,6 +342,7 @@ async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain
 fn stub_network(address: SocketAddr) -> NetworkConfig {
     NetworkConfig {
         name: "stubnet".into(),
+        disabled: false,
         display_name: Some("Stub Network".into()),
         aliases: Vec::new(),
         chain_id: CHAIN_ID,
@@ -401,7 +402,6 @@ fn pipeline_server(
         MessageStore::new(open()),
         LegalStore::new(open()),
         TokenStore::new(open()),
-        AddressBookStore::new(open()),
         keys,
     )
     .unwrap();

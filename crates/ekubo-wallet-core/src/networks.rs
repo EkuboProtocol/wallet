@@ -111,6 +111,7 @@ pub(crate) fn parse(document: &str) -> Result<Vec<NetworkProfile>> {
             let profile = NetworkProfile {
                 config: NetworkConfig {
                     name: chain.name,
+                    disabled: false,
                     display_name: chain.display_name,
                     aliases: chain.aliases,
                     chain_id: chain.chain_id,
@@ -198,7 +199,14 @@ pub fn default_networks() -> Vec<NetworkConfig> {
     known_networks()
         .iter()
         .filter(|profile| profile.is_default)
-        .map(|profile| profile.config.clone())
+        .map(|profile| {
+            let mut network = profile.config.clone();
+            network.disabled = !matches!(
+                network.name.as_str(),
+                "ethereum" | "base" | "arbitrum" | "robinhood"
+            );
+            network
+        })
         .collect()
 }
 

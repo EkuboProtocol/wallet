@@ -155,6 +155,7 @@ def normalize(upstream: bytes, url: str = SOURCE_URL) -> dict:
         # and record nothing the digest does not already say.
         "source_url": url,
         "source_sha256": hashlib.sha256(upstream).hexdigest(),
+        "upstream_tokens": len(entries),
         "skipped_non_evm": skipped_non_evm,
         "tokens": tokens,
     }

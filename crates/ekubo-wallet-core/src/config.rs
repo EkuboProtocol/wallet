@@ -54,6 +54,9 @@ pub struct NativeCurrency {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct NetworkConfig {
     pub name: String,
+    /// Disabled profiles remain inspectable and editable but are excluded
+    /// from ordinary wallet activity until the owner enables them again.
+    pub disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -402,11 +405,11 @@ impl ConfigStore {
         let networks = self.load()?.networks;
         networks
             .iter()
-            .find(|network| network.name == requested)
+            .find(|network| !network.disabled && network.name == requested)
             .or_else(|| {
-                networks
-                    .iter()
-                    .find(|network| network.aliases.iter().any(|alias| alias == requested))
+                networks.iter().find(|network| {
+                    !network.disabled && network.aliases.iter().any(|alias| alias == requested)
+                })
             })
             .cloned()
             .with_context(|| format!("unknown network {requested}"))
@@ -456,7 +459,7 @@ impl ConfigStore {
         self.load()?
             .networks
             .into_iter()
-            .find(|network| network.chain_id == chain_id)
+            .find(|network| !network.disabled && network.chain_id == chain_id)
             .with_context(|| format!("no configured network for chain {chain_id}"))
     }
 }
@@ -618,8 +621,8 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
         );
         // Userinfo is a credential written in the one part of a URL that does
         // not have to look like one, and this wallet quotes its endpoints back
-        // verbatim: `wallet_list` hands them to the agent, `network show`
-        // prints them, and the disclosure text names them. A field repeated on
+        // verbatim: `list_networks` hands them to the agent, the desktop shows
+        // them, and the disclosure text names them. A field repeated on
         // every read cannot hold a secret, so it is refused here rather than
         // redacted at each of the places it would otherwise surface — and
         // refused without echoing the URL, since the message that named it

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn command_palette_matches_route_labels_as_ordered_subsequences() {
     assert_eq!(fuzzy_route_score("WalletConnect", "wc"), Some(5));
-    assert!(fuzzy_route_score("Address Book", "addr").is_some());
+    assert!(fuzzy_route_score("Networks", "net").is_some());
     assert!(fuzzy_route_score("Portfolio", "ptf").is_some());
     assert_eq!(fuzzy_route_score("Networks", "xyz"), None);
     assert_eq!(fuzzy_route_score("Tokens", "token"), Some(0));
@@ -55,7 +55,7 @@ fn tray_artwork_tracks_both_system_appearance_families() {
 
 #[test]
 fn command_palette_reaches_every_desktop_route() {
-    assert_eq!(Route::ALL.len(), 12);
+    assert_eq!(Route::ALL.len(), 10);
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
     assert_eq!(Route::Overview.label(), "Portfolio");
@@ -78,6 +78,29 @@ fn token_filter_combines_network_and_case_insensitive_search() {
     assert!(token_matches_filter(&token, Some(1), "a0B869"));
     assert!(!token_matches_filter(&token, Some(10), "usdc"));
     assert!(!token_matches_filter(&token, Some(1), "wrapped ether"));
+}
+
+#[test]
+fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
+    let token = StoredToken {
+        chain_id: "1".into(),
+        address: "0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".into(),
+        symbol: Some("USDC".into()),
+        name: Some("USD Coin".into()),
+        decimals: Some(6),
+        source: "test".into(),
+        added_at: chrono::Utc::now(),
+    };
+    let source = vec![token; 17_286];
+    let mut offsets = Vec::new();
+    let loaded = collect_token_inventory(|limit, offset| {
+        offsets.push(offset);
+        Ok(source.iter().skip(offset).take(limit).cloned().collect())
+    })
+    .unwrap();
+
+    assert_eq!(loaded.len(), 17_286);
+    assert_eq!(offsets, [0, 10_000]);
 }
 
 #[test]

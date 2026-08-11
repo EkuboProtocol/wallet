@@ -15,7 +15,7 @@ already running as the same OS user.
 ## Desktop model
 
 - `OwnerApi` exists only in the GUI and controls accounts, reviews, policies,
-  networks, tokens, address book, agent installation, legal acceptance,
+  networks, tokens, agent installation, legal acceptance,
   exports, and updates.
 - `AgentApi` can inspect public wallet state, simulate, propose, enqueue signing
   requests, and observe results. It cannot approve, export keys, or weaken owner
