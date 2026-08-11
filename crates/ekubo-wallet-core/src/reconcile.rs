@@ -27,11 +27,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{TimeDelta, Utc};
-use std::{
-    collections::HashMap,
-    sync::{LazyLock, Mutex, MutexGuard},
-    time::{Duration, Instant},
-};
+use std::sync::{Mutex, MutexGuard};
 
 /// How long a `submitting` lease may go untouched before a reader may assume
 /// the submitting process died mid-send and reclaim the record.
@@ -103,40 +99,6 @@ async fn observe(
 /// chain settled: a receipt finalizes to confirmed or reverted, a consumed
 /// nonce without a receipt marks the record replaced, and a stale submission
 /// lease is recovered when `recover_stale_submission` allows it.
-/// How long an unchanged answer is reused before the chain is asked again.
-///
-/// Short enough that a person running `transaction show` twice sees the second
-/// answer as fresh, long enough that a dapp polling in a loop stops turning
-/// one pending transaction into unbounded RPC load.
-const UNCHANGED_OBSERVATION_TTL: Duration = Duration::from_secs(1);
-
-/// Request ids whose last chain observation found nothing had changed.
-///
-/// Process-local and bounded: this is a throttle, not a cache of truth, and
-/// losing it costs one extra RPC round trip. Cleared wholesale rather than
-/// evicted one at a time, because the map only grows while transactions are in
-/// flight and a wallet has one of those per chain.
-static UNCHANGED_SINCE: LazyLock<Mutex<HashMap<uuid::Uuid, Instant>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-const MAX_REMEMBERED_OBSERVATIONS: usize = 1_024;
-
-fn recently_unchanged(request_id: uuid::Uuid) -> bool {
-    UNCHANGED_SINCE.lock().is_ok_and(|seen| {
-        seen.get(&request_id)
-            .is_some_and(|at| at.elapsed() < UNCHANGED_OBSERVATION_TTL)
-    })
-}
-
-fn remember_unchanged(request_id: uuid::Uuid) {
-    if let Ok(mut seen) = UNCHANGED_SINCE.lock() {
-        if seen.len() >= MAX_REMEMBERED_OBSERVATIONS {
-            seen.clear();
-        }
-        seen.insert(request_id, Instant::now());
-    }
-}
-
 pub async fn reconcile_record(
     pending: &Mutex<PendingStore>,
     network: &NetworkConfig,
@@ -161,22 +123,6 @@ pub async fn reconcile_record(
         .or(record.signed_transaction_hash.as_ref())
         .cloned()
         .context("submitted transaction is missing its hash")?;
-    // A poll that already answered "nothing yet" within the last interval is
-    // answered from that, without asking the chain again.
-    //
-    // `wallet_getCallsStatus` is dapp-callable and a dapp decides how often to
-    // call it. Each call reached `observe`, which is a receipt lookup and, when
-    // that finds nothing, a nonce read as well -- two RPC round trips per poll,
-    // against endpoints shared with simulation and signing. A loop turned one
-    // pending transaction into as much RPC load as the dapp cared to generate.
-    //
-    // Only the negative observation is remembered. Anything that settled --
-    // mined, reverted, replaced -- falls straight through, so a status a caller
-    // is waiting for is never delayed by this; what is suppressed is the repeat
-    // of an answer that has not changed.
-    if recently_unchanged(record.request_id) {
-        return Ok(record);
-    }
     match observe(network, &record, &transaction_hash).await? {
         ChainObservation::Mined(receipt) => {
             // The same rule the two branches below apply: a lease still inside
@@ -238,12 +184,6 @@ pub async fn reconcile_record(
                     pending.release_submission(record.request_id, record.generation)?
                 };
             }
-            // Remembered only here, where the chain said nothing had changed.
-            // Every settled branch above falls through without touching it, so
-            // a status a caller is waiting for is never delayed by the
-            // throttle -- what it suppresses is the repeat of an answer that
-            // has not moved.
-            remember_unchanged(record.request_id);
             Ok(record)
         }
     }

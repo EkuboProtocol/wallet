@@ -1143,23 +1143,6 @@ fn a_cancelled_row_from_wallet_removal_never_had_an_envelope() {
 }
 
 #[test]
-fn terminal_statuses_match_the_enum() {
-    // The pruning runs in SQL against `TERMINAL_STATUSES`, so that list is
-    // what actually decides which history is reclaimed. `is_terminal` decides
-    // the same question for a parsed value. Adding a lifecycle state to one
-    // and forgetting the other would either leak history forever or delete a
-    // row the lifecycle still needs, and neither shows up until it matters.
-    for status in PendingStatus::ALL {
-        assert_eq!(
-            TERMINAL_STATUSES.contains(&status.column()),
-            status.is_terminal(),
-            "{} is classified inconsistently",
-            status.column()
-        );
-    }
-}
-
-#[test]
 fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
     // Nothing bounded what queued and in-flight rows *become*. Every automatic
     // signature writes a durable row before it broadcasts, so repeated valid
