@@ -353,6 +353,10 @@ pub struct WalletWindow {
     walletconnect_uri_input: Option<Entity<InputState>>,
     network_json_input: Option<Entity<InputState>>,
     network_json_error: Option<SharedString>,
+    network_action_busy: BTreeSet<String>,
+    network_action_errors: BTreeMap<String, SharedString>,
+    pending_network_removal: Option<String>,
+    network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
     policy_installing: bool,
@@ -648,6 +652,10 @@ fn token_matches_filter(token: &StoredToken, chain_filter: Option<u64>, query: &
             .name
             .as_deref()
             .is_some_and(|value| value.to_lowercase().contains(&query))
+}
+
+fn network_can_be_removed(network: &NetworkConfig) -> bool {
+    network.disabled
 }
 
 const TOKEN_INVENTORY_PAGE_SIZE: usize = 10_000;
@@ -1076,6 +1084,10 @@ impl WalletWindow {
             walletconnect_uri_input: None,
             network_json_input: None,
             network_json_error: None,
+            network_action_busy: BTreeSet::new(),
+            network_action_errors: BTreeMap::new(),
+            pending_network_removal: None,
+            network_proposal_error: None,
             policy_json_input: None,
             policy_editor: None,
             policy_installing: false,
@@ -2016,20 +2028,29 @@ impl WalletWindow {
             })
         });
         let name = name.to_owned();
+        if !self.network_action_busy.insert(name.clone()) {
+            return;
+        }
+        self.network_action_errors.remove(&name);
+        if !disabled && self.pending_network_removal.as_deref() == Some(name.as_str()) {
+            self.pending_network_removal = None;
+        }
         let owner = self.owner.clone();
-        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        let action_name = name.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.set_network_disabled(&name, disabled).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
+                view.network_action_busy.remove(&action_name);
                 let changed = result.is_ok();
-                view.operation_status = Some(match result {
-                    Ok(network) if disabled => format!("Disabled network {}.", network.name).into(),
-                    Ok(network) => format!("Enabled network {}.", network.name).into(),
-                    Err(error) => format!("Could not update network: {error:#}").into(),
-                });
+                if let Err(error) = result {
+                    view.network_action_errors.insert(
+                        action_name,
+                        format!("Could not update network: {error:#}").into(),
+                    );
+                }
                 if changed && disabled && selected_network {
                     view.portfolio_chain_id = None;
                     view.invalidate_portfolio();
@@ -2041,19 +2062,43 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn remove_network(&mut self, name: &str, cx: &mut Context<Self>) {
+    fn begin_network_removal(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.pending_network_removal = Some(name.to_owned());
+        self.network_action_errors.remove(name);
+        cx.notify();
+    }
+
+    fn cancel_network_removal(&mut self, cx: &mut Context<Self>) {
+        self.pending_network_removal = None;
+        cx.notify();
+    }
+
+    fn confirm_network_removal(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.pending_network_removal.as_deref() != Some(name) {
+            return;
+        }
         let owner = self.owner.clone();
         let name = name.to_owned();
-        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        if !self.network_action_busy.insert(name.clone()) {
+            return;
+        }
+        self.network_action_errors.remove(&name);
+        let action_name = name.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(cx, async move { owner.remove_network(&name).await });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                view.operation_status = Some(match result {
-                    Ok(network) => format!("Deleted disabled network {}.", network.name).into(),
-                    Err(error) => format!("Could not delete network: {error:#}").into(),
-                });
+                view.network_action_busy.remove(&action_name);
+                match result {
+                    Ok(_) => view.pending_network_removal = None,
+                    Err(error) => {
+                        view.network_action_errors.insert(
+                            action_name,
+                            format!("Could not delete network: {error:#}").into(),
+                        );
+                    }
+                }
                 cx.notify();
             });
         })
@@ -2067,8 +2112,7 @@ impl WalletWindow {
         }
         let owner = self.owner.clone();
         self.network_proposal_busy = true;
-        self.operation_status =
-            Some("Verifying the proposed RPC chain ID before owner authentication…".into());
+        self.network_proposal_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner
                 .accept_network_proposal(&proposal)
@@ -2079,14 +2123,10 @@ impl WalletWindow {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.network_proposal_busy = false;
-                view.operation_status = Some(match result {
-                    Ok(proposal) => format!(
-                        "Installed network {} after verifying chain {}.",
-                        proposal.name, proposal.chain_id
-                    )
-                    .into(),
-                    Err(error) => format!("Network proposal was not installed: {error:#}").into(),
-                });
+                if let Err(error) = result {
+                    view.network_proposal_error =
+                        Some(format!("Network proposal was not installed: {error:#}").into());
+                }
                 cx.notify();
             });
         })
@@ -2095,11 +2135,11 @@ impl WalletWindow {
     }
 
     fn reject_network_proposal(&mut self, proposal: &NetworkConfig, cx: &mut Context<Self>) {
-        self.operation_status = Some(match self.owner.reject_network_proposal(proposal) {
-            Ok(true) => format!("Rejected network proposal {}.", proposal.name).into(),
-            Ok(false) => "The network proposal changed. Review the current profile.".into(),
-            Err(error) => format!("Could not reject network proposal: {error:#}").into(),
-        });
+        self.network_proposal_error = match self.owner.reject_network_proposal(proposal) {
+            Ok(true) => None,
+            Ok(false) => Some("The network proposal changed. Review the current profile.".into()),
+            Err(error) => Some(format!("Could not reject network proposal: {error:#}").into()),
+        };
         cx.notify();
     }
 
@@ -4830,6 +4870,14 @@ impl WalletWindow {
                                 .text_color(cx.theme().muted_foreground)
                                 .child("The wallet contacts the proposed RPC and verifies its chain ID before authentication or installation."),
                         )
+                        .when_some(self.network_proposal_error.clone(), |group, error| {
+                            group.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(error),
+                            )
+                        })
                         .child(rows),
                 );
             }
@@ -4879,7 +4927,12 @@ impl WalletWindow {
                     let edit = network.clone();
                     let toggle_name = name.clone();
                     let remove_name = name.clone();
+                    let confirm_remove_name = name.clone();
                     let disabled = network.disabled;
+                    let busy = self.network_action_busy.contains(&name);
+                    let confirming_removal =
+                        self.pending_network_removal.as_deref() == Some(name.as_str());
+                    let action_error = self.network_action_errors.get(&name).cloned();
                     let exact = serde_json::to_string_pretty(&network)
                         .unwrap_or_else(|error| format!("Could not serialize network: {error:#}"));
                     div()
@@ -4925,6 +4978,7 @@ impl WalletWindow {
                                                 "edit-network-{name}"
                                             )))
                                             .label("Edit")
+                                            .disabled(busy)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 view.edit_network(&edit, window, cx);
                                             })),
@@ -4933,7 +4987,14 @@ impl WalletWindow {
                                             Button::new(SharedString::from(format!(
                                                 "toggle-network-{name}"
                                             )))
-                                            .label(if disabled { "Enable" } else { "Disable" })
+                                            .label(if busy {
+                                                "Authenticating…"
+                                            } else if disabled {
+                                                "Enable"
+                                            } else {
+                                                "Disable"
+                                            })
+                                            .disabled(busy)
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 view.set_network_disabled(
                                                     &toggle_name,
@@ -4942,15 +5003,20 @@ impl WalletWindow {
                                                 );
                                             })),
                                         )
-                                        .when(disabled, |buttons| {
+                                        .when(network_can_be_removed(&network), |buttons| {
                                             buttons.child(
                                                 Button::new(SharedString::from(format!(
                                                     "delete-network-{name}"
                                                 )))
-                                                .label("Delete")
+                                                .label(if confirming_removal {
+                                                    "Awaiting confirmation"
+                                                } else {
+                                                    "Delete"
+                                                })
                                                 .danger()
+                                                .disabled(busy || confirming_removal)
                                                 .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.remove_network(&remove_name, cx);
+                                                    view.begin_network_removal(&remove_name, cx);
                                                 })),
                                             )
                                         }),
@@ -4965,6 +5031,67 @@ impl WalletWindow {
                                 .text_sm()
                                 .child(exact),
                         )
+                        .when(confirming_removal, |card| {
+                            card.child(
+                                div()
+                                    .p_3()
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(cx.theme().danger)
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().danger)
+                                            .child(format!(
+                                                "Delete {name}? Its trusted RPC configuration will be removed from the encrypted wallet database."
+                                            )),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Button::new(SharedString::from(format!(
+                                                    "confirm-delete-network-{name}"
+                                                )))
+                                                .label(if busy {
+                                                    "Authenticating…"
+                                                } else {
+                                                    "Authenticate & delete"
+                                                })
+                                                .danger()
+                                                .disabled(busy)
+                                                .on_click(cx.listener(
+                                                    move |view, _, _, cx| {
+                                                        view.confirm_network_removal(
+                                                            &confirm_remove_name,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            )
+                                            .child(
+                                                Button::new(SharedString::from(format!(
+                                                    "cancel-delete-network-{name}"
+                                                )))
+                                                .label("Cancel")
+                                                .disabled(busy)
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    view.cancel_network_removal(cx);
+                                                })),
+                                            ),
+                                    ),
+                            )
+                        })
+                        .when_some(action_error, |card, error| {
+                            card.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(error),
+                            )
+                        })
                 }))
             }
             Err(error) => content.child(Alert::error(

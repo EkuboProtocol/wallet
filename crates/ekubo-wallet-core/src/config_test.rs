@@ -101,6 +101,37 @@ fn network_mutations_require_network_scoped_owner_authorization() {
 }
 
 #[test]
+fn network_deletion_requires_an_owner_authorized_disable_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+
+    assert!(store.remove_network("ethereum", &authorized).is_err());
+    assert!(
+        store
+            .load()
+            .unwrap()
+            .networks
+            .iter()
+            .any(|network| network.name == "ethereum" && !network.disabled)
+    );
+
+    store
+        .set_network_disabled("ethereum", true, &authorized)
+        .unwrap();
+    let removed = store.remove_network("ethereum", &authorized).unwrap();
+    assert_eq!(removed.name, "ethereum");
+    assert!(
+        store
+            .load()
+            .unwrap()
+            .networks
+            .iter()
+            .all(|network| network.name != "ethereum")
+    );
+}
+
+#[test]
 fn round_trips_private_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());

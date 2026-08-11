@@ -81,6 +81,18 @@ fn token_filter_combines_network_and_case_insensitive_search() {
 }
 
 #[test]
+fn only_disabled_networks_offer_permanent_removal() {
+    let mut network = ekubo_wallet_core::networks::default_networks()
+        .into_iter()
+        .find(|network| network.name == "ethereum")
+        .unwrap();
+
+    assert!(!network_can_be_removed(&network));
+    network.disabled = true;
+    assert!(network_can_be_removed(&network));
+}
+
+#[test]
 fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
     let token = StoredToken {
         chain_id: "1".into(),
