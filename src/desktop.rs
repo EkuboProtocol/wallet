@@ -1,6 +1,6 @@
 use crate::{
     BUILD_VERSION,
-    agent_config::{AgentAdapter, ConfigPreview},
+    agent_config::{AgentAdapter, ConfigBatchInstall, ConfigPreview},
     authority::{
         ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioSnapshot,
         OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
@@ -209,7 +209,7 @@ fn upsert_detected_agents() -> Result<String> {
     ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Route {
     Overview,
     Reviews,
@@ -324,6 +324,7 @@ pub struct WalletWindow {
     token_import_state: TokenImportState,
     token_import_error: Option<SharedString>,
     token_import_status: Option<SharedString>,
+    token_proposal_error: Option<SharedString>,
     token_list_generation: u64,
     mcp_status: SharedString,
     selected_record: Option<uuid::Uuid>,
@@ -342,7 +343,7 @@ pub struct WalletWindow {
     account_export: Option<AccountExport>,
     legal_review: Option<LegalReview>,
     legal_gate: bool,
-    operation_status: Option<SharedString>,
+    route_errors: BTreeMap<Route, SharedString>,
     detailed_notification_previews: Arc<AtomicBool>,
     portfolio: PortfolioState,
     portfolio_generation: u64,
@@ -432,6 +433,7 @@ struct LegalReview {
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
     viewed_to_end: bool,
+    error: Option<SharedString>,
 }
 
 struct AccountExport {
@@ -462,6 +464,7 @@ struct PolicyEditor {
 struct PendingAgentInstall {
     display_name: String,
     preview: Option<ConfigPreview>,
+    remove_client_id: Option<uuid::Uuid>,
 }
 
 struct ActiveReview {
@@ -1136,6 +1139,7 @@ impl WalletWindow {
             token_import_state: TokenImportState::Idle,
             token_import_error: None,
             token_import_status: None,
+            token_proposal_error: None,
             token_list_generation: 0,
             mcp_status: "MCP starting…".into(),
             selected_record: None,
@@ -1154,7 +1158,7 @@ impl WalletWindow {
             account_export: None,
             legal_review: None,
             legal_gate: false,
-            operation_status: None,
+            route_errors: BTreeMap::new(),
             detailed_notification_previews,
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
@@ -1261,6 +1265,14 @@ impl WalletWindow {
         }
     }
 
+    fn set_route_error(&mut self, route: Route, error: impl Into<SharedString>) {
+        self.route_errors.insert(route, error.into());
+    }
+
+    fn clear_route_error(&mut self, route: Route) {
+        self.route_errors.remove(&route);
+    }
+
     fn reload_tokens(&mut self, cx: &mut Context<Self>) {
         let Some(list) = self.token_list.clone() else {
             return;
@@ -1295,7 +1307,7 @@ impl WalletWindow {
     }
 
     fn connect_walletconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(input) = self.walletconnect_uri_input.as_ref() else {
+        let Some(input) = self.walletconnect_uri_input.clone() else {
             return;
         };
         let uri = input.read(cx).value().trim().to_owned();
@@ -1307,11 +1319,15 @@ impl WalletWindow {
         {
             Ok(start) => start,
             Err(error) => {
-                self.operation_status = Some(format!("Could not connect: {error:#}").into());
+                self.set_route_error(
+                    Route::WalletConnect,
+                    format!("Could not connect: {error:#}"),
+                );
                 cx.notify();
                 return;
             }
         };
+        self.clear_route_error(Route::WalletConnect);
         input.update(cx, |input, cx| input.set_value("", window, cx));
         self.owner
             .event_bus()
@@ -1322,7 +1338,6 @@ impl WalletWindow {
         let presenter = self.walletconnect_presenter.clone();
         let manager = self.walletconnect.clone();
         let events = self.owner.event_bus();
-        self.operation_status = Some("Connecting to the WalletConnect relay…".into());
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || {
                 tokio::runtime::Handle::current()
@@ -1334,10 +1349,13 @@ impl WalletWindow {
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                view.operation_status = Some(match result {
-                    Ok(()) => "WalletConnect session ended.".into(),
-                    Err(error) => format!("WalletConnect session failed: {error:#}").into(),
-                });
+                match result {
+                    Ok(()) => view.clear_route_error(Route::WalletConnect),
+                    Err(error) => view.set_route_error(
+                        Route::WalletConnect,
+                        format!("WalletConnect session failed: {error:#}"),
+                    ),
+                }
                 cx.notify();
             });
         })
@@ -1346,13 +1364,18 @@ impl WalletWindow {
     }
 
     fn disconnect_walletconnect(&mut self, session_id: uuid::Uuid, cx: &mut Context<Self>) {
-        self.operation_status = Some(match self.walletconnect.lock() {
-            Ok(mut manager) => match manager.disconnect(session_id) {
-                Ok(_) => "Disconnecting WalletConnect session…".into(),
-                Err(error) => format!("Could not disconnect session: {error:#}").into(),
-            },
-            Err(_) => "WalletConnect session state is unavailable.".into(),
-        });
+        let result = self
+            .walletconnect
+            .lock()
+            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))
+            .and_then(|mut manager| manager.disconnect(session_id).map(|_| ()));
+        match result {
+            Ok(()) => self.clear_route_error(Route::WalletConnect),
+            Err(error) => self.set_route_error(
+                Route::WalletConnect,
+                format!("Could not disconnect session: {error:#}"),
+            ),
+        }
         self.owner
             .event_bus()
             .publish(crate::events::DomainEventKind::WalletConnectChanged {
@@ -1895,6 +1918,7 @@ impl WalletWindow {
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
             viewed_to_end: false,
+            error: None,
         });
         cx.notify();
     }
@@ -1916,6 +1940,7 @@ impl WalletWindow {
                 scroll_check_scheduled: false,
                 scroll_layout_ready: false,
                 viewed_to_end: false,
+                error: None,
             }
         });
     }
@@ -1944,22 +1969,27 @@ impl WalletWindow {
         if !review.acceptance_required || !review.viewed_to_end {
             return;
         }
-        self.operation_status = Some(
-            match self.owner.accept_legal(review.document, &review.digest) {
-                Ok(()) => format!("Accepted the current {}.", review.document.title()).into(),
-                Err(error) => format!("Could not accept document: {error:#}").into(),
-            },
-        );
-        self.open_next_required_legal();
+        match self.owner.accept_legal(review.document, &review.digest) {
+            Ok(()) => self.open_next_required_legal(),
+            Err(error) => {
+                if let Some(review) = self.legal_review.as_mut() {
+                    review.error = Some(format!("Could not accept document: {error:#}").into());
+                }
+            }
+        }
         cx.notify();
     }
 
     fn reinstall_detected_agents(&mut self, cx: &mut Context<Self>) {
         if self.agent_reinstall == AgentReinstallState::Running {
-            self.operation_status = Some("Agent configuration repair is already running.".into());
+            self.set_route_error(
+                Route::Settings,
+                "Agent configuration repair is already running.",
+            );
             cx.notify();
             return;
         }
+        self.clear_route_error(Route::Settings);
         self.agent_reinstall = AgentReinstallState::Running;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move { upsert_detected_agents() });
         cx.spawn(async move |view, cx| {
@@ -1967,8 +1997,10 @@ impl WalletWindow {
             let _ = view.update(cx, |view, cx| {
                 view.agent_reinstall = AgentReinstallState::Idle;
                 if let Err(error) = result {
-                    view.operation_status =
-                        Some(format!("Could not reinstall MCP server: {error:#}").into());
+                    view.set_route_error(
+                        Route::Settings,
+                        format!("Could not reinstall MCP server: {error:#}"),
+                    );
                 }
                 cx.notify();
             });
@@ -1986,8 +2018,6 @@ impl WalletWindow {
             return;
         }
         let Some(chain_id) = self.portfolio_chain_id else {
-            self.operation_status = Some("Select a network before loading balances.".into());
-            cx.notify();
             return;
         };
         self.portfolio_generation = self.portfolio_generation.wrapping_add(1);
@@ -2041,10 +2071,9 @@ impl WalletWindow {
             Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 self.network_json_error = None;
-                self.operation_status = Some(format!("Editing network {}.", network.name).into());
             }
             Err(error) => {
-                self.operation_status =
+                self.network_json_error =
                     Some(format!("Could not serialize network: {error:#}").into());
             }
         }
@@ -2070,21 +2099,21 @@ impl WalletWindow {
         }
         self.network_json_error = None;
         let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let name = network.name.clone();
-            owner.install_network(network).await.map(|()| name)
-        });
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.install_network(network).await },
+            );
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                view.operation_status = Some(match result {
-                    Ok(name) => format!("Installed network {name}.").into(),
+                match result {
+                    Ok(()) => view.network_json_error = None,
                     Err(error) => {
                         view.network_json_error =
                             Some(format!("Network was not installed: {error:#}").into());
-                        format!("Could not install network: {error:#}").into()
                     }
-                });
+                }
                 cx.notify();
             });
         })
@@ -2333,18 +2362,18 @@ impl WalletWindow {
                 delegate.viewed_to_end,
             )
         };
-        let Some(source) = source else {
+        let Some(_source) = source else {
             return;
         };
         if !viewed_to_end {
-            self.operation_status =
+            self.token_proposal_error =
                 Some("Scroll through the complete token proposal before accepting it.".into());
             cx.notify();
             return;
         }
         let owner = self.owner.clone();
         self.token_proposal_busy = true;
-        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        self.token_proposal_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.accept_token_proposals(&proposals).await
         });
@@ -2358,12 +2387,9 @@ impl WalletWindow {
             }
             let _ = view.update(cx, |view, cx| {
                 view.token_proposal_busy = false;
-                view.operation_status = Some(match result {
-                    Ok(inserted) => {
-                        format!("Accepted {inserted} new token name(s) from {source}.").into()
-                    }
-                    Err(error) => format!("Token proposals were not accepted: {error:#}").into(),
-                });
+                view.token_proposal_error = result
+                    .err()
+                    .map(|error| format!("Token proposals were not accepted: {error:#}").into());
                 cx.notify();
             });
         })
@@ -2382,12 +2408,12 @@ impl WalletWindow {
             let delegate = list.read(cx).delegate();
             (delegate.source.clone(), delegate.proposals.clone())
         };
-        let Some(source) = source else {
+        let Some(_source) = source else {
             return;
         };
         let owner = self.owner.clone();
         self.token_proposal_busy = true;
-        self.operation_status = Some("Rejecting the exact token proposal rows…".into());
+        self.token_proposal_error = None;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             tokio::task::spawn_blocking(move || owner.reject_token_proposals(&proposals))
                 .await
@@ -2403,12 +2429,9 @@ impl WalletWindow {
             }
             let _ = view.update(cx, |view, cx| {
                 view.token_proposal_busy = false;
-                view.operation_status = Some(match result {
-                    Ok(removed) => {
-                        format!("Rejected {removed} token proposal(s) from {source}.").into()
-                    }
-                    Err(error) => format!("Could not reject token proposals: {error:#}").into(),
-                });
+                view.token_proposal_error = result
+                    .err()
+                    .map(|error| format!("Could not reject token proposals: {error:#}").into());
                 cx.notify();
             });
         })
@@ -2712,6 +2735,7 @@ impl WalletWindow {
             owner.confirm_software_update_install(&authorization)?;
             Ok::<_, anyhow::Error>(())
         });
+        self.clear_route_error(Route::Updates);
         cx.spawn(async move |view, cx| match task.await {
             Ok(()) => {
                 let staged = pending
@@ -2745,8 +2769,10 @@ impl WalletWindow {
                         summary,
                         bytes,
                     };
-                    view.operation_status =
-                        Some(format!("Update installation was not authorized: {error:#}").into());
+                    view.set_route_error(
+                        Route::Updates,
+                        format!("Update installation was not authorized: {error:#}"),
+                    );
                     cx.notify();
                 });
             }
@@ -2756,7 +2782,7 @@ impl WalletWindow {
     }
 
     fn revoke_agent(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
-        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        self.clear_route_error(Route::Settings);
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let authorization = owner.authorize_agent_access().await?;
@@ -2765,10 +2791,13 @@ impl WalletWindow {
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
-                view.operation_status = Some(match result {
-                    Ok(()) => "Revoked the agent's OAuth access immediately.".into(),
-                    Err(error) => format!("Could not revoke agent: {error:#}").into(),
-                });
+                match result {
+                    Ok(()) => view.clear_route_error(Route::Settings),
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not revoke agent: {error:#}"),
+                    ),
+                }
                 cx.notify();
             });
         })
@@ -2792,7 +2821,7 @@ impl WalletWindow {
         if self.pending_agent_install.is_some()
             || self.agent_reinstall == AgentReinstallState::Running
         {
-            self.operation_status = Some("Finish the current agent change first.".into());
+            self.set_route_error(Route::Settings, "Finish the current agent change first.");
             cx.notify();
             return;
         }
@@ -2809,16 +2838,19 @@ impl WalletWindow {
             Ok(PendingAgentInstall {
                 display_name: format!("Install {}", adapter.display_name),
                 preview: Some(preview),
+                remove_client_id: None,
             })
         })();
         match result {
             Ok(pending) => {
                 self.pending_agent_install = Some(pending);
-                self.operation_status = None;
+                self.clear_route_error(Route::Settings);
             }
             Err(error) => {
-                self.operation_status =
-                    Some(format!("Could not prepare agent installation: {error:#}").into());
+                self.set_route_error(
+                    Route::Settings,
+                    format!("Could not prepare agent installation: {error:#}"),
+                );
             }
         }
         cx.notify();
@@ -2826,7 +2858,7 @@ impl WalletWindow {
 
     fn prepare_agent_removal(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.pending_agent_install.is_some() {
-            self.operation_status = Some("Finish the current agent change first.".into());
+            self.set_route_error(Route::Settings, "Finish the current agent change first.");
             cx.notify();
             return;
         }
@@ -2844,24 +2876,59 @@ impl WalletWindow {
             Ok(PendingAgentInstall {
                 display_name: format!("Remove {}", adapter.display_name),
                 preview: Some(adapter.preview_remove(false)?),
+                remove_client_id: Some(client_id),
             })
         })();
         match result {
             Ok(pending) => {
                 self.pending_agent_install = Some(pending);
-                self.operation_status = None;
+                self.clear_route_error(Route::Settings);
             }
             Err(error) => {
-                self.operation_status =
-                    Some(format!("Could not prepare agent change: {error:#}").into());
+                self.set_route_error(
+                    Route::Settings,
+                    format!("Could not prepare agent change: {error:#}"),
+                );
             }
+        }
+        cx.notify();
+    }
+
+    fn prepare_agent_registration_removal(
+        &mut self,
+        client_id: uuid::Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_agent_install.is_some() {
+            self.set_route_error(Route::Settings, "Finish the current agent change first.");
+            cx.notify();
+            return;
+        }
+        match self.owner.clients().and_then(|clients| {
+            clients
+                .into_iter()
+                .find(|client| client.id == client_id && client.revoked_at.is_none())
+                .context("the selected agent registration is no longer active")
+        }) {
+            Ok(client) => {
+                self.pending_agent_install = Some(PendingAgentInstall {
+                    display_name: format!("Delete {}", client.display_name),
+                    preview: None,
+                    remove_client_id: Some(client_id),
+                });
+                self.clear_route_error(Route::Settings);
+            }
+            Err(error) => self.set_route_error(
+                Route::Settings,
+                format!("Could not prepare registration removal: {error:#}"),
+            ),
         }
         cx.notify();
     }
 
     fn cancel_agent_install(&mut self, cx: &mut Context<Self>) {
         if self.pending_agent_install.take().is_some() {
-            self.operation_status = Some("Agent installation cancelled.".into());
+            self.clear_route_error(Route::Settings);
         }
         cx.notify();
     }
@@ -2871,22 +2938,54 @@ impl WalletWindow {
             return;
         };
         let display_name = pending.display_name.clone();
-        let result = pending
-            .preview
-            .take()
-            .expect("a pending installation always has its preview")
-            .install();
-        self.operation_status = Some(match result {
-            Ok(backup) if backup.as_os_str().is_empty() => {
-                format!("Completed {display_name} configuration change.").into()
+        let preview = pending.preview.take();
+        let Some(client_id) = pending.remove_client_id else {
+            let preview = preview.expect("an installation always has its preview");
+            match preview.install() {
+                Ok(_) => self.clear_route_error(Route::Settings),
+                Err(error) => self.set_route_error(
+                    Route::Settings,
+                    format!("Could not install {display_name}: {error:#}"),
+                ),
             }
-            Ok(backup) => format!(
-                "Completed {display_name} configuration change. Backup: {}",
-                backup.display()
-            )
-            .into(),
-            Err(error) => format!("Could not install {display_name}: {error:#}").into(),
+            cx.notify();
+            return;
+        };
+        self.agent_reinstall = AgentReinstallState::Running;
+        self.clear_route_error(Route::Settings);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let batch = if let Some(preview) = preview {
+                Some(
+                    tokio::task::spawn_blocking(move || ConfigBatchInstall::install(vec![preview]))
+                        .await
+                        .context("agent configuration removal task failed")??,
+                )
+            } else {
+                None
+            };
+            let authorization = owner.authorize_agent_access().await?;
+            owner.remove_client(client_id, &authorization)?;
+            if let Some(batch) = batch {
+                batch.commit();
+            }
+            Ok::<_, anyhow::Error>(())
         });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.agent_reinstall = AgentReinstallState::Idle;
+                match result {
+                    Ok(()) => view.clear_route_error(Route::Settings),
+                    Err(error) => view.set_route_error(
+                        Route::Settings,
+                        format!("Could not complete {display_name}: {error:#}"),
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2930,7 +3029,7 @@ impl WalletWindow {
 
     fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
-            self.operation_status = Some("Finish or close the current review first.".into());
+            self.set_route_error(Route::Reviews, "Finish or close the current review first.");
             cx.notify();
             return;
         }
@@ -2946,11 +3045,13 @@ impl WalletWindow {
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
                 });
-                self.operation_status = None;
+                self.clear_route_error(Route::Reviews);
             }
             Err(error) => {
-                self.operation_status =
-                    Some(format!("Could not open message review: {error:#}").into());
+                self.set_route_error(
+                    Route::Reviews,
+                    format!("Could not open message review: {error:#}"),
+                );
             }
         }
         cx.notify();
@@ -2958,7 +3059,7 @@ impl WalletWindow {
 
     fn begin_typed_data_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
-            self.operation_status = Some("Finish or close the current review first.".into());
+            self.set_route_error(Route::Reviews, "Finish or close the current review first.");
             cx.notify();
             return;
         }
@@ -2974,11 +3075,13 @@ impl WalletWindow {
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
                 });
-                self.operation_status = None;
+                self.clear_route_error(Route::Reviews);
             }
             Err(error) => {
-                self.operation_status =
-                    Some(format!("Could not open typed-data review: {error:#}").into());
+                self.set_route_error(
+                    Route::Reviews,
+                    format!("Could not open typed-data review: {error:#}"),
+                );
             }
         }
         cx.notify();
@@ -2986,11 +3089,11 @@ impl WalletWindow {
 
     fn begin_transaction_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
-            self.operation_status = Some("Finish or close the current review first.".into());
+            self.set_route_error(Route::Reviews, "Finish or close the current review first.");
             cx.notify();
             return;
         }
-        self.operation_status = Some(format!("Opening review {request_id}…").into());
+        self.clear_route_error(Route::Reviews);
         let owner = self.owner.clone();
         let presenter = self.review_presenter.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -3011,18 +3114,14 @@ impl WalletWindow {
                         view.active_review = None;
                     }
                     view.finish_review_flow();
-                    view.operation_status = Some(match result {
-                        Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Signed(_)) => {
-                            "Review approved and transaction signed.".into()
-                        }
-                        Ok(ekubo_wallet_core::orchestrator::ApprovalOutcome::Rejected(_)) => {
-                            "Review rejected. No signature was produced.".into()
-                        }
+                    match result {
+                        Ok(_) => view.clear_route_error(Route::Reviews),
                         Err(error) if error.to_string().contains("closed without a decision") => {
-                            "Review closed. The request remains pending.".into()
+                            view.clear_route_error(Route::Reviews);
                         }
-                        Err(error) => format!("Review failed: {error:#}").into(),
-                    });
+                        Err(error) => view
+                            .set_route_error(Route::Reviews, format!("Review failed: {error:#}")),
+                    }
                     cx.notify();
                 });
         })
@@ -3087,7 +3186,7 @@ impl WalletWindow {
             (GuiReviewCommand::Refresh, Some(ActiveReviewCompletion::Transaction(response))) => {
                 active.awaiting_refresh = true;
                 if response.send(command).is_err() {
-                    self.operation_status = Some("The review request is no longer active.".into());
+                    self.set_route_error(Route::Reviews, "The review request is no longer active.");
                     self.active_review = None;
                 }
             }
@@ -3102,7 +3201,7 @@ impl WalletWindow {
             ) => {
                 wait_for_flow = true;
                 if response.send(command).is_err() {
-                    self.operation_status = Some("The review request is no longer active.".into());
+                    self.set_route_error(Route::Reviews, "The review request is no longer active.");
                 }
                 self.active_review = None;
             }
@@ -3114,7 +3213,7 @@ impl WalletWindow {
                 ),
             ) => {
                 self.active_review = None;
-                self.operation_status = Some("Review closed. The request remains pending.".into());
+                self.clear_route_error(Route::Reviews);
             }
             (
                 GuiReviewCommand::Close | GuiReviewCommand::Reject,
@@ -3128,20 +3227,26 @@ impl WalletWindow {
                 Some(ActiveReviewCompletion::Message { request_id, .. }),
             ) => {
                 self.active_review = None;
-                self.operation_status = Some(match owner.reject_message(request_id) {
-                    Ok(_) => "Message signature rejected.".into(),
-                    Err(error) => format!("Could not reject message: {error:#}").into(),
-                });
+                match owner.reject_message(request_id) {
+                    Ok(_) => self.clear_route_error(Route::Reviews),
+                    Err(error) => self.set_route_error(
+                        Route::Reviews,
+                        format!("Could not reject message: {error:#}"),
+                    ),
+                }
             }
             (
                 GuiReviewCommand::Reject,
                 Some(ActiveReviewCompletion::TypedData { request_id, .. }),
             ) => {
                 self.active_review = None;
-                self.operation_status = Some(match owner.reject_typed_data(request_id) {
-                    Ok(_) => "Typed-data signature rejected.".into(),
-                    Err(error) => format!("Could not reject typed data: {error:#}").into(),
-                });
+                match owner.reject_typed_data(request_id) {
+                    Ok(_) => self.clear_route_error(Route::Reviews),
+                    Err(error) => self.set_route_error(
+                        Route::Reviews,
+                        format!("Could not reject typed data: {error:#}"),
+                    ),
+                }
             }
             (
                 GuiReviewCommand::Approve,
@@ -3161,10 +3266,13 @@ impl WalletWindow {
                     let result = task.await;
                     let _ = view.update(cx, |view, cx| {
                         view.finish_review_flow();
-                        view.operation_status = Some(match result {
-                            Ok(_) => "Message reviewed, authenticated, and signed.".into(),
-                            Err(error) => format!("Message signing failed: {error:#}").into(),
-                        });
+                        match result {
+                            Ok(_) => view.clear_route_error(Route::Reviews),
+                            Err(error) => view.set_route_error(
+                                Route::Reviews,
+                                format!("Message signing failed: {error:#}"),
+                            ),
+                        }
                         cx.notify();
                     });
                 })
@@ -3188,10 +3296,13 @@ impl WalletWindow {
                     let result = task.await;
                     let _ = view.update(cx, |view, cx| {
                         view.finish_review_flow();
-                        view.operation_status = Some(match result {
-                            Ok(_) => "Typed data reviewed, authenticated, and signed.".into(),
-                            Err(error) => format!("Typed-data signing failed: {error:#}").into(),
-                        });
+                        match result {
+                            Ok(_) => view.clear_route_error(Route::Reviews),
+                            Err(error) => view.set_route_error(
+                                Route::Reviews,
+                                format!("Typed-data signing failed: {error:#}"),
+                            ),
+                        }
                         cx.notify();
                     });
                 })
@@ -3240,8 +3351,12 @@ impl WalletWindow {
                     .send(ProposalCommand::Approve(selected_account))
                     .is_err()
                 {
-                    self.operation_status =
-                        Some("The connection proposal is no longer active.".into());
+                    self.set_route_error(
+                        Route::WalletConnect,
+                        "The connection proposal is no longer active.",
+                    );
+                } else {
+                    self.clear_route_error(Route::WalletConnect);
                 }
             }
             (
@@ -3250,7 +3365,7 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 let _ = response.send(ProposalCommand::Reject);
-                self.operation_status = Some("WalletConnect proposal rejected.".into());
+                self.clear_route_error(Route::WalletConnect);
             }
             (
                 GuiReviewCommand::Close,
@@ -3258,15 +3373,17 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 let _ = response.send(ProposalCommand::Close);
-                self.operation_status = Some("WalletConnect proposal closed and declined.".into());
+                self.clear_route_error(Route::WalletConnect);
             }
             (GuiReviewCommand::Refresh, completion) => {
                 active.completion = completion;
-                self.operation_status =
-                    Some("Only transaction reviews can be re-simulated.".into());
+                self.set_route_error(
+                    Route::Reviews,
+                    "Only transaction reviews can be re-simulated.",
+                );
             }
             (_, None) => {
-                self.operation_status = Some("The review request is no longer active.".into());
+                self.set_route_error(Route::Reviews, "The review request is no longer active.");
                 self.active_review = None;
             }
         }
@@ -3308,7 +3425,7 @@ impl WalletWindow {
     }
 
     fn set_detailed_notification_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        self.clear_route_error(Route::Settings);
         let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             owner.set_detailed_notification_previews(enabled).await
@@ -3320,18 +3437,12 @@ impl WalletWindow {
                     Ok(()) => {
                         view.detailed_notification_previews
                             .store(enabled, Ordering::Relaxed);
-                        view.operation_status = Some(
-                            if enabled {
-                                "Notification previews may now include request identifiers."
-                            } else {
-                                "Notification previews are now lock-screen safe."
-                            }
-                            .into(),
-                        );
+                        view.clear_route_error(Route::Settings);
                     }
                     Err(error) => {
-                        view.operation_status = Some(
-                            format!("Could not save notification preference: {error:#}").into(),
+                        view.set_route_error(
+                            Route::Settings,
+                            format!("Could not save notification preference: {error:#}"),
                         );
                     }
                 }
@@ -4126,6 +4237,18 @@ impl WalletWindow {
                                         ),
                                 )
                             })
+                            .when(active && !managed, |row| {
+                                row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "delete-agent-registration-{client_id}"
+                                    )))
+                                    .label("Delete registration")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.prepare_agent_registration_removal(client_id, cx);
+                                    })),
+                                )
+                            })
                             .when(active, |row| {
                                 row.child(
                                     Button::new(SharedString::from(format!(
@@ -4236,7 +4359,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Agent tokens protect this endpoint from accidental or unauthorized local clients. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user."),
+                            .child("OAuth access tokens are issued only after wallet-mediated human presence and protect this endpoint from accidental or unauthorized local clients. Agent configuration files contain no credential. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user."),
                     ),
             )
             .child(
@@ -5501,7 +5624,15 @@ impl WalletWindow {
             )
         };
 
-        let mut content = div().flex().flex_col().flex_1().min_h(px(320.0)).gap_3();
+        let mut content = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(320.0))
+            .gap_3()
+            .when_some(self.token_proposal_error.clone(), |content, error| {
+                content.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            });
         if let Some(input) = self.token_list_url_input.as_ref() {
             let selection = active_chain.map_or_else(
                 || "all enabled networks".to_owned(),
@@ -6195,28 +6326,36 @@ impl WalletWindow {
             .child(
                 div()
                     .font_semibold()
-                    .child(format!("{} MCP configuration", pending.display_name)),
+                    .child(format!("Review {}", pending.display_name)),
             )
-            .child("Review the exact configuration change. A timestamped backup is created before installation.")
-            .child(
-                div()
-                    .id("agent-configuration-diff-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .p_3()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .font_family("monospace")
-                    .child(
-                        pending
-                            .preview
-                            .as_ref()
-                            .expect("a pending installation always has its preview")
-                            .exact_diff()
-                            .to_owned(),
-                    ),
-            )
+            .when(pending.preview.is_some(), |panel| {
+                panel.child("Review the exact configuration change. A timestamped backup is created before installation.")
+            })
+            .when(pending.remove_client_id.is_some(), |panel| {
+                panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Removal also deletes this wallet registration and revokes all of its OAuth credentials after operating-system authentication. The configuration change is rolled back if authentication or database removal fails."),
+                )
+            })
+            .when_some(pending.preview.as_ref(), |panel, preview| {
+                panel.child(
+                    div()
+                        .id("agent-configuration-diff-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scrollbar()
+                        .p_3()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .font_family("monospace")
+                        .child(preview.exact_diff().to_owned()),
+                )
+            })
+            .when(pending.preview.is_none(), |panel| {
+                panel.child("No managed configuration file belongs to this registration. Only its encrypted wallet registration and OAuth credentials will be deleted.")
+            })
             .child(
                 div()
                     .flex()
@@ -6231,7 +6370,11 @@ impl WalletWindow {
                     )
                     .child(
                         Button::new("confirm-agent-install")
-                            .label("Apply")
+                            .label(if pending.remove_client_id.is_some() {
+                                "Authenticate & remove"
+                            } else {
+                                "Apply"
+                            })
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.confirm_agent_install(cx);
@@ -6289,6 +6432,9 @@ impl WalletWindow {
                     .flex_shrink_0()
                     .child(format!("Document digest: {}", review.digest)),
             )
+            .when_some(review.error.clone(), |panel, error| {
+                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
             .child(
                 div()
                     .flex()
@@ -6456,6 +6602,13 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_4()
+                    .when_some(
+                        self.route_errors.get(&self.route).cloned(),
+                        |content, error| {
+                            content
+                                .child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        },
+                    )
                     .child(self.route_panel(cx)),
             )
     }

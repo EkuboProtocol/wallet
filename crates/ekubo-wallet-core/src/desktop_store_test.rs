@@ -146,6 +146,47 @@ fn revocation_invalidates_access_without_removing_harness_registration() {
 }
 
 #[test]
+fn removal_requires_agent_authorization_and_deletes_every_oauth_credential() {
+    let mut store = store(39);
+    let client = register(&mut store);
+    let pair = authorize_and_exchange(&mut store, &client);
+    let wrong_scope = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+
+    assert!(store.remove_client(client.id, &wrong_scope).is_err());
+    assert!(
+        store
+            .authenticate_access_token(&pair.access_token.expose_base64url(), MCP_RESOURCE)
+            .unwrap()
+            .is_some()
+    );
+
+    store
+        .remove_client(client.id, &agent_authorization())
+        .unwrap();
+    assert!(store.clients().unwrap().is_empty());
+    assert!(
+        store
+            .authenticate_access_token(&pair.access_token.expose_base64url(), MCP_RESOURCE)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .refresh_access_token(
+                &pair.refresh_token.expose_base64url(),
+                client.id,
+                MCP_RESOURCE,
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .oauth_client_for_authorization(client.id, REDIRECT)
+            .is_err()
+    );
+}
+
+#[test]
 fn protected_desktop_settings_reject_the_wrong_authorization_scope() {
     let mut store = store(35);
     let client = register(&mut store);
