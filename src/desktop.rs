@@ -25,21 +25,22 @@ use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::AgentKind;
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::pending::PendingStatus;
+use ekubo_wallet_core::token_store::StoredToken;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, QuitMode, Render,
-    SharedString, Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions,
-    div, prelude::*, px, size,
+    SharedString, Subscription, Task, Window, WindowAppearance, WindowBounds, WindowHandle,
+    WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, FocusTrapElement, IconName, Root, StyledExt,
+    ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, StyledExt,
     alert::Alert,
     button::{Button, ButtonVariants},
     group_box::{GroupBox, GroupBoxVariants as _},
     h_flex,
     input::{Input, InputState},
-    list::ListItem,
+    list::{List, ListDelegate, ListEvent, ListItem, ListState},
     scroll::ScrollableElement,
-    sidebar::{Sidebar, SidebarMenu, SidebarMenuItem, SidebarToggleButton},
+    sidebar::{Sidebar, SidebarMenu, SidebarMenuItem},
     spinner::Spinner,
     switch::Switch,
 };
@@ -56,6 +57,12 @@ use std::{
 use tokio::sync::oneshot;
 
 actions!(ekubo_wallet, [OpenCommandPalette, Quit]);
+
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = ekubo_wallet, no_json)]
+struct NavigateRoute {
+    route: Route,
+}
 
 struct DesktopRuntime {
     _instance: SingleInstance,
@@ -74,6 +81,13 @@ fn next_required_legal(status: &LegalStatus) -> Option<LegalDocument> {
     } else {
         None
     }
+}
+
+fn legal_requires_acceptance(document: LegalDocument) -> bool {
+    matches!(
+        document,
+        LegalDocument::TermsOfService | LegalDocument::PrivacyPolicy
+    )
 }
 
 fn format_asset_balance(
@@ -164,7 +178,6 @@ pub enum Route {
     Networks,
     Tokens,
     AddressBook,
-    Agents,
     WalletConnect,
     Settings,
     Legal,
@@ -172,7 +185,7 @@ pub enum Route {
 }
 
 impl Route {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 12] = [
         Self::Overview,
         Self::Reviews,
         Self::Activity,
@@ -181,7 +194,6 @@ impl Route {
         Self::Networks,
         Self::Tokens,
         Self::AddressBook,
-        Self::Agents,
         Self::WalletConnect,
         Self::Settings,
         Self::Legal,
@@ -198,12 +210,18 @@ impl Route {
             Self::Networks => "Networks",
             Self::Tokens => "Tokens",
             Self::AddressBook => "Address Book",
-            Self::Agents => "Agents",
             Self::WalletConnect => "WalletConnect",
             Self::Settings => "Settings",
             Self::Legal => "Legal & Version",
             Self::Updates => "Updates",
         }
+    }
+
+    fn menu_order(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|candidate| *candidate == self)
+            .unwrap_or(usize::MAX)
     }
 
     const fn icon(self) -> IconName {
@@ -216,11 +234,46 @@ impl Route {
             Self::Networks => IconName::Network,
             Self::Tokens => IconName::Star,
             Self::AddressBook => IconName::BookOpen,
-            Self::Agents => IconName::Bot,
             Self::WalletConnect => IconName::Globe,
             Self::Settings => IconName::Settings,
             Self::Legal => IconName::Info,
             Self::Updates => IconName::ArrowDown,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    const fn shortcut(self) -> &'static str {
+        match self {
+            Self::Overview => "⌘P",
+            Self::Reviews => "⌘R",
+            Self::Activity => "⌘A",
+            Self::Accounts => "⌘⇧A",
+            Self::Policies => "⌘⇧P",
+            Self::Networks => "⌘N",
+            Self::Tokens => "⌘T",
+            Self::AddressBook => "⌘B",
+            Self::WalletConnect => "⌘W",
+            Self::Settings => "⌘,",
+            Self::Legal => "⌘L",
+            Self::Updates => "⌘U",
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    const fn shortcut(self) -> &'static str {
+        match self {
+            Self::Overview => "Ctrl+P",
+            Self::Reviews => "Ctrl+R",
+            Self::Activity => "Ctrl+A",
+            Self::Accounts => "Ctrl+Shift+A",
+            Self::Policies => "Ctrl+Shift+P",
+            Self::Networks => "Ctrl+N",
+            Self::Tokens => "Ctrl+T",
+            Self::AddressBook => "Ctrl+B",
+            Self::WalletConnect => "Ctrl+W",
+            Self::Settings => "Ctrl+,",
+            Self::Legal => "Ctrl+L",
+            Self::Updates => "Ctrl+U",
         }
     }
 }
@@ -230,6 +283,10 @@ pub struct WalletWindow {
     review_presenter: GuiReviewPresenter,
     route: Route,
     command_palette: bool,
+    command_palette_list: Option<Entity<ListState<RouteListDelegate>>>,
+    command_palette_subscription: Option<Subscription>,
+    token_list: Option<Entity<ListState<TokenListDelegate>>>,
+    token_list_generation: u64,
     mcp_status: SharedString,
     selected_record: Option<uuid::Uuid>,
     active_review: Option<ActiveReview>,
@@ -247,7 +304,6 @@ pub struct WalletWindow {
     portfolio: PortfolioState,
     portfolio_generation: u64,
     modal_focus: FocusHandle,
-    nav_collapsed: bool,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
@@ -396,6 +452,300 @@ impl<T> SerialQueue<T> {
     }
 }
 
+struct RouteListDelegate {
+    routes: Vec<Route>,
+    selected: Option<IndexPath>,
+}
+
+struct TokenListDelegate {
+    owner: OwnerApi,
+    all_tokens: Vec<StoredToken>,
+    visible_tokens: Vec<StoredToken>,
+    chain_filter: Option<u64>,
+    query: String,
+    loading: bool,
+    error: Option<SharedString>,
+    status: Option<SharedString>,
+}
+
+impl TokenListDelegate {
+    fn new(owner: OwnerApi) -> Self {
+        Self {
+            owner,
+            all_tokens: Vec::new(),
+            visible_tokens: Vec::new(),
+            chain_filter: None,
+            query: String::new(),
+            loading: true,
+            error: None,
+            status: None,
+        }
+    }
+
+    fn replace_tokens(&mut self, result: Result<Vec<StoredToken>>) {
+        self.loading = false;
+        match result {
+            Ok(tokens) => {
+                self.all_tokens = tokens;
+                self.error = None;
+                self.apply_filters();
+            }
+            Err(error) => {
+                self.error = Some(format!("Tokens unavailable: {error:#}").into());
+                self.visible_tokens.clear();
+            }
+        }
+    }
+
+    fn set_chain_filter(&mut self, chain_filter: Option<u64>) {
+        self.chain_filter = chain_filter;
+        self.apply_filters();
+    }
+
+    fn apply_filters(&mut self) {
+        self.visible_tokens = self
+            .all_tokens
+            .iter()
+            .filter(|token| token_matches_filter(token, self.chain_filter, &self.query))
+            .cloned()
+            .collect();
+    }
+}
+
+fn token_matches_filter(token: &StoredToken, chain_filter: Option<u64>, query: &str) -> bool {
+    if chain_filter.is_some_and(|chain| token.chain_id.parse::<u64>().ok() != Some(chain)) {
+        return false;
+    }
+    let query = query.to_lowercase();
+    query.is_empty()
+        || token.address.to_lowercase().contains(&query)
+        || token
+            .symbol
+            .as_deref()
+            .is_some_and(|value| value.to_lowercase().contains(&query))
+        || token
+            .name
+            .as_deref()
+            .is_some_and(|value| value.to_lowercase().contains(&query))
+}
+
+impl RouteListDelegate {
+    fn new() -> Self {
+        Self {
+            routes: Route::ALL.into(),
+            selected: Some(IndexPath::default()),
+        }
+    }
+
+    fn route(&self, index: IndexPath) -> Option<Route> {
+        self.routes.get(index.row).copied()
+    }
+}
+
+impl ListDelegate for RouteListDelegate {
+    type Item = ListItem;
+
+    fn items_count(&self, _: usize, _: &App) -> usize {
+        self.routes.len()
+    }
+
+    fn perform_search(
+        &mut self,
+        query: &str,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Task<()> {
+        let mut matches = Route::ALL
+            .into_iter()
+            .filter_map(|route| fuzzy_route_score(route.label(), query).map(|score| (score, route)))
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|(score, route)| (*score, route.menu_order()));
+        self.routes = matches.into_iter().map(|(_, route)| route).collect();
+        self.selected = (!self.routes.is_empty()).then(IndexPath::default);
+        Task::ready(())
+    }
+
+    fn set_selected_index(
+        &mut self,
+        index: Option<IndexPath>,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) {
+        self.selected = index;
+    }
+
+    fn render_item(
+        &mut self,
+        index: IndexPath,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Option<Self::Item> {
+        let route = self.route(index)?;
+        Some(
+            ListItem::new(("command-route", index.row)).child(
+                h_flex()
+                    .gap_3()
+                    .child(Icon::new(route.icon()))
+                    .child(route.label()),
+            ),
+        )
+    }
+}
+
+impl ListDelegate for TokenListDelegate {
+    type Item = ListItem;
+
+    fn items_count(&self, _: usize, _: &App) -> usize {
+        self.visible_tokens.len()
+    }
+
+    fn perform_search(
+        &mut self,
+        query: &str,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) -> Task<()> {
+        query.clone_into(&mut self.query);
+        self.apply_filters();
+        Task::ready(())
+    }
+
+    fn set_selected_index(
+        &mut self,
+        _: Option<IndexPath>,
+        _: &mut Window,
+        _: &mut Context<ListState<Self>>,
+    ) {
+    }
+
+    fn render_item(
+        &mut self,
+        index: IndexPath,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<Self::Item> {
+        let token = self.visible_tokens.get(index.row)?.clone();
+        let chain_id = token.chain_id.parse::<u64>().ok();
+        let address = token.address.parse::<alloy::primitives::Address>().ok();
+        let owner = self.owner.clone();
+        let state = cx.entity().downgrade();
+        let row_id = format!("token-{}-{}", token.chain_id, token.address);
+        Some(
+            ListItem::new(SharedString::from(row_id)).child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(format!(
+                                "{} · chain {}",
+                                token.symbol.as_deref().unwrap_or("Unnamed token"),
+                                token.chain_id
+                            ))
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(token.address.clone()),
+                            ),
+                    )
+                    .child(
+                        Button::new(("remove-token", index.row))
+                            .label("Remove")
+                            .danger()
+                            .disabled(chain_id.zip(address).is_none())
+                            .on_click(move |_, _, cx| {
+                                let Some((chain_id, address)) = chain_id.zip(address) else {
+                                    return;
+                                };
+                                let result = owner.remove_token(chain_id, address);
+                                let _ = state.update(cx, |list, cx| {
+                                    let delegate = list.delegate_mut();
+                                    let succeeded = result.is_ok();
+                                    delegate.status = Some(match result {
+                                        Ok(true) => "Removed token metadata.".into(),
+                                        Ok(false) => "Token metadata was already absent.".into(),
+                                        Err(error) => {
+                                            format!("Could not remove token: {error:#}").into()
+                                        }
+                                    });
+                                    if succeeded {
+                                        delegate.all_tokens.retain(|item| {
+                                            !(item.chain_id.parse::<u64>().ok() == Some(chain_id)
+                                                && item
+                                                    .address
+                                                    .parse::<alloy::primitives::Address>()
+                                                    .ok()
+                                                    == Some(address))
+                                        });
+                                        delegate.apply_filters();
+                                    }
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            ),
+        )
+    }
+
+    fn loading(&self, _: &App) -> bool {
+        self.loading
+    }
+
+    fn render_empty(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(cx.theme().muted_foreground)
+            .child(
+                self.error
+                    .clone()
+                    .unwrap_or_else(|| "No tokens match these filters.".into()),
+            )
+    }
+}
+
+fn fuzzy_route_score(label: &str, query: &str) -> Option<usize> {
+    let label = label
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<Vec<_>>();
+    let query = query
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<Vec<_>>();
+    if query.is_empty() {
+        return Some(0);
+    }
+    let mut cursor = 0;
+    let mut previous = None;
+    let mut score = 0;
+    for wanted in query {
+        let relative = label
+            .get(cursor..)?
+            .iter()
+            .position(|value| *value == wanted)?;
+        let position = cursor + relative;
+        score += previous.map_or(position, |previous| position.saturating_sub(previous + 1));
+        previous = Some(position);
+        cursor = position + 1;
+    }
+    Some(score)
+}
+
 impl WalletWindow {
     fn new(
         owner: OwnerApi,
@@ -410,6 +760,10 @@ impl WalletWindow {
             review_presenter,
             route: Route::Overview,
             command_palette: false,
+            command_palette_list: None,
+            command_palette_subscription: None,
+            token_list: None,
+            token_list_generation: 0,
             mcp_status: "MCP starting…".into(),
             selected_record: None,
             active_review: None,
@@ -427,7 +781,6 @@ impl WalletWindow {
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
             modal_focus: cx.focus_handle(),
-            nav_collapsed: true,
             walletconnect,
             walletconnect_presenter,
             walletconnect_uri_input: None,
@@ -441,6 +794,40 @@ impl WalletWindow {
     }
 
     fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette_list.is_none() {
+            let list =
+                cx.new(|cx| ListState::new(RouteListDelegate::new(), window, cx).searchable(true));
+            list.update(cx, |list, cx| {
+                list.set_selected_index(Some(IndexPath::default()), window, cx);
+            });
+            self.command_palette_subscription = Some(cx.subscribe(
+                &list,
+                |view, list, event: &ListEvent, cx| match event {
+                    ListEvent::Confirm(index) => {
+                        if let Some(route) = list.read(cx).delegate().route(*index) {
+                            view.route = route;
+                        }
+                        view.command_palette = false;
+                        cx.notify();
+                    }
+                    ListEvent::Cancel => {
+                        view.command_palette = false;
+                        cx.notify();
+                    }
+                    ListEvent::Select(_) => {}
+                },
+            ));
+            self.command_palette_list = Some(list);
+        }
+        if self.token_list.is_none() {
+            let owner = self.owner.clone();
+            self.token_list = Some(cx.new(|cx| {
+                ListState::new(TokenListDelegate::new(owner), window, cx)
+                    .searchable(true)
+                    .selectable(false)
+            }));
+            self.reload_tokens(cx);
+        }
         if self.account_id_input.is_none() {
             self.account_id_input = Some(cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Account name, for example primary")
@@ -468,6 +855,37 @@ impl WalletWindow {
             self.address_note_input =
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("Optional note")));
         }
+    }
+
+    fn reload_tokens(&mut self, cx: &mut Context<Self>) {
+        let Some(list) = self.token_list.clone() else {
+            return;
+        };
+        self.token_list_generation = self.token_list_generation.wrapping_add(1);
+        let generation = self.token_list_generation;
+        list.update(cx, |list, cx| {
+            list.delegate_mut().loading = true;
+            cx.notify();
+        });
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.tokens(None, 10_000, 0))
+                .await
+                .context("token inventory task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.token_list_generation != generation {
+                    return;
+                }
+                list.update(cx, |list, cx| {
+                    list.delegate_mut().replace_tokens(result);
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
     }
 
     fn connect_walletconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -847,6 +1265,13 @@ impl WalletWindow {
     }
 
     fn reinstall_detected_agents_from_menu(&mut self, cx: &mut Context<Self>) {
+        if self.legal_gate {
+            self.operation_status = Some(
+                "Accept the current Terms and Privacy Policy before installing agents.".into(),
+            );
+            cx.notify();
+            return;
+        }
         match self.owner.mcp_port() {
             Ok(Some(port)) => self.reinstall_detected_agents(port, cx),
             Ok(None) => {
@@ -904,20 +1329,6 @@ impl WalletWindow {
         self.operation_status = Some(match self.owner.revoke_client(client_id) {
             Ok(()) => "Revoked the agent token immediately.".into(),
             Err(error) => format!("Could not revoke agent: {error:#}").into(),
-        });
-        cx.notify();
-    }
-
-    fn remove_token(
-        &mut self,
-        chain_id: u64,
-        address: alloy::primitives::Address,
-        cx: &mut Context<Self>,
-    ) {
-        self.operation_status = Some(match self.owner.remove_token(chain_id, address) {
-            Ok(true) => "Removed token metadata.".into(),
-            Ok(false) => "Token metadata was already absent.".into(),
-            Err(error) => format!("Could not remove token: {error:#}").into(),
         });
         cx.notify();
     }
@@ -1575,11 +1986,30 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn toggle_palette(&mut self, _: &OpenCommandPalette, _: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_palette(
+        &mut self,
+        _: &OpenCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.legal_gate {
             return;
         }
         self.command_palette = !self.command_palette;
+        if self.command_palette
+            && let Some(list) = self.command_palette_list.as_ref()
+        {
+            list.update(cx, |list, cx| list.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn navigate_route(&mut self, action: &NavigateRoute, _: &mut Window, cx: &mut Context<Self>) {
+        if self.legal_gate {
+            return;
+        }
+        self.route = action.route;
+        self.command_palette = false;
         cx.notify();
     }
 
@@ -1606,9 +2036,8 @@ impl WalletWindow {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let collapsed = self.nav_collapsed;
         let menu = SidebarMenu::new().children(Route::ALL.into_iter().map(|route| {
-            SidebarMenuItem::new(route.label())
+            SidebarMenuItem::new(format!("{}  {}", route.label(), route.shortcut()))
                 .icon(route.icon())
                 .active(route == self.route)
                 .disable(self.legal_gate)
@@ -1619,35 +2048,9 @@ impl WalletWindow {
                 }))
         }));
         Sidebar::new("wallet-sidebar")
-            .w(px(196.0))
-            .collapsed(collapsed)
-            .header(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .when(!collapsed, |header| {
-                        header.child(div().text_lg().font_semibold().child("Ekubo Wallet"))
-                    })
-                    .child(
-                        SidebarToggleButton::new()
-                            .collapsed(collapsed)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.nav_collapsed = !view.nav_collapsed;
-                                cx.notify();
-                            })),
-                    ),
-            )
+            .w(px(48.0))
+            .collapsed(true)
             .child(menu)
-            .footer(
-                Button::new("reinstall-all-agents")
-                    .icon(IconName::Redo2)
-                    .tooltip("Reinstall MCP server for every detected agent")
-                    .when(!collapsed, |button| button.label("Reinstall MCP server"))
-                    .disabled(self.legal_gate)
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.reinstall_detected_agents_from_menu(cx);
-                    })),
-            )
     }
 
     fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1771,6 +2174,95 @@ impl WalletWindow {
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut agents = div().flex().flex_col().gap_1();
         let clients = self.owner.clients().unwrap_or_default();
+        let mut managed_agents = div().flex().flex_col().gap_1();
+        for item in &clients {
+            let client_id = item.id;
+            let active = item.revoked_at.is_none();
+            let managed = item.agent_kind != AgentKind::Other;
+            let status = if let Some(revoked) = item.revoked_at {
+                format!("Revoked {revoked}")
+            } else if let Some(last_used) = item.last_used_at {
+                format!("Last used {last_used}")
+            } else {
+                "Registered, not yet used".into()
+            };
+            managed_agents =
+                managed_agents.child(
+                    ListItem::new(SharedString::from(format!("managed-agent-{client_id}"))).child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .gap_4()
+                                    .child(format!("{} · {:?}", item.display_name, item.agent_kind))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(status),
+                                    ),
+                            )
+                            .when(active && managed, |row| {
+                                row.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "repair-agent-{client_id}"
+                                            )))
+                                            .label("Repair")
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.prepare_agent_repair(client_id, cx);
+                                            })),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "rotate-agent-{client_id}"
+                                            )))
+                                            .label("Rotate token")
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.prepare_agent_rotation(client_id, cx);
+                                            })),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "remove-agent-{client_id}"
+                                            )))
+                                            .label("Remove")
+                                            .danger()
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.prepare_agent_removal(client_id, cx);
+                                            })),
+                                        ),
+                                )
+                            })
+                            .when(active, |row| {
+                                row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "revoke-agent-{client_id}"
+                                    )))
+                                    .label("Revoke access")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.revoke_agent(client_id, cx);
+                                    })),
+                                )
+                            }),
+                    ),
+                );
+        }
+        if clients.is_empty() {
+            managed_agents = managed_agents.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No agent registrations have been created."),
+            );
+        }
         let adapters = match AgentAdapter::supported() {
             Ok(adapters) => adapters,
             Err(error) => {
@@ -1857,7 +2349,13 @@ impl WalletWindow {
                     .child(format!(
                         "Request limit: {} MiB",
                         MCP_REQUEST_LIMIT_BYTES / 1024 / 1024
-                    )),
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Agent tokens protect this endpoint from accidental or unauthorized local clients. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user."),
+                    ),
             )
             .child(
                 GroupBox::new()
@@ -1895,7 +2393,30 @@ impl WalletWindow {
                     .id("detected-agent-settings")
                     .outline()
                     .title("Detected agents")
+                    .child(
+                        Button::new("reinstall-all-detected-agents")
+                            .label(if self.agent_reinstall == AgentReinstallState::Running {
+                                "Reinstalling…"
+                            } else {
+                                "Reinstall MCP server"
+                            })
+                            .primary()
+                            .disabled(
+                                self.legal_gate
+                                    || self.agent_reinstall == AgentReinstallState::Running,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.reinstall_detected_agents_from_menu(cx);
+                            })),
+                    )
                     .child(agents),
+            )
+            .child(
+                GroupBox::new()
+                    .id("managed-agent-settings")
+                    .outline()
+                    .title("Managed agent connections")
+                    .child(managed_agents),
             )
     }
 
@@ -2437,6 +2958,77 @@ impl WalletWindow {
         }
     }
 
+    fn render_tokens(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(list) = self.token_list.as_ref() else {
+            return div().child(Spinner::new());
+        };
+        let delegate = list.read(cx).delegate();
+        let active_chain = delegate.chain_filter;
+        let visible = delegate.visible_tokens.len();
+        let total = delegate.all_tokens.len();
+        let status = delegate.status.clone();
+        let networks = self.owner.networks().unwrap_or_default();
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(320.0))
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("token-network-all")
+                            .label("All networks")
+                            .when(active_chain.is_none(), ButtonVariants::primary)
+                            .on_click({
+                                let list = list.clone();
+                                move |_, _, cx| {
+                                    list.update(cx, |list, cx| {
+                                        list.delegate_mut().set_chain_filter(None);
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    .children(networks.into_iter().map(|network| {
+                        let chain_id = network.chain_id;
+                        let list = list.clone();
+                        Button::new(SharedString::from(format!("token-network-{chain_id}")))
+                            .label(network.display_name.unwrap_or(network.name))
+                            .when(active_chain == Some(chain_id), ButtonVariants::primary)
+                            .on_click(move |_, _, cx| {
+                                list.update(cx, |list, cx| {
+                                    list.delegate_mut().set_chain_filter(Some(chain_id));
+                                    cx.notify();
+                                });
+                            })
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("Showing {visible} of {total} token(s)")),
+            )
+            .when_some(status, |panel, status| {
+                panel.child(Alert::info("token-operation-status", status))
+            })
+            .child(
+                List::new(list)
+                    .search_placeholder("Search token name, symbol, or address")
+                    .flex_1()
+                    .min_h(px(260.0))
+                    .w_full()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius),
+            )
+    }
+
     fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
@@ -2518,115 +3110,8 @@ impl WalletWindow {
                 })),
                 Err(error) => panel.child(format!("Networks unavailable: {error:#}")),
             },
-            Route::Tokens => {
-                match self.owner.tokens(None, 500, 0) {
-                    Ok(items) => panel.children(items.into_iter().map(|item| {
-                        let chain_id = item.chain_id.parse::<u64>().ok();
-                        let address = item.address.parse::<alloy::primitives::Address>().ok();
-                        div()
-                            .py_2()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(format!(
-                                "{} · chain {} · {}",
-                                item.symbol.as_deref().unwrap_or("Unnamed token"),
-                                item.chain_id,
-                                item.address
-                            ))
-                            .when_some(chain_id.zip(address), |row, (chain_id, address)| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "remove-token-{chain_id}-{address}"
-                                    )))
-                                    .label("Remove")
-                                    .danger()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.remove_token(chain_id, address, cx);
-                                    })),
-                                )
-                            })
-                    })),
-                    Err(error) => panel.child(format!("Tokens unavailable: {error:#}")),
-                }
-            }
+            Route::Tokens => self.render_tokens(cx),
             Route::AddressBook => self.render_address_book(cx),
-            Route::Agents => {
-                match self.owner.clients() {
-                    Ok(items) => panel.children(items.into_iter().map(|item| {
-                        let client_id = item.id;
-                        let active = item.revoked_at.is_none();
-                        let managed = item.agent_kind != AgentKind::Other;
-                        div()
-                            .py_2()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(format!("{} · {:?}", item.display_name, item.agent_kind))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if let Some(revoked) = item.revoked_at {
-                                        format!("Revoked {revoked}")
-                                    } else if let Some(last_used) = item.last_used_at {
-                                        format!("Last used {last_used}")
-                                    } else {
-                                        "Registered, not yet used".into()
-                                    }),
-                            )
-                            .when(active && managed, |row| {
-                                row.child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "repair-agent-{client_id}"
-                                            )))
-                                            .label("Repair")
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.prepare_agent_repair(client_id, cx);
-                                            })),
-                                        )
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "rotate-agent-{client_id}"
-                                            )))
-                                            .label("Rotate token")
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.prepare_agent_rotation(client_id, cx);
-                                            })),
-                                        )
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "remove-agent-{client_id}"
-                                            )))
-                                            .label("Remove")
-                                            .danger()
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.prepare_agent_removal(client_id, cx);
-                                            })),
-                                        ),
-                                )
-                            })
-                            .when(active, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "revoke-agent-{client_id}"
-                                    )))
-                                    .label("Revoke access")
-                                    .danger()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.revoke_agent(client_id, cx);
-                                    })),
-                                )
-                            })
-                    })),
-                    Err(error) => panel.child(format!("Agents unavailable: {error:#}")),
-                }
-            }
             Route::WalletConnect => self.render_walletconnect(cx),
             Route::Settings => self.render_settings(cx),
             Route::Legal => self.render_legal(cx),
@@ -2957,7 +3442,7 @@ impl WalletWindow {
         let Some(review) = &self.legal_review else {
             return div().into_any_element();
         };
-        let informational = review.document == LegalDocument::ThirdPartyLicenses;
+        let informational = !legal_requires_acceptance(review.document);
         div()
             .absolute()
             .inset_0()
@@ -3007,10 +3492,8 @@ impl WalletWindow {
                                 }
                             })),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
+                    .child(div().flex().gap_2().when(!informational, |buttons| {
+                        buttons
                             .child(
                                 Button::new("legal-viewed")
                                     .label(if review.viewed {
@@ -3023,18 +3506,16 @@ impl WalletWindow {
                                         view.mark_legal_viewed(cx);
                                     })),
                             )
-                            .when(!informational, |buttons| {
-                                buttons.child(
-                                    Button::new("accept-legal")
-                                        .label("Accept")
-                                        .primary()
-                                        .disabled(!review.viewed)
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.accept_legal(cx);
-                                        })),
-                                )
-                            }),
-                    ),
+                            .child(
+                                Button::new("accept-legal")
+                                    .label("Accept")
+                                    .primary()
+                                    .disabled(!review.viewed)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.accept_legal(cx);
+                                    })),
+                            )
+                    })),
             )
             .focus_trap("legal-review-focus", &self.modal_focus)
             .into_any_element()
@@ -3142,17 +3623,15 @@ impl WalletWindow {
                     )),
                 )
             })
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
-                "Agent tokens protect this endpoint from accidental or unauthorized local clients. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user.",
-            ))
     }
 
-    fn render_palette(cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .absolute()
             .top(px(54.0))
-            .left(px(220.0))
-            .w(px(360.0))
+            .left(px(58.0))
+            .w(px(420.0))
+            .max_h(px(460.0))
             .p_3()
             .rounded_lg()
             .shadow_lg()
@@ -3160,15 +3639,16 @@ impl WalletWindow {
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
             .child(div().font_semibold().mb_2().child("Go to…"))
-            .children(Route::ALL.into_iter().map(|route| {
-                Button::new(SharedString::from(format!("palette-{route:?}")))
-                    .label(route.label())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.route = route;
-                        this.command_palette = false;
-                        cx.notify();
-                    }))
-            }))
+            .when_some(self.command_palette_list.as_ref(), |palette, list| {
+                palette.child(
+                    List::new(list)
+                        .h(px(390.0))
+                        .w_full()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .rounded(cx.theme().radius),
+                )
+            })
     }
 }
 
@@ -3191,6 +3671,7 @@ impl Render for WalletWindow {
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::navigate_route))
             .relative()
             .size_full()
             .flex()
@@ -3199,7 +3680,7 @@ impl Render for WalletWindow {
             .child(self.render_sidebar(cx))
             .child(self.render_content(cx))
             .when(self.command_palette, |view| {
-                view.child(Self::render_palette(cx))
+                view.child(self.render_palette(cx))
             })
             .when(self.active_review.is_some(), |view| {
                 view.child(self.render_review_overlay(cx))
@@ -3241,6 +3722,11 @@ fn show_wallet_window(
     }
 
     wallet_view.update(cx, |view, cx| {
+        view.command_palette = false;
+        view.command_palette_list = None;
+        view.command_palette_subscription = None;
+        view.token_list = None;
+        view.token_list_generation = view.token_list_generation.wrapping_add(1);
         view.account_id_input = None;
         view.private_key_input = None;
         view.walletconnect_uri_input = None;
@@ -3314,14 +3800,189 @@ pub fn run_desktop() -> Result<()> {
                 _walletconnect: walletconnect.clone(),
                 _tray: tray.clone(),
             });
-            cx.bind_keys([
+            let mut key_bindings = vec![
                 KeyBinding::new("cmd-k", OpenCommandPalette, Some("Wallet")),
                 KeyBinding::new("ctrl-k", OpenCommandPalette, Some("Wallet")),
                 #[cfg(target_os = "macos")]
                 KeyBinding::new("cmd-q", Quit, None),
                 #[cfg(not(target_os = "macos"))]
                 KeyBinding::new("ctrl-q", Quit, None),
+            ];
+            #[cfg(target_os = "macos")]
+            key_bindings.extend([
+                KeyBinding::new(
+                    "cmd-p",
+                    NavigateRoute {
+                        route: Route::Overview,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-r",
+                    NavigateRoute {
+                        route: Route::Reviews,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-a",
+                    NavigateRoute {
+                        route: Route::Activity,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-shift-a",
+                    NavigateRoute {
+                        route: Route::Accounts,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-shift-p",
+                    NavigateRoute {
+                        route: Route::Policies,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-n",
+                    NavigateRoute {
+                        route: Route::Networks,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-t",
+                    NavigateRoute {
+                        route: Route::Tokens,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-b",
+                    NavigateRoute {
+                        route: Route::AddressBook,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-w",
+                    NavigateRoute {
+                        route: Route::WalletConnect,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-,",
+                    NavigateRoute {
+                        route: Route::Settings,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-l",
+                    NavigateRoute {
+                        route: Route::Legal,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "cmd-u",
+                    NavigateRoute {
+                        route: Route::Updates,
+                    },
+                    Some("Wallet"),
+                ),
             ]);
+            #[cfg(not(target_os = "macos"))]
+            key_bindings.extend([
+                KeyBinding::new(
+                    "ctrl-p",
+                    NavigateRoute {
+                        route: Route::Overview,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-r",
+                    NavigateRoute {
+                        route: Route::Reviews,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-a",
+                    NavigateRoute {
+                        route: Route::Activity,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-shift-a",
+                    NavigateRoute {
+                        route: Route::Accounts,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-shift-p",
+                    NavigateRoute {
+                        route: Route::Policies,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-n",
+                    NavigateRoute {
+                        route: Route::Networks,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-t",
+                    NavigateRoute {
+                        route: Route::Tokens,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-b",
+                    NavigateRoute {
+                        route: Route::AddressBook,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-w",
+                    NavigateRoute {
+                        route: Route::WalletConnect,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-,",
+                    NavigateRoute {
+                        route: Route::Settings,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-l",
+                    NavigateRoute {
+                        route: Route::Legal,
+                    },
+                    Some("Wallet"),
+                ),
+                KeyBinding::new(
+                    "ctrl-u",
+                    NavigateRoute {
+                        route: Route::Updates,
+                    },
+                    Some("Wallet"),
+                ),
+            ]);
+            cx.bind_keys(key_bindings);
             cx.on_action(|_: &Quit, cx| cx.quit());
             let shutdown_server = server_slot.clone();
             let shutdown_walletconnect = walletconnect.clone();
@@ -3413,8 +4074,19 @@ pub fn run_desktop() -> Result<()> {
                                         ..
                                     }
                             );
-                            if portfolio_changed {
-                                event_view.update(cx, |view, _| view.invalidate_portfolio());
+                            let configuration_changed = matches!(
+                                &event.kind,
+                                crate::events::DomainEventKind::ConfigurationChanged
+                            );
+                            if portfolio_changed || configuration_changed {
+                                event_view.update(cx, |view, cx| {
+                                    if portfolio_changed {
+                                        view.invalidate_portfolio();
+                                    }
+                                    if configuration_changed {
+                                        view.reload_tokens(cx);
+                                    }
+                                });
                             }
                             true
                         }
@@ -3481,6 +4153,18 @@ pub fn run_desktop() -> Result<()> {
                                 tray_view.update(cx, |view, cx| {
                                     view.route = Route::WalletConnect;
                                     cx.notify();
+                                });
+                                let _ = cx
+                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                            }
+                            TrayCommand::ReinstallAgents => {
+                                tray_view.update(cx, |view, cx| {
+                                    view.route = if view.legal_gate {
+                                        Route::Legal
+                                    } else {
+                                        Route::Settings
+                                    };
+                                    view.reinstall_detected_agents_from_menu(cx);
                                 });
                                 let _ = cx
                                     .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));

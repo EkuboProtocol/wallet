@@ -9,6 +9,7 @@ const OPEN_ID: &str = "ekubo.open";
 const REVIEWS_ID: &str = "ekubo.reviews";
 const CONNECT_ID: &str = "ekubo.connect";
 const AGENTS_ID: &str = "ekubo.agents";
+const REINSTALL_AGENTS_ID: &str = "ekubo.reinstall-agents";
 const UPDATES_ID: &str = "ekubo.updates";
 const SETTINGS_ID: &str = "ekubo.settings";
 const QUIT_ID: &str = "ekubo.quit";
@@ -18,6 +19,7 @@ pub enum TrayCommand {
     OpenWallet,
     OpenRoute(Route),
     ConnectDapp,
+    ReinstallAgents,
     CheckForUpdates,
     Quit,
 }
@@ -54,6 +56,8 @@ impl PlatformTray {
         let reviews = MenuItem::with_id(REVIEWS_ID, "No pending reviews", true, None);
         let connect = MenuItem::with_id(CONNECT_ID, "Connect dapp…", true, None);
         let agents = MenuItem::with_id(AGENTS_ID, "MCP starting…", true, None);
+        let reinstall_agents =
+            MenuItem::with_id(REINSTALL_AGENTS_ID, "Reinstall MCP Server", true, None);
         let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Settings…", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit Ekubo Wallet", true, None);
@@ -65,6 +69,7 @@ impl PlatformTray {
             &separator_one,
             &connect,
             &agents,
+            &reinstall_agents,
             &separator_two,
             &updates,
             &settings,
@@ -141,9 +146,9 @@ impl TrayService for PlatformTray {
                 OPEN_ID => Some(TrayCommand::OpenWallet),
                 REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Reviews)),
                 CONNECT_ID => Some(TrayCommand::ConnectDapp),
-                AGENTS_ID => Some(TrayCommand::OpenRoute(Route::Agents)),
+                AGENTS_ID | SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
+                REINSTALL_AGENTS_ID => Some(TrayCommand::ReinstallAgents),
                 UPDATES_ID => Some(TrayCommand::CheckForUpdates),
-                SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
                 QUIT_ID => Some(TrayCommand::Quit),
                 _ => None,
             })
