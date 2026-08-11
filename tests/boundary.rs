@@ -44,13 +44,7 @@ fn mcp_server_cannot_reach_an_approval_surface() {
 /// human override can originate, which is exactly what an auditor reads this
 /// test to enumerate.
 ///
-/// `src/cli.rs` mints two, and they are different capabilities. One is
-/// `ekubo-wallet review`. The other is `owner_at_terminal`, the single origin
-/// of the `InteractiveOwner` that lets `network add` and `network edit`
-/// configure a plaintext endpoint to a node the operator runs -- a decision the
-/// confirmation screen puts to them by name, and one an agent's network
-/// proposal has no way to reach, because it cannot mint the witness.
-const PROOF_ORIGINS: &[(&str, usize)] = &[("src/cli.rs", 2), ("src/connect.rs", 1)];
+const PROOF_ORIGINS: &[(&str, usize)] = &[("src/cli.rs", 1), ("src/connect.rs", 1)];
 
 /// Only the listed production call sites can mint an interactive-terminal
 /// proof, one each. Every human override in the process descends from one of

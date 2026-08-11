@@ -1398,14 +1398,9 @@ mod fee_ceiling_surface_tests {
     }
 }
 
-/// `7e73dfa` let the interactive owner accept a plaintext-to-a-remote-host RPC
-/// that `validate_admissible_endpoints` still refuses on every other path, on
-/// the strength of `confirm_network_change`/`network_review` warning about it
-/// "by name". `is_remote_plaintext` was never actually called from `cli.rs`,
-/// so every owner who added or edited such a network saw only the generic,
-/// transport-agnostic [`NETWORK_TRUST_WARNING`] -- identical to what an
-/// ordinary `https` network shows, naming nothing about the one property that
-/// makes this configuration different. These tests are what that gap needed.
+/// A plaintext-to-a-remote-host RPC is allowed only after the network review
+/// names that endpoint and its risk. These tests keep the warning and the
+/// screen wired together.
 mod plaintext_remote_endpoint_warning_tests {
     use super::*;
 

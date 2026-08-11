@@ -3378,8 +3378,7 @@ async fn run_network(
                 .iter()
                 .find(|network| network.chain_id == candidate.chain_id)
                 .cloned();
-            let owner = owner_at_terminal()?;
-            replace_configured_network(&mut prospective, candidate.clone(), Some(&owner))?;
+            replace_configured_network(&mut prospective, candidate.clone())?;
             // The complete URL is shown, not just its origin. This is the
             // one moment the user can catch a typo or the wrong endpoint, and
             // `network list` already prints configured URLs in full; an RPC
@@ -3407,7 +3406,7 @@ async fn run_network(
                 .await?;
             config.update(|state| {
                 ensure_reviewed_network(&state.networks, candidate.chain_id, reviewed.as_ref())?;
-                replace_configured_network(&mut state.networks, candidate.clone(), Some(&owner))
+                replace_configured_network(&mut state.networks, candidate.clone())
             })?;
             emit(
                 mode,
@@ -3626,14 +3625,6 @@ fn network_candidate(
     // chain-ID probe, and an operating-system authentication prompt, all to
     // be told at the end that a number they typed was out of range.
     ekubo_wallet_core::config::validate_network(&candidate)?;
-    // No plaintext-endpoint refusal here. It used to fire before
-    // `confirm_network_change`, a live chain-ID probe, and an OS
-    // authentication prompt -- three human gates, and the first of them prints
-    // the complete RPC URLs. An operator with a node at
-    // `http://192.168.1.10:8545`, on Tailscale, or in a lab VLAN was told no
-    // by a wall in front of the screen that exists to let them say "yes, I
-    // know". The refusal still stands for every path that cannot present an
-    // `InteractiveOwner`; here it is a warning on that screen instead.
     Ok(candidate)
 }
 
@@ -3904,10 +3895,9 @@ async fn run_network_edit(
             network: draft.name.clone(),
         })
         .await?;
-    let owner = owner_at_terminal()?;
     config.update(|state| {
         ensure_reviewed_network(&state.networks, draft.chain_id, Some(&original))?;
-        replace_configured_network(&mut state.networks, draft.clone(), Some(&owner))
+        replace_configured_network(&mut state.networks, draft.clone())
     })?;
     emit(
         mode,
@@ -4682,13 +4672,6 @@ async fn review_one_network_proposal(
         // proposal in a row, so an inline prompt would stack answered
         // exchanges behind the next one. Two endpoint lists side by side is
         // also the network fact most likely to outgrow a terminal.
-        // `None` in practice, never by trusting that here: an agent's
-        // proposal cannot carry a plaintext-remote endpoint in the first
-        // place, because `put_network_proposal` validates with no
-        // `InteractiveOwner` and `validate_admissible_endpoints` refuses one
-        // on that path. Asking the same predicate here anyway keeps the
-        // screen right if that ever changes, instead of relying on a reader
-        // remembering why it doesn't need to.
         if !network_review(title, summary, facts, plaintext_remote_warning(proposal)).ask(
             "Accept this network?",
             "Accept this network",
@@ -4719,11 +4702,9 @@ async fn review_one_network_proposal(
         config.update(|state| {
             ensure_reviewed_network(&state.networks, proposal.chain_id, existing.as_ref())?;
             if existing.is_some() {
-                // `None` on both: an agent may not propose a plaintext
-                // endpoint, so accepting one is not a case that arises.
-                replace_configured_network(&mut state.networks, proposal.clone(), None)
+                replace_configured_network(&mut state.networks, proposal.clone())
             } else {
-                add_configured_network(&mut state.networks, proposal.clone(), None)
+                add_configured_network(&mut state.networks, proposal.clone())
             }
         })?;
         PolicyStore::production(config.data_dir())?.discard_network_proposal(proposal)?;
@@ -4763,11 +4744,9 @@ const NETWORK_TRUST_WARNING: &str = "The configured RPC supplies the chain state
 /// The confirmation-screen warning for a network whose RPC list contains
 /// plaintext http to a remote host, naming which endpoint qualifies.
 ///
-/// `is_remote_plaintext` is the same predicate `validate_admissible_endpoints`
-/// refuses on because of, everywhere an `InteractiveOwner` is absent; on the
-/// two paths where the owner is asked instead of refused, the screen has to
-/// say so in the same terms the refusal used, or agreeing to the write means
-/// agreeing to a risk the code never actually named.
+/// The warning appears on every direct or proposed network review, so the
+/// owner sees the transport risk alongside the complete endpoint before the
+/// write is confirmed.
 fn plaintext_remote_warning(network: &NetworkConfig) -> Option<String> {
     let remote: Vec<String> = network
         .rpc_urls
@@ -4793,23 +4772,6 @@ fn plaintext_remote_warning(network: &NetworkConfig) -> Option<String> {
 /// The scrollback rendering, for the network commands that never open a
 /// screen. A command that has already shown one asks with
 /// [`crate::fullscreen::Review::ask`] instead.
-/// The witness that a network write came down the interactive owner path.
-///
-/// One place, so `tests/boundary.rs` enumerates one new origin rather than one
-/// per command. `network add` and `network edit` both reach it, and both then
-/// put the profile through `confirm_network_change` -- which prints the
-/// complete RPC URLs and warns about a plaintext one by name -- before anything
-/// is written.
-///
-/// Holding this does not mean the owner agreed. It means the question will be
-/// asked, on a screen they are sitting in front of. What an agent's proposal
-/// cannot do is get here at all.
-fn owner_at_terminal() -> Result<ekubo_wallet_core::config::InteractiveOwner> {
-    Ok(ekubo_wallet_core::config::InteractiveOwner::at_terminal(
-        &crate::approval::InteractiveProof::from_terminal()?,
-    ))
-}
-
 fn confirm_network_change(
     title: &str,
     summary: &str,

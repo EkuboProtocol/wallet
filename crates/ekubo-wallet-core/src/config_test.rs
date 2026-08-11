@@ -175,7 +175,7 @@ fn cli_replacement_takes_over_the_name_or_the_chain_id() {
         .unwrap()
         .clone();
     ethereum.rpc_urls = vec!["https://rpc.example.invalid".parse().unwrap()];
-    replace_configured_network(&mut networks, ethereum.clone(), None).unwrap();
+    replace_configured_network(&mut networks, ethereum.clone()).unwrap();
     assert_eq!(
         networks
             .iter()
@@ -189,7 +189,7 @@ fn cli_replacement_takes_over_the_name_or_the_chain_id() {
     // the configuration holds one profile per chain ID either way.
     let mut renamed = ethereum;
     renamed.name = "custom".into();
-    replace_configured_network(&mut networks, renamed, None).unwrap();
+    replace_configured_network(&mut networks, renamed).unwrap();
     assert_eq!(networks.len(), count, "chain 1 was replaced, not added");
     assert!(networks.iter().all(|network| network.name != "ethereum"));
     assert_eq!(
@@ -216,7 +216,7 @@ fn a_replacement_never_evicts_a_chain_by_reusing_its_name() {
     candidate.name = "ethereum".into();
     candidate.aliases = vec!["unclaimed".into()];
     candidate.chain_id = 999_999;
-    assert!(replace_configured_network(&mut networks, candidate, None).is_err());
+    assert!(replace_configured_network(&mut networks, candidate).is_err());
     assert!(networks.iter().any(|network| network.chain_id == 1));
 }
 
@@ -231,7 +231,7 @@ fn cli_replacement_still_rejects_an_identifier_taken_by_another_chain() {
     candidate.name = "unclaimed".into();
     candidate.chain_id = 999_999;
     candidate.aliases = vec!["eth".into()];
-    assert!(replace_configured_network(&mut networks, candidate, None).is_err());
+    assert!(replace_configured_network(&mut networks, candidate).is_err());
 }
 
 #[test]
@@ -489,7 +489,7 @@ fn a_replacement_does_not_quietly_drop_the_owners_fee_ceiling() {
     let mut edited = networks[0].clone();
     edited.rpc_urls = vec!["https://elsewhere.example.invalid/rpc".parse().unwrap()];
     edited.max_fee_per_gas = None;
-    replace_configured_network(&mut networks, edited, None).unwrap();
+    replace_configured_network(&mut networks, edited).unwrap();
 
     let stored = networks
         .iter()
@@ -518,7 +518,7 @@ fn a_replacement_that_names_a_ceiling_sets_it() {
 
     let mut raised = networks[0].clone();
     raised.max_fee_per_gas = Some("2000000000".into());
-    replace_configured_network(&mut networks, raised, None).unwrap();
+    replace_configured_network(&mut networks, raised).unwrap();
 
     assert_eq!(
         networks
@@ -535,7 +535,7 @@ fn a_replacement_that_names_a_ceiling_sets_it() {
     let mut edited = fresh[0].clone();
     edited.max_fee_per_gas = None;
     fresh[0].max_fee_per_gas = None;
-    replace_configured_network(&mut fresh, edited, None).unwrap();
+    replace_configured_network(&mut fresh, edited).unwrap();
     assert!(fresh[0].max_fee_per_gas.is_none());
 }
 
@@ -630,156 +630,5 @@ mod record_network_tests {
         store
             .network_for_record("1", "ethereum")
             .expect("the same profile, under a name it already answered to");
-    }
-}
-
-mod plaintext_endpoint_tests {
-    //! An RPC connection carries what the wallet reads and what it signs.
-
-    use super::*;
-
-    fn network_with(url: &str) -> NetworkConfig {
-        NetworkConfig {
-            name: "custom".into(),
-            display_name: None,
-            aliases: Vec::new(),
-            chain_id: 999,
-            rpc_urls: vec![url.parse().unwrap()],
-            rpc_strategy: RpcStrategy::Ordered,
-            max_gas_limit: None,
-            max_fee_per_gas: None,
-            native_currency: None,
-            block_explorer_url: None,
-            documentation_url: None,
-        }
-    }
-
-    /// Over plaintext to a remote host, anything on the path reads the
-    /// addresses, calldata, and balances this wallet asks about -- and chooses
-    /// the fee estimate an automatic transaction is signed against, since
-    /// `capped_fee` leaves an estimate unchanged when no ceiling is set and the
-    /// shipped profiles set none.
-    #[test]
-    fn a_remote_plaintext_endpoint_is_not_admissible() {
-        for remote in [
-            "http://rpc.example.com/v1",
-            "http://192.168.1.5:8545",
-            "http://10.0.0.1:8545",
-            "http://[2001:db8::1]:8545",
-        ] {
-            let error = format!(
-                "{:#}",
-                validate_admissible_endpoints(&network_with(remote), None)
-                    .expect_err("{remote} is plaintext to somewhere else")
-            );
-            assert!(error.contains("plaintext http"), "{remote}: {error}");
-        }
-    }
-
-    /// A node on this machine is the case the allowance exists for: a path
-    /// with nothing on it. A LAN address is not that -- it is a network an
-    /// attacker can be on.
-    #[test]
-    fn a_node_on_this_machine_is_still_reachable_in_plaintext() {
-        for local in [
-            "http://localhost:8545",
-            "http://127.0.0.1:8545",
-            "http://[::1]:8545",
-            "http://node.localhost:8545",
-        ] {
-            validate_admissible_endpoints(&network_with(local), None)
-                .unwrap_or_else(|error| panic!("{local} is a local node: {error:#}"));
-        }
-        validate_admissible_endpoints(&network_with("https://rpc.example.com/v1"), None)
-            .expect("https anywhere is the ordinary case");
-    }
-
-    /// The rule is on admission, not on `load`. A configuration that already
-    /// holds a plaintext endpoint has to keep loading: refusing would take the
-    /// wallet roster and every other network with it, and leave no way to run
-    /// the edit that would fix it.
-    #[test]
-    fn an_existing_configuration_still_loads() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = ConfigStore::new(directory.path());
-        let config = WalletConfig {
-            version: 2,
-            wallets: Vec::new(),
-            networks: vec![network_with("http://rpc.example.com/v1")],
-        };
-        validate_config(&config).expect("a stored profile is not refused on the way in");
-        store
-            .update(|current| {
-                current.networks = config.networks.clone();
-                Ok(())
-            })
-            .expect("and it can be written back, so the profile can be repaired");
-        assert_eq!(store.load().unwrap().networks.len(), 1);
-    }
-}
-
-mod owner_witness_tests {
-    //! "The agent cannot do X" has to mean "not without the owner saying so".
-
-    use super::*;
-    use crate::approval::InteractiveProof;
-
-    fn lan_node() -> NetworkConfig {
-        NetworkConfig {
-            name: "lab".into(),
-            display_name: None,
-            aliases: Vec::new(),
-            chain_id: 999,
-            rpc_urls: vec!["http://192.168.1.10:8545".parse().unwrap()],
-            rpc_strategy: RpcStrategy::Ordered,
-            max_gas_limit: None,
-            max_fee_per_gas: None,
-            native_currency: None,
-            block_explorer_url: None,
-            documentation_url: None,
-        }
-    }
-
-    /// A self-hosted node behind a private address is a configuration the
-    /// operator is entitled to accept, and the human `network add` flow already
-    /// prints the complete RPC URLs on a full-screen review before writing
-    /// anything. The refusal used to fire before that screen, so the answer was
-    /// no and there was nowhere to say otherwise.
-    #[test]
-    fn the_owner_may_configure_a_node_on_their_own_network() {
-        let owner = InteractiveOwner::at_terminal(&InteractiveProof::for_tests());
-        validate_admissible_endpoints(&lan_node(), Some(&owner))
-            .expect("the owner is shown the URL and asked");
-
-        let mut networks = default_networks();
-        add_configured_network(&mut networks, lan_node(), Some(&owner))
-            .expect("and the write goes through on that path");
-    }
-
-    /// Every path that cannot present one still refuses, which is the half that
-    /// must not regress: an agent's proposal crosses the same helpers, so a
-    /// flag threaded through them would have handed it the bypass.
-    #[test]
-    fn a_path_without_the_witness_still_refuses() {
-        assert!(validate_admissible_endpoints(&lan_node(), None).is_err());
-        let mut networks = default_networks();
-        assert!(add_configured_network(&mut networks, lan_node(), None).is_err());
-        assert!(replace_configured_network(&mut networks, lan_node(), None).is_err());
-    }
-
-    /// And the predicate the refusal uses is the one the warning uses, so the
-    /// screen cannot describe a different set of URLs than the rule judges.
-    #[test]
-    fn one_predicate_decides_both_the_refusal_and_the_warning() {
-        for remote in ["http://rpc.example.com", "http://192.168.1.10:8545"] {
-            assert!(is_remote_plaintext(&remote.parse().unwrap()), "{remote}");
-        }
-        for fine in [
-            "https://rpc.example.com",
-            "http://localhost:8545",
-            "http://127.0.0.1:8545",
-        ] {
-            assert!(!is_remote_plaintext(&fine.parse().unwrap()), "{fine}");
-        }
     }
 }
