@@ -254,6 +254,20 @@ fn command_palette_reaches_every_desktop_route() {
 }
 
 #[test]
+fn transaction_review_launch_is_single_flight_before_and_after_the_prompt_arrives() {
+    let mut flow = ReviewFlowState::Ready;
+
+    assert!(flow.begin_transaction());
+    assert!(flow.is_in_progress());
+    assert!(!flow.begin_transaction());
+    assert!(flow.activate_transaction_prompt());
+    assert!(!flow.begin_transaction());
+
+    flow = ReviewFlowState::Ready;
+    assert!(flow.begin_transaction());
+}
+
+#[test]
 fn route_shortcuts_preserve_standard_text_editing_bindings() {
     #[cfg(target_os = "macos")]
     let expected = [

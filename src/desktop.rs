@@ -604,7 +604,30 @@ enum AgentReinstallState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReviewFlowState {
     Ready,
+    Loading,
     Busy,
+}
+
+impl ReviewFlowState {
+    fn begin_transaction(&mut self) -> bool {
+        if *self != Self::Ready {
+            return false;
+        }
+        *self = Self::Loading;
+        true
+    }
+
+    fn activate_transaction_prompt(&mut self) -> bool {
+        if *self != Self::Loading {
+            return false;
+        }
+        *self = Self::Busy;
+        true
+    }
+
+    const fn is_in_progress(self) -> bool {
+        !matches!(self, Self::Ready)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3370,7 +3393,7 @@ impl WalletWindow {
 
     fn receive_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
         let Some(QueuedReview::WalletConnect(prompt)) = self.queued_reviews.receive(
-            self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy,
+            self.active_review.is_some() || self.review_flow.is_in_progress(),
             QueuedReview::WalletConnect(prompt),
         ) else {
             return;
@@ -3396,7 +3419,7 @@ impl WalletWindow {
     }
 
     fn activate_next_queued_review(&mut self) {
-        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+        if self.active_review.is_some() || self.review_flow.is_in_progress() {
             return;
         }
         match self.queued_reviews.next(self.active_review.is_some()) {
@@ -4280,7 +4303,7 @@ impl WalletWindow {
     }
 
     fn begin_account_removal(&mut self, wallet_id: String, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+        if self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.account_action_errors.insert(
                 wallet_id,
                 "Finish or close the current review first.".into(),
@@ -5493,8 +5516,12 @@ impl WalletWindow {
             active.awaiting_refresh = false;
             return;
         }
+        if self.active_review.is_none() && self.review_flow.activate_transaction_prompt() {
+            self.activate_transaction_prompt(prompt);
+            return;
+        }
         let Some(QueuedReview::Transaction(prompt)) = self.queued_reviews.receive(
-            self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy,
+            self.active_review.is_some() || self.review_flow.is_in_progress(),
             QueuedReview::Transaction(Box::new(prompt)),
         ) else {
             return;
@@ -5503,6 +5530,7 @@ impl WalletWindow {
     }
 
     fn activate_transaction_prompt(&mut self, prompt: GuiReviewPrompt) {
+        self.review_flow = ReviewFlowState::Busy;
         self.active_review = Some(ActiveReview {
             state: ReviewState::new(prompt.document),
             simulation: Some(prompt.simulation),
@@ -5515,7 +5543,7 @@ impl WalletWindow {
     }
 
     fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+        if self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.set_route_error(Route::Reviews, "Finish or close the current review first.");
             cx.notify();
             return;
@@ -5545,7 +5573,7 @@ impl WalletWindow {
     }
 
     fn begin_typed_data_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+        if self.active_review.is_some() || self.review_flow.is_in_progress() {
             self.set_route_error(Route::Reviews, "Finish or close the current review first.");
             cx.notify();
             return;
@@ -5575,7 +5603,7 @@ impl WalletWindow {
     }
 
     fn begin_transaction_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.active_review.is_some() || self.review_flow == ReviewFlowState::Busy {
+        if self.active_review.is_some() || !self.review_flow.begin_transaction() {
             self.set_route_error(Route::Reviews, "Finish or close the current review first.");
             cx.notify();
             return;
@@ -6098,6 +6126,7 @@ impl WalletWindow {
                                     )))
                                     .label("Review")
                                     .primary()
+                                    .disabled(self.review_flow.is_in_progress())
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.begin_transaction_review(request_id, cx);
                                     })),
