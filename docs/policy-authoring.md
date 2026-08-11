@@ -7,10 +7,21 @@ Policies screen and authenticates before installation.
 
 Owners can manage chain entries in the Guided editor: add, rename, edit, or
 remove a chain, set its batch ceiling, and allow no native value, any native
-value, or an exact set of wei values. Existing allow/deny rules remain visible
-and are preserved. Advanced JSON exposes the complete predicate language.
-Both views feed the same canonical validation, revision recheck, permission
-diff, and OS-authenticated installation path.
+value, or an exact set of wei values. The same editor can add, edit, and remove
+allow/deny rules with named target and sender sets, exact native values, empty
+calldata, or canonical ABI selectors. Selector argument constraints accept the
+typed predicate object, including collections and `any`, `all`, `not`, `each`,
+`selector`, and `length` composition. Existing rules that use a shape the form
+cannot represent remain visible and preserved; edit those in Advanced JSON.
+
+An explicit danger-marked **Allow anything** preset is available for owners
+who intentionally want every call on every chain to sign automatically. It
+allows arbitrary targets, calldata, native value, and batches up to 4096 calls.
+It is only a draft shortcut: the owner must still validate the permission diff
+and pass OS authentication before installation.
+
+Both editor views feed the same canonical validation, revision recheck,
+permission diff, and OS-authenticated installation path.
 
 Prefer the narrowest rule that expresses the intended operation: exact chains,
 targets, native-value ceilings, canonical ABI signatures, and typed argument
