@@ -115,21 +115,6 @@ struct StubChain {
     /// Make every subsequent RPC call fail, used to prove a failed refresh
     /// cannot fall back to an earlier authored transaction.
     fail_all: AtomicBool,
-    /// What this node claims the plan costs. A second stub with a different
-    /// value is the smallest possible dishonest endpoint: it agrees about the
-    /// chain, the block, and the outcome, and lies about one number that a
-    /// reviewer would read and a signature would carry.
-    gas_used: Option<u64>,
-    /// What this node puts in the simulated header's `gasLimit`, which is the
-    /// ceiling the signed gas limit is computed against.
-    block_gas_limit: Option<u64>,
-    /// What this node reports at the wallet's own address, which decides
-    /// whether the plan is prepared as an EIP-7702 authorization or a plain
-    /// call.
-    wallet_code: Option<String>,
-    /// Whether the plan reverts here. A revert is not a vote under `m_of_n`,
-    /// so two of these leave the quorum with nothing to agree on.
-    reverts: bool,
     /// Whether this node refuses `eth_sendRawTransaction`. A plan can simulate
     /// perfectly and still be an envelope no node will accept -- one that
     /// spends the whole native balance has nothing left to pay for itself.
@@ -139,10 +124,6 @@ struct StubChain {
 /// The one lie a stub tells, if it tells one.
 #[derive(Default)]
 struct StubLie {
-    gas_used: Option<u64>,
-    block_gas_limit: Option<u64>,
-    wallet_code: Option<String>,
-    reverts: bool,
     refuses_send: bool,
 }
 
@@ -178,18 +159,11 @@ impl StubChain {
     fn dispatch(&self, method: &str, params: &serde_json::Value) -> serde_json::Value {
         match method {
             "eth_chainId" => serde_json::json!(format!("{CHAIN_ID:#x}")),
-            // Asked before a quorum simulation, so the height the quorum pins
-            // to is the median of what the endpoints say rather than whatever
-            // the first one happened to report.
             "eth_blockNumber" => serde_json::json!(format!("{PARENT_NUMBER:#x}")),
-            "eth_getBlockByNumber" => block_json_limited(
-                PARENT_NUMBER,
-                B256::repeat_byte(0xa9),
-                self.block_gas_limit.unwrap_or(BLOCK_GAS_LIMIT),
-            ),
-            "eth_getCode" => {
-                serde_json::json!(self.wallet_code.clone().unwrap_or_else(|| "0x".to_owned()))
+            "eth_getBlockByNumber" => {
+                block_json_limited(PARENT_NUMBER, B256::repeat_byte(0xa9), BLOCK_GAS_LIMIT)
             }
+            "eth_getCode" => serde_json::json!("0x"),
             "eth_getBalance" => serde_json::json!("0x21e19e0c9bab2400000"),
             "eth_getTransactionCount" => serde_json::json!("0x0"),
             "eth_feeHistory" => serde_json::json!({
@@ -206,11 +180,7 @@ impl StubChain {
                 let mut parent = hash_of(PARENT_NUMBER);
                 for (index, entry) in blocks.iter().enumerate() {
                     let number = PARENT_NUMBER + 1 + u64::try_from(index).unwrap();
-                    let mut block = block_json_limited(
-                        number,
-                        parent,
-                        self.block_gas_limit.unwrap_or(BLOCK_GAS_LIMIT),
-                    );
+                    let mut block = block_json_limited(number, parent, BLOCK_GAS_LIMIT);
                     parent = serde_json::from_value(block["hash"].clone()).unwrap();
                     let calls = entry["calls"].as_array().map_or(0, Vec::len);
                     block["calls"] = serde_json::json!(
@@ -218,12 +188,9 @@ impl StubChain {
                             .map(|_| serde_json::json!({
                                 "returnData": "0x",
                                 "logs": [],
-                                "gasUsed": format!("{:#x}", self.gas_used.unwrap_or(0x5208)),
-                                "status": if self.reverts { "0x0" } else { "0x1" },
-                                "error": self.reverts.then(|| serde_json::json!({
-                                    "code": 3,
-                                    "message": "execution reverted",
-                                })),
+                                "gasUsed": "0x5208",
+                                "status": "0x1",
+                                "error": null,
                             }))
                             .collect::<Vec<_>>()
                     );
@@ -273,22 +240,10 @@ async fn start_stub() -> (SocketAddr, std::sync::Arc<StubChain>) {
     start_stub_lying(StubLie::default()).await
 }
 
-async fn start_stub_reporting(gas_used: Option<u64>) -> (SocketAddr, std::sync::Arc<StubChain>) {
-    start_stub_lying(StubLie {
-        gas_used,
-        ..StubLie::default()
-    })
-    .await
-}
-
 async fn start_stub_lying(lie: StubLie) -> (SocketAddr, std::sync::Arc<StubChain>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let chain = std::sync::Arc::new(StubChain {
-        gas_used: lie.gas_used,
-        block_gas_limit: lie.block_gas_limit,
-        wallet_code: lie.wallet_code,
-        reverts: lie.reverts,
         refuses_send: lie.refuses_send,
         ..StubChain::default()
     });
@@ -919,208 +874,6 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
     );
 }
 
-/// Build a server whose one network lists both stubs and requires them to
-/// agree.
-fn agreeing_server(
-    first: SocketAddr,
-    second: SocketAddr,
-    policy: &WalletPolicy,
-) -> (tempfile::TempDir, WalletMcpServer, WalletMetadata) {
-    let (directory, server, wallet) = pipeline_server(first, policy);
-    server
-        .config
-        .update(|state| {
-            // By chain ID: the configuration also holds the shipped defaults,
-            // so the stub is not the first entry.
-            let network = state
-                .networks
-                .iter_mut()
-                .find(|network| network.chain_id == CHAIN_ID)
-                .expect("the stub network is configured");
-            network.rpc_urls = vec![
-                format!("http://{first}/").parse().unwrap(),
-                format!("http://{second}/").parse().unwrap(),
-            ];
-            network.rpc_strategy = ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 };
-            Ok(())
-        })
-        .unwrap();
-    (directory, server, wallet)
-}
-
-/// Two honest endpoints agree, so `m_of_n(2)` signs exactly as `ordered`
-/// would. The strategy must cost correctness nothing when nobody is lying.
-#[tokio::test(flavor = "multi_thread")]
-async fn agreeing_endpoints_sign_normally() {
-    let (first, chain) = start_stub().await;
-    let (second, _other) = start_stub().await;
-    let (_directory, server, wallet) =
-        agreeing_server(first, second, &WalletPolicy::allow_all_with_approval());
-
-    let output = server
-        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
-            wallet_id: "primary".into(),
-            chain_id: CHAIN_ID.to_string(),
-            reference: Some(plan_reference(wallet.address)),
-            simulation_id: None,
-            request_id: None,
-            on_simulation_failure: OnSimulationFailure::RequestApproval,
-        }))
-        .await
-        .expect("two agreeing endpoints sign")
-        .0;
-    assert_eq!(output.status, ExecutionStatus::Submitted, "{output:?}");
-    assert_eq!(chain.mined.lock().unwrap().len(), 1);
-}
-
-/// The property the strategy exists for: one endpoint understating the gas is
-/// caught by the other, and nothing is signed.
-///
-/// The two stubs agree about the chain, the block, and the outcome. They
-/// differ only in what the plan costs — the smallest lie an endpoint can tell
-/// that a reviewer would read and a signature would carry. Under `ordered`
-/// this would have been signed on the first endpoint's word.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_lying_endpoint_is_caught_and_nothing_is_signed() {
-    let (honest, chain) = start_stub().await;
-    let (liar, liar_chain) = start_stub_reporting(Some(0x9999)).await;
-    let (_directory, server, wallet) =
-        agreeing_server(honest, liar, &WalletPolicy::allow_all_with_approval());
-
-    let output = server
-        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
-            wallet_id: "primary".into(),
-            chain_id: CHAIN_ID.to_string(),
-            reference: Some(plan_reference(wallet.address)),
-            simulation_id: None,
-            request_id: None,
-            on_simulation_failure: OnSimulationFailure::RequestApproval,
-        }))
-        .await
-        .expect("a contradiction is a reviewable outcome, not a crash")
-        .0;
-
-    // Nothing signed on either node, by anybody.
-    assert!(
-        chain.mined.lock().unwrap().is_empty() && liar_chain.mined.lock().unwrap().is_empty(),
-        "a disputed simulation must not produce a signature"
-    );
-    // It becomes a human's decision, with the contradiction on the screen,
-    // rather than a silently-taken side or an opaque command failure.
-    assert_eq!(
-        output.status,
-        ExecutionStatus::ApprovalRequired,
-        "{output:?}"
-    );
-    let record = server
-        .pending
-        .lock()
-        .unwrap()
-        .get(output.request_id)
-        .unwrap();
-    assert_eq!(record.status, PendingStatus::AwaitingApproval);
-}
-
-/// The lie the agreement projection could not see: the block gas limit.
-///
-/// Run 6251, finding 186985. It comes out of the simulated header, which is
-/// the endpoint's to write, and it is the ceiling `signing_gas_limit` computes
-/// against — so it reaches the chain rather than the screen. An endpoint that
-/// matched every compared field could set this alone and either fail
-/// preparation outright or collapse the margin, leaving an agreed transaction
-/// to run out of gas and burn its fee.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_endpoint_alone_about_the_block_gas_limit_is_caught() {
-    let (honest, chain) = start_stub().await;
-    let (liar, liar_chain) = start_stub_lying(StubLie {
-        block_gas_limit: Some(BLOCK_GAS_LIMIT / 2),
-        ..StubLie::default()
-    })
-    .await;
-    let (_directory, server, wallet) =
-        agreeing_server(honest, liar, &WalletPolicy::allow_all_with_approval());
-
-    let output = server
-        .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
-            wallet_id: "primary".into(),
-            chain_id: CHAIN_ID.to_string(),
-            reference: Some(plan_reference(wallet.address)),
-            simulation_id: None,
-            request_id: None,
-            on_simulation_failure: OnSimulationFailure::RequestApproval,
-        }))
-        .await
-        .expect("a contradiction is a reviewable outcome, not a crash")
-        .0;
-
-    assert!(
-        chain.mined.lock().unwrap().is_empty() && liar_chain.mined.lock().unwrap().is_empty(),
-        "a disputed gas ceiling must not produce a signature"
-    );
-    assert_eq!(
-        output.status,
-        ExecutionStatus::ApprovalRequired,
-        "{output:?}"
-    );
-}
-
-/// A quorum that never formed is not an answer.
-///
-/// Run 6251, finding 186982. Only a successful simulation votes, so two
-/// reverts leave the agreement set empty — and the loop fell out of the bottom
-/// returning the last endpoint's failure, which looked exactly like the
-/// network's answer. Under `m_of_n` one endpoint's word is the thing the owner
-/// configured the strategy in order not to act on, and a failure is the word
-/// most worth doubting: its effects are unavailable by construction, and a
-/// human override may sign it anyway.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_quorum_that_never_formed_is_not_reported_as_an_answer() {
-    let (first, _first_chain) = start_stub_lying(StubLie {
-        reverts: true,
-        ..StubLie::default()
-    })
-    .await;
-    let (second, _second_chain) = start_stub_lying(StubLie {
-        reverts: true,
-        ..StubLie::default()
-    })
-    .await;
-    let (_directory, server, wallet) =
-        agreeing_server(first, second, &WalletPolicy::allow_all_with_approval());
-
-    let simulation = server
-        .wallet_simulate_execution_plan(Parameters(SimulateInput {
-            wallet_id: "primary".into(),
-            chain_id: CHAIN_ID.to_string(),
-            reference: plan_reference(wallet.address),
-            fork_id: None,
-        }))
-        .await
-        .expect("a failed quorum is a reviewable outcome")
-        .0;
-
-    assert!(!simulation.result.simulation.success);
-    let reported = simulation
-        .result
-        .simulation
-        .error
-        .clone()
-        .unwrap_or_default();
-    assert!(
-        reported.contains("endpoints to agree"),
-        "the answer must say the threshold was never met: {reported}"
-    );
-    // The reason still reaches the reviewer: a plan that honestly reverts
-    // everywhere is the ordinary case here.
-    assert!(reported.contains("reverted"), "{reported}");
-    // And it carries no gas figures, so nothing downstream can sign against
-    // numbers a single endpoint chose.
-    assert!(
-        simulation.result.simulation.gas_used.is_none(),
-        "{simulation:?}"
-    );
-}
-
 /// A plan that simulates and is then refused by every endpoint must not leave
 /// the wallet frozen on that chain.
 ///
@@ -1132,11 +885,7 @@ async fn a_quorum_that_never_formed_is_not_reported_as_an_answer() {
 /// for itself, froze the account until someone intervened by hand.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_send_no_endpoint_accepted_leaves_the_chain_usable() {
-    let (address, chain) = start_stub_lying(StubLie {
-        refuses_send: true,
-        ..StubLie::default()
-    })
-    .await;
+    let (address, chain) = start_stub_lying(StubLie { refuses_send: true }).await;
     let (_directory, server, wallet) =
         pipeline_server(address, &WalletPolicy::allow_all_with_approval());
 

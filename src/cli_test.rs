@@ -376,7 +376,7 @@ fn a_complete_custom_network_needs_no_terminal_at_all() {
 }
 
 /// The strategy is settable from the same command as every other network
-/// field, and validated against the endpoints it is given.
+/// field.
 #[test]
 fn the_rpc_strategy_is_set_and_checked_alongside_the_other_fields() {
     let mut args = add_args("base", None);
@@ -384,22 +384,12 @@ fn the_rpc_strategy_is_set_and_checked_alongside_the_other_fields() {
         "https://one.example.invalid".parse().unwrap(),
         "https://two.example.invalid".parse().unwrap(),
     ];
-    args.rpc_strategy = Some(ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 });
+    args.rpc_strategy = Some(ekubo_wallet_core::config::RpcStrategy::Random);
     let candidate = candidate_of(args, &default_networks()).unwrap();
     assert_eq!(
         candidate.rpc_strategy,
-        ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 }
+        ekubo_wallet_core::config::RpcStrategy::Random
     );
-
-    // Asking for more agreement than there are endpoints is refused where the
-    // number is typed, not at signing time.
-    let mut args = add_args("base", None);
-    args.rpc_urls = vec!["https://only.example.invalid".parse().unwrap()];
-    args.rpc_strategy = Some(ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 });
-    let error = candidate_of(args, &default_networks())
-        .expect_err("two of one is not reachable")
-        .to_string();
-    assert!(error.contains("needs 2 endpoints but"), "{error}");
 }
 
 #[test]

@@ -657,10 +657,8 @@ pub const TOKEN_BALANCE_UNVERIFIED_CODE: &str = "token_balance_unverified";
 /// signs the authorization, and the replacement still happens on chain, but
 /// nothing in the document said a delegation was involved at all.
 ///
-/// Under `m_of_n` the delegation facts are part of the simulation agreement
-/// projection, so a single endpoint cannot move them. Under `ordered` this
-/// finding is what remains: the document always states that an authorization
-/// is being signed, so a reader can notice one they did not expect.
+/// The document always states that an authorization is being signed, so a
+/// reader can notice one they did not expect.
 pub const DELEGATION_AUTHORIZED_CODE: &str = "delegation_authorized";
 
 /// What the policy decided, and therefore what happens next.

@@ -194,10 +194,7 @@ struct PublicNetwork {
     /// tries them. Reported in full because failover reaches any of them, so
     /// naming only the first would describe traffic that does not happen.
     rpc_urls: Vec<String>,
-    /// How those endpoints are used: `ordered`, `random`, or `m_of_n(N)`.
-    /// Worth reading before trusting a simulation: under `m_of_n` the result
-    /// is one several independent endpoints returned identically, and under
-    /// the others it is one endpoint's word.
+    /// Whether endpoints are tried in configured or fresh random order.
     rpc_strategy: String,
 }
 
@@ -366,11 +363,10 @@ struct AddNetworkInput {
     /// when that endpoint does.
     #[schemars(with = "Vec<String>")]
     rpc_urls: Vec<Url>,
-    /// How those endpoints are used: `ordered` takes the first answer,
-    /// `random` varies which endpoint is asked first, and `m_of_n(2)` acts
-    /// only on a simulation two endpoints returned identically. Omit for
-    /// `ordered`. Proposing this still queues for the owner, who sees the
-    /// strategy on the review screen before anything is written.
+    /// How endpoints are ordered: `ordered` takes the first answer and
+    /// `random` varies which endpoint is asked first. Omit for `ordered`.
+    /// Proposing this still queues for the owner, who sees the strategy on the
+    /// review screen before anything is written.
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     rpc_strategy: Option<String>,

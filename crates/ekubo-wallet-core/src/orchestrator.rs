@@ -369,10 +369,7 @@ pub async fn approve_transaction(
         latest: Mutex::new(None),
     };
     // Authoring can fail on a request that is still perfectly rejectable.
-    // Under `m_of_n` a quorum that does not form is reported as a setup
-    // failure carrying no gas figures — deliberately, so nothing downstream
-    // signs against numbers one endpoint chose — and `prepare_execution` needs
-    // gas. The rejection write below happens only after the presenter answers,
+    // The rejection write below happens only after the presenter answers,
     // so the row stayed `awaiting_approval` with no way through this command
     // at all, and whatever queued it waited on a decision nobody could give.
     //

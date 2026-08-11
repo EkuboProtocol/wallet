@@ -273,23 +273,12 @@ pub async fn prepare_execution(
         prepared.2.max_fee_per_gas >= prepared.2.max_priority_fee_per_gas,
         "RPC returned invalid EIP-1559 fee fields"
     );
-    // Under `m_of_n` the fee is not whatever the first endpoint said. Fee
-    // estimates are not deterministic across honest nodes, so requiring
-    // equality would refuse ordinary answers — but a median of several answers
-    // is a value no single endpoint chooses, which is the
-    // property `m_of_n` was configured for and did not have here.
-    let (max_fee_per_gas, max_priority_fee_per_gas) = crate::rpc::median_fee_estimate(
-        network,
-        prepared.2.max_fee_per_gas,
-        prepared.2.max_priority_fee_per_gas,
-    )
-    .await?;
     // And the ceiling the owner set, if they set one. Nothing else bounds this
     // on the automatic path: no policy rule speaks about fees and no reviewer
     // sees them, so `gas_limit × max_fee_per_gas` was whatever an endpoint
     // cared to name.
-    let max_fee_per_gas = capped_fee(network, max_fee_per_gas)?;
-    let max_priority_fee_per_gas = max_priority_fee_per_gas.min(max_fee_per_gas);
+    let max_fee_per_gas = capped_fee(network, prepared.2.max_fee_per_gas)?;
+    let max_priority_fee_per_gas = prepared.2.max_priority_fee_per_gas.min(max_fee_per_gas);
     // The delegation the authorization is decided against is read here, not
     // taken from the simulation.
     //

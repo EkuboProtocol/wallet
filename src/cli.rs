@@ -357,9 +357,7 @@ struct NetworkAddArgs {
     /// should reach, not what to append to something already there.
     #[arg(long = "rpc-url")]
     rpc_urls: Vec<Url>,
-    /// How the endpoints are used: `ordered` (first answer wins), `random`
-    /// (fresh order per request), or `m_of_n(2)` (require 2 endpoints to
-    /// return the same simulation before acting on it).
+    /// How endpoints are ordered: `ordered` or `random`.
     #[arg(long)]
     rpc_strategy: Option<RpcStrategy>,
     #[arg(long)]
@@ -4267,8 +4265,8 @@ const CUSTOM_NETWORK_FIELDS: &[RequiredField] = &[
     RequiredField {
         flag: "--rpc-strategy",
         prompt: "RPC strategy",
-        help: "How the endpoints above are used: ordered, random, or m_of_n(N) to require N of them to return the same simulation",
-        example: "m_of_n(2)",
+        help: "How the endpoints above are tried: ordered or random",
+        example: "ordered",
         default: Some("ordered"),
         optional: true,
     },

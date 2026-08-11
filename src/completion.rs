@@ -79,8 +79,7 @@ enum Source {
     Aliases,
     /// Confirmed tokens on the network named earlier in the same command.
     Tokens,
-    /// The endpoint-agreement strategies, which are parsed from a string
-    /// rather than a `ValueEnum` because `m_of_n(2)` carries a number.
+    /// RPC endpoint ordering strategies.
     RpcStrategies,
     Files,
 }
@@ -429,8 +428,6 @@ fn lookup(config: &ConfigStore, source: Source, position: &Position<'_>) -> Resu
             return Ok(vec![
                 Candidate::new("ordered", "first endpoint that answers"),
                 Candidate::new("random", "fresh endpoint order per request"),
-                Candidate::new("m_of_n(2)", "two endpoints must return the same answer"),
-                Candidate::new("m_of_n(3)", "three endpoints must return the same answer"),
             ]);
         }
         Source::Presets => {

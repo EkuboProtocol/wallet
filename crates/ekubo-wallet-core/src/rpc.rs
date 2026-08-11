@@ -17,10 +17,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
-/// Shorter than [`RPC_TIMEOUT`], because this one is paid `agree` times over
-/// on a path a person may be waiting on, and a slow endpoint here costs a
-/// second opinion rather than the answer itself.
-const FEE_ESTIMATE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Providers pooled per endpoint URL, the same way [`crate::plan_fetch`]
 /// pools its reference-fetch clients. Bounded and evicted oldest-first so a
@@ -100,12 +96,7 @@ where
 
 /// The order this request should visit the endpoints in.
 ///
-/// Configured order, unless the network asks for a random one. `m_of_n` is
-/// deliberately absent here: it is not an ordering, and the reads that route
-/// through [`try_endpoints`] are the ones whose answers cannot be compared —
-/// a receipt that only one endpoint has seen yet, for example. Those take the
-/// first answer under every strategy. Quorum sampling is applied only by the
-/// fee, head, and simulation paths where its semantics are defined.
+/// Configured order, unless the network asks for a fresh random order.
 pub(crate) fn endpoint_order(network: &NetworkConfig) -> Vec<&url::Url> {
     let mut order: Vec<&url::Url> = network.rpc_urls.iter().collect();
     if network.rpc_strategy.shuffles() {
@@ -131,141 +122,6 @@ fn shuffle<T>(items: &mut [T]) {
             usize::try_from(u64::from_le_bytes(bytes) % (index as u64 + 1)).unwrap_or_default();
         items.swap(index, pick);
     }
-}
-
-/// The EIP-1559 fee pair to sign, given what the endpoint that answered the
-/// rest of preparation said.
-///
-/// Under `ordered` and `random` that answer stands: those strategies have
-/// already chosen to trust whichever endpoint is first, and asking more of
-/// them here would spend requests the owner said they did not want to spend.
-///
-/// Under `m_of_n` it does not. Requiring equality would refuse every request,
-/// because two honest nodes legitimately disagree about what the next block
-/// will cost. What is available instead is a median: draw estimates from
-/// the configured endpoints until `agree` of them have answered, and take the
-/// middle of each field. With a majority honest, the middle value is one no
-/// single operator picked — which is the whole of what `m_of_n` promises and
-/// what these two fields were getting none of.
-///
-/// The two fields are taken independently, so the pair is re-ordered
-/// afterwards rather than assumed consistent.
-pub async fn median_fee_estimate(
-    network: &NetworkConfig,
-    first_max_fee: u128,
-    first_priority_fee: u128,
-) -> Result<(u128, u128)> {
-    let required = network.rpc_strategy.required_agreement();
-    if required <= 1 {
-        return Ok((first_max_fee, first_priority_fee));
-    }
-    let mut failures = Vec::new();
-    let mut max_fees = Vec::new();
-    let mut priority_fees = Vec::new();
-    // Every configured endpoint votes, not the first `required` to answer.
-    // See `median_head` below for why stopping early defeats the median.
-    for endpoint in endpoint_order(network) {
-        let provider = provider_for(endpoint);
-        // The chain is asked about in the same round trip as the estimate, for
-        // the reason spelled out in `median_head`: an endpoint serving some
-        // other chain is not a witness to this one's fees, and a vote it casts
-        // cannot be taken back once it is inside the median.
-        match tokio::time::timeout(FEE_ESTIMATE_TIMEOUT, async {
-            tokio::try_join!(provider.get_chain_id(), provider.estimate_eip1559_fees())
-        })
-        .await
-        {
-            Ok(Ok((chain_id, _))) if chain_id != network.chain_id => failures.push((
-                endpoint,
-                anyhow::anyhow!("RPC reports chain {chain_id}, not {}", network.chain_id),
-            )),
-            Ok(Ok((_, estimate))) => {
-                max_fees.push(estimate.max_fee_per_gas);
-                priority_fees.push(estimate.max_priority_fee_per_gas);
-            }
-            Ok(Err(error)) => failures.push((endpoint, rpc_error(&error))),
-            Err(_) => failures.push((endpoint, anyhow::anyhow!("fee estimate timed out"))),
-        }
-    }
-    ensure!(
-        max_fees.len() >= required,
-        "{} requires {required} endpoints to agree on the fee but only {} answered",
-        network.name,
-        max_fees.len()
-    );
-    let max_fee_per_gas = median(&mut max_fees);
-    let max_priority_fee_per_gas = median(&mut priority_fees).min(max_fee_per_gas);
-    Ok((max_fee_per_gas, max_priority_fee_per_gas))
-}
-
-/// The height a quorum simulation pins to, as the median of what `agree`
-/// endpoints say the chain head is.
-///
-/// `None` under `ordered` and `random`, where there is no quorum to protect
-/// and the endpoint that runs the simulation reads its own head.
-///
-/// Under `m_of_n` there is. The pin used to be whichever height the first
-/// endpoint happened to report, and every later endpoint was then held to it —
-/// so an endpoint reporting an old head chose the state the whole quorum
-/// evaluated against, and the others honestly agreed about that height. The
-/// agreement was real and the thing agreed on was the attacker's. A median
-/// with a majority honest is a height an honest endpoint reported, and one
-/// liar moves it by at most a position.
-pub async fn median_head(network: &NetworkConfig) -> Result<Option<u64>> {
-    let required = network.rpc_strategy.required_agreement();
-    if required <= 1 {
-        return Ok(None);
-    }
-    let mut heads = Vec::new();
-    // Every configured endpoint votes, not the first `required` to answer.
-    //
-    // "A median with a majority honest is a height an honest endpoint
-    // reported, and one liar moves it by at most a position" is only true of a
-    // median over the whole set. Stopping at `required` made the sample the
-    // first responders, and a liar is fast — with `m_of_n(2)` over three
-    // endpoints, one stale endpoint answering alongside one current endpoint
-    // is half the sample, the lower median takes the stale height, and the
-    // honest third endpoint is never asked. Every other endpoint then
-    // simulates against the state the liar chose, agrees honestly about it,
-    // and the quorum is real while the thing agreed on is the attacker's.
-    //
-    // Each head is asked for together with the chain it belongs to. Nothing
-    // requires every configured endpoint to serve the configured chain —
-    // `validate_network` checks the shape of the list, not its identity — and
-    // an endpoint on some other chain reports that chain's height. Its vote
-    // enters the median here, and `simulate_execution_through`'s own chain
-    // check comes far too late to help: it disqualifies the endpoint from
-    // *simulating*, long after that endpoint's height became the pin every
-    // honest endpoint is held to. A vote cannot be taken back out of a median
-    // once it is in, so it has to be refused at the door.
-    for endpoint in endpoint_order(network) {
-        let provider = provider_for(endpoint);
-        if let Ok(Ok((chain_id, number))) = tokio::time::timeout(FEE_ESTIMATE_TIMEOUT, async {
-            tokio::try_join!(provider.get_chain_id(), provider.get_block_number())
-        })
-        .await
-            && chain_id == network.chain_id
-        {
-            heads.push(u128::from(number));
-        }
-    }
-    ensure!(
-        heads.len() >= required,
-        "{} requires {required} endpoints to agree but only {} reported a chain head",
-        network.name,
-        heads.len()
-    );
-    Ok(Some(
-        u64::try_from(median(&mut heads)).expect("every element came from a u64"),
-    ))
-}
-
-/// The lower of the two middle values for an even count, so the answer is
-/// always one an endpoint actually returned rather than an average of two
-/// that nobody did.
-fn median(values: &mut [u128]) -> u128 {
-    values.sort_unstable();
-    values[(values.len() - 1) / 2]
 }
 
 /// The error raised when every endpoint a network lists has been tried.

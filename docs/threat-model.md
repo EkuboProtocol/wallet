@@ -210,8 +210,8 @@ agent-supplied hypotheticals while deciding whether to sign.
 The RPC still executes the EVM, supplies state, gas/fee estimates, receipts,
 and transaction visibility. It can lie, censor, or be stale. Pinning and local
 validation detect structural mismatches, not a coherently dishonest endpoint.
-Use a trusted authenticated provider—or an independently designed quorum
-boundary—for funded production wallets.
+Use a trusted authenticated provider or a backend with an independent
+verification model, such as a light client, for funded production wallets.
 
 **This is a trust assumption, stated as one**, and its shape is worth being
 precise about, because it is narrower than it used to be.

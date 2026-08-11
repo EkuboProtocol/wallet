@@ -780,36 +780,3 @@ async fn every_endpoint_dead_reports_each_one() {
     assert!(error.contains("127.0.0.1:1"), "unexpected: {error}");
     assert!(error.contains("127.0.0.1:2"), "unexpected: {error}");
 }
-
-/// `m_of_n(2)` against two real, independent mainnet endpoints.
-///
-/// The unit tests prove the mechanism with stubs, one of which lies. This
-/// proves the part stubs cannot: that two unrelated production nodes, pinned
-/// to one block, actually return simulations this wallet considers identical.
-/// If honest endpoints disagreed in practice — over gas accounting, transfer
-/// tracing, or block linkage — the strategy would refuse every request and be
-/// useless, and that would only ever show up here.
-#[tokio::test(flavor = "multi_thread")]
-async fn two_real_endpoints_agree_on_the_same_simulation() {
-    let Some(mut network) = network(1) else {
-        eprintln!("skipping agreement check: set EKUBO_WALLET_LIVE_RPC_TESTS=1 to run");
-        return;
-    };
-    if network.rpc_urls.len() < 2 {
-        eprintln!("skipping agreement check: chain 1 is configured with one endpoint");
-        return;
-    }
-    network.rpc_strategy = ekubo_wallet_core::config::RpcStrategy::MOfN { agree: 2 };
-
-    let plan = approve_plan(1, Address::repeat_byte(0x42), 1);
-    let result = simulate_retrying(&network, &plan, None).await;
-    assert!(
-        result.simulation.success,
-        "two independent endpoints did not agree on a simple approve: {:?}",
-        result.simulation.failure
-    );
-    assert!(
-        result.simulation.gas_used.is_some(),
-        "an agreed simulation still reports the gas both endpoints returned"
-    );
-}

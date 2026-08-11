@@ -330,11 +330,6 @@ fn rpc_strategies_round_trip_through_the_spellings_people_type() {
     for (text, expected) in [
         ("ordered", RpcStrategy::Ordered),
         ("Random", RpcStrategy::Random),
-        ("m_of_n(2)", RpcStrategy::MOfN { agree: 2 }),
-        // A shell eats parentheses, so the other spellings are accepted too.
-        ("m_of_n:3", RpcStrategy::MOfN { agree: 3 }),
-        ("m-of-n 2", RpcStrategy::MOfN { agree: 2 }),
-        ("M_OF_N(4)", RpcStrategy::MOfN { agree: 4 }),
     ] {
         assert_eq!(
             text.parse::<RpcStrategy>().unwrap(),
@@ -343,43 +338,14 @@ fn rpc_strategies_round_trip_through_the_spellings_people_type() {
         );
     }
     // Display round-trips, so what `network list` prints can be typed back in.
-    for strategy in [
-        RpcStrategy::Ordered,
-        RpcStrategy::Random,
-        RpcStrategy::MOfN { agree: 2 },
-    ] {
+    for strategy in [RpcStrategy::Ordered, RpcStrategy::Random] {
         assert_eq!(
             strategy.to_string().parse::<RpcStrategy>().unwrap(),
             strategy
         );
     }
     assert!("majority".parse::<RpcStrategy>().is_err());
-    assert!("m_of_n".parse::<RpcStrategy>().is_err());
-    assert!("m_of_n(two)".parse::<RpcStrategy>().is_err());
-}
-
-/// A threshold the network cannot reach would refuse every request on it, so
-/// it is refused where the number is typed rather than at signing time.
-#[test]
-fn an_unreachable_agreement_threshold_is_refused() {
-    use crate::config::RpcStrategy;
-    let mut network = default_networks().remove(0);
-    network.rpc_urls.truncate(2);
-
-    network.rpc_strategy = RpcStrategy::MOfN { agree: 3 };
-    let error = crate::config::validate_network(&network)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("needs 3 endpoints but"), "{error}");
-
-    network.rpc_strategy = RpcStrategy::MOfN { agree: 1 };
-    let error = crate::config::validate_network(&network)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("at least 2"), "{error}");
-
-    network.rpc_strategy = RpcStrategy::MOfN { agree: 2 };
-    crate::config::validate_network(&network).expect("two of two is reachable");
+    assert!("m_of_n(2)".parse::<RpcStrategy>().is_err());
 }
 
 /// The setting is absent from a configuration written before it existed, and
@@ -401,16 +367,13 @@ fn the_default_strategy_is_neither_required_nor_written() {
         "the default is not written back: {written}"
     );
 
-    let mut agreeing = stored.clone();
-    agreeing.rpc_strategy = RpcStrategy::MOfN { agree: 2 };
-    let written = serde_json::to_value(&agreeing).unwrap();
-    assert_eq!(
-        written["rpc_strategy"],
-        serde_json::json!({"m_of_n": {"agree": 2}})
-    );
+    let mut random = stored.clone();
+    random.rpc_strategy = RpcStrategy::Random;
+    let written = serde_json::to_value(&random).unwrap();
+    assert_eq!(written["rpc_strategy"], serde_json::json!("random"));
     assert_eq!(
         serde_json::from_value::<crate::config::NetworkConfig>(written).unwrap(),
-        agreeing
+        random
     );
 }
 
