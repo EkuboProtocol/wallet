@@ -146,6 +146,27 @@ impl OwnerApi {
         Ok(ExportLease::new(self.export_account(wallet_id).await?))
     }
 
+    pub fn account_removal_document(&self, wallet_id: &str) -> Result<ReviewDocument> {
+        let wallet = self.config.wallet(wallet_id)?;
+        let in_flight =
+            PolicyStore::production(self.config.data_dir())?.in_flight_transactions(wallet_id)?;
+        let mut request = ApprovalRequest::new(
+            ApprovalKind::RemoveWallet,
+            "Remove account",
+            "Delete this account's platform credential, local metadata, policy, and queued requests.",
+        )
+        .fact("Account", &wallet.id)
+        .fact("Address", format!("{:#x}", wallet.address))
+        .warning("This cannot be undone unless you have a separate private-key backup.");
+        for transaction in in_flight {
+            request = request.warning(format!(
+                "Transaction {} is {:?} on chain {} and may still reach the chain. Removal deletes the only local signed bytes and tracking state.",
+                transaction.request_id, transaction.status, transaction.chain_id
+            ));
+        }
+        Ok(ReviewDocument::from_request(request, Vec::new()))
+    }
+
     pub async fn remove_account(&self, wallet_id: &str) -> Result<WalletMetadata> {
         let removed = CustodyService::new(
             self.config.clone(),
@@ -637,14 +658,19 @@ pub trait Clipboard: Send + Sync + 'static {
 pub struct ExportLease {
     value: Arc<Mutex<zeroize::Zeroizing<String>>>,
     expires_at: Instant,
+    duration: Duration,
 }
 
 impl ExportLease {
     fn new(value: zeroize::Zeroizing<String>) -> Self {
+        Self::new_for_duration(value, PRIVATE_KEY_REVEAL_DURATION)
+    }
+
+    fn new_for_duration(value: zeroize::Zeroizing<String>, duration: Duration) -> Self {
         let value = Arc::new(Mutex::new(value));
         let expiring = value.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(PRIVATE_KEY_REVEAL_DURATION);
+            std::thread::sleep(duration);
             if let Ok(mut value) = expiring.lock() {
                 use zeroize::Zeroize as _;
                 value.zeroize();
@@ -652,7 +678,8 @@ impl ExportLease {
         });
         Self {
             value,
-            expires_at: Instant::now() + PRIVATE_KEY_REVEAL_DURATION,
+            expires_at: Instant::now() + duration,
+            duration,
         }
     }
 
@@ -677,8 +704,9 @@ impl ExportLease {
         let value = self.visible_value().context("private-key reveal expired")?;
         clipboard.write_text(&value)?;
         let expected = zeroize::Zeroizing::new(value.to_string());
+        let duration = self.duration;
         std::thread::spawn(move || {
-            std::thread::sleep(PRIVATE_KEY_REVEAL_DURATION);
+            std::thread::sleep(duration);
             if clipboard.read_text().ok().flatten().as_deref() == Some(expected.as_str()) {
                 let _ = clipboard.clear();
             }

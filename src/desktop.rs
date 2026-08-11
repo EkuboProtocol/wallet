@@ -1,7 +1,7 @@
 use crate::{
     BUILD_VERSION,
     agent_config::{AgentAdapter, ConfigPreview},
-    authority::{ApplicationAuthority, OwnerApi},
+    authority::{ApplicationAuthority, ExportLease, OwnerApi, PRIVATE_KEY_REVEAL_DURATION},
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     http_server::{MCP_REQUEST_LIMIT_BYTES, McpHttpServer},
     notifications::{
@@ -18,12 +18,14 @@ use crate::{
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::ReviewDecision;
 use ekubo_wallet_core::core::policy::WalletPolicy;
+use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::AgentKind;
 use ekubo_wallet_core::legal::LegalDocument;
 use ekubo_wallet_core::pending::PendingStatus;
 use gpui::{
-    App, Context, Entity, KeyBinding, QuitMode, Render, SharedString, Window, WindowAppearance,
-    WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px, size,
+    App, ClipboardItem, Context, Entity, KeyBinding, QuitMode, Render, SharedString, Window,
+    WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px,
+    size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, Root, StyledExt,
@@ -113,6 +115,8 @@ pub struct WalletWindow {
     active_review: Option<ActiveReview>,
     pending_agent_install: Option<PendingAgentInstall>,
     account_id_input: Option<Entity<InputState>>,
+    private_key_input: Option<Entity<InputState>>,
+    account_export: Option<AccountExport>,
     legal_review: Option<LegalReview>,
     operation_status: Option<SharedString>,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
@@ -125,6 +129,12 @@ struct LegalReview {
     text: String,
     digest: String,
     viewed: bool,
+}
+
+struct AccountExport {
+    wallet_id: String,
+    lease: Option<ExportLease>,
+    copied: bool,
 }
 
 struct PendingAgentInstall {
@@ -189,6 +199,9 @@ enum ActiveReviewCompletion {
         selected_account: usize,
         response: oneshot::Sender<ProposalCommand>,
     },
+    AccountRemoval {
+        wallet_id: String,
+    },
 }
 
 impl WalletWindow {
@@ -208,6 +221,8 @@ impl WalletWindow {
             active_review: None,
             pending_agent_install: None,
             account_id_input: None,
+            private_key_input: None,
+            account_export: None,
             legal_review: None,
             operation_status: None,
             walletconnect,
@@ -220,6 +235,13 @@ impl WalletWindow {
         if self.account_id_input.is_none() {
             self.account_id_input = Some(cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Account name, for example primary")
+            }));
+        }
+        if self.private_key_input.is_none() {
+            self.private_key_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("0x-prefixed 32-byte private key")
+                    .masked(true)
             }));
         }
         if self.walletconnect_uri_input.is_none() {
@@ -342,6 +364,128 @@ impl WalletWindow {
             }
             Err(error) => {
                 self.operation_status = Some(format!("Could not create account: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn import_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(id_input), Some(key_input)) = (
+            self.account_id_input.as_ref(),
+            self.private_key_input.as_ref(),
+        ) else {
+            return;
+        };
+        let wallet_id = id_input.read(cx).value().trim().to_owned();
+        let secret = zeroize::Zeroizing::new(key_input.read(cx).value().trim().to_owned());
+        key_input.update(cx, |input, cx| input.set_value("", window, cx));
+        let result = PrivateKeyMaterial::from_hex(&secret)
+            .and_then(|key| self.owner.import_account(&wallet_id, key));
+        self.operation_status = Some(match result {
+            Ok(account) => {
+                id_input.update(cx, |input, cx| input.set_value("", window, cx));
+                format!("Imported account {} at {:#x}.", account.id, account.address).into()
+            }
+            Err(error) => format!("Could not import account: {error:#}").into(),
+        });
+        cx.notify();
+    }
+
+    fn begin_account_export(&mut self, wallet_id: String, cx: &mut Context<Self>) {
+        self.account_export = Some(AccountExport {
+            wallet_id,
+            lease: None,
+            copied: false,
+        });
+        cx.notify();
+    }
+
+    fn authenticate_account_export(&mut self, cx: &mut Context<Self>) {
+        let Some(export) = self.account_export.as_ref() else {
+            return;
+        };
+        let wallet_id = export.wallet_id.clone();
+        let owner = self.owner.clone();
+        self.operation_status = Some("Waiting for operating-system authentication…".into());
+        cx.spawn(async move |view, cx| {
+            let result = owner.begin_private_key_export(&wallet_id).await;
+            let _ = view.update(cx, |view, cx| {
+                match result {
+                    Ok(lease) => {
+                        if let Some(export) = view.account_export.as_mut()
+                            && export.wallet_id == wallet_id
+                        {
+                            export.lease = Some(lease);
+                            export.copied = false;
+                            view.operation_status = Some(
+                                "Private key revealed for 30 seconds. It has not been copied."
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        view.operation_status =
+                            Some(format!("Private-key export cancelled: {error:#}").into());
+                    }
+                }
+                cx.notify();
+            });
+            cx.background_executor()
+                .timer(PRIVATE_KEY_REVEAL_DURATION)
+                .await;
+            let _ = view.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn copy_account_export(&mut self, cx: &mut Context<Self>) {
+        let Some(export) = self.account_export.as_mut() else {
+            return;
+        };
+        let Some(value) = export.lease.as_ref().and_then(ExportLease::visible_value) else {
+            self.operation_status = Some("The private-key reveal has expired.".into());
+            cx.notify();
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+        export.copied = true;
+        self.operation_status = Some(
+            "Copied explicitly. The clipboard will be conditionally cleared in 30 seconds.".into(),
+        );
+        cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(PRIVATE_KEY_REVEAL_DURATION)
+                .await;
+            cx.update(|cx| {
+                if cx
+                    .read_from_clipboard()
+                    .and_then(|item| item.text())
+                    .as_deref()
+                    == Some(value.as_str())
+                {
+                    cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn begin_account_removal(&mut self, wallet_id: String, cx: &mut Context<Self>) {
+        match self.owner.account_removal_document(&wallet_id) {
+            Ok(document) => {
+                self.active_review = Some(ActiveReview {
+                    state: ReviewState::new(document),
+                    simulation: None,
+                    completion: Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
+                    awaiting_refresh: false,
+                });
+                self.operation_status = None;
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not prepare account removal: {error:#}").into());
             }
         }
         cx.notify();
@@ -782,6 +926,10 @@ impl WalletWindow {
                 self.active_review = None;
                 self.operation_status = Some("Review closed. The request remains pending.".into());
             }
+            (GuiReviewCommand::Close, Some(ActiveReviewCompletion::AccountRemoval { .. })) => {
+                self.active_review = None;
+                self.operation_status = Some("Account removal cancelled.".into());
+            }
             (
                 GuiReviewCommand::Reject,
                 Some(ActiveReviewCompletion::Message { request_id, .. }),
@@ -830,6 +978,29 @@ impl WalletWindow {
                         view.operation_status = Some(match result {
                             Ok(_) => "Typed data reviewed, authenticated, and signed.".into(),
                             Err(error) => format!("Typed-data signing failed: {error:#}").into(),
+                        });
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            (GuiReviewCommand::Reject, Some(ActiveReviewCompletion::AccountRemoval { .. })) => {
+                self.active_review = None;
+                self.operation_status = Some("Account removal cancelled.".into());
+            }
+            (
+                GuiReviewCommand::Approve,
+                Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
+            ) => {
+                self.active_review = None;
+                cx.spawn(async move |view, cx| {
+                    let result = owner.remove_account(&wallet_id).await;
+                    let _ = view.update(cx, |view, cx| {
+                        view.operation_status = Some(match result {
+                            Ok(_) => {
+                                format!("Removed account {wallet_id} and its local policy.").into()
+                            }
+                            Err(error) => format!("Could not remove account: {error:#}").into(),
                         });
                         cx.notify();
                     });
@@ -1122,6 +1293,21 @@ impl WalletWindow {
                     ),
             );
         }
+        if let Some(input) = &self.private_key_input {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(Input::new(input).mask_toggle().flex_1())
+                    .child(
+                        Button::new("import-account")
+                            .label("Import private key")
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.import_account(window, cx);
+                            })),
+                    ),
+            );
+        }
         panel = panel.child(
             div()
                 .mt_3()
@@ -1134,19 +1320,56 @@ impl WalletWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child("No accounts yet."),
             ),
-            Ok(items) => panel.children(items.into_iter().map(|item| {
-                div()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(format!("{} · {:#x}", item.id, item.address))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{:?} · created {}", item.source, item.created_at)),
-                    )
-            })),
+            Ok(items) => {
+                panel.children(items.into_iter().map(|item| {
+                    let export_id = item.id.clone();
+                    let removal_id = item.id.clone();
+                    div()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .child(format!("{} · {:#x}", item.id, item.address))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{:?} · created {}",
+                                            item.source, item.created_at
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "export-account-{export_id}"
+                                    )))
+                                    .label("Export")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.begin_account_export(export_id.clone(), cx);
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "remove-account-{removal_id}"
+                                    )))
+                                    .label("Remove")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.begin_account_removal(removal_id.clone(), cx);
+                                    })),
+                                ),
+                        )
+                }))
+            }
             Err(error) => panel.child(format!("Accounts unavailable: {error:#}")),
         }
     }
@@ -1872,6 +2095,79 @@ impl WalletWindow {
             )
     }
 
+    fn render_account_security_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(export) = self.account_export.as_ref() else {
+            return div();
+        };
+        let visible = export.lease.as_ref().and_then(ExportLease::visible_value);
+        div()
+            .absolute()
+            .inset_4()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().text_xl().font_semibold().child("Export private key"))
+            .child(format!("Account: {}", export.wallet_id))
+            .child("Anyone with this key has full control of the account. Never paste it into a website, chat, issue, log, or agent prompt.")
+            .when_some(visible.as_ref(), |panel, value| {
+                panel.child(
+                    div()
+                        .p_3()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .font_family("monospace")
+                        .child(value.to_string()),
+                )
+            })
+            .when(export.lease.is_some() && visible.is_none(), |panel| {
+                panel.child("The 30-second reveal expired and the key is concealed.")
+            })
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(
+                        Button::new("close-account-export")
+                            .label("Close")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.account_export = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .when(export.lease.is_none(), |buttons| {
+                                buttons.child(
+                                    Button::new("authenticate-account-export")
+                                        .label("Authenticate & reveal")
+                                        .danger()
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.authenticate_account_export(cx);
+                                        })),
+                                )
+                            })
+                            .when(visible.is_some(), |buttons| {
+                                buttons.child(
+                                    Button::new("copy-account-export")
+                                        .label(if export.copied { "Copied" } else { "Copy" })
+                                        .disabled(export.copied)
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.copy_account_export(cx);
+                                        })),
+                                )
+                            }),
+                    ),
+            )
+    }
+
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
@@ -1952,6 +2248,9 @@ impl Render for WalletWindow {
             .when(self.legal_review.is_some(), |view| {
                 view.child(self.render_legal_overlay(cx))
             })
+            .when(self.account_export.is_some(), |view| {
+                view.child(self.render_account_security_overlay(cx))
+            })
     }
 }
 
@@ -1981,6 +2280,7 @@ fn show_wallet_window(
 
     wallet_view.update(cx, |view, cx| {
         view.account_id_input = None;
+        view.private_key_input = None;
         view.walletconnect_uri_input = None;
         cx.notify();
     });
