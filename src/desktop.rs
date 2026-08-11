@@ -34,16 +34,22 @@ use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, IconName, Root, StyledExt,
     alert::Alert,
     button::{Button, ButtonVariants},
+    group_box::{GroupBox, GroupBoxVariants as _},
     h_flex,
     input::{Input, InputState},
+    list::ListItem,
     scroll::ScrollableElement,
     sidebar::{Sidebar, SidebarMenu, SidebarMenuItem, SidebarToggleButton},
     spinner::Spinner,
+    switch::Switch,
 };
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::oneshot;
@@ -234,6 +240,7 @@ pub struct WalletWindow {
     legal_review: Option<LegalReview>,
     legal_gate: bool,
     operation_status: Option<SharedString>,
+    detailed_notification_previews: Arc<AtomicBool>,
     portfolio: PortfolioState,
     portfolio_generation: u64,
     modal_focus: FocusHandle,
@@ -342,6 +349,7 @@ impl WalletWindow {
         review_presenter: GuiReviewPresenter,
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
+        detailed_notification_previews: Arc<AtomicBool>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut window = Self {
@@ -360,6 +368,7 @@ impl WalletWindow {
             legal_review: None,
             legal_gate: false,
             operation_status: None,
+            detailed_notification_previews,
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
             modal_focus: cx.focus_handle(),
@@ -1345,6 +1354,28 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn set_detailed_notification_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        match self.owner.set_detailed_notification_previews(enabled) {
+            Ok(()) => {
+                self.detailed_notification_previews
+                    .store(enabled, Ordering::Relaxed);
+                self.operation_status = Some(
+                    if enabled {
+                        "Notification previews may now include request identifiers."
+                    } else {
+                        "Notification previews are now lock-screen safe."
+                    }
+                    .into(),
+                );
+            }
+            Err(error) => {
+                self.operation_status =
+                    Some(format!("Could not save notification preference: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.nav_collapsed;
         let menu = SidebarMenu::new().children(Route::ALL.into_iter().map(|route| {
@@ -1509,25 +1540,16 @@ impl WalletWindow {
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut panel = div()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(self.mcp_status.clone())
-            .child(format!(
-                "Request limit: {} MiB",
-                MCP_REQUEST_LIMIT_BYTES / 1024 / 1024
-            ))
-            .child("Notifications hide transaction details by default.")
-            .child(div().mt_3().font_semibold().child("Detected agents"));
+        let mut agents = div().flex().flex_col().gap_1();
         let clients = self.owner.clients().unwrap_or_default();
         let adapters = match AgentAdapter::supported() {
             Ok(adapters) => adapters,
-            Err(error) => return panel.child(format!("Agent detection unavailable: {error:#}")),
+            Err(error) => {
+                return div().child(Alert::error(
+                    "agent-detection-error",
+                    format!("Agent detection unavailable: {error:#}"),
+                ));
+            }
         };
         let mut detected = 0;
         for adapter in adapters.into_iter().filter(AgentAdapter::detected) {
@@ -1535,42 +1557,90 @@ impl WalletWindow {
             let installed = clients
                 .iter()
                 .any(|client| client.agent_kind == adapter.kind && client.revoked_at.is_none());
-            panel = panel.child(
-                div()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .items_center()
-                    .justify_between()
+            let display_name = adapter.display_name;
+            let config_path = adapter.config_path.display().to_string();
+            agents = agents.child(
+                ListItem::new(SharedString::from(format!("detected-agent-{detected}")))
+                    .disabled(true)
                     .child(
-                        div().child(adapter.display_name).child(
+                        div().child(display_name).child(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(adapter.config_path.display().to_string()),
+                                .child(config_path),
                         ),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if installed {
-                                "Automatically managed"
-                            } else {
-                                "Will install after legal acceptance"
-                            }),
-                    ),
+                    .suffix(move |_, _| {
+                        div().text_sm().child(if installed {
+                            "Automatically managed"
+                        } else {
+                            "Will install after legal acceptance"
+                        })
+                    }),
             );
         }
         if detected == 0 {
-            panel = panel.child(
+            agents = agents.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
                     .child("No supported agent installation was detected."),
             );
         }
-        panel
+
+        let detailed = self.detailed_notification_previews.load(Ordering::Relaxed);
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                GroupBox::new()
+                    .id("mcp-settings")
+                    .outline()
+                    .title("MCP service")
+                    .child(self.mcp_status.clone())
+                    .child(format!(
+                        "Request limit: {} MiB",
+                        MCP_REQUEST_LIMIT_BYTES / 1024 / 1024
+                    )),
+            )
+            .child(
+                GroupBox::new()
+                    .id("notification-settings")
+                    .outline()
+                    .title("Notifications")
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child("Show detailed previews")
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Off by default so lock-screen notifications do not expose transaction identifiers."),
+                                    ),
+                            )
+                            .child(
+                                Switch::new("detailed-notification-previews")
+                                    .checked(detailed)
+                                    .tooltip("Include request identifiers in lifecycle notifications")
+                                    .on_click(cx.listener(|view, checked, _, cx| {
+                                        view.set_detailed_notification_previews(*checked, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                GroupBox::new()
+                    .id("detected-agent-settings")
+                    .outline()
+                    .title("Detected agents")
+                    .child(agents),
+            )
     }
 
     fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -2793,12 +2863,12 @@ impl WalletWindow {
             .child(self.route_panel(cx))
             .when_some(self.operation_status.clone(), |view, status| {
                 view.child(
-                    div()
-                        .p_2()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .child(status),
+                    Alert::info("operation-status", status).on_close(cx.listener(
+                        |view, _, _, cx| {
+                            view.operation_status = None;
+                            cx.notify();
+                        },
+                    )),
                 )
             })
             .child(div().text_sm().text_color(cx.theme().muted_foreground).child(
@@ -2956,6 +3026,9 @@ pub fn run_desktop() -> Result<()> {
                 PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
             ));
             let initial_agents = owner.clients().map_or(0, |clients| clients.len());
+            let detailed_notification_previews = Arc::new(AtomicBool::new(
+                owner.detailed_notification_previews().unwrap_or(false),
+            ));
             if let Some(tray) = tray.borrow_mut().as_mut() {
                 tray.update(&TraySnapshot {
                     pending_reviews: 0,
@@ -3005,6 +3078,7 @@ pub fn run_desktop() -> Result<()> {
                     review_presenter.clone(),
                     walletconnect.clone(),
                     walletconnect_presenter.clone(),
+                    detailed_notification_previews.clone(),
                     cx,
                 )
             });
@@ -3158,21 +3232,18 @@ pub fn run_desktop() -> Result<()> {
             })
             .detach();
 
-            let detailed_previews = clients
-                .lock()
-                .ok()
-                .and_then(|store| store.setting::<bool>("notification_detailed_previews").ok())
-                .flatten()
-                .unwrap_or(false);
-            let preferences = NotificationPreferences { detailed_previews };
             let (notification_clicks, mut clicked_notifications) =
                 tokio::sync::mpsc::unbounded_channel();
             let notification_service = PlatformNotificationService::new(notification_clicks);
             let mut domain_events = events.subscribe();
+            let notification_previews = detailed_notification_previews.clone();
             gpui_tokio::Tokio::spawn(cx, async move {
                 loop {
                     match domain_events.recv().await {
                         Ok(event) => {
+                            let preferences = NotificationPreferences {
+                                detailed_previews: notification_previews.load(Ordering::Relaxed),
+                            };
                             if let Some(notification) = notification_for(&event, preferences) {
                                 notification_service.show(notification);
                             }

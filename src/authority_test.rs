@@ -1,4 +1,5 @@
 use super::*;
+use ekubo_wallet_core::policy_store::DatabaseKey;
 
 #[test]
 fn exact_review_payloads_escape_invisible_and_bidirectional_text() {
@@ -54,4 +55,28 @@ fn export_lease_conceals_and_conditionally_clears_its_clipboard_value() {
         clipboard.read_text().unwrap().as_deref(),
         Some("new clipboard value")
     );
+}
+
+#[test]
+fn notification_preview_preference_is_owner_controlled_and_persisted() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.db");
+    let desktop = DesktopStore::open(&database, &DatabaseKey::new([13; 32])).unwrap();
+    let owner = OwnerApi {
+        config: ConfigStore::new(directory.path()),
+        desktop: Arc::new(Mutex::new(desktop)),
+        events: EventBus::default(),
+    };
+    let mut events = owner.event_bus().subscribe();
+
+    assert!(!owner.detailed_notification_previews().unwrap());
+    owner.set_detailed_notification_previews(true).unwrap();
+    assert!(owner.detailed_notification_previews().unwrap());
+    assert!(matches!(
+        events.try_recv().unwrap().kind,
+        DomainEventKind::ConfigurationChanged
+    ));
+
+    owner.set_detailed_notification_previews(false).unwrap();
+    assert!(!owner.detailed_notification_previews().unwrap());
 }

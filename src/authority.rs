@@ -253,6 +253,20 @@ impl OwnerApi {
         self.desktop()?.set_setting("mcp_port", &port)
     }
 
+    pub fn detailed_notification_previews(&self) -> Result<bool> {
+        Ok(self
+            .desktop()?
+            .setting("notification_detailed_previews")?
+            .unwrap_or(false))
+    }
+
+    pub fn set_detailed_notification_previews(&self, enabled: bool) -> Result<()> {
+        self.desktop()?
+            .set_setting("notification_detailed_previews", &enabled)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
     pub fn policy(&self, wallet_id: &str) -> Result<Option<StoredPolicy>> {
         PolicyStore::production(self.config.data_dir())?.get(wallet_id)
     }
