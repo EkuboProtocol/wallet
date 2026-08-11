@@ -16,7 +16,7 @@ use ekubo_wallet_core::{
     execution::BroadcastResult,
     human_presence::{
         HumanPresence as _, OwnerAuthorization, OwnerAuthorizationScope, PlatformHumanPresence,
-        PresenceRequest, authorize_owner,
+        PresenceRequest, authorize_owner, require_software_update_authorization,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
@@ -316,6 +316,17 @@ impl OwnerApi {
 
     pub async fn authorize_agent_access(&self) -> Result<OwnerAuthorization> {
         Ok(authorize_owner(OwnerAuthorizationScope::AgentAccess).await?)
+    }
+
+    pub async fn authorize_software_update(&self) -> Result<OwnerAuthorization> {
+        Ok(authorize_owner(OwnerAuthorizationScope::SoftwareUpdate).await?)
+    }
+
+    pub fn confirm_software_update_install(
+        &self,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        Ok(require_software_update_authorization(authorization)?)
     }
 
     pub fn mcp_port(&self) -> Result<Option<u16>> {

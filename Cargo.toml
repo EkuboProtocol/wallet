@@ -37,6 +37,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 gpui_tokio = { git = "https://github.com/zed-industries/zed" }
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+minisign-verify = "0.2.5"
 num-bigint = "0.5.1"
 notify-rust = "4.18.0"
 rand = "0.10.0"

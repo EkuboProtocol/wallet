@@ -3236,6 +3236,7 @@ dependencies = [
  "hex",
  "image",
  "interprocess",
+ "minisign-verify",
  "notify-rust",
  "num-bigint 0.5.1",
  "rand 0.10.2",

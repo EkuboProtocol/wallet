@@ -94,8 +94,15 @@ jobs:
           pattern: packages-*
           path: dist
           merge-multiple: true
+      - name: Install cargo-packager signer
+        run: cargo install cargo-packager --locked --version 0.11.8
+      - name: Sign update metadata
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: cargo packager signer sign dist/latest.json
       - name: Require signed update metadata
-        run: test -f dist/latest.json && find dist -name '*.sig' -print -quit | grep .
+        run: test -f dist/latest.json && test -f dist/latest.json.sig && find dist -name '*.sig' -print -quit | grep .
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/**

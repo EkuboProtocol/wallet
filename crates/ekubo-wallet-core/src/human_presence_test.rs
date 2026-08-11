@@ -66,6 +66,14 @@ fn owner_authorization_is_scope_bound() {
 }
 
 #[test]
+fn software_update_authorization_cannot_be_reused_from_another_setting() {
+    let update = OwnerAuthorization::for_test(OwnerAuthorizationScope::SoftwareUpdate);
+    require_software_update_authorization(&update).unwrap();
+    let agent = OwnerAuthorization::for_test(OwnerAuthorizationScope::AgentAccess);
+    assert!(require_software_update_authorization(&agent).is_err());
+}
+
+#[test]
 fn protected_setting_prompts_name_the_security_boundary() {
     assert_eq!(
         PresenceRequest::ChangeProtectedSettings {
@@ -80,6 +88,13 @@ fn protected_setting_prompts_name_the_security_boundary() {
         }
         .reason(),
         "change trusted token names and amount scaling"
+    );
+    assert_eq!(
+        PresenceRequest::ChangeProtectedSettings {
+            scope: OwnerAuthorizationScope::SoftwareUpdate,
+        }
+        .reason(),
+        "install a verified Ekubo Wallet software update"
     );
 }
 

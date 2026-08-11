@@ -14,6 +14,7 @@ use crate::{
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
+    updater::{UpdateSummary, VerifiedUpdate},
     walletconnect::{
         ProposalCommand, ProposalPresenter, ProposalPrompt, WalletConnectManager, run_session,
     },
@@ -73,10 +74,11 @@ struct NavigateRoute {
 }
 
 struct DesktopRuntime {
-    _instance: SingleInstance,
+    _instance: Arc<Mutex<Option<SingleInstance>>>,
     _server: Arc<Mutex<Option<McpHttpServer>>>,
     _walletconnect: Arc<Mutex<crate::walletconnect::WalletConnectManager>>,
     _tray: Rc<RefCell<Option<PlatformTray>>>,
+    _pending_software_update: Arc<Mutex<Option<PendingSoftwareUpdate>>>,
 }
 
 impl gpui::Global for DesktopRuntime {}
@@ -404,6 +406,36 @@ pub struct WalletWindow {
     policy_installing: bool,
     token_proposal_busy: bool,
     network_proposal_busy: bool,
+    update_state: SoftwareUpdateState,
+    pending_software_update: Arc<Mutex<Option<PendingSoftwareUpdate>>>,
+}
+
+struct PendingSoftwareUpdate {
+    update: VerifiedUpdate,
+    bytes: Vec<u8>,
+}
+
+enum SoftwareUpdateState {
+    Idle,
+    Checking,
+    Current,
+    Available {
+        update: VerifiedUpdate,
+        summary: UpdateSummary,
+    },
+    Downloading {
+        summary: UpdateSummary,
+        received: u64,
+        total: Option<u64>,
+    },
+    Ready {
+        update: VerifiedUpdate,
+        summary: UpdateSummary,
+        bytes: Vec<u8>,
+    },
+    Authorizing,
+    Installing,
+    Failed(SharedString),
 }
 
 enum PortfolioState {
@@ -1083,6 +1115,7 @@ impl WalletWindow {
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
         detailed_notification_previews: Arc<AtomicBool>,
+        pending_software_update: Arc<Mutex<Option<PendingSoftwareUpdate>>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut window = Self {
@@ -1132,6 +1165,8 @@ impl WalletWindow {
             policy_installing: false,
             token_proposal_busy: false,
             network_proposal_busy: false,
+            update_state: SoftwareUpdateState::Idle,
+            pending_software_update,
         };
         window.open_next_required_legal();
         window
@@ -2552,6 +2587,166 @@ impl WalletWindow {
                 view.activity_feedback.insert(request_id, feedback);
                 cx.notify();
             });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if matches!(
+            self.update_state,
+            SoftwareUpdateState::Checking
+                | SoftwareUpdateState::Downloading { .. }
+                | SoftwareUpdateState::Authorizing
+                | SoftwareUpdateState::Installing
+        ) {
+            return;
+        }
+        self.update_state = SoftwareUpdateState::Checking;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(crate::updater::check_for_update)
+                .await
+                .context("software update check task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.update_state = match result {
+                    Ok(Some(update)) => SoftwareUpdateState::Available {
+                        summary: update.summary(),
+                        update,
+                    },
+                    Ok(None) => SoftwareUpdateState::Current,
+                    Err(error) => SoftwareUpdateState::Failed(
+                        format!("Could not check for signed updates: {error:#}").into(),
+                    ),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn download_update(&mut self, cx: &mut Context<Self>) {
+        let state = std::mem::replace(&mut self.update_state, SoftwareUpdateState::Idle);
+        let SoftwareUpdateState::Available { update, summary } = state else {
+            self.update_state = state;
+            return;
+        };
+        self.update_state = SoftwareUpdateState::Downloading {
+            summary: summary.clone(),
+            received: 0,
+            total: None,
+        };
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                let bytes = update.download_verified_with_progress(|chunk, total| {
+                    let _ = progress_tx.send((chunk as u64, total));
+                })?;
+                Ok::<_, anyhow::Error>((update, bytes))
+            })
+            .await
+            .context("software update download task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let mut received = 0_u64;
+            while let Some((chunk, total)) = progress_rx.recv().await {
+                received = received.saturating_add(chunk);
+                let _ = view.update(cx, |view, cx| {
+                    if let SoftwareUpdateState::Downloading {
+                        received: current,
+                        total: expected,
+                        ..
+                    } = &mut view.update_state
+                    {
+                        *current = received;
+                        *expected = total;
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.update_state = match result {
+                    Ok((update, bytes)) => SoftwareUpdateState::Ready {
+                        update,
+                        summary,
+                        bytes,
+                    },
+                    Err(error) => SoftwareUpdateState::Failed(
+                        format!("Update download or signature verification failed: {error:#}")
+                            .into(),
+                    ),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let state = std::mem::replace(&mut self.update_state, SoftwareUpdateState::Idle);
+        let SoftwareUpdateState::Ready {
+            update,
+            summary,
+            bytes,
+        } = state
+        else {
+            self.update_state = state;
+            return;
+        };
+        self.update_state = SoftwareUpdateState::Authorizing;
+        let owner = self.owner.clone();
+        let pending = self.pending_software_update.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let authorization = owner.authorize_software_update().await?;
+            owner.confirm_software_update_install(&authorization)?;
+            Ok::<_, anyhow::Error>(())
+        });
+        cx.spawn(async move |view, cx| match task.await {
+            Ok(()) => {
+                let staged = pending
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("software update slot was poisoned"))
+                    .map(|mut pending| {
+                        *pending = Some(PendingSoftwareUpdate { update, bytes });
+                    });
+                match staged {
+                    Ok(()) => {
+                        let _ = view.update(cx, |view, cx| {
+                            view.update_state = SoftwareUpdateState::Installing;
+                            cx.notify();
+                        });
+                        cx.update(|cx| cx.quit());
+                    }
+                    Err(error) => {
+                        let _ = view.update(cx, |view, cx| {
+                            view.update_state = SoftwareUpdateState::Failed(
+                                format!("Could not stage verified update: {error:#}").into(),
+                            );
+                            cx.notify();
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = view.update(cx, |view, cx| {
+                    view.update_state = SoftwareUpdateState::Ready {
+                        update,
+                        summary,
+                        bytes,
+                    };
+                    view.operation_status =
+                        Some(format!("Update installation was not authorized: {error:#}").into());
+                    cx.notify();
+                });
+            }
         })
         .detach();
         cx.notify();
@@ -5647,15 +5842,137 @@ impl WalletWindow {
             )
     }
 
-    fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let panel = div()
+    fn render_updates(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut panel = div()
             .p_4()
             .rounded_lg()
             .border_1()
             .border_color(cx.theme().border)
             .flex()
             .flex_col()
-            .gap_2();
+            .gap_4()
+            .child(format!("Installed version: {BUILD_VERSION}"))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Updates are installed only after their embedded Minisign signature is verified and you explicitly confirm the exact version and release notes."),
+            );
+        match &self.update_state {
+            SoftwareUpdateState::Idle => panel.child(
+                Button::new("check-for-software-update")
+                    .label("Check for updates")
+                    .primary()
+                    .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
+            ),
+            SoftwareUpdateState::Checking => panel.child(
+                h_flex()
+                    .gap_2()
+                    .child(Spinner::new())
+                    .child("Downloading and verifying signed update metadata…"),
+            ),
+            SoftwareUpdateState::Current => panel
+                .child("This is the latest signed release for this platform.")
+                .child(
+                    Button::new("recheck-for-software-update")
+                        .label("Check again")
+                        .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
+                ),
+            SoftwareUpdateState::Available { summary, .. } => {
+                panel = panel
+                    .child(div().text_lg().font_semibold().child(format!(
+                        "Ekubo Wallet {} is available",
+                        summary.version
+                    )))
+                    .when_some(summary.notes.clone(), |panel, notes| {
+                        panel.child(
+                            GroupBox::new()
+                                .id("software-update-release-notes")
+                                .outline()
+                                .title("Release notes")
+                                .child(TextView::markdown("software-update-notes", notes)),
+                        )
+                    })
+                    .when(summary.requires_package_handoff, |panel| {
+                        panel.child("This package is managed by the operating system. After verification, the native package installer will complete the update.")
+                    })
+                    .child(
+                        Button::new("download-software-update")
+                            .label("Download and verify signature")
+                            .primary()
+                            .on_click(cx.listener(|view, _, _, cx| view.download_update(cx))),
+                    );
+                panel
+            }
+            SoftwareUpdateState::Downloading {
+                summary,
+                received,
+                total,
+            } => {
+                let progress = total.map_or_else(
+                    || format!("{} MiB received", received / 1024 / 1024),
+                    |total| {
+                        let percent = if total == 0 {
+                            0
+                        } else {
+                            received.saturating_mul(100).saturating_div(total).min(100)
+                        };
+                        format!(
+                            "{percent}% · {} of {} MiB",
+                            received / 1024 / 1024,
+                            total / 1024 / 1024
+                        )
+                    },
+                );
+                panel.child(
+                    h_flex()
+                        .gap_2()
+                        .child(Spinner::new())
+                        .child(format!(
+                            "Downloading Ekubo Wallet {} and verifying its signature… {progress}",
+                            summary.version
+                        )),
+                )
+            }
+            SoftwareUpdateState::Ready { summary, bytes, .. } => panel
+                .child(
+                    div()
+                        .font_semibold()
+                        .child(format!("Ekubo Wallet {} is verified", summary.version)),
+                )
+                .child(format!(
+                    "The {} MiB package passed Minisign verification. Installation will gracefully disconnect WalletConnect sessions, stop the MCP server, replace the application, and relaunch.",
+                    bytes.len() / 1024 / 1024
+                ))
+                .child(
+                    Button::new("install-software-update")
+                        .label("Authenticate, install, and restart")
+                        .primary()
+                        .on_click(cx.listener(|view, _, _, cx| view.install_update(cx))),
+                ),
+            SoftwareUpdateState::Authorizing => panel.child(
+                h_flex()
+                    .gap_2()
+                    .child(Spinner::new())
+                    .child("Waiting for operating-system authentication…"),
+            ),
+            SoftwareUpdateState::Installing => panel.child(
+                h_flex()
+                    .gap_2()
+                    .child(Spinner::new())
+                    .child("Stopping services and installing the verified update…"),
+            ),
+            SoftwareUpdateState::Failed(error) => panel
+                .child(div().text_color(cx.theme().danger).child(error.clone()))
+                .child(
+                    Button::new("retry-software-update")
+                        .label("Try again")
+                        .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
+                ),
+        }
+    }
+
+    fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         match self.route {
             Route::Overview => self.render_portfolio(cx),
             Route::Activity => self.render_activity(cx),
@@ -5665,9 +5982,7 @@ impl WalletWindow {
             Route::Tokens => self.render_tokens(cx),
             Route::WalletConnect => self.render_walletconnect(cx),
             Route::Settings => self.render_settings(cx),
-            Route::Updates => panel
-                .child(format!("Installed version: {BUILD_VERSION}"))
-                .child("Updates are downloaded and signature-verified only after confirmation."),
+            Route::Updates => self.render_updates(cx),
             Route::Reviews => self.render_reviews(cx),
         }
     }
@@ -6366,6 +6681,8 @@ pub fn run_desktop() -> Result<()> {
     let clients = authority.desktop_store();
     let events = authority.events();
     let server_slot = Arc::new(Mutex::new(None::<McpHttpServer>));
+    let instance_slot = Arc::new(Mutex::new(Some(instance)));
+    let pending_software_update = Arc::new(Mutex::new(None::<PendingSoftwareUpdate>));
     let walletconnect = Arc::new(Mutex::new(
         crate::walletconnect::WalletConnectManager::default(),
     ));
@@ -6397,10 +6714,11 @@ pub fn run_desktop() -> Result<()> {
                 });
             }
             cx.set_global(DesktopRuntime {
-                _instance: instance,
+                _instance: instance_slot.clone(),
                 _server: server_slot.clone(),
                 _walletconnect: walletconnect.clone(),
                 _tray: tray.clone(),
+                _pending_software_update: pending_software_update.clone(),
             });
             let mut key_bindings = vec![
                 KeyBinding::new("cmd-k", OpenCommandPalette, None),
@@ -6560,6 +6878,8 @@ pub fn run_desktop() -> Result<()> {
             cx.on_action(|_: &Quit, cx| cx.quit());
             let shutdown_server = server_slot.clone();
             let shutdown_walletconnect = walletconnect.clone();
+            let shutdown_update = pending_software_update.clone();
+            let shutdown_instance = instance_slot.clone();
             let tokio = gpui_tokio::Tokio::handle(cx);
             cx.on_app_quit(move |_| {
                 if let Ok(mut sessions) = shutdown_walletconnect.lock() {
@@ -6570,9 +6890,38 @@ pub fn run_desktop() -> Result<()> {
                     .ok()
                     .and_then(|mut server| server.take());
                 let tokio = tokio.clone();
+                let shutdown_update = shutdown_update.clone();
+                let shutdown_instance = shutdown_instance.clone();
                 async move {
                     if let Some(server) = server {
                         let _ = tokio.spawn(server.stop()).await;
+                    }
+                    let pending = shutdown_update
+                        .lock()
+                        .ok()
+                        .and_then(|mut pending| pending.take());
+                    if let Some(pending) = pending {
+                        match tokio
+                            .spawn_blocking(move || pending.update.install(pending.bytes))
+                            .await
+                        {
+                            Ok(Ok(())) => {
+                                let instance = shutdown_instance
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut instance| instance.take());
+                                drop(instance);
+                                if let Err(error) = crate::updater::relaunch() {
+                                    tracing::error!(%error, "verified update installed but relaunch failed");
+                                }
+                            }
+                            Ok(Err(error)) => {
+                                tracing::error!(%error, "verified software update installation failed");
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "verified software update installation task failed");
+                            }
+                        }
                     }
                 }
             })
@@ -6585,6 +6934,7 @@ pub fn run_desktop() -> Result<()> {
                     walletconnect.clone(),
                     walletconnect_presenter.clone(),
                     detailed_notification_previews.clone(),
+                    pending_software_update.clone(),
                     cx,
                 )
             });
@@ -6740,6 +7090,7 @@ pub fn run_desktop() -> Result<()> {
                             TrayCommand::CheckForUpdates => {
                                 tray_view.update(cx, |view, cx| {
                                     view.route = Route::Updates;
+                                    view.check_for_updates(cx);
                                     cx.notify();
                                 });
                                 let _ = cx
