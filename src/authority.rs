@@ -25,7 +25,7 @@ use ekubo_wallet_core::{
     pending::{PendingStore, PendingTransaction},
     policy_store::{PolicyStore, StoredPolicy},
     token_store::{StoredToken, TokenStore},
-    typed_data::{PendingTypedData, TypedDataStore},
+    typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
 use std::{
     sync::{Arc, Mutex},
@@ -85,6 +85,10 @@ impl OwnerApi {
 
     pub fn accounts(&self) -> Result<Vec<WalletMetadata>> {
         Ok(self.config.load()?.wallets)
+    }
+
+    pub fn account(&self, wallet_id: &str) -> Result<WalletMetadata> {
+        self.config.wallet(wallet_id)
     }
 
     pub fn create_account(&self, wallet_id: &str, policy: &WalletPolicy) -> Result<WalletMetadata> {
@@ -235,6 +239,10 @@ impl OwnerApi {
         Ok(self.config.load()?.networks)
     }
 
+    pub fn network_by_chain_id(&self, chain_id: u64) -> Result<NetworkConfig> {
+        self.config.network_by_chain_id(&chain_id.to_string())
+    }
+
     pub async fn install_network(&self, network: NetworkConfig) -> Result<()> {
         ekubo_wallet_core::config::validate_network(&network)?;
         PlatformHumanPresence
@@ -356,6 +364,27 @@ impl OwnerApi {
         Ok(ReviewDocument::from_request(summary, payloads))
     }
 
+    pub fn queue_message(
+        &self,
+        wallet_id: &str,
+        chain_id: u64,
+        message: &[u8],
+        encoding: ekubo_wallet_core::message::MessageEncoding,
+        requester: &str,
+    ) -> Result<PendingMessage> {
+        let queued = MessageStore::production(self.config.data_dir())?.create(
+            wallet_id,
+            Some(&chain_id.to_string()),
+            message,
+            encoding,
+            Some(requester),
+        )?;
+        self.events.publish(DomainEventKind::ReviewChanged {
+            request_id: queued.request_id,
+        });
+        Ok(queued)
+    }
+
     pub fn typed_data_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
         let request = TypedDataStore::production(self.config.data_dir())?.get(request_id)?;
         let exact_json = serde_json::to_string_pretty(&request.typed_data)?;
@@ -385,6 +414,39 @@ impl OwnerApi {
             );
         }
         Ok(ReviewDocument::from_request(summary, vec![exact]))
+    }
+
+    pub fn queue_typed_data(
+        &self,
+        wallet_id: &str,
+        chain_id: u64,
+        payload: &serde_json::Value,
+        requester: &str,
+    ) -> Result<PendingTypedData> {
+        let (_, parsed_chain_id, digest) = parse_typed_data(payload)?;
+        anyhow::ensure!(
+            parsed_chain_id == chain_id,
+            "typed-data domain chain does not match the request chain"
+        );
+        let queued = TypedDataStore::production(self.config.data_dir())?.create(
+            wallet_id,
+            chain_id,
+            payload,
+            digest,
+            Some(requester),
+        )?;
+        self.events.publish(DomainEventKind::ReviewChanged {
+            request_id: queued.request_id,
+        });
+        Ok(queued)
+    }
+
+    pub(crate) fn config_store(&self) -> &ConfigStore {
+        &self.config
+    }
+
+    pub(crate) fn event_bus(&self) -> EventBus {
+        self.events.clone()
     }
 
     pub async fn sign_message(

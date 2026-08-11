@@ -11,6 +11,9 @@ use crate::{
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
+    walletconnect::{
+        ProposalCommand, ProposalPresenter, ProposalPrompt, WalletConnectManager, run_session,
+    },
 };
 use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::ReviewDecision;
@@ -112,6 +115,9 @@ pub struct WalletWindow {
     account_id_input: Option<Entity<InputState>>,
     legal_review: Option<LegalReview>,
     operation_status: Option<SharedString>,
+    walletconnect: Arc<Mutex<WalletConnectManager>>,
+    walletconnect_presenter: ProposalPresenter,
+    walletconnect_uri_input: Option<Entity<InputState>>,
 }
 
 struct LegalReview {
@@ -154,10 +160,20 @@ enum ActiveReviewCompletion {
         request_id: uuid::Uuid,
         digest: String,
     },
+    WalletConnect {
+        choices: Vec<crate::walletconnect::ProposalChoice>,
+        selected_account: usize,
+        response: oneshot::Sender<ProposalCommand>,
+    },
 }
 
 impl WalletWindow {
-    fn new(owner: OwnerApi, review_presenter: GuiReviewPresenter) -> Self {
+    fn new(
+        owner: OwnerApi,
+        review_presenter: GuiReviewPresenter,
+        walletconnect: Arc<Mutex<WalletConnectManager>>,
+        walletconnect_presenter: ProposalPresenter,
+    ) -> Self {
         Self {
             owner,
             review_presenter,
@@ -170,6 +186,9 @@ impl WalletWindow {
             account_id_input: None,
             legal_review: None,
             operation_status: None,
+            walletconnect,
+            walletconnect_presenter,
+            walletconnect_uri_input: None,
         }
     }
 
@@ -179,6 +198,103 @@ impl WalletWindow {
                 InputState::new(window, cx).placeholder("Account name, for example primary")
             }));
         }
+        if self.walletconnect_uri_input.is_none() {
+            self.walletconnect_uri_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("wc: pairing URI")));
+        }
+    }
+
+    fn connect_walletconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = self.walletconnect_uri_input.as_ref() else {
+            return;
+        };
+        let uri = input.read(cx).value().trim().to_owned();
+        let start = match self
+            .walletconnect
+            .lock()
+            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))
+            .and_then(|mut manager| manager.begin_uri(&uri).map(|(start, _)| start))
+        {
+            Ok(start) => start,
+            Err(error) => {
+                self.operation_status = Some(format!("Could not connect: {error:#}").into());
+                cx.notify();
+                return;
+            }
+        };
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.owner
+            .event_bus()
+            .publish(crate::events::DomainEventKind::WalletConnectChanged {
+                session_id: start.id.to_string(),
+            });
+        let owner = self.owner.clone();
+        let presenter = self.walletconnect_presenter.clone();
+        let manager = self.walletconnect.clone();
+        let events = self.owner.event_bus();
+        self.operation_status = Some("Connecting to the WalletConnect relay…".into());
+        cx.spawn(async move |view, cx| {
+            let result = run_session(start, owner, presenter, manager, events).await;
+            let _ = view.update(cx, |view, cx| {
+                view.operation_status = Some(match result {
+                    Ok(()) => "WalletConnect session ended.".into(),
+                    Err(error) => format!("WalletConnect session failed: {error:#}").into(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn disconnect_walletconnect(&mut self, session_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.operation_status = Some(match self.walletconnect.lock() {
+            Ok(mut manager) => match manager.disconnect(session_id) {
+                Ok(_) => "Disconnecting WalletConnect session…".into(),
+                Err(error) => format!("Could not disconnect session: {error:#}").into(),
+            },
+            Err(_) => "WalletConnect session state is unavailable.".into(),
+        });
+        self.owner
+            .event_bus()
+            .publish(crate::events::DomainEventKind::WalletConnectChanged {
+                session_id: session_id.to_string(),
+            });
+        cx.notify();
+    }
+
+    fn install_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+        let document = prompt.choices[0].document.clone();
+        self.active_review = Some(ActiveReview {
+            state: ReviewState::new(document),
+            simulation: None,
+            completion: Some(ActiveReviewCompletion::WalletConnect {
+                choices: prompt.choices,
+                selected_account: 0,
+                response: prompt.response,
+            }),
+            awaiting_refresh: false,
+        });
+    }
+
+    fn select_walletconnect_account(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(active) = self.active_review.as_mut() else {
+            return;
+        };
+        let Some(ActiveReviewCompletion::WalletConnect {
+            choices,
+            selected_account,
+            ..
+        }) = active.completion.as_mut()
+        else {
+            return;
+        };
+        let Some(choice) = choices.get(index) else {
+            return;
+        };
+        *selected_account = index;
+        active.state = ReviewState::new(choice.document.clone());
+        cx.notify();
     }
 
     fn create_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -567,6 +683,39 @@ impl WalletWindow {
                 })
                 .detach();
             }
+            (
+                GuiReviewCommand::Approve,
+                Some(ActiveReviewCompletion::WalletConnect {
+                    selected_account,
+                    response,
+                    ..
+                }),
+            ) => {
+                self.active_review = None;
+                if response
+                    .send(ProposalCommand::Approve(selected_account))
+                    .is_err()
+                {
+                    self.operation_status =
+                        Some("The connection proposal is no longer active.".into());
+                }
+            }
+            (
+                GuiReviewCommand::Reject,
+                Some(ActiveReviewCompletion::WalletConnect { response, .. }),
+            ) => {
+                self.active_review = None;
+                let _ = response.send(ProposalCommand::Reject);
+                self.operation_status = Some("WalletConnect proposal rejected.".into());
+            }
+            (
+                GuiReviewCommand::Close,
+                Some(ActiveReviewCompletion::WalletConnect { response, .. }),
+            ) => {
+                self.active_review = None;
+                let _ = response.send(ProposalCommand::Close);
+                self.operation_status = Some("WalletConnect proposal closed and declined.".into());
+            }
             (GuiReviewCommand::Refresh, completion) => {
                 active.completion = completion;
                 self.operation_status =
@@ -913,6 +1062,82 @@ impl WalletWindow {
         }
     }
 
+    fn render_walletconnect(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut panel = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child("Pairings are in memory only and disconnect when you explicitly Quit.");
+        if let Some(input) = self.walletconnect_uri_input.as_ref() {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(Input::new(input).flex_1())
+                    .child(
+                        Button::new("connect-walletconnect")
+                            .label("Connect")
+                            .primary()
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.connect_walletconnect(window, cx);
+                            })),
+                    ),
+            );
+        }
+        let sessions = self
+            .walletconnect
+            .lock()
+            .map(|manager| manager.sessions())
+            .unwrap_or_default();
+        if sessions.is_empty() {
+            return panel.child("No active WalletConnect sessions.");
+        }
+        panel.children(sessions.into_iter().map(|session| {
+            let session_id = session.id;
+            div()
+                .py_2()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(format!(
+                            "{} · {:?}",
+                            session.dapp_name.as_deref().unwrap_or("Pairing"),
+                            session.status
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "{} active request(s) · topic {}",
+                                    session.active_requests, session.pairing_topic
+                                )),
+                        )
+                        .when_some(session.last_error, |column, error| {
+                            column.child(format!("Connection error: {error}"))
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("disconnect-wc-{session_id}")))
+                        .label("Disconnect")
+                        .danger()
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.disconnect_walletconnect(session_id, cx);
+                        })),
+                )
+        }))
+    }
+
     fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
@@ -1079,9 +1304,7 @@ impl WalletWindow {
                     Err(error) => panel.child(format!("Agents unavailable: {error:#}")),
                 }
             }
-            Route::WalletConnect => panel
-                .child("Pairings are kept only in memory and are disconnected on Quit.")
-                .child("Paste and screen-scan controls will appear here."),
+            Route::WalletConnect => self.render_walletconnect(cx),
             Route::Settings => self.render_settings(cx),
             Route::Legal => self.render_legal(cx),
             Route::Updates => panel
@@ -1114,6 +1337,28 @@ impl WalletWindow {
                     .child(document.request.title.clone()),
             )
             .child(document.request.summary.clone());
+        if let Some(ActiveReviewCompletion::WalletConnect {
+            choices,
+            selected_account,
+            ..
+        }) = active.completion.as_ref()
+        {
+            review_body = review_body
+                .child(div().mt_2().font_semibold().child("Account to expose"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .children(choices.iter().enumerate().map(|(index, choice)| {
+                            Button::new(SharedString::from(format!("wc-account-{index}")))
+                                .label(choice.account.id.clone())
+                                .when(index == *selected_account, ButtonVariants::primary)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.select_walletconnect_account(index, cx);
+                                }))
+                        })),
+                );
+        }
         for fact in &document.request.facts {
             review_body = review_body.child(
                 div()
@@ -1547,6 +1792,7 @@ fn show_wallet_window(
 
     wallet_view.update(cx, |view, cx| {
         view.account_id_input = None;
+        view.walletconnect_uri_input = None;
         cx.notify();
     });
     let root_view = wallet_view.clone();
@@ -1583,6 +1829,7 @@ pub fn run_desktop() -> Result<()> {
         crate::walletconnect::WalletConnectManager::default(),
     ));
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
+    let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
 
     gpui_platform::application().run(move |cx: &mut App| {
         gpui_component::init(cx);
@@ -1635,7 +1882,14 @@ pub fn run_desktop() -> Result<()> {
         })
         .detach();
 
-        let wallet_view = cx.new(|_| WalletWindow::new(owner.clone(), review_presenter.clone()));
+        let wallet_view = cx.new(|_| {
+            WalletWindow::new(
+                owner.clone(),
+                review_presenter.clone(),
+                walletconnect.clone(),
+                walletconnect_presenter.clone(),
+            )
+        });
         let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
         show_wallet_window(cx, &wallet_view, &window_slot)
             .expect("failed to open the wallet window");
@@ -1649,6 +1903,21 @@ pub fn run_desktop() -> Result<()> {
                     cx.notify();
                 });
                 let _ = cx.update(|cx| show_wallet_window(cx, &review_view, &review_window));
+            }
+        })
+        .detach();
+        let walletconnect_review_view = wallet_view.clone();
+        let walletconnect_review_window = window_slot.clone();
+        cx.spawn(async move |cx| {
+            while let Some(prompt) = walletconnect_prompts.recv().await {
+                walletconnect_review_view.update(cx, |view, cx| {
+                    view.install_walletconnect_prompt(prompt);
+                    view.route = Route::WalletConnect;
+                    cx.notify();
+                });
+                let _ = cx.update(|cx| {
+                    show_wallet_window(cx, &walletconnect_review_view, &walletconnect_review_window)
+                });
             }
         })
         .detach();

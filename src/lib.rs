@@ -8,6 +8,7 @@ pub use ekubo_wallet_core::{
 pub mod agent_config;
 pub mod authority;
 pub mod batch_read;
+pub mod dapp_identity;
 pub mod desktop;
 pub mod events;
 pub mod gui_review;
@@ -20,6 +21,7 @@ pub mod single_instance;
 pub mod tray;
 pub mod updater;
 pub mod walletconnect;
+mod walletconnect_handler;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
