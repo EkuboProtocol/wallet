@@ -98,6 +98,36 @@ fn the_form_cycles_focus_in_both_directions() {
     assert_eq!(form.current(), Field::Network, "and forwards to the first");
 }
 
+/// Finding 200646: the picker used to draw a freshly loaded list but return
+/// only its row index, which the browser then applied to the older list it had
+/// loaded at startup. A concurrent reorder therefore selected a different
+/// chain. The picker now owns both the rows and the identities they index.
+#[test]
+fn a_network_choice_is_resolved_against_the_snapshot_that_drew_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = ConfigStore::new(directory.path());
+    let mut fresh = networks();
+    fresh.reverse();
+    config
+        .update(|state| {
+            state.networks = fresh.clone();
+            Ok(())
+        })
+        .unwrap();
+
+    let mut form = add_form();
+    let Some(View::Networks(picker)) =
+        handle_form_key(&mut form, &config, press(KeyCode::Enter)).unwrap()
+    else {
+        panic!("Enter on the network field must open the picker");
+    };
+    assert_eq!(
+        picker.picked(0),
+        fresh.first(),
+        "row zero must keep the identity from the snapshot that drew row zero"
+    );
+}
+
 #[test]
 fn rows_name_the_chain_and_search_the_whole_record() {
     let networks = networks();

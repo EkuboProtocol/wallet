@@ -251,8 +251,31 @@ enum View {
     Form(Form),
     /// The network pick, reached from the form's first row. A sub-view rather
     /// than a nested call, so it draws in the same screen.
-    Networks(Box<SearchableTable>),
+    Networks(Box<NetworkPicker>),
     Confirm(Confirm),
+}
+
+/// One network list and the exact configuration snapshot its row indexes name.
+///
+/// The browser's outer network list may be older than the one loaded when this
+/// picker opens. Keeping only a positional answer let a row from the fresh list
+/// index the older one, so a concurrent reorder selected a different chain (or
+/// indexed past the end). The rows and their identities now travel together.
+struct NetworkPicker {
+    table: SearchableTable,
+    networks: Vec<NetworkConfig>,
+}
+
+impl NetworkPicker {
+    fn load(config: &ConfigStore) -> Result<Self> {
+        let networks = config.load()?.networks;
+        let table = network_picker(&networks);
+        Ok(Self { table, networks })
+    }
+
+    fn picked(&self, index: usize) -> Option<&NetworkConfig> {
+        self.networks.get(index)
+    }
 }
 
 /// A change the owner has confirmed in-screen and not yet authenticated.
@@ -424,7 +447,7 @@ pub async fn browse(config: &ConfigStore, presence: &dyn HumanPresence) -> Resul
         if let Err(error) = screen.terminal.draw(|frame| match &mut view {
             View::List => draw_list(frame, &mut list, &entries, notice.as_deref()),
             View::Form(form) => draw_form(frame, form),
-            View::Networks(picker) => draw_networks(frame, picker),
+            View::Networks(picker) => draw_networks(frame, &mut picker.table),
             View::Confirm(confirm) => draw_confirm(frame, confirm),
         }) {
             break Err(error.into());
@@ -485,14 +508,18 @@ pub async fn browse(config: &ConfigStore, presence: &dyn HumanPresence) -> Resul
                     view = next;
                 }
             }
-            View::Networks(picker) => match picker.handle_key(key) {
+            View::Networks(picker) => match picker.table.handle_key(key) {
                 TableEvent::Stay => {}
                 TableEvent::Quit => view = View::List,
                 TableEvent::Picked(index) => {
                     // The picker is only ever opened from an add form, and the
                     // form is rebuilt around the chosen network so the chain
-                    // and its display name cannot disagree.
-                    let network = &networks[index];
+                    // and its display name cannot disagree. Resolve the row
+                    // against the snapshot that drew it, not the browser's
+                    // older outer snapshot.
+                    let network = picker
+                        .picked(index)
+                        .context("the selected network is no longer in the picker")?;
                     let mut form = Form::add(network);
                     form.focus_on(Field::Alias);
                     view = View::Form(form);
@@ -818,8 +845,7 @@ fn handle_form_key(form: &mut Form, config: &ConfigStore, key: KeyEvent) -> Resu
         KeyCode::BackTab | KeyCode::Up => form.previous_field(),
         KeyCode::Enter => {
             if form.current() == Field::Network {
-                let networks = config.load()?.networks;
-                return Ok(Some(View::Networks(Box::new(network_picker(&networks)))));
+                return Ok(Some(View::Networks(Box::new(NetworkPicker::load(config)?))));
             }
             if form.focus + 1 < form.fields().len() {
                 form.next_field();
