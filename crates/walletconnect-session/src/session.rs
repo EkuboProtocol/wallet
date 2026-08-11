@@ -16,13 +16,13 @@
 //! could forget is a check that eventually gets forgotten.
 
 use super::{
-    crypto::{Envelope, KeyAgreement, SymKey, seal},
+    crypto::{ClientIdentity, Envelope, KeyAgreement, SymKey, seal},
     protocol::{
         AppMetadata, IncomingMessage, OutgoingRequest, OutgoingResponse, ProposalNamespace, Relay,
         SESSION_TTL_SECONDS, SessionDeleteParams, SessionProposeParams, SessionRequestParams,
         SettledNamespace, error_code, method, request_id, tag, ttl,
     },
-    relay::RelayConnection,
+    relay::{RelayConfig, RelayConnection},
     uri::PairingUri,
 };
 use anyhow::{Context, Result, bail};
@@ -412,6 +412,7 @@ struct Settled {
 pub struct Session<'a> {
     relay: RelayConnection,
     handler: &'a dyn SessionHandler,
+    wallet_metadata: AppMetadata,
     pairing_topic: String,
     pairing_key: SymKey,
     /// When the dapp said this pairing stops being valid, if it said.
@@ -440,15 +441,23 @@ pub struct Session<'a> {
 }
 
 impl<'a> Session<'a> {
-    #[must_use]
-    pub fn new(
-        relay: RelayConnection,
+    /// Parse-independent session setup: create an ephemeral relay identity,
+    /// authenticate the connection, and bind it to one pairing.
+    ///
+    /// The embedding wallet supplies its public metadata and handles every
+    /// security-sensitive decision through [`SessionHandler`].
+    pub async fn connect(
+        relay_config: &RelayConfig,
         pairing: PairingUri,
+        wallet_metadata: AppMetadata,
         handler: &'a dyn SessionHandler,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let identity = ClientIdentity::generate()?;
+        let relay = RelayConnection::connect(relay_config, &identity).await?;
+        Ok(Self {
             relay,
             handler,
+            wallet_metadata,
             pairing_topic: pairing.topic,
             pairing_key: pairing.sym_key,
             pairing_expiry: pairing.expiry,
@@ -457,7 +466,7 @@ impl<'a> Session<'a> {
             settled: None,
             answered: AnsweredIds::default(),
             salt: 0,
-        }
+        })
     }
 
     /// Run until the dapp disconnects, the relay closes, or `shutdown` fires.
@@ -766,7 +775,7 @@ impl<'a> Session<'a> {
                 "relay": self.relay_object(),
                 "controller": {
                     "publicKey": agreement.public_key_hex(),
-                    "metadata": wallet_metadata(),
+                    "metadata": &self.wallet_metadata,
                 },
                 "namespaces": namespaces,
                 "expiry": expiry,
@@ -981,16 +990,6 @@ impl<'a> Session<'a> {
         self.salt = self.salt.wrapping_add(1);
         request_id(Utc::now().timestamp_millis(), self.salt)
     }
-}
-
-/// How this wallet describes itself to a dapp.
-fn wallet_metadata() -> Value {
-    json!({
-        "name": "Ekubo Wallet",
-        "description": "Policy-enforced local EVM wallet",
-        "url": "https://github.com/EkuboProtocol/wallet-mcp-server",
-        "icons": [],
-    })
 }
 
 /// Whether a request is inside what the session approved.

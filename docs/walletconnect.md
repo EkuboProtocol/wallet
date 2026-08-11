@@ -210,6 +210,21 @@ one can impersonate the dapp for the length of the pairing. Prefer the paste
 prompt over an argument, and treat a link you did not just generate as spent.
 
 
+## Implementation boundary
+
+WalletConnect's transport and session state machine live in the workspace's
+`walletconnect-session` crate. The crate parses pairing links and EIP-155
+requests, authenticates and encrypts relay traffic, settles proposals, and
+enforces the approved session scope. Its entry point takes relay credentials,
+public wallet metadata, and a `SessionHandler`; it has no access to Ekubo's
+configuration, custody, policy, simulation, or terminal UI.
+
+`src/connect.rs` implements that handler. This keeps the same feature in the
+same `ekubo-wallet` binary while making the protocol implementation reusable
+and keeping wallet-specific authorization on the application side of the
+crate boundary.
+
+
 ## The session screen
 
 `connect` is full-screen from its first question to its last. Before pairing it

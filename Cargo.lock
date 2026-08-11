@@ -2247,35 +2247,28 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "base64 0.23.0",
- "bs58",
- "chacha20poly1305",
  "chrono",
  "clap",
  "clap_complete",
  "crossterm",
  "directories",
- "ed25519-dalek",
  "ekubo-wallet-core",
  "futures",
  "hex",
- "hkdf 0.13.0",
  "num-bigint 0.5.1",
- "rand 0.10.2",
  "ratatui",
  "reqwest",
  "rmcp",
  "schemars 1.2.2",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tokio-tungstenite",
  "tracing-subscriber",
  "unicode-width",
  "url",
  "uuid 1.24.0",
- "x25519-dalek",
+ "walletconnect-session",
  "zeroize",
 ]
 
@@ -5947,6 +5940,33 @@ checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "walletconnect-session"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "async-trait",
+ "base64 0.23.0",
+ "bs58",
+ "chacha20poly1305",
+ "chrono",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "hkdf 0.13.0",
+ "rand 0.10.2",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

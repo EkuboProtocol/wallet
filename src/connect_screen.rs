@@ -300,7 +300,7 @@ fn prompt_for_uri_blocking(account: &str, address: &str, relay: &str) -> Result<
         }
         if key.code == KeyCode::Enter {
             let value = field.value().trim().to_owned();
-            if crate::walletconnect::uri::looks_like_pairing_uri(&value) {
+            if walletconnect_session::uri::looks_like_pairing_uri(&value) {
                 return Ok(Some(value));
             }
             notice = Some("A WalletConnect link starts with `wc:`.".to_owned());

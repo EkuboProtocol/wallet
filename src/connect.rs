@@ -17,7 +17,7 @@
 //! * Everything else is either answered from local state or refused.
 //!
 //! What this module adds on top is two checks a dapp needs and an agent does
-//! not. The session's approved scope is enforced in [`crate::walletconnect::session`]
+//! not. The session's approved scope is enforced in [`walletconnect_session::session`]
 //! before a request reaches here. And every request is checked to be *about
 //! this wallet*: a `from`, a signer address, or a typed-data domain naming
 //! anything other than the connected account is refused before a record is
@@ -32,6 +32,7 @@ use crate::{
         DecimalU256, ExecutionPlan, ExecutionStep, ExecutionStepKind, PlannedTransaction,
     },
     custody::OsKeyStore,
+    dapp_identity::DappIdentity,
     human_presence::PlatformHumanPresence,
     legal,
     message::{MessageEncoding, MessageStore, parse_siwe},
@@ -44,18 +45,6 @@ use crate::{
     simulation::simulate_execution,
     token_store::TokenStore,
     typed_data::{TypedDataStore, parse_typed_data},
-    walletconnect::{
-        crypto::ClientIdentity,
-        identity::DappIdentity,
-        protocol::{AppMetadata, error_code},
-        relay::{DEFAULT_RELAY_URL, RelayConnection},
-        request as dapp_request,
-        session::{
-            ApprovedScope, DappRequest, ProposalDecision, ProposalSummary, RequestOutcome,
-            SUPPORTED_EVENTS, Session, SessionEvent, SessionHandler,
-        },
-        uri::PairingUri,
-    },
 };
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
@@ -69,6 +58,15 @@ use std::{
     },
 };
 use url::Url;
+use walletconnect_session::{
+    AppMetadata, ApprovedScope, DEFAULT_RELAY_URL, DappRequest, PairingUri, ProposalDecision,
+    ProposalSummary, RelayConfig, RequestOutcome, SUPPORTED_EVENTS, Session, SessionEvent,
+    SessionHandler, protocol::error_code, request as dapp_request,
+};
+
+/// Identifies this application to the public relay. It is sent in the relay
+/// URL and is not a secret.
+const WALLETCONNECT_PROJECT_ID: &str = "1b68f6037b9d5d9558dc5aa3f67c2dc3";
 
 /// The dapp-facing methods this wallet implements.
 ///
@@ -102,6 +100,16 @@ pub const SUPPORTED_METHODS: &[&str] = &[
 /// calls nobody is reading, and "approve all of this" stops meaning anything.
 /// A dapp told the batch is too large can send smaller ones.
 pub const MAX_BATCH_CALLS: usize = 24;
+
+/// How this wallet describes itself to a dapp during settlement.
+fn wallet_metadata() -> AppMetadata {
+    AppMetadata {
+        name: "Ekubo Wallet".to_owned(),
+        description: "Policy-enforced local EVM wallet".to_owned(),
+        url: "https://github.com/EkuboProtocol/wallet-mcp-server".to_owned(),
+        icons: Vec::new(),
+    }
+}
 
 /// What `ekubo-wallet connect` was asked to do.
 pub struct ConnectOptions {
@@ -151,8 +159,11 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
     let pairing = PairingUri::parse(&uri, chrono::Utc::now())?;
 
     let relay_display = relay_url.to_string();
-    let identity = ClientIdentity::generate()?;
-    let relay = RelayConnection::connect(&relay_url, &identity).await?;
+    let relay = RelayConfig::new(
+        relay_url,
+        WALLETCONNECT_PROJECT_ID,
+        format!("wc-2/rust-ekubo-wallet-{}/cli", crate::VERSION),
+    );
 
     let state = Arc::new(Mutex::new(SessionState {
         title: "Connecting…".to_owned(),
@@ -174,7 +185,7 @@ pub async fn run(config: &ConfigStore, options: ConnectOptions) -> Result<()> {
         quit: Arc::new(AtomicBool::new(false)),
         submitted_batches: RefCell::new(std::collections::BTreeSet::new()),
     };
-    let session = Session::new(relay, pairing, &handler);
+    let session = Session::connect(&relay, pairing, wallet_metadata(), &handler).await?;
     let outcome = session
         .run(async {
             let _ = tokio::signal::ctrl_c().await;
@@ -591,7 +602,7 @@ impl DappSession<'_> {
 
     /// The network configured for a CAIP-2 chain, if any.
     fn network_for(&self, caip2: &str) -> Option<NetworkConfig> {
-        let chain_id = crate::walletconnect::session::numeric_chain_id(caip2)?;
+        let chain_id = walletconnect_session::session::numeric_chain_id(caip2)?;
         self.config.network_by_chain_id(&chain_id.to_string()).ok()
     }
 

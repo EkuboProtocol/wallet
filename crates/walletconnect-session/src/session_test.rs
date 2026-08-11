@@ -6,7 +6,7 @@
 //! person never approved.
 
 use super::*;
-use crate::walletconnect::protocol::{Participant, SessionRequestPayload};
+use crate::protocol::{Participant, SessionRequestPayload};
 
 fn scope() -> ApprovedScope {
     ApprovedScope {

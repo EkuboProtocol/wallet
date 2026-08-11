@@ -2,8 +2,11 @@
 
 use super::*;
 
-fn config(url: &str) -> Url {
-    Url::parse(url).unwrap()
+const PROJECT_ID: &str = "0123456789abcdef0123456789abcdef";
+const USER_AGENT: &str = "wc-2/rust-test-wallet-1.0/cli";
+
+fn config(url: &str) -> RelayConfig {
+    RelayConfig::new(Url::parse(url).unwrap(), PROJECT_ID, USER_AGENT)
 }
 
 #[test]
@@ -13,21 +16,7 @@ fn the_connection_url_carries_the_token_the_project_and_the_agent() {
     let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert!(query.contains_key("auth"));
     assert_eq!(query.get("projectId").map(String::as_str), Some(PROJECT_ID));
-    assert!(
-        query.get("ua").is_some_and(|ua| ua.starts_with("wc-2/")),
-        "{query:?}"
-    );
-}
-
-#[test]
-fn the_compiled_in_project_id_is_shaped_like_one() {
-    // It goes into a URL query string unvalidated, and a typo in it would only
-    // show up as a relay close code at pairing time.
-    assert_eq!(PROJECT_ID.len(), 32);
-    assert!(
-        PROJECT_ID.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "{PROJECT_ID}"
-    );
+    assert_eq!(query.get("ua").map(String::as_str), Some(USER_AGENT));
 }
 
 #[test]
@@ -272,7 +261,7 @@ fn an_oversized_payload_is_refused_before_it_is_queued() {
     let (incoming, mut incoming_rx) = mpsc::channel(8);
     let (outgoing, _outgoing_rx) = mpsc::channel(8);
 
-    let huge = "A".repeat(crate::walletconnect::crypto::MAX_ENVELOPE_BYTES + 1);
+    let huge = "A".repeat(crate::crypto::MAX_ENVELOPE_BYTES + 1);
     dispatch(
         &json!({
             "id": 8, "jsonrpc": "2.0", "method": "irn_subscription",

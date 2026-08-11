@@ -15,6 +15,7 @@ pub mod cli;
 pub mod completion;
 pub mod connect;
 pub mod connect_screen;
+pub mod dapp_identity;
 pub mod fullscreen;
 pub mod mcp;
 pub mod pager;
@@ -24,7 +25,6 @@ pub mod signing_review;
 pub mod token_picker;
 pub mod tui;
 pub mod tx_browser;
-pub mod walletconnect;
 
 /// The crate version, exactly as the manifest declares it.
 ///

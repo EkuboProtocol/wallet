@@ -25,8 +25,8 @@
 //! decision somewhere the owner cannot see it. What this produces is
 //! material for a person to judge, never a verdict.
 
-use super::protocol::AppMetadata;
 use url::Url;
+use walletconnect_session::protocol::AppMetadata;
 
 /// How much dapp-authored text is drawn before it is cut. Long enough for a
 /// real name or a sentence of description, short enough that a wall of text
@@ -285,5 +285,5 @@ fn is_host_character(character: char) -> bool {
 }
 
 #[cfg(test)]
-#[path = "identity_test.rs"]
+#[path = "dapp_identity_test.rs"]
 mod tests;

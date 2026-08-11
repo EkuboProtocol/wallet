@@ -32,14 +32,28 @@ use url::Url;
 /// The public relay, used when nothing else is configured.
 pub const DEFAULT_RELAY_URL: &str = "wss://relay.walletconnect.org";
 
-/// This wallet's relay project id.
+/// Application-specific settings for a relay connection.
 ///
-/// It identifies the *application* to the relay operator, not the user, and it
-/// is not a secret — it travels in the connection URL's query string on every
-/// pairing. It is compiled in rather than configured because it names this
-/// wallet: a copy running under someone else's id would spend their quota and
-/// misreport who is connecting.
-pub const PROJECT_ID: &str = "1b68f6037b9d5d9558dc5aa3f67c2dc3";
+/// The project id is not a secret: it travels in the connection URL. The user
+/// agent should use `WalletConnect`'s `protocol/sdk/environment` shape, for
+/// example `wc-2/rust-my-wallet-1.0/cli`.
+#[derive(Clone, Debug)]
+pub struct RelayConfig {
+    pub url: Url,
+    pub project_id: String,
+    pub user_agent: String,
+}
+
+impl RelayConfig {
+    #[must_use]
+    pub fn new(url: Url, project_id: impl Into<String>, user_agent: impl Into<String>) -> Self {
+        Self {
+            url,
+            project_id: project_id.into(),
+            user_agent: user_agent.into(),
+        }
+    }
+}
 
 /// How long a relay authentication token stays valid. One day, as the
 /// reference client uses; the connection is re-authenticated on reconnect.
@@ -132,15 +146,15 @@ type Subscriptions = Arc<Mutex<std::collections::HashSet<String>>>;
 
 impl RelayConnection {
     /// Open and authenticate a connection.
-    pub async fn connect(relay: &Url, identity: &ClientIdentity) -> Result<Self> {
-        Self::connect_within(relay, identity, RELAY_HANDSHAKE_TIMEOUT).await
+    pub async fn connect(config: &RelayConfig, identity: &ClientIdentity) -> Result<Self> {
+        Self::connect_within(config, identity, RELAY_HANDSHAKE_TIMEOUT).await
     }
 
     /// [`Self::connect`], with the handshake deadline named rather than
     /// compiled in, so a test can stand a stalled host up in milliseconds
     /// instead of waiting out the real one.
     async fn connect_within(
-        relay: &Url,
+        relay: &RelayConfig,
         identity: &ClientIdentity,
         handshake: Duration,
     ) -> Result<Self> {
@@ -175,13 +189,13 @@ impl RelayConnection {
             Ok(opened) => opened.with_context(|| {
                 format!(
                     "could not reach the WalletConnect relay at {}",
-                    relay.as_str()
+                    relay.url.as_str()
                 )
             })?,
             Err(_) => bail!(
                 "the WalletConnect relay at {} did not finish opening a connection within \
                  {handshake:?}",
-                relay.as_str()
+                relay.url.as_str()
             ),
         };
         let (mut sink, mut source) = stream.split();
@@ -434,25 +448,28 @@ fn dispatch(
 }
 
 /// The websocket URL with a freshly signed authentication token.
-fn authenticated_url(relay: &Url, identity: &ClientIdentity) -> Result<Url> {
+fn authenticated_url(relay: &RelayConfig, identity: &ClientIdentity) -> Result<Url> {
+    ensure!(
+        !relay.project_id.is_empty(),
+        "the relay project id is empty"
+    );
+    ensure!(
+        !relay.user_agent.is_empty(),
+        "the relay user agent is empty"
+    );
     // The token's audience is the relay's own URL without the query string:
     // signing the full URL would mean signing the token into itself.
-    let mut audience = relay.clone();
+    let mut audience = relay.url.clone();
     audience.set_query(None);
     let audience = audience.as_str().trim_end_matches('/').to_owned();
     let jwt = identity.relay_jwt(&audience, chrono::Utc::now().timestamp(), JWT_TTL_SECONDS)?;
 
-    let mut url = relay.clone();
+    let mut url = relay.url.clone();
     url.query_pairs_mut()
         .append_pair("auth", &jwt)
-        .append_pair("projectId", PROJECT_ID)
-        .append_pair("ua", &user_agent());
+        .append_pair("projectId", &relay.project_id)
+        .append_pair("ua", &relay.user_agent);
     Ok(url)
-}
-
-/// The relay's user-agent triple: protocol, SDK, environment.
-fn user_agent() -> String {
-    format!("wc-2/rust-ekubo-wallet-{}/cli", crate::VERSION)
 }
 
 #[cfg(test)]

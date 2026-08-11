@@ -296,7 +296,7 @@ fn third_party_licenses_cover_every_locked_dependency() {
         let name = field(lines.next(), "name").expect("lockfile package has a name");
         let version = field(lines.next(), "version").expect("lockfile package has a version");
         // Workspace-local crates are first-party, not attributions.
-        if name.starts_with("ekubo-wallet") {
+        if name.starts_with("ekubo-wallet") || name == "walletconnect-session" {
             continue;
         }
         checked += 1;

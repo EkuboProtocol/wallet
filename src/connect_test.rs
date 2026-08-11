@@ -2,6 +2,17 @@
 
 use super::*;
 
+#[test]
+fn the_relay_project_id_is_shaped_like_one() {
+    assert_eq!(WALLETCONNECT_PROJECT_ID.len(), 32);
+    assert!(
+        WALLETCONNECT_PROJECT_ID
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()),
+        "{WALLETCONNECT_PROJECT_ID}"
+    );
+}
+
 fn example_dapp() -> AppMetadata {
     AppMetadata {
         name: "Example".to_owned(),

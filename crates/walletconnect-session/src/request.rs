@@ -11,7 +11,7 @@
 //! place it deliberately does guess is argument *order*, where the ecosystem
 //! never settled on one and both orders are unambiguous to detect.
 
-use alloy::primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
