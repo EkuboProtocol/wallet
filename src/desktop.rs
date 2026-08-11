@@ -36,7 +36,7 @@ use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, ObjectFit, QuitMode,
     Render, RenderImage, ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, WeakEntity,
     Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, img,
-    prelude::*, px, size,
+    prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Sizable,
@@ -471,7 +471,7 @@ pub struct WalletWindow {
 #[derive(Clone)]
 struct DesktopSnapshot {
     reviews: std::result::Result<OwnerReviewQueues, SharedString>,
-    activity: std::result::Result<Vec<OwnerActivityRecord>, SharedString>,
+    activity: std::result::Result<Arc<[OwnerActivityRecord]>, SharedString>,
     clients: std::result::Result<Vec<McpClient>, SharedString>,
     accounts: std::result::Result<Vec<WalletMetadata>, SharedString>,
     policies: BTreeMap<String, std::result::Result<Option<StoredPolicy>, SharedString>>,
@@ -484,7 +484,8 @@ struct DesktopSnapshot {
 impl DesktopSnapshot {
     fn capture(owner: &OwnerApi) -> Self {
         let reviews = cache_result(owner.reviews(None));
-        let activity = cache_result(owner.activity(None, 200));
+        let activity =
+            cache_result(owner.activity(None, 200)).map(Arc::<[OwnerActivityRecord]>::from);
         let clients = cache_result(owner.clients());
         let accounts = cache_result(owner.accounts());
         let legal_status = cache_result(owner.legal_status());
@@ -498,7 +499,7 @@ impl DesktopSnapshot {
         let mut message_documents = BTreeMap::new();
         let mut typed_data_documents = BTreeMap::new();
         if let Ok(activity) = &activity {
-            for record in activity {
+            for record in activity.iter() {
                 match record {
                     OwnerActivityRecord::Message(record) => {
                         message_documents.insert(
@@ -839,6 +840,282 @@ struct TokenEditorErrors {
 struct ActivityFeedback {
     message: SharedString,
     error: bool,
+}
+
+fn render_activity_row(
+    record: &OwnerActivityRecord,
+    selected: bool,
+    busy: bool,
+    feedback: Option<ActivityFeedback>,
+    editor: WeakEntity<WalletWindow>,
+    cx: &mut App,
+) -> gpui::Div {
+    let request_id = record.request_id();
+    let base = div().h(px(116.0)).pb_2();
+    let card = match record {
+        OwnerActivityRecord::Transaction(item) => {
+            let status = item.status;
+            let actions = transaction_actions(item.status);
+            let inspect_editor = editor.clone();
+            let refresh_editor = editor.clone();
+            let send_editor = editor.clone();
+            let cancel_editor = editor.clone();
+            let discard_editor = editor;
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(format!(
+                            "{:?} · transaction · {} · {}",
+                            item.status, item.wallet_id, item.network_name
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .font_family("monospace")
+                                .truncate()
+                                .child(request_id.to_string()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "inspect-transaction-{request_id}"
+                            )))
+                            .label("Inspect")
+                            .on_click(move |_, _, cx| {
+                                let _ = inspect_editor.update(cx, |view, cx| {
+                                    view.selected_record = Some(request_id);
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .when(actions.refresh, |buttons| {
+                            buttons.child(
+                                Button::new(SharedString::from(format!(
+                                    "refresh-transaction-{request_id}"
+                                )))
+                                .label(if busy { "Working…" } else { "Refresh" })
+                                .disabled(busy)
+                                .on_click(move |_, _, cx| {
+                                    let _ = refresh_editor.update(cx, |view, cx| {
+                                        view.refresh_transaction(request_id, cx);
+                                    });
+                                }),
+                            )
+                        })
+                        .when(actions.send, |buttons| {
+                            buttons.child(
+                                Button::new(SharedString::from(format!(
+                                    "rebroadcast-transaction-{request_id}"
+                                )))
+                                .label(if status == PendingStatus::Signed {
+                                    "Send signed bytes"
+                                } else {
+                                    "Rebroadcast"
+                                })
+                                .disabled(busy)
+                                .on_click(move |_, _, cx| {
+                                    let _ = send_editor.update(cx, |view, cx| {
+                                        view.rebroadcast_transaction(request_id, cx);
+                                    });
+                                }),
+                            )
+                        })
+                        .when(actions.cancel, |buttons| {
+                            buttons.child(
+                                Button::new(SharedString::from(format!(
+                                    "cancel-transaction-{request_id}"
+                                )))
+                                .label(if status == PendingStatus::Cancelling {
+                                    "Retry cancellation"
+                                } else {
+                                    "Cancel transaction"
+                                })
+                                .danger()
+                                .disabled(busy)
+                                .on_click(
+                                    move |_, window, cx| {
+                                        let _ = cancel_editor.update(cx, |view, cx| {
+                                            view.confirm_transaction_cancellation(
+                                                request_id, window, cx,
+                                            );
+                                        });
+                                    },
+                                ),
+                            )
+                        })
+                        .when(actions.discard, |buttons| {
+                            buttons.child(
+                                Button::new(SharedString::from(format!("discard-{request_id}")))
+                                    .label("Discard unsent signature")
+                                    .danger()
+                                    .disabled(busy)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = discard_editor.update(cx, |view, cx| {
+                                            view.discard_unsent_transaction(request_id, cx);
+                                        });
+                                    }),
+                            )
+                        }),
+                )
+                .into_any_element()
+        }
+        OwnerActivityRecord::Message(item) => {
+            let inspect_editor = editor.clone();
+            let review_editor = editor;
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(format!(
+                            "{:?} · message signature · {}",
+                            item.status, item.wallet_id
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .font_family("monospace")
+                                .truncate()
+                                .child(request_id.to_string()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "inspect-message-{request_id}"
+                            )))
+                            .label("Inspect")
+                            .on_click(move |_, _, cx| {
+                                let _ = inspect_editor.update(cx, |view, cx| {
+                                    view.selected_record = Some(request_id);
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .when(item.status == MessageStatus::AwaitingApproval, |buttons| {
+                            buttons.child(
+                                Button::new(SharedString::from(format!(
+                                    "review-message-activity-{request_id}"
+                                )))
+                                .label("Review")
+                                .on_click(move |_, _, cx| {
+                                    let _ = review_editor.update(cx, |view, cx| {
+                                        view.begin_message_review(request_id, cx);
+                                    });
+                                }),
+                            )
+                        }),
+                )
+                .into_any_element()
+        }
+        OwnerActivityRecord::TypedData(item) => {
+            let inspect_editor = editor.clone();
+            let review_editor = editor;
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(format!(
+                            "{:?} · typed-data signature · {} · chain {}",
+                            item.status, item.wallet_id, item.chain_id
+                        ))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .font_family("monospace")
+                                .truncate()
+                                .child(request_id.to_string()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new(SharedString::from(format!(
+                                "inspect-typed-data-{request_id}"
+                            )))
+                            .label("Inspect")
+                            .on_click(move |_, _, cx| {
+                                let _ = inspect_editor.update(cx, |view, cx| {
+                                    view.selected_record = Some(request_id);
+                                    cx.notify();
+                                });
+                            }),
+                        )
+                        .when(
+                            item.status == TypedDataStatus::AwaitingApproval,
+                            |buttons| {
+                                buttons.child(
+                                    Button::new(SharedString::from(format!(
+                                        "review-typed-data-activity-{request_id}"
+                                    )))
+                                    .label("Review")
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = review_editor.update(cx, |view, cx| {
+                                                view.begin_typed_data_review(request_id, cx);
+                                            });
+                                        },
+                                    ),
+                                )
+                            },
+                        ),
+                )
+                .into_any_element()
+        }
+    };
+    base.map(|outer| {
+        let mut card_container = div()
+            .size_full()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(if selected {
+                cx.theme().primary
+            } else {
+                cx.theme().border
+            })
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap_2()
+            .child(card);
+        if let Some(feedback) = feedback {
+            card_container = card_container.child(
+                div()
+                    .text_sm()
+                    .truncate()
+                    .text_color(if feedback.error {
+                        cx.theme().danger
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(feedback.message),
+            );
+        }
+        outer.child(card_container)
+    })
 }
 
 #[derive(Clone)]
@@ -2405,10 +2682,11 @@ impl WalletWindow {
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
-    fn cached_activity(&self) -> Result<&[OwnerActivityRecord]> {
+    fn cached_activity_records(&self) -> Result<Arc<[OwnerActivityRecord]>> {
         self.snapshot()?
             .activity
-            .as_deref()
+            .as_ref()
+            .cloned()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
@@ -6014,10 +6292,11 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3();
-        let items = match self.cached_activity() {
-            Ok(items) => items,
+        let records = match self.cached_activity_records() {
+            Ok(records) => records,
             Err(error) => return panel.child(format!("Activity unavailable: {error:#}")),
         };
+        let items = records.as_ref();
         let selected = self
             .selected_record
             .and_then(|request_id| items.iter().find(|item| item.request_id() == request_id));
@@ -6032,243 +6311,30 @@ impl WalletWindow {
                     .child("No wallet activity yet."),
             );
         }
-        panel.children(items.iter().map(|record| {
-            let request_id = record.request_id();
-            let selected = self.selected_record == Some(request_id);
-            let base = div()
-                .p_3()
-                .rounded_lg()
-                .border_1()
-                .border_color(if selected {
-                    cx.theme().primary
-                } else {
-                    cx.theme().border
-                })
-                .flex()
-                .flex_col()
-                .gap_2();
-            match record {
-                OwnerActivityRecord::Transaction(item) => {
-                    let status = item.status;
-                    let busy = self.activity_busy.contains(&request_id);
-                    let actions = transaction_actions(item.status);
-                    let feedback = self.activity_feedback.get(&request_id).cloned();
-                    base.child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(format!(
-                                        "{:?} · transaction · {} · {}",
-                                        item.status, item.wallet_id, item.network_name
-                                    ))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .font_family("monospace")
-                                            .truncate()
-                                            .child(request_id.to_string()),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "inspect-transaction-{request_id}"
-                                        )))
-                                        .label("Inspect")
-                                        .on_click(
-                                            cx.listener(move |view, _, _, cx| {
-                                                view.selected_record = Some(request_id);
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
-                                    .when(actions.refresh, |buttons| {
-                                        buttons.child(
-                                            Button::new(SharedString::from(format!(
-                                                "refresh-transaction-{request_id}"
-                                            )))
-                                            .label(if busy { "Working…" } else { "Refresh" })
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.refresh_transaction(request_id, cx);
-                                            })),
-                                        )
-                                    })
-                                    .when(actions.send, |buttons| {
-                                        buttons.child(
-                                            Button::new(SharedString::from(format!(
-                                                "rebroadcast-transaction-{request_id}"
-                                            )))
-                                            .label(if status == PendingStatus::Signed {
-                                                "Send signed bytes"
-                                            } else {
-                                                "Rebroadcast"
-                                            })
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.rebroadcast_transaction(request_id, cx);
-                                            })),
-                                        )
-                                    })
-                                    .when(actions.cancel, |buttons| {
-                                        buttons.child(
-                                            Button::new(SharedString::from(format!(
-                                                "cancel-transaction-{request_id}"
-                                            )))
-                                            .label(if status == PendingStatus::Cancelling {
-                                                "Retry cancellation"
-                                            } else {
-                                                "Cancel transaction"
-                                            })
-                                            .danger()
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.confirm_transaction_cancellation(
-                                                    request_id, window, cx,
-                                                );
-                                            })),
-                                        )
-                                    })
-                                    .when(actions.discard, |buttons| {
-                                        buttons.child(
-                                            Button::new(SharedString::from(format!(
-                                                "discard-{request_id}"
-                                            )))
-                                            .label("Discard unsent signature")
-                                            .danger()
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.discard_unsent_transaction(request_id, cx);
-                                            })),
-                                        )
-                                    }),
-                            ),
-                    )
-                    .when_some(feedback, |row, feedback| {
-                        row.child(
-                            div()
-                                .text_sm()
-                                .text_color(if feedback.error {
-                                    cx.theme().danger
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .child(feedback.message),
+        let selected_record = self.selected_record;
+        let busy = Arc::new(self.activity_busy.clone());
+        let feedback = Arc::new(self.activity_feedback.clone());
+        let editor = cx.entity().downgrade();
+        panel.child(
+            uniform_list("activity-records", records.len(), move |range, _, cx| {
+                range
+                    .map(|index| {
+                        let record = &records[index];
+                        let request_id = record.request_id();
+                        render_activity_row(
+                            record,
+                            selected_record == Some(request_id),
+                            busy.contains(&request_id),
+                            feedback.get(&request_id).cloned(),
+                            editor.clone(),
+                            cx,
                         )
                     })
-                }
-                OwnerActivityRecord::Message(item) => base.child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .gap_4()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(format!(
-                                    "{:?} · message signature · {}",
-                                    item.status, item.wallet_id
-                                ))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .font_family("monospace")
-                                        .truncate()
-                                        .child(request_id.to_string()),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "inspect-message-{request_id}"
-                                    )))
-                                    .label("Inspect")
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.selected_record = Some(request_id);
-                                        cx.notify();
-                                    })),
-                                )
-                                .when(item.status == MessageStatus::AwaitingApproval, |buttons| {
-                                    buttons.child(
-                                        Button::new(SharedString::from(format!(
-                                            "review-message-activity-{request_id}"
-                                        )))
-                                        .label("Review")
-                                        .on_click(
-                                            cx.listener(move |view, _, _, cx| {
-                                                view.begin_message_review(request_id, cx);
-                                            }),
-                                        ),
-                                    )
-                                }),
-                        ),
-                ),
-                OwnerActivityRecord::TypedData(item) => base.child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .gap_4()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(format!(
-                                    "{:?} · typed-data signature · {} · chain {}",
-                                    item.status, item.wallet_id, item.chain_id
-                                ))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .font_family("monospace")
-                                        .truncate()
-                                        .child(request_id.to_string()),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "inspect-typed-data-{request_id}"
-                                    )))
-                                    .label("Inspect")
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.selected_record = Some(request_id);
-                                        cx.notify();
-                                    })),
-                                )
-                                .when(
-                                    item.status == TypedDataStatus::AwaitingApproval,
-                                    |buttons| {
-                                        buttons.child(
-                                            Button::new(SharedString::from(format!(
-                                                "review-typed-data-activity-{request_id}"
-                                            )))
-                                            .label("Review")
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.begin_typed_data_review(request_id, cx);
-                                            })),
-                                        )
-                                    },
-                                ),
-                        ),
-                ),
-            }
-        }))
+                    .collect()
+            })
+            .w_full()
+            .h(px(580.0)),
+        )
     }
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
