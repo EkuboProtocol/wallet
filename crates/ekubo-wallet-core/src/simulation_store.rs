@@ -13,7 +13,7 @@
 //! send. Anything stale, foreign, or already spent makes the caller simulate
 //! again, which is the safe direction.
 //!
-//! Like forks, this lives only in this process. The approval CLI is a separate
+//! Like forks, this lives only in this process. The approval UI is a separate
 //! process and deliberately re-simulates: a human deciding whether to sign
 //! should be reading the chain as it is at that moment, not as it was when the
 //! agent queued the request.
@@ -72,6 +72,12 @@ impl SimulationStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Drop one recorded result without consuming it as a send. Used when an
+    /// application-wide client quota cannot retain another per-client entry.
+    pub fn discard(&mut self, simulation_id: Uuid) -> bool {
+        self.recorded.remove(&simulation_id).is_some()
     }
 
     /// Record a completed simulation and return its identifier.

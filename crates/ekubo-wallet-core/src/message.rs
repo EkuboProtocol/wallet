@@ -4,7 +4,7 @@
 //! whatever the verifying service decides they mean, so neither simulation nor
 //! the policy language can score one. Every request therefore queues for
 //! explicit human review, with no automatic path at all — the MCP tool only
-//! creates a pending request, and the separate CLI prints the exact bytes,
+//! creates a pending request, and the desktop review presents the exact bytes,
 //! requires terminal approval plus OS owner authentication, and only then
 //! signs.
 //!

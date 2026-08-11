@@ -657,7 +657,7 @@ fn a_shadowed_suggestion_cannot_fill_the_queue_it_is_invisible_in() {
         .unwrap();
     assert_eq!(store.count_proposals().unwrap(), 1);
 
-    // Confirming by a path that carries no proposal generation -- the CLI's
+    // Confirming by a path that carries no proposal generation -- the owner's
     // file and stdin import is one -- still consumes the suggestion.
     store.add(&usdc(1, token), "list-a").unwrap();
     assert!(store.proposals().unwrap().is_empty());

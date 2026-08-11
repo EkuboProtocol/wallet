@@ -302,7 +302,7 @@ pub struct TypedDataReading {
 
 /// Render a typed-data payload through its vendored descriptor, if one
 /// matches the domain exactly. Display-only, like every descriptor reading:
-/// the complete payload the CLI prints remains the authoritative review.
+/// the complete payload the desktop presents remains the authoritative review.
 pub async fn interpret_typed_data(typed_data: &serde_json::Value) -> Option<TypedDataReading> {
     let data: clear_signing::eip712::TypedData = serde_json::from_value(typed_data.clone()).ok()?;
     let outcome = clear_signing::format_typed_data(

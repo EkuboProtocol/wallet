@@ -412,7 +412,7 @@ fn a_proposal_naming_nothing_recognizable_still_settles_a_usable_session() {
 #[test]
 fn the_pairing_key_stops_being_an_authority_once_a_session_settles() {
     // The URI a person pastes is a credential that goes on existing: in a
-    // dapp's local storage, in a screenshot, in a terminal's scrollback. Only
+    // dapp's local storage, in a screenshot, or another app's history. Only
     // the proposal it exists to deliver may be answered with it, so a copy of
     // that URI cannot act as the settled session afterwards.
     assert!(answerable_from(method::SESSION_PROPOSE, Origin::Pairing));
@@ -469,7 +469,7 @@ fn the_deadline_is_the_same_deadline_for_every_method() {
 #[test]
 fn a_pairings_own_deadline_outlives_the_moment_the_uri_was_pasted() {
     // A pairing URI is a secret that travels through a clipboard and a
-    // terminal's scrollback, and its expiry is the dapp's statement about how
+    // clipboard history, and its expiry is the dapp's statement about how
     // long a copy is worth anything. Parsing used to be the only place that
     // read it, after which the session waited on the topic indefinitely and
     // settled a fresh seven days whenever a proposal turned up.

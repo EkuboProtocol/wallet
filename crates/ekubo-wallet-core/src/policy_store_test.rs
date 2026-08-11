@@ -618,7 +618,10 @@ fn a_legacy_database_claiming_schema_one_is_refused() {
         .err()
         .expect("a legacy schema 1 database must be refused")
         .to_string();
-    assert!(error.contains("schema 1 is not the schema"), "{error}");
+    assert!(
+        error.contains("schema 1 is not a desktop schema"),
+        "{error}"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
@@ -693,7 +696,7 @@ mod database_lock_tests {
     //! A lock taken by pathname serializes two processes only if both of them
     //! locked the same inode.
 
-    /// A symlink at `policies.lock` gave two processes different inodes, and
+    /// A symlink at `wallet.lock` gave two processes different inodes, and
     /// the first-use path is what that costs: both see no database, both
     /// generate a key, the second `set_secret` wins, and the first creates a
     /// database encrypted under a key the credential store no longer holds.
@@ -708,7 +711,7 @@ mod database_lock_tests {
         let directory = tempfile::tempdir().unwrap();
         let elsewhere = directory.path().join("elsewhere.lock");
         std::fs::write(&elsewhere, b"").unwrap();
-        let planted = directory.path().join("policies.lock");
+        let planted = directory.path().join("wallet.lock");
         std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
 
         assert!(
@@ -756,8 +759,7 @@ mod first_policy_clears_residue_tests {
     }
 
     /// `purge` runs at wallet creation, but only after a *successful* custody
-    /// create -- and the repair route the half-provisioned error message points
-    /// at, `ekubo-wallet policy require-approval <id>`, reaches `put` without
+    /// create -- and the Accounts screen's repair route reaches `put` without
     /// it. So a removal whose purge failed, or a creation interrupted between
     /// the credential and the policy, left the queues and any proposal in place
     /// under a name that a different key now answers to. The replacement could

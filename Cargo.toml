@@ -3,11 +3,12 @@ name = "ekubo-wallet"
 version = "1.0.0-rc.0"
 edition = "2024"
 rust-version = "1.91"
-description = "Local-first EVM wallet, CLI, and MCP server with policy-enforced signing"
+build = "build.rs"
+description = "Local-first EVM desktop wallet with policy-enforced agent signing"
 repository = "https://github.com/EkuboProtocol/wallet-mcp-server"
 license = "FSL-1.1-MIT"
 keywords = ["mcp", "ethereum", "wallet", "eip-7702"]
-categories = ["command-line-utilities", "cryptography::cryptocurrencies"]
+categories = ["cryptography::cryptocurrencies", "gui"]
 
 [workspace]
 members = ["crates/ekubo-wallet-core", "crates/walletconnect-session"]
@@ -22,34 +23,68 @@ walletconnect-session = { path = "crates/walletconnect-session" }
 alloy = { version = "=2.1.1", features = ["consensus", "dyn-abi", "eips", "json-abi", "k256", "rlp", "signer-keystore"] }
 anyhow = "1.0.100"
 async-trait = "0.1.89"
+axum = "0.8.6"
+base64 = "0.23.0"
 chrono = { version = "0.4.42", features = ["serde"] }
-clap = { version = "4.5.51", features = ["derive", "env"] }
-clap_complete = "4.5.61"
-crossterm = "0.29.0"
+cargo-packager-updater = "=0.2.3"
 directories = "6.0.0"
+fs2 = "0.4.3"
 futures = "0.3.31"
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "26cc9366abb27ccedce386ac99a615a8fa7018da" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "wayland", "x11"] }
+gpui_tokio = { git = "https://github.com/zed-industries/zed" }
 hex = "0.4.3"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 num-bigint = "0.5.1"
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+notify-rust = "4.18.0"
+rand = "0.10.0"
 # Same feature set as the core crate's, so the release check adds a call site
 # rather than a build.
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
-rmcp = { version = "3.1.0", features = ["transport-io"] }
+rqrr = "0.10.1"
+rmcp = { version = "3.1.0", features = ["transport-streamable-http-server"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
+subtle = "2.6.1"
 tempfile = "3.23.0"
-tokio = { version = "1.48.0", features = ["io-std", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7.17"
+toml_edit = "0.22.27"
+tower = "0.5.2"
+tray-icon = "0.24.2"
+tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
-unicode-width = "0.2.2"
 zeroize = { version = "1.8.2", features = ["derive"] }
 url = { version = "2.5.7", features = ["serde"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Allow development checks with Command Line Tools alone. Signed release CI
+# may precompile the same pinned Metal shaders using full Xcode.
+gpui_macos = { git = "https://github.com/zed-industries/zed", features = ["runtime_shaders"] }
+
+[target.'cfg(windows)'.dependencies]
+interprocess = "2.4.3"
+
 [dev-dependencies]
-assert_cmd = "2.1.1"
-base64 = "0.23.0"
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core", features = ["test-hooks"] }
+
+[build-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[package.metadata.packager]
+product-name = "Ekubo Wallet"
+identifier = "org.ekubo.wallet"
+formats = ["app", "dmg", "nsis", "appimage", "deb", "rpm"]
+before-packaging-command = "cargo build --release"
+resources = ["schemas", "contrib/polkit/com.ekubo.wallet.policy"]
+icons = ["target/packager-assets/icon-512.png"]
+
+[package.metadata.gpui-revisions]
+zed = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
+gpui-component = "26cc9366abb27ccedce386ac99a615a8fa7018da"
 
 # Unoptimized MSVC frames for the deeply generic alloy, rmcp, and schemars call
 # chains are large enough to overflow Windows test-thread stacks even at a

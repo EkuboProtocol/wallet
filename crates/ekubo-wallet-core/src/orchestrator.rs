@@ -3,12 +3,12 @@
 //! Every signature this process produces is minted by a function in this
 //! module. Transactions take one of two paths: the automatic path, gated by
 //! the active policy and a successful simulation, and the human-gated path,
-//! gated by a terminal review plus OS owner authentication. The two payloads
+//! gated by a native review plus OS owner authentication. The two payloads
 //! no policy can score — an EIP-191 message and an EIP-712 typed-data
 //! payload — take [`sign_reviewed_message`] and [`sign_reviewed_typed_data`],
 //! which confirm owner presence themselves.
 //!
-//! Each owns its guard ladder once, so the MCP server and the CLI cannot
+//! Each owns its guard ladder once, so the MCP server and desktop cannot
 //! drift apart on what is checked before key material is touched.
 //!
 //! That "every signature" is enforced rather than merely intended:
@@ -19,9 +19,7 @@
 //! without the presence check that precedes one.
 
 use crate::{
-    approval::{
-        ApprovalDecision, ApprovalKind, ApprovalRequest, InteractiveProof, ReviewPresenter,
-    },
+    approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ReviewDocument, ReviewPresenter},
     approval_summary::{
         TokenMetadataMap, interpret_steps, plan_token_targets, render_balance_changes,
     },
@@ -53,14 +51,13 @@ use std::{
 /// Calldata bytes shown in full at approval time.
 ///
 /// A person reads these; past a few hundred bytes nobody is reading them, and
-/// a wall of hex pushes the warnings above it off a terminal that does not
-/// scroll. Beyond the limit the review shows the head, the length, and a
-/// keccak of the whole thing — enough to compare against whatever produced the
-/// call, and honest that the rest was not displayed.
+/// the structured facts show a bounded preview; the complete value remains in
+/// [`crate::approval::ReviewDocument::exact_payloads`] for the scroll-gated
+/// monospace view.
 const MAX_DISPLAYED_CALLDATA_BYTES: usize = 512;
 
 /// Bytes per displayed row. Fixed so the grouping is a property of the
-/// calldata rather than of the terminal's width.
+/// calldata rather than of the window's width.
 const CALLDATA_BYTES_PER_ROW: usize = 32;
 
 /// The calldata a reviewer is shown, as fixed-width rows.
@@ -123,7 +120,7 @@ fn lock(pending: &Mutex<PendingStore>) -> Result<std::sync::MutexGuard<'_, Pendi
 /// Write down that the owner said no, and be honest about it if that fails.
 ///
 /// By the time this runs the reviewer has already been told the request was
-/// refused — the presenter drew that on their terminal. The row is what decides
+/// refused — the presenter drew that in the native review. The row is what decides
 /// whether it is true: `store_signed` accepts anything still
 /// `AwaitingApproval`, so a rejection that did not commit leaves a request the
 /// owner declined available to a later approval flow, which can sign it.
@@ -149,8 +146,8 @@ fn record_rejection(
     }
     Err(error).context(format!(
         "the rejection was not recorded, so request {request_id} is still awaiting approval and \
-         can still be signed even though it was refused; reject it again with `ekubo-wallet \
-         review {request_id} --decision reject`"
+         can still be signed even though it was refused; open that review in the wallet \
+         application and reject it again"
     ))
 }
 
@@ -297,7 +294,6 @@ pub enum ApprovalOutcome {
 ///
 /// `read_policy` is called once before review and once after authentication,
 /// so the decision and the signature bind the same policy. The
-/// [`InteractiveProof`] is consumed: one proof authorizes one approval.
 #[allow(clippy::too_many_lines)]
 pub async fn approve_transaction(
     config: &ConfigStore,
@@ -305,7 +301,6 @@ pub async fn approve_transaction(
     tokens: &crate::token_store::TokenStore,
     read_policy: &(dyn Fn() -> Result<StoredPolicy> + Sync),
     request: PendingTransaction,
-    proof: InteractiveProof,
     presenter: &dyn ReviewPresenter,
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
@@ -346,7 +341,7 @@ pub async fn approve_transaction(
     let policy_context = crate::core::predicate::PolicyContext {
         wallet: wallet.address,
     };
-    let overrides = SigningOverrides::human(&proof);
+    let overrides = SigningOverrides::reviewed();
     // Display metadata only, and only ever from the owner's token database: a
     // token contract must not get to name itself on the screen where the owner
     // decides. A token with no confirmed row renders by address in base units,
@@ -380,7 +375,7 @@ pub async fn approve_transaction(
     let (approval, simulation) = review.author().await.with_context(|| {
         format!(
             "this request could not be prepared for review, so it is still awaiting a decision; \
-             reject it with `ekubo-wallet review {} --decision reject` if it should not proceed",
+             open review {} in the wallet application to reject it if it should not proceed",
             request.request_id
         )
     })?;
@@ -392,7 +387,7 @@ pub async fn approve_transaction(
     // Recorded before anything else can fail. Rejection needs only the request
     // ID — no simulation, no prepared envelope — and reading that state first
     // meant an unrelated error in it returned early and left the request
-    // `AwaitingApproval` after the terminal had told the reviewer it was
+    // `AwaitingApproval` after the native UI had told the reviewer it was
     // refused. A decision this function calls a decision has to be written
     // like one.
     if decision != ApprovalDecision::Approved {
@@ -526,7 +521,7 @@ impl TransactionReview<'_> {
     /// Simulate, prepare, and render. Every call is a complete re-read of the
     /// chain: the simulation is pinned to whatever block is current now, and
     /// the fee fields come from the same moment.
-    async fn author(&self) -> Result<(ApprovalRequest, SimulationResult)> {
+    async fn author(&self) -> Result<(ReviewDocument, SimulationResult)> {
         // Asking for new chain state withdraws the old answer immediately. If
         // anything below fails, approval must fail with it rather than falling
         // back to the nonce, fees, and envelope the reviewer explicitly asked
@@ -580,7 +575,24 @@ impl TransactionReview<'_> {
                 prepared,
             },
         ));
-        Ok((approval, simulation))
+        let mut exact_payloads = vec![serde_json::to_string_pretty(&self.request.execution_plan)?];
+        exact_payloads.extend(
+            self.request
+                .execution_plan
+                .ordered_steps
+                .iter()
+                .map(|step| {
+                    format!(
+                        "Step {} calldata\n0x{}",
+                        step.step,
+                        hex::encode(&step.transaction.data)
+                    )
+                }),
+        );
+        Ok((
+            ReviewDocument::from_request(approval, exact_payloads),
+            simulation,
+        ))
     }
 
     /// The authored review the presenter finished on.
@@ -602,9 +614,9 @@ impl TransactionReview<'_> {
 #[async_trait::async_trait]
 impl crate::approval::ReviewRefresh for TransactionReview<'_> {
     async fn resimulate(&self) -> Result<crate::approval::Refreshed> {
-        let (request, simulation) = self.author().await?;
+        let (document, simulation) = self.author().await?;
         Ok(crate::approval::Refreshed {
-            request,
+            document,
             simulation,
         })
     }
@@ -789,7 +801,7 @@ async fn transaction_approval_request(
 /// "No policy" is the half-provisioned state: `account create` and
 /// `account import` write the wallet into `config.json` and only then
 /// initialize its policy, so a failure between the two leaves a wallet whose
-/// key exists and whose authority was never described. The CLI tells the owner
+/// key exists and whose authority was never described. The desktop tells the owner
 /// that state fails closed — "it has no policy, so signing fails closed and the
 /// MCP server refuses to start until it has one" — and for transactions it
 /// does, because grading a plan needs a policy to grade it against.
@@ -811,9 +823,8 @@ fn require_provisioned_wallet(policies: &PolicyStore, wallet_id: &str) -> Result
     ensure!(
         policies.get(wallet_id)?.is_some(),
         "wallet {wallet_id} has no policy, so nothing it holds can be signed. It was created or \
-         imported while policy initialization failed. Give it one with `ekubo-wallet policy \
-         require-approval {wallet_id}`, or remove it with `ekubo-wallet account remove \
-         {wallet_id}`."
+         imported while policy initialization failed. Open Accounts in the wallet application to \
+         install a require-approval policy or remove wallet {wallet_id}."
     );
     Ok(())
 }

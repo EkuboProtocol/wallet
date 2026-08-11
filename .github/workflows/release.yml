@@ -1,616 +1,104 @@
-name: Release signed binaries
+name: Release desktop applications
 
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: desktop-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   validate:
-    name: Validate release tag
     runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Check out source and tags
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
+      - name: Install GPUI Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - run: test "$GITHUB_REF_NAME" = "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+      - run: cargo fmt --all --check
+      - run: cargo test --locked --workspace
+      - run: cargo tree --locked | (! grep -E ' (clap|clap_complete|crossterm|ratatui) v')
+      - run: '! grep -R "transport-io" Cargo.toml Cargo.lock'
 
-      - name: Match tag, package version, and main
-        id: version
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | sed -n '1p')"
-          test -n "$version"
-          test "$GITHUB_REF_NAME" = "v$version"
-          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-
-      - name: Install latest stable Rust
-        run: rustup update stable --no-self-update
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Check all targets
-        run: cargo check --locked --all-targets --all-features
-
-      - name: Run Clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      - name: Test the tagged source
-        env:
-          RUST_MIN_STACK: 67108864
-        run: cargo test --locked --workspace --all-features
-
-      - name: Install RustSec audit client
-        run: cargo install cargo-audit --locked --version 0.22.2
-
-      - name: Audit dependency advisories
-        run: cargo audit
-
-  build-linux:
-    name: Build ${{ matrix.target }}
+  package:
     needs: validate
+    environment: release
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-    runs-on: ${{ matrix.runner }}
+          - os: macos-15
+            formats: app,dmg
+            artifact: macos
+          - os: windows-2025
+            formats: nsis
+            artifact: windows
+          - os: ubuntu-24.04
+            formats: appimage,deb,rpm
+            artifact: linux
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install target
-        run: |
-          rustup update stable --no-self-update
-          rustup target add ${{ matrix.target }}
-
-      - name: Build release binary
-        run: cargo build --locked --release --target ${{ matrix.target }}
-
-      - name: Package binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          package="ekubo-wallet-${{ needs.validate.outputs.version }}-${{ matrix.target }}"
-          mkdir -p "dist/$package"
-          install -m 0755 "target/${{ matrix.target }}/release/ekubo-wallet" "dist/$package/ekubo-wallet"
-          install -m 0644 LICENSE "dist/$package/LICENSE"
-          install -m 0644 README.md "dist/$package/README.md"
-          # The polkit action is the one payload file the installer cannot
-          # produce from the binary: it has to exist on disk before owner
-          # authentication works. Completions come from `ekubo-wallet
-          # completion`, and the policy schema from `ekubo-wallet policy
-          # schema`, so neither is shipped here.
-          mkdir -p "dist/$package/contrib/polkit"
-          install -m 0644 contrib/polkit/com.ekubo.wallet.policy "dist/$package/contrib/polkit/"
-          tar -C dist -czf "dist/$package.tar.gz" "$package"
-
-      - name: Upload packaged binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-${{ matrix.target }}
-          path: dist/*.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-
-  build-native-signing-targets:
-    name: Build ${{ matrix.target }}
-    needs: validate
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install target
-        run: |
-          rustup update stable --no-self-update
-          rustup target add ${{ matrix.target }}
-
-      - name: Build release binary
-        run: cargo build --locked --release --target ${{ matrix.target }}
-
-      - name: Stage unsigned binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p unsigned
-          cp "target/${{ matrix.target }}/release/ekubo-wallet${{ runner.os == 'Windows' && '.exe' || '' }}" unsigned/
-          cp LICENSE unsigned/LICENSE
-          cp README.md unsigned/README.md
-
-      - name: Upload unsigned binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: unsigned-${{ matrix.target }}
-          path: unsigned/
-          if-no-files-found: error
-          retention-days: 1
-
-  package-macos:
-    name: Sign, notarize, and package macOS binaries
-    needs: [validate, build-native-signing-targets]
-    runs-on: macos-15
-    # Scopes the Apple secrets to the protected environment, which only accepts
-    # `v*` tag deployments, rather than exposing them at repository scope.
-    environment: release
-    outputs:
-      signed: ${{ steps.detect.outputs.signed }}
-    steps:
-      # Only the vendored Apple intermediate is needed here; the binaries
-      # themselves arrive as artifacts from the build job.
-      - name: Check out the vendored Apple intermediate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          sparse-checkout: .github/apple
-          sparse-checkout-cone-mode: false
-
-      - name: Download Intel binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: unsigned-x86_64-apple-darwin
-          path: unsigned/x86_64-apple-darwin
-
-      - name: Download Apple Silicon binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: unsigned-aarch64-apple-darwin
-          path: unsigned/aarch64-apple-darwin
-
-      # Signing is all-or-nothing: with a complete credential set the binaries
-      # are Developer ID signed and notarized, and without any credential the
-      # release still publishes, clearly labeled as unsigned. A partial
-      # credential set is a configuration error and fails the release.
-      - name: Detect Apple signing configuration
-        id: detect
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libfuse2 rpm
+      - name: Require protected update signing key
         shell: bash
         env:
-          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
-          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
-          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
-          APPLE_NOTARY_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-        run: |
-          set -euo pipefail
-          present=0
-          total=0
-          for value in "$APPLE_CODESIGN_IDENTITY" \
-            "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" \
-            "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
-            "$APPLE_NOTARY_API_KEY_P8_BASE64" \
-            "$APPLE_NOTARY_ISSUER_ID" \
-            "$APPLE_NOTARY_KEY_ID"; do
-            total=$((total + 1))
-            if [ -n "$value" ]; then present=$((present + 1)); fi
-          done
-          if [ "$present" -eq 0 ]; then
-            echo "::warning::No Apple signing credentials configured; publishing unsigned macOS binaries."
-            printf 'signed=false\n' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$present" -ne "$total" ]; then
-            echo "::error::Apple signing is partially configured ($present of $total secrets)."
-            exit 1
-          fi
-          printf 'signed=true\n' >> "$GITHUB_OUTPUT"
-
-      # Importing the certificate, signing, packaging, and notarizing share one
-      # step so the private key and the notary key exist for exactly as long as
-      # they are used. The cleanup trap fires when this step's shell exits, so
-      # anything that reads them has to run before it — a later step holding a
-      # path to the notary key would find the file already deleted.
-      - name: Sign, notarize, and package macOS archives
+          EKUBO_UPDATER_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
+        run: test -n "$EKUBO_UPDATER_PRIVATE_KEY" && test -n "$EKUBO_UPDATER_PUBLIC_KEY"
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version 0.11.8
+      - name: Build native packages
         shell: bash
         env:
-          SIGNED: ${{ steps.detect.outputs.signed }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
-          APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
-          APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
-          APPLE_NOTARY_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-        run: |
-          set -euo pipefail
-
-          keychain_path="$RUNNER_TEMP/ekubo-release-signing.keychain-db"
-          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
-          api_key_path="$RUNNER_TEMP/AuthKey.p8"
-
-          cleanup() {
-            security delete-keychain "$keychain_path" >/dev/null 2>&1 || true
-            rm -f "$certificate_path" "$api_key_path"
-          }
-          trap cleanup EXIT
-
-          if [ "$SIGNED" = "true" ]; then
-            keychain_password="ekubo-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-
-            printf '%s' "$APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 -D > "$certificate_path"
-            printf '%s' "$APPLE_NOTARY_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
-            chmod 600 "$certificate_path" "$api_key_path"
-
-            # `security export` emits the identity alone, so a .p12 holds the
-            # leaf and its key and never the issuing chain. macOS trusts the
-            # Apple Root CA but not this intermediate, and the search list below
-            # replaces the user domain with this keychain, so nothing else can
-            # supply it. Left out, the identity imports fine and then fails as
-            # CSSMERR_TP_NOT_TRUSTED at signing time.
-            intermediate=.github/apple/DeveloperIDG2CA.cer
-            expected_digest=f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
-            actual_digest="$(shasum -a 256 "$intermediate" | cut -d ' ' -f 1)"
-            if [ "$actual_digest" != "$expected_digest" ]; then
-              echo "::error::$intermediate does not match its pinned SHA-256."
-              exit 1
-            fi
-
-            security create-keychain -p "$keychain_password" "$keychain_path"
-            security set-keychain-settings -lut 21600 "$keychain_path"
-            security unlock-keychain -p "$keychain_password" "$keychain_path"
-            security import "$certificate_path" -k "$keychain_path" -P "$APPLE_DEVELOPER_ID_APPLICATION_P12_PASSWORD" -T /usr/bin/codesign
-            security import "$intermediate" -k "$keychain_path"
-            security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
-            security list-keychains -d user -s "$keychain_path"
-
-            # Fail here rather than on the first codesign call, where the same
-            # cause reports only as an unusable identity.
-            valid="$(security find-identity -v -p codesigning "$keychain_path" |
-              sed -n 's/^ *\([0-9][0-9]*\) valid identities found.*/\1/p')"
-            if [ "${valid:-0}" -lt 1 ]; then
-              echo "::error::No valid codesigning identity in the release keychain. The .p12 may lack its private key, or its chain may not resolve against the vendored intermediate."
-              exit 1
-            fi
-
-            for target in x86_64-apple-darwin aarch64-apple-darwin; do
-              binary="unsigned/$target/ekubo-wallet"
-              codesign --force --options runtime --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$binary"
-              codesign --verify --strict --verbose=2 "$binary"
-            done
-          fi
-
-          mkdir -p dist
-          for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            package="ekubo-wallet-$VERSION-$target"
-            mkdir -p "dist/$package"
-            install -m 0755 "unsigned/$target/ekubo-wallet" "dist/$package/ekubo-wallet"
-            install -m 0644 "unsigned/$target/LICENSE" "dist/$package/LICENSE"
-            install -m 0644 "unsigned/$target/README.md" "dist/$package/README.md"
-            ditto -c -k --sequesterRsrc --keepParent "dist/$package" "dist/$package.zip"
-          done
-
-          if [ "$SIGNED" = "true" ]; then
-            # Submit both archives before waiting on either. Notarization is
-            # queue time, not work this runner does, so two `submit --wait`
-            # calls in a row cost the sum of two queues. The first submission
-            # from this team took 3h45m; twice that exceeds the six-hour job
-            # limit and GitHub would cancel the release mid-notarization, with
-            # the tag already spent. Overlapping them costs the slower one.
-            submission_ids=""
-            for target in x86_64-apple-darwin aarch64-apple-darwin; do
-              package="ekubo-wallet-$VERSION-$target"
-              id="$(xcrun notarytool submit "dist/$package.zip" \
-                --key "$api_key_path" \
-                --key-id "$APPLE_NOTARY_KEY_ID" \
-                --issuer "$APPLE_NOTARY_ISSUER_ID" \
-                --no-wait 2>&1 | sed -n 's/^ *id: *//p' | head -1)"
-              case "$id" in
-                ????????-????-????-????-????????????) ;;
-                *)
-                  echo "::error::Could not read a submission id back for $package."
-                  exit 1 ;;
-              esac
-              echo "submitted $package as $id"
-              submission_ids="$submission_ids $id"
-            done
-
-            # --timeout fails this step cleanly while the job still has room,
-            # rather than letting GitHub's own cancellation truncate it.
-            for id in $submission_ids; do
-              xcrun notarytool wait "$id" \
-                --key "$api_key_path" \
-                --key-id "$APPLE_NOTARY_KEY_ID" \
-                --issuer "$APPLE_NOTARY_ISSUER_ID" \
-                --timeout 4h
-              status="$(xcrun notarytool info "$id" \
-                --key "$api_key_path" \
-                --key-id "$APPLE_NOTARY_KEY_ID" \
-                --issuer "$APPLE_NOTARY_ISSUER_ID" 2>&1 |
-                sed -n 's/^ *status: *//p')"
-              if [ "$status" != "Accepted" ]; then
-                echo "::error::Notarization $id finished as ${status:-unknown}."
-                xcrun notarytool log "$id" \
-                  --key "$api_key_path" \
-                  --key-id "$APPLE_NOTARY_KEY_ID" \
-                  --issuer "$APPLE_NOTARY_ISSUER_ID" || true
-                exit 1
-              fi
-              echo "notarization $id accepted"
-            done
-          fi
-
-      - name: Upload macOS archives
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          EKUBO_UPDATER_PUBLIC_KEY: ${{ secrets.EKUBO_UPDATER_PUBLIC_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_NOTARY_KEY_PATH }}
+        run: cargo packager --release --formats "${{ matrix.formats }}"
+      - name: Sign Windows installer
+        if: runner.os == 'Windows'
+        uses: azure/trusted-signing-action@v0.5.1
         with:
-          name: release-macos
-          path: dist/*.zip
-          if-no-files-found: error
-          retention-days: 7
-
-  package-windows:
-    name: Sign and package Windows binary
-    needs: [validate, build-native-signing-targets]
-    runs-on: windows-2025
-    # Required for OIDC: the Azure federated credential is registered against
-    # subject `repo:<owner>/<repo>:environment:release`, so the token minted for
-    # this job only matches while it deploys to that environment.
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    outputs:
-      signed: ${{ steps.detect.outputs.signed }}
-    steps:
-      - name: Download Windows binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: unsigned-x86_64-pc-windows-msvc
-          path: unsigned
-
-      - name: Detect Azure signing configuration
-        id: detect
-        shell: bash
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-        run: |
-          set -euo pipefail
-          if [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_TENANT_ID" ] \
-            && [ -n "$AZURE_SUBSCRIPTION_ID" ] && [ -n "$AZURE_ARTIFACT_SIGNING_ENDPOINT" ]; then
-            printf 'signed=true\n' >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::No Azure Artifact Signing configuration; publishing an unsigned Windows binary."
-            printf 'signed=false\n' >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Authenticate to Azure with OIDC
-        if: steps.detect.outputs.signed == 'true'
-        uses: Azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Authenticode-sign executable
-        if: steps.detect.outputs.signed == 'true'
-        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-          files-folder: ${{ github.workspace }}\unsigned
+          endpoint: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          files-folder: target/release
           files-folder-filter: exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: Ekubo Wallet
-          description-url: https://github.com/${{ github.repository }}
-
-      - name: Verify and package executable
-        shell: pwsh
-        env:
-          EXPECT_SIGNED: ${{ steps.detect.outputs.signed }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if ($env:EXPECT_SIGNED -eq "true") {
-            $signature = Get-AuthenticodeSignature "unsigned\ekubo-wallet.exe"
-            if ($signature.Status -ne "Valid") {
-              throw "Authenticode verification failed: $($signature.Status)"
-            }
-          }
-          $package = "ekubo-wallet-${{ needs.validate.outputs.version }}-x86_64-pc-windows-msvc"
-          New-Item -ItemType Directory -Force -Path "dist\$package" | Out-Null
-          Copy-Item "unsigned\ekubo-wallet.exe" "dist\$package\ekubo-wallet.exe"
-          Copy-Item "unsigned\LICENSE" "dist\$package\LICENSE"
-          Copy-Item "unsigned\README.md" "dist\$package\README.md"
-          Compress-Archive -Path "dist\$package" -DestinationPath "dist\$package.zip"
-
-      - name: Upload Windows archive
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@v4
         with:
-          name: release-windows
-          path: dist/*.zip
+          name: packages-${{ matrix.artifact }}
+          path: target/release/bundle/**
           if-no-files-found: error
-          retention-days: 7
 
   publish:
-    name: Attest and publish immutable release
-    needs: [validate, build-linux, package-macos, package-windows]
+    needs: package
     runs-on: ubuntu-24.04
     environment: release
-    permissions:
-      attestations: write
-      contents: write
-      id-token: write
     steps:
-      - name: Check out the tagged source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Download release archives
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@v4
         with:
-          pattern: release-*
+          pattern: packages-*
           path: dist
           merge-multiple: true
-
-      # install.sh ships as a signed release asset rather than being fetched
-      # from the raw source tree. The script verifies everything it downloads,
-      # but nothing verified the script: a client piping it into a shell ran it
-      # before any of its own checks could apply, so whoever could choose those
-      # bytes chose what executed. Published here, it gets a Sigstore bundle
-      # from the same identity as the archives it installs.
-      - name: Stage the installer for signing
-        shell: bash
-        run: install -m 0755 install.sh dist/install.sh
-
-      - name: Generate checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          archive_count=0
-          : > SHA256SUMS
-          for archive in ekubo-wallet-*; do
-            test -f "$archive"
-            sha256sum "$archive" >> SHA256SUMS
-            archive_count=$((archive_count + 1))
-          done
-          test "$archive_count" -eq 5
-
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: Keyless-sign archives and checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS dist/install.sh; do
-            cosign sign-blob --yes --bundle "$artifact.sigstore.json" "$artifact"
-          done
-
-      - name: Verify Sigstore bundles before publishing
-        shell: bash
-        run: |
-          set -euo pipefail
-          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
-          for artifact in dist/ekubo-wallet-* dist/SHA256SUMS dist/install.sh; do
-            case "$artifact" in
-              *.sigstore.json) continue ;;
-            esac
-            cosign verify-blob \
-              --bundle "$artifact.sigstore.json" \
-              --certificate-identity "$identity" \
-              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-              "$artifact"
-          done
-
-      # GitHub build-provenance attestation for a private repository requires
-      # GitHub Enterprise Cloud. On other plans this step fails, which must not
-      # discard an otherwise complete release: the Sigstore bundles verified in
-      # the previous step are the mandatory provenance control, and the release
-      # notes below state whether an attestation was also recorded.
-      - name: Attest all published files
-        id: attest
-        continue-on-error: true
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      - name: Require signed update metadata
+        run: test -f dist/latest.json && find dist -name '*.sig' -print -quit | grep .
+      - uses: softprops/action-gh-release@v2
         with:
-          subject-path: dist/*
-
-      - name: Report attestation outcome
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.attest.outcome }}" != "success" ]; then
-            echo "::warning::Build-provenance attestation was not recorded. Private-repository attestations require GitHub Enterprise Cloud; the verified Sigstore bundles still cover every published file."
-          fi
-
-      - name: Create GitHub Release with attested assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.validate.outputs.version }}
-          MACOS_SIGNED: ${{ needs.package-macos.outputs.signed }}
-          WINDOWS_SIGNED: ${{ needs.package-windows.outputs.signed }}
-          ATTESTED: ${{ steps.attest.outcome }}
-        run: |
-          set -euo pipefail
-
-          # A semver prerelease carries a hyphenated identifier: 1.0.0-rc.0.
-          # Publishing one as a normal release would mark it Latest, and
-          # install.sh defaults to the `releases/latest` endpoint, so every
-          # default install would silently move to a candidate build.
-          case "$VERSION" in
-            *-*) prerelease=true ;;
-            *) prerelease=false ;;
-          esac
-
-          notes="$RUNNER_TEMP/release-notes.md"
-          {
-            if [ "$prerelease" = true ]; then
-              printf '%s\n\n' '**This is a prerelease.** `install.sh` resolves `latest` through an endpoint that skips prereleases, so it will not install this build unless asked for by version.'
-            fi
-            if [ "$ATTESTED" = "success" ]; then
-              printf '%s\n\n' 'Prebuilt archives are attached below. Every archive and SHA256SUMS carries a keyless Sigstore bundle, verified before publishing, and a GitHub build-provenance attestation.'
-            else
-              printf '%s\n\n' 'Prebuilt archives are attached below. Every archive and SHA256SUMS carries a keyless Sigstore bundle, verified before publishing. No GitHub build-provenance attestation was recorded, because private-repository attestations require GitHub Enterprise Cloud; verify the Sigstore bundles instead.'
-            fi
-            printf '%s\n' '## Platform code signing'
-            if [ "$MACOS_SIGNED" = "true" ]; then
-              printf '%s\n' '- macOS: Developer ID signed and notarized.'
-            else
-              printf '%s\n' '- macOS: **not** Developer ID signed or notarized. Gatekeeper will block the first run until you clear the quarantine attribute (`xattr -d com.apple.quarantine ./ekubo-wallet`). Verify the checksum and Sigstore bundle before doing so.'
-            fi
-            if [ "$WINDOWS_SIGNED" = "true" ]; then
-              printf '%s\n' '- Windows: Authenticode signed with Azure Artifact Signing.'
-            else
-              printf '%s\n' '- Windows: **not** Authenticode signed. SmartScreen will warn on first run. Verify the checksum and Sigstore bundle before running it.'
-            fi
-            printf '%s\n' '- Linux: unsigned by platform convention; verify the checksum and Sigstore bundle.'
-            printf '\n%s\n' 'Install with:'
-            printf '\n%s\n' '```sh'
-            base='https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}'
-            identity='https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}'
-            printf 'd=$(mktemp -d)\n'
-            printf 'curl -fsSL -o "$d/install.sh" %s/install.sh\n' "$base"
-            printf 'curl -fsSL -o "$d/install.sh.sigstore.json" %s/install.sh.sigstore.json\n' "$base"
-            printf 'cosign verify-blob --bundle "$d/install.sh.sigstore.json" \\\n'
-            printf '  --certificate-identity %s \\\n' "$identity"
-            printf '  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\\n'
-            printf '  "$d/install.sh"\n'
-            if [ "$prerelease" = true ]; then
-              printf 'EKUBO_WALLET_VERSION=%s sh "$d/install.sh"\n' "$VERSION"
-            else
-              printf '%s\n' 'sh "$d/install.sh"'
-            fi
-            printf '%s\n\n' '```'
-            printf '%s\n' 'Verification instructions: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/releasing.md#verify-a-download'
-          } > "$notes"
-
-          release_flags=()
-          if [ "$prerelease" = true ]; then
-            release_flags+=(--prerelease)
-          fi
-
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --target "$GITHUB_SHA" \
-            --title "Ekubo Wallet $VERSION" \
-            --generate-notes \
-            --notes-file "$notes" \
-            ${release_flags[@]+"${release_flags[@]}"}
+          files: dist/**
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/**

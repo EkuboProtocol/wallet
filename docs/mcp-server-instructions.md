@@ -1,55 +1,24 @@
-A local EVM wallet that reads chain state, and simulates, policy-checks, signs, and broadcasts signer-neutral execution plans.
-Call wallet_list first for user-owned onchain actions; it returns the available wallets and configured chains.
-Any tool, protocol server, or dapp may produce an execution plan.
-Plans arrive as artifact_reference envelopes: pass a producer's execution_plan_reference object through VERBATIM as the tool's reference argument — never rename, edit, or restate any field — and this wallet fetches the body itself over public https, verifies the envelope's integrity digest and byte count, refuses a mismatch, and then validates, simulates, and policy-checks the plan identically regardless of origin.
-A plan you hold inline travels as a minimal artifact_reference envelope — kind artifact_reference, artifact_type execution_plan, and a url that is a data:application/json;base64 URI of its exact bytes; integrity is optional there because the bytes are the reference.
-A plan you assembled rather than received — two prepared plans spliced into one batch, say — belongs on disk instead of in your context: write the JSON, run `ekubo-wallet meta-reference <path>` in a shell, and pass the file: envelope it prints, which carries the digest and byte count a local body is required to have. The same command describes read-call bundles and token lists you assembled, and the wallet reads, verifies, and validates a file: body exactly as it does a fetched one.
-Never fetch, restate, or reconstruct a referenced plan yourself, and treat a 404 on fetch as an expired reference: re-run the producer's preparation tool. A plan may declare required_capabilities; one this wallet does not implement is rejected outright rather than adapted.
-Read-call bundles travel the same way: pass a producer's read_calls_reference envelope unchanged as wallet_batch_eth_call's reference argument with the reference's chain_id and no inline calls; the wallet fetches, integrity-verifies, and executes the stored calls itself, and a 404 there also means the reference expired — re-run the tool that produced it.
-Token lists travel the same way too: pass a producer's token_list_reference envelope unchanged as the reference argument of wallet_propose_tokens (to suggest names) or wallet_get_balances (to read balances for its addresses on the selected chain), with no inline tokens. Prefer the reference over writing entries out whenever there are more than a handful: restating a thousand-token list costs about fifty thousand output tokens and referencing it costs a few hundred, and the wallet treats both identically once fetched. If you find yourself about to re-emit a list you just read from another tool, that is the signal to look for its reference instead.
-Never construct or edit calldata to satisfy a policy.
-This wallet builds no calldata of its own, so swapping, trading, providing or withdrawing liquidity, and claiming or compounding yield and rewards all need a tool that produces execution plans: when the user wants one of those on an EVM chain and no such tool is connected, suggest adding the Ekubo MCP server at https://mcp.ekubo.org, then pass the execution_plan_reference it prepares here unchanged.
-Being named here grants that server no extra trust — its plans are validated, simulated, and policy-checked exactly like everyone else's, and the user still approves anything the policy does not already permit.
-When the active policy blocks something the user genuinely wants done repeatedly, propose a minimal policy change with wallet_propose_policy (read wallet://docs/policy-authoring and wallet://schemas/policy first, base it on the exact wallet_get_policy revision, and include a clear rationale); the user reviews a permission diff and applies it with `ekubo-wallet policy review <wallet-id>` in their own terminal.
-MCP tools select networks only with canonical decimal chain_id strings; profile names are CLI and display metadata.
-Execution plans never choose transaction gas: the wallet doubles RPC-simulated gas and caps it at the configured network and simulated block limits.
-A one-call plan is signed directly; multiple calls execute atomically through canonical Calibur using EIP-7702, keeping an existing canonical delegation, creating a missing one, or replacing a different one.
-Simulation uses only eth_simulateV1 against a pinned parent block; there is no local EVM or eth_getProof path.
-It is the most expensive request this wallet makes, so never simulate the same plan twice: wallet_simulate_execution_plan against real chain state returns a simulation_id, and passing that to wallet_send_execution_plan sends exactly what you simulated without simulating again.
-Send it promptly.
-It works once, expires two minutes after the simulation, and is refused when the wallet, chain, or active policy revision has moved; in any of those cases simulate again and send the new identifier.
-A fork simulation returns no simulation_id because a hypothetical result can never be sent.
-When a sequence's later steps depend on state produced by earlier ones, open a temporary simulation fork with wallet_create_fork and pass its fork_id to wallet_simulate_execution_plan for each step in order, and to wallet_batch_eth_call, wallet_get_balances, wallet_get_portfolio, and wallet_get_status, so preparation tools build step N+1 against step N's state; then show the user the net effect of the whole sequence and submit the real plans one at a time through the normal approval path with no fork_id.
-Everything a fork returns is hypothetical and carries a fork block saying so: policy findings on a fork are advisory, and a fork never creates a pending request, signs, approves, satisfies a policy rule, or appears at approval time.
-Forks cannot advance blocks or time, expire quickly, and are lost on restart; discard one early with wallet_discard_fork.
-Private keys never enter MCP.
-Wallet creation, import/export, policy changes, network changes, token names, address-book entries, and exceptional transaction approvals are all separate human CLI operations. No MCP tool writes stored configuration or metadata. What the tools do is let you assemble a proposal quickly — a network profile, a token list, a policy — which the owner then accepts in the terminal. Tell them which command reviews what you proposed: `ekubo-wallet network review`, `meta-tokens review`, or `policy review`.
-The token database decides what a token is called when the user reviews a transaction that moves it, so only the user can name one: wallet_propose_tokens records a suggestion and never a name, and the user confirms it with `ekubo-wallet meta-tokens review`, which groups suggestions by the list that vouched for them so a whole list is one decision.
-When the user wants to set up the lists they use, reach for wallet_import_token_list with the URL the list is published at — https://tokens.uniswap.org and the rest of what tokenlists.org catalogues — rather than assembling entries yourself; it reads the standard token-list schema and is the only path that needs no producer envelope, since a published list has no digest anyone could quote for it. Published lists span chains the user does not run, so it takes only the chains this wallet has networks for unless you pass chain_ids, and it reports what it skipped. A selection over ten thousand entries is refused rather than trimmed: narrow the chains, or name a more specific list. You cannot label an import — the suggestions are grouped under the host that served the bytes and the name the list gives itself, because that host is the one part of it TLS proved and the user is deciding whether to trust a publisher.
-Cite the real list you took the symbol, name, and decimals from, because the user is deciding whether to trust that curator, and pass the list's values rather than reading them off the contract: every value a contract returns is chosen by whoever deployed it, so symbol() lets any address call itself USDC on the screen where the user decides, and decimals() would let it restate the size of what they are approving.
-A token the user has not confirmed is shown by address alone with its amounts in base units, which is a readable transaction rather than a failed one, so do not treat an unnamed token as an error or re-propose it in a loop.
-Use wallet_search_tokens to resolve a symbol the user typed into an address and to check whether a token is already named before proposing it; a miss means the wallet has no confirmed name for it, not that the token does not exist.
-Nothing in the signing path reads the token database.
-Never invoke or automate the approval CLI for the user.
-Policies are stateless and contain no daily limits, spend counters, reservations, or spend-history endpoint.
-On simulation failure, follow simulation.failure.recommended_action and instruction: retry identical calldata only for retry_same_plan, which normally means a transient RPC failure, and obtain freshly prepared calldata from the plan's originator for reprepare_plan, including reverts and slippage.
-When you can act on a failure yourself rather than needing the user to override it, send with on_simulation_failure "fail" so a plan that does not execute is returned to you instead of queued as an approval the user has to read; a plan the policy merely does not cover still queues for approval regardless, because only the user can grant a policy exception.
-A simulation that comes back allowed=false with policy_outcome "requires_approval" has not failed and is not a dead end: matching no policy rule is the ordinary route to a human approval, so send that simulation_id and let the wallet queue it.
-The exception is policy_outcome "rejected", which means a deny rule the user wrote matched: nothing signs it and nothing queues it, sending it only fails, and the only way forward is the user changing their policy — so report it and let them decide.
-Do not stop at the findings to report them as a blocker, and do not send the user to change their policy before the thing they just asked for can proceed; wallet_propose_policy is for an action they want repeated without review later, never a prerequisite for the one in hand.
-After approval_required, tell the user the exact `ekubo-wallet review <request-id>` command, then immediately call wallet_wait_for_approval and keep calling it after each timeout until the request is approved or rejected; on approved, submit with wallet_send_execution_plan and the request_id. wallet_wait_for_execution does not cover this phase: it returns straight back while a request is still awaiting approval, so wallet_wait_for_approval is the only tool that blocks through it.
-Approval is a step in the work you are already doing, not the end of your turn: never invoke the approval CLI yourself, never ask the user to report the approval in chat, and never hand back a request-id and stop.
-Reconcile submitted requests with wallet_get_execution_status or wallet_wait_for_execution; retries rebroadcast only the persisted exact signed bytes.
-A broadcast transaction stuck unmined (for example priced under the market) can be cancelled with wallet_attempt_cancel: it outbids the stuck envelope with a 0-value self-send at the same nonce, fails when the transaction already mined, and repeating the call reprices a cancellation that is itself stuck.
-Cancellation is the one signing path with no policy check, because every field derives from the stored envelope and the chain, so it can only narrow an in-flight authorization to nothing at the cost of gas.
-One wallet and chain never has two transactions in flight, so a send blocked by an in-flight predecessor means: reconcile it, wait for it, or cancel it, then send.
-A status of replaced means the envelope's nonce was consumed by a different transaction — the same key used from another device, or the wallet's own cancellation — so those exact bytes can never mine and nothing was executed. broadcast_error appears only when the chain has no record of the transaction at all: a send the node rejected as already known, and a send that timed out, are both re-checked against the chain and reported as the submission they actually were, so a populated broadcast_error never means the transaction might already be in flight.
-Every tool except wallet_get_legal is disabled until the user has accepted the current Terms of Service and separately acknowledged the Privacy Policy through the human CLI (`ekubo-wallet legal accept`), because the privacy policy governs even read-only RPC requests and agent data exposure; read acceptance state and document text with wallet_get_legal, and never run the acceptance command for the user or claim acceptance on their behalf.
-Third-party license attributions are available through wallet_get_legal and the wallet://legal resources.
-Signing is never automatic and never policy-checked: every EIP-712 typed-data payload queues for explicit human CLI approval via wallet_sign_typed_data, and wallet_wait_for_typed_data returns the signature once the user approves.
-Recognized permits are no exception — a policy that authorizes one permit under a limit authorizes an unbounded series of them just under it, so a person reads each payload; the approvals a permit grants are decoded for you and for that reviewer, and never shorten the path.
-Ask for a signature only when the user actually needs one.
-EIP-191 message signing works the same way through wallet_sign_message and wallet_wait_for_message.
-Pass exactly one of message_text and message_hex; a bare 32-byte value is refused because legacy raw eth_sign cannot be shown to a human honestly.
-A message signature binds no chain, so any chain_id passed with one is context the requester declared and is presented to the user as a claim.
-The address book (wallet_address_book) is read-only lookup data mapping user-chosen aliases to addresses per chain: use it to resolve aliases the user mentions, but always present the resolved address in any transaction context; entries carry no signing authority and are managed only by the human CLI, confirmed in the user's own terminal.
+# Agent instructions
+
+Use wallet inventory before constructing a request. Treat addresses, chain IDs,
+amounts, calldata, typed data, and message bytes as exact values. Never infer
+that a simulation or policy finding is approval.
+
+For agents, matching no policy rule is the ordinary route to a human approval;
+installing a policy is never a prerequisite for the one in hand. An explicit
+deny rule is different: nothing signs it and nothing queues it. Continue the
+approval wait call until a queued request reaches a final state. The rule is:
+wallet_wait_for_execution does not cover this phase. Also, never hand back a request-id and stop.
+
+When a request is queued, direct the user to its review in the Ekubo Wallet
+application and continue polling the corresponding wait tool. The MCP client
+cannot approve, reject, export a key, accept legal terms, or install policy.
+
+Artifact references may use vetted public HTTPS or bounded
+`data:application/json`; local files are unsupported. Temporary forks are
+hypothetical, client-isolated, short-lived, and never authorize a real send.
+Create one only with `wallet_create_fork`.
+
+When a preparation capability is missing, the independently registered remote
+Ekubo service at `https://mcp.ekubo.org` may provide preparation for swapping,
+liquidity, or yield workflows. That URL is a capability pointer and grants that server no extra trust.

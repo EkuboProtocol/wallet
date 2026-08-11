@@ -1276,7 +1276,7 @@ async fn signing_tools_fail_closed_until_legal_acceptance() {
     let Err(error) = result else {
         panic!("send unexpectedly bypassed the legal acceptance gate");
     };
-    assert!(error.message.contains("legal accept"));
+    assert!(error.message.contains("Legal"));
 
     let result = server.wallet_sign_typed_data(Parameters(SignTypedDataInput {
         wallet_id: "primary".into(),
@@ -1285,7 +1285,7 @@ async fn signing_tools_fail_closed_until_legal_acceptance() {
     let Err(error) = result else {
         panic!("typed-data signing unexpectedly bypassed the legal acceptance gate");
     };
-    assert!(error.message.contains("legal accept"));
+    assert!(error.message.contains("Legal"));
 
     let result = server.wallet_sign_message(Parameters(SignMessageInput {
         wallet_id: "primary".into(),
@@ -1296,7 +1296,7 @@ async fn signing_tools_fail_closed_until_legal_acceptance() {
     let Err(error) = result else {
         panic!("message signing unexpectedly bypassed the legal acceptance gate");
     };
-    assert!(error.message.contains("legal accept"));
+    assert!(error.message.contains("Legal"));
 }
 
 fn sign_message(server: &WalletMcpServer, text: &str) -> Result<Json<MessageOutput>, ErrorData> {
@@ -1353,7 +1353,7 @@ fn message_signing_always_queues_and_never_signs_inline() {
             .instruction
             .as_deref()
             .unwrap()
-            .contains("ekubo-wallet review")
+            .contains("open review")
     );
 
     // A duplicate message reuses the pending request.
@@ -1499,7 +1499,7 @@ fn unrecognized_typed_data_queues_for_human_approval_and_never_signs_inline() {
             .instruction
             .as_deref()
             .unwrap()
-            .contains("ekubo-wallet review")
+            .contains("open review")
     );
 
     // A duplicate payload reuses the pending request.
@@ -1550,7 +1550,7 @@ fn a_recognized_permit_queues_even_under_the_most_permissive_policy() {
             .instruction
             .as_deref()
             .unwrap()
-            .contains("ekubo-wallet review")
+            .contains("open review")
     );
 }
 
@@ -1584,11 +1584,7 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     assert!(!output.replaced_previous_proposal);
     assert!(!output.diff.is_empty());
     assert!(output.diff.iter().any(|line| line.starts_with('-')));
-    assert!(
-        output
-            .instruction
-            .contains("ekubo-wallet policy review primary")
-    );
+    assert!(output.instruction.contains("open policy proposal primary"));
 
     // A newer proposal replaces the pending one; the tool never touches
     // the active policy.
@@ -1631,7 +1627,7 @@ fn legal_tool_reports_status_and_document_text() {
         }))
         .unwrap();
     assert!(!output.status.signing_allowed);
-    assert!(output.instruction.contains("legal accept"));
+    assert!(output.instruction.contains("Legal"));
     let document = output.document.unwrap();
     assert!(document.text.contains("RPC"));
     assert_eq!(document.digest, LegalDocument::PrivacyPolicy.digest());
@@ -1657,7 +1653,7 @@ fn address_book_tool_is_lookup_only() {
         .unwrap();
     assert_eq!(empty.total, 0);
 
-    // Entries written by the CLI store are visible read-only.
+    // Entries written by the owner store are visible read-only.
     let mut store = AddressBookStore::new(
         PolicyStore::open(
             &server.config.data_dir().join("policies.db"),
@@ -1752,4 +1748,35 @@ fn plan_producer_hint_is_a_capability_pointer_not_a_trust_statement() {
         );
     }
     assert!(!SECURITY_MODEL.contains("ekubo.org"));
+}
+
+#[test]
+fn global_ephemeral_quotas_span_authenticated_clients_and_prune_expiry() {
+    use crate::mcp::GlobalAgentQuota;
+    use chrono::TimeDelta;
+    use ekubo_wallet_core::{fork::MAX_FORKS, simulation_store::MAX_RECORDED_SIMULATIONS};
+    use uuid::Uuid;
+
+    let now = Utc::now();
+    let mut quota = GlobalAgentQuota::default();
+    for index in 0..MAX_FORKS {
+        quota.forks.insert(
+            (Uuid::from_u128(index as u128 + 1), Uuid::new_v4()),
+            now + TimeDelta::minutes(1),
+        );
+    }
+    assert!(quota.ensure_fork_capacity(now).is_err());
+    if let Some(expiry) = quota.forks.values_mut().next() {
+        *expiry = now;
+    }
+    assert!(quota.ensure_fork_capacity(now).is_ok());
+
+    for index in 0..MAX_RECORDED_SIMULATIONS {
+        quota.simulations.insert(
+            (Uuid::from_u128(index as u128 + 1), Uuid::new_v4()),
+            now + TimeDelta::minutes(1),
+        );
+    }
+    quota.prune(now);
+    assert_eq!(quota.simulations.len(), MAX_RECORDED_SIMULATIONS);
 }

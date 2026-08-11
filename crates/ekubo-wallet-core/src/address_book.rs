@@ -3,7 +3,7 @@
 //! Entries are lookup convenience data with no signing authority: nothing in
 //! the signing or policy path reads this store, and an alias never
 //! substitutes for reviewing the actual address in an approval. Entries are
-//! added, updated, and removed only by the interactive CLI after OS owner
+//! added, updated, and removed only by the owner-only native UI after OS owner
 //! authentication; MCP exposes read-only lookups so an agent can resolve
 //! "pay alice" to the address the user configured. The rows live inside the
 //! `SQLCipher` database precisely because an agent must not be able to retarget
@@ -29,7 +29,7 @@ pub const MAX_NOTE_LEN: usize = 256;
 /// One stored alias, the address rendered checksummed.
 ///
 /// The address is `String` rather than `Address` because this is what the MCP
-/// and CLI surfaces render, and what they render is the EIP-55 checksummed
+/// and desktop surfaces render, and what they render is the EIP-55 checksummed
 /// form — a pure function of the 20 stored bytes, derived here rather than
 /// stored, so the two can never disagree.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -62,7 +62,7 @@ impl AddressBookStore {
         Self { database }
     }
 
-    /// Insert or replace one alias. The CLI authenticates the owner before
+    /// Insert or replace one alias. The native UI authenticates the owner before
     /// calling this; nothing reachable from MCP does.
     pub fn upsert(
         &mut self,

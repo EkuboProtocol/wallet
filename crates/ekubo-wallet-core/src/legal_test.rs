@@ -81,8 +81,9 @@ fn privacy_policy_discloses_the_release_check() {
     assert!(policy.contains("EKUBO_WALLET_SKIP_UPDATE_CHECK=1"));
     // What triggers it, because "when you run a command" is the difference
     // between this and the background telemetry section 1 promises is absent.
-    assert!(policy.contains("does not poll in the background"));
-    assert!(policy.contains("Installing an update is never done by this software."));
+    assert!(policy.contains("Automatic checks follow the updater"));
+    assert!(policy.contains("An update is never installed silently."));
+    assert!(policy.contains("requires your explicit\nconfirmation"));
     // Section 4's exhaustive claim has to account for it too, not just
     // section 2's.
     assert!(policy.contains(
@@ -126,7 +127,7 @@ fn terms_disclaim_key_backup_and_recovery() {
     );
     // Saying a copy is the user's job is only fair if the terms also say how
     // to get one, and `account export` is the supported route.
-    assert!(TERMS_OF_SERVICE.contains("ekubo-wallet account export"));
+    assert!(TERMS_OF_SERVICE.contains("Export Private Key"));
 }
 
 fn store() -> (tempfile::TempDir, LegalStore) {

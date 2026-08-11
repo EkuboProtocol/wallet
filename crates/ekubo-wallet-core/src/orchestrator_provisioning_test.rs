@@ -121,7 +121,7 @@ fn a_wallet_with_no_policy_is_not_provisioned() {
     );
     assert!(error.contains("has no policy"), "{error}");
     assert!(
-        error.contains("policy require-approval primary"),
+        error.contains("Open Accounts") && error.contains("require-approval policy"),
         "the refusal has to name the repair: {error}"
     );
 

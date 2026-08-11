@@ -79,7 +79,7 @@ impl PendingStatus {
 /// Whether this error means the store simply does not hold that request.
 ///
 /// A request id does not say which of the three signing queues owns it, so the
-/// CLI tries each in turn. What it must not do is treat *every* failure as
+/// reconciler tries each in turn. What it must not do is treat *every* failure as
 /// "not here": a transaction row whose stored envelope no longer parses, a
 /// typed-data row that has already been decided, a database that cannot be
 /// read at all — each of those used to send the search on to the next queue,
@@ -139,7 +139,7 @@ pub struct PendingTransaction {
     /// Where the plan's bytes came from — the TLS-vetted https host that
     /// served them, "inline data URI", or "a file on this machine" — shown as
     /// an approval fact. None for plans this process built itself (transfers,
-    /// CLI).
+    /// desktop).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_source: Option<String>,
     pub digest: String,
@@ -564,7 +564,7 @@ impl PendingStore {
     /// `status = 'submitting'` is not enough to identify a lease. Recovery
     /// observes a record outside any lock, decides its lease has expired, and
     /// releases it — and between those two moments another process can release
-    /// and re-claim the same request, because the CLI and the MCP server share
+    /// and re-claim the same request, because the desktop and the MCP server share
     /// this database without sharing a lock. The row is still `submitting`, so
     /// the stale release lands on the *new* lease and the live submitter's own
     /// `mark_broadcast` then fails after the RPC already accepted the envelope.
@@ -654,7 +654,7 @@ impl PendingStore {
     /// `priced_against` is the newest cancellation hash the caller saw when it
     /// computed this envelope's fees, or `None` if there was none. It has to
     /// still be the newest, because a replacement is only a replacement of the
-    /// thing it outbid: the MCP server and the CLI share this database but not
+    /// thing it outbid: the MCP server and the desktop share this database but not
     /// a lock, so two processes can both bump over generation N, and whichever
     /// writes second would install its lower-priced envelope as the newest.
     /// The next reprice then bumps from that demoted baseline, and the

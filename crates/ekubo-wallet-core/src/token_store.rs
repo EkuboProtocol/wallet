@@ -321,7 +321,7 @@ impl TokenStore {
     /// [`MAX_IMPORT_TOKENS`] entries and the queue may hold
     /// [`MAX_PENDING_TOKEN_PROPOSALS`]. The database journals in DELETE mode
     /// at FULL synchronization, so every autocommit is several filesystem
-    /// syncs — accepting a large list a row at a time froze the terminal for
+    /// syncs — accepting a large list a row at a time froze the review UI for
     /// minutes and left half of it applied if anyone gave up. `propose` has
     /// always been one transaction for the same reason.
     ///
@@ -387,7 +387,7 @@ impl TokenStore {
     /// Removing a name is fail-safe in a way adding one is not: the wallet
     /// falls back to displaying the bare address, which is the conservative
     /// thing to show. That is why this needs the owner's confirmation in the
-    /// terminal but not the credential-store authentication that replacing a
+    /// native UI but not the credential-store authentication that replacing a
     /// policy does — nothing here can cause something to be signed.
     ///
     /// It exists because a new database now arrives holding thousands of
@@ -421,7 +421,7 @@ impl TokenStore {
     }
 
     /// Record tokens an agent suggests, for the owner to review in the
-    /// terminal. Nothing here is a display name yet — a suggestion becomes one
+    /// native review screen. Nothing here is a display name yet — a suggestion becomes one
     /// only by being confirmed into `tokens`.
     ///
     /// Tokens already confirmed are skipped rather than re-proposed, so review
@@ -454,8 +454,7 @@ impl TokenStore {
         let mut pending = self.count_proposals()?;
         ensure!(
             pending < MAX_PENDING_TOKEN_PROPOSALS,
-            "{pending} tokens already await review; the owner must run \
-             `ekubo-wallet meta-tokens review` before more can be suggested"
+            "{pending} tokens already await review; the owner must resolve them in the Tokens screen before more can be suggested"
         );
         let mut summary = ProposalSummary::default();
         let transaction = self.database.connection.transaction()?;
@@ -504,7 +503,7 @@ impl TokenStore {
                 ensure!(
                     pending < MAX_PENDING_TOKEN_PROPOSALS,
                     "this batch would leave more than {MAX_PENDING_TOKEN_PROPOSALS} tokens \
-                     awaiting review; the owner must run `ekubo-wallet meta-tokens review` first"
+                     awaiting review; the owner must resolve them in the Tokens screen first"
                 );
                 pending += 1;
             }

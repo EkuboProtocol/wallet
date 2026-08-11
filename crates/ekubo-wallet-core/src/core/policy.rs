@@ -214,7 +214,7 @@ impl Rule {
     /// rules there are. A `deny` that disappears hands authority back and a
     /// `deny` that appears takes it away, so keying `+` to "present in the
     /// proposal" printed a widening under a minus sign — on the one surface
-    /// the CLI tells the reviewer is authoritative.
+    /// the desktop review tells the owner is authoritative.
     #[must_use]
     fn describe_change(&self, chain: &str, added: bool) -> String {
         let (marker, verb) = match (self.effect, added) {
@@ -402,7 +402,7 @@ impl WalletPolicy {
     }
 
     /// Nothing signs automatically: no rules at all, so every call falls to the
-    /// default deny and queues for explicit human approval in the CLI. Kept
+    /// default deny and queues for explicit human approval in the application. Kept
     /// byte-identical to `examples/policies/deny-all.json` by test.
     #[must_use]
     pub fn require_approval_for_everything() -> Self {
@@ -413,7 +413,7 @@ impl WalletPolicy {
                 "*".into(),
                 ChainPolicy {
                     label: Some(
-                        "Deny every automatic signature; each transaction needs an explicit CLI approval"
+                        "Deny every automatic signature; each transaction needs explicit approval in the wallet application"
                             .into(),
                     ),
                     max_calls_per_batch: 1,
@@ -675,7 +675,7 @@ pub enum PolicyOutcome {
     /// signs automatically, with no prompt.
     Allowed,
     /// Nothing in the policy covers some call. It cannot sign automatically,
-    /// but a human may approve it in the CLI.
+    /// but a human may approve it in the desktop application.
     RequiresApproval,
     /// A `deny` rule matched. Nothing signs it and nothing queues: the policy
     /// has to change first. There is no approval prompt for this outcome.
@@ -731,7 +731,7 @@ pub fn json_schema() -> Value {
                  against one chain's unordered rule set: any matching deny rule rejects the plan \
                  outright — nothing signs, nothing queues, and no approval overrides it — \
                  otherwise any matching allow rule signs it automatically, otherwise the plan \
-                 queues for explicit human approval in the CLI. Every other refusal (no rule, the \
+                 queues for explicit human approval in the wallet application. Every other refusal (no rule, the \
                  native_value guard, max_calls_per_batch, an ungoverned chain) queues the same \
                  way; only a deny rule forecloses. There are no amount limits, budgets, or spend \
                  counters — a rule bounds which calls may be made, not how much they move."

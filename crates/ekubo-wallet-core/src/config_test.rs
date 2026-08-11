@@ -438,7 +438,7 @@ fn a_private_file_is_opened_through_the_name_it_was_given() {
 
 #[test]
 fn a_replacement_does_not_quietly_drop_the_owners_fee_ceiling() {
-    // The MCP candidate and the CLI form both leave `max_fee_per_gas` as
+    // The MCP candidate and the desktop form both leave `max_fee_per_gas` as
     // `None`, each with a comment saying an agent does not get to choose the
     // owner's fee ceiling. Whole-profile replacement turned both into the
     // opposite: a routine endpoint edit deleted the ceiling, and an absent

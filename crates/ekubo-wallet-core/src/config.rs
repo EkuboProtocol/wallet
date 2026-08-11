@@ -431,7 +431,7 @@ impl ConfigStore {
     ///
     /// Private on purpose. `update` is the only correct way to change a
     /// configuration, because a read-modify-write that does not hold the lock
-    /// silently discards whatever another CLI or MCP process wrote in between.
+    /// silently discards whatever another owner or MCP task wrote in between.
     /// That rule used to live in a doc comment while the compiler allowed
     /// anything; now the only caller that can reach this is `update` itself.
     fn save(&self, config: &WalletConfig) -> Result<()> {
@@ -480,7 +480,7 @@ impl ConfigStore {
     ///
     /// Reads are safe without the lock because saves replace the complete JSON
     /// document atomically. Every read-modify-write operation must use this
-    /// method so two CLI or MCP processes cannot silently discard each other's
+    /// method so two owner or MCP tasks cannot silently discard each other's
     /// changes.
     pub fn update<T>(&self, update: impl FnOnce(&mut WalletConfig) -> Result<T>) -> Result<T> {
         create_private_dir(&self.data_dir)?;
@@ -651,7 +651,7 @@ pub use crate::networks::default_networks;
 /// Whether this endpoint sends the wallet's reads in the clear to another
 /// machine.
 ///
-/// Used by the CLI to put a targeted warning on the confirmation screen.
+/// Used by the desktop to put a targeted warning on the confirmation screen.
 /// Loopback is not remote -- local development nodes commonly use plaintext.
 #[must_use]
 pub fn is_remote_plaintext(rpc_url: &url::Url) -> bool {
@@ -968,7 +968,7 @@ pub fn replace_configured_network(
     //
     // Both constructors of a candidate profile leave `max_fee_per_gas` as
     // `None` and say why: the MCP one because "an agent does not choose the
-    // owner's fee ceiling", the CLI form because a ceiling is a judgement
+    // owner's fee ceiling", the desktop form because a ceiling is a judgement
     // about what the owner's transactions are worth rather than a property of
     // the chain. Both are right about intent and both achieved the opposite,
     // because this function replaces the whole profile — so a routine endpoint
@@ -978,7 +978,7 @@ pub fn replace_configured_network(
     // there is nothing to check it against.
     //
     // Carried rather than required, because `None` here has only ever meant
-    // "not specified". Nothing in the CLI or MCP surface sets a ceiling at
+    // "not specified". Nothing in the desktop or MCP surface sets a ceiling at
     // all; the owner writes one into the configuration by hand, and the
     // owner's own `network edit` path clones the existing profile, so a
     // deliberate change arrives as `Some`. A future affordance for *removing*

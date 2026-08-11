@@ -15,8 +15,7 @@ use thiserror::Error;
 /// Nothing else belongs here. Changing a network or importing a token list
 /// grants no signing authority and redirects no payment, and asking for a
 /// fingerprint before each one only teaches the owner to give it without
-/// reading. Those are confirmed in the terminal instead; see
-/// a terminal confirmation.
+/// reading. Those use explicit native confirmation without a biometric prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PresenceRequest {
     SignTransaction { wallet: String },

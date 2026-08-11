@@ -4,7 +4,7 @@
 //! plan fetching and digest verification, policy evaluation, simulation,
 //! the signing orchestrator and its guard ladders, key custody, owner
 //! authentication, review-content generation, and the encrypted stores. The
-//! binary crate above supplies only presentation (CLI, TUI, MCP adapters);
+//! binary crate above supplies only presentation (GPUI and MCP adapters);
 //! an audit of what this wallet can sign reads this crate.
 
 #[cfg(all(feature = "test-hooks", not(debug_assertions)))]
@@ -20,6 +20,7 @@ pub mod config;
 pub mod core;
 pub mod custody;
 pub mod default_tokens;
+pub mod desktop_store;
 /// Debug-build-only scratch sessions. Never compiled into a release binary.
 #[cfg(debug_assertions)]
 pub mod ephemeral;

@@ -1,3 +1,4 @@
+use crate::events::{DomainEventKind, EventBus, TransactionStage};
 use crate::{
     abi_decoder::{AbiDecodePlan, AbiDecodeResult, decode_abi_result},
     address_book::{AddressBookEntry, AddressBookStore},
@@ -10,7 +11,7 @@ use crate::{
     },
     custody::{KeyStore, OsKeyStore},
     execution::ReceiptStatus,
-    fork::{ForkSession, ForkStore, MAX_PLANS_PER_FORK, pin_parent_block},
+    fork::{ForkSession, ForkStore, MAX_FORKS, MAX_PLANS_PER_FORK, pin_parent_block},
     input_validation::{parse_chain_id, validate_timeout_seconds},
     legal::{self, LegalDocument, LegalStatus, LegalStore},
     message::{
@@ -23,7 +24,7 @@ use crate::{
     release_check::{self, ReleaseCheck},
     rpc::{WalletStatus, transaction_known, wallet_status},
     simulation::{SimulationResult, simulate_execution},
-    simulation_store::SimulationStore,
+    simulation_store::{MAX_RECORDED_SIMULATIONS, RecordedSimulation, SimulationStore},
     token_store::{StoredToken, TokenStore},
     typed_data::{
         PendingTypedData, PermitApproval, TypedDataStatus, TypedDataStore,
@@ -33,8 +34,9 @@ use crate::{
 use alloy::primitives::Address;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
+use ekubo_wallet_core::desktop_store::DesktopStore;
 use rmcp::{
-    ErrorData, RoleServer, ServerHandler, ServiceExt,
+    ErrorData, RoleServer, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
     model::{
         Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
@@ -43,11 +45,11 @@ use rmcp::{
     },
     service::RequestContext,
     tool, tool_handler, tool_router,
-    transport::stdio,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -78,6 +80,53 @@ const MAX_CONCURRENT_WAITS: usize = 16;
 
 static WAIT_SLOTS: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_WAITS));
 
+#[derive(Default)]
+pub(crate) struct GlobalAgentQuota {
+    forks: HashMap<(uuid::Uuid, uuid::Uuid), DateTime<Utc>>,
+    simulations: HashMap<(uuid::Uuid, uuid::Uuid), DateTime<Utc>>,
+}
+
+impl GlobalAgentQuota {
+    fn prune(&mut self, now: DateTime<Utc>) {
+        self.forks.retain(|_, expiry| *expiry > now);
+        self.simulations.retain(|_, expiry| *expiry > now);
+    }
+
+    fn ensure_fork_capacity(&mut self, now: DateTime<Utc>) -> Result<()> {
+        self.prune(now);
+        ensure!(
+            self.forks.len() < MAX_FORKS,
+            "all authenticated clients already hold the global maximum of {MAX_FORKS} simulation forks"
+        );
+        Ok(())
+    }
+
+    fn register_fork(&mut self, client: uuid::Uuid, session: &ForkSession) -> Result<()> {
+        self.ensure_fork_capacity(Utc::now())?;
+        self.forks
+            .insert((client, session.fork_id), session.expires_at);
+        Ok(())
+    }
+
+    fn register_simulation(&mut self, client: uuid::Uuid, simulation: &RecordedSimulation) -> bool {
+        self.prune(Utc::now());
+        if self.simulations.len() >= MAX_RECORDED_SIMULATIONS {
+            return false;
+        }
+        self.simulations
+            .insert((client, simulation.simulation_id), simulation.expires_at);
+        true
+    }
+
+    fn release_fork(&mut self, client: uuid::Uuid, fork: uuid::Uuid) {
+        self.forks.remove(&(client, fork));
+    }
+
+    fn release_simulation(&mut self, client: uuid::Uuid, simulation: uuid::Uuid) {
+        self.simulations.remove(&(client, simulation));
+    }
+}
+
 /// How far past its own deadline a wait may run while one reconciliation
 /// finishes.
 ///
@@ -90,7 +139,7 @@ const WAIT_RECONCILE_GRACE: Duration = Duration::from_secs(5);
 use url::Url;
 
 #[derive(Clone)]
-struct WalletMcpServer {
+pub(crate) struct WalletMcpServer {
     config: ConfigStore,
     policies: Arc<Mutex<PolicyStore>>,
     pending: Arc<Mutex<PendingStore>>,
@@ -106,22 +155,39 @@ struct WalletMcpServer {
     /// Simulation results a send may consume instead of simulating again.
     /// In-process only for the same reasons, and short-lived besides.
     simulations: Arc<Mutex<SimulationStore>>,
+    client_namespace: uuid::Uuid,
+    global_quota: Arc<Mutex<GlobalAgentQuota>>,
+    events: EventBus,
     /// Where private keys live. Production uses the OS credential store;
     /// tests substitute an in-memory store so no real keychain is touched.
     keys: Arc<dyn KeyStore>,
+    requesting_client: Option<(uuid::Uuid, Arc<Mutex<DesktopStore>>)>,
 }
 
 impl WalletMcpServer {
-    fn production(config: ConfigStore) -> Result<Self> {
+    pub(crate) fn production(
+        config: ConfigStore,
+        client_id: uuid::Uuid,
+        desktop: Arc<Mutex<DesktopStore>>,
+        global_quota: Arc<Mutex<GlobalAgentQuota>>,
+        events: EventBus,
+    ) -> Result<Self> {
         let configured = config.load()?;
         ensure!(
-            configured.wallets.is_empty() || config.data_dir().join("policies.db").is_file(),
+            configured.wallets.is_empty()
+                || config
+                    .data_dir()
+                    .join(crate::policy_store::DATABASE_FILE)
+                    .is_file(),
             "{} lists wallets but {} does not exist. If a wallet was created or imported while \
-             policy initialization failed, repair it with `ekubo-wallet policy require-approval \
-             <wallet-id>` or remove it with `ekubo-wallet account remove <wallet-id>`. If this \
-             directory belongs to different wallet software, point EKUBO_WALLET_HOME elsewhere.",
+             policy initialization failed, open Accounts in Ekubo Wallet to install a \
+             require-approval policy or remove the account. If this directory belongs to \
+             different wallet software, choose a different data location in Settings.",
             config.data_dir().join("config.json").display(),
-            config.data_dir().join("policies.db").display(),
+            config
+                .data_dir()
+                .join(crate::policy_store::DATABASE_FILE)
+                .display(),
         );
         let policies = PolicyStore::production(config.data_dir())?;
         let pending = PendingStore::production(config.data_dir())?;
@@ -130,7 +196,7 @@ impl WalletMcpServer {
         let legal = LegalStore::production(config.data_dir())?;
         let tokens = TokenStore::production(config.data_dir())?;
         let address_book = AddressBookStore::production(config.data_dir())?;
-        Self::new(
+        let mut server = Self::new(
             config,
             policies,
             pending,
@@ -140,7 +206,12 @@ impl WalletMcpServer {
             tokens,
             address_book,
             Arc::new(OsKeyStore),
-        )
+        )?;
+        server.requesting_client = Some((client_id, desktop));
+        server.client_namespace = client_id;
+        server.global_quota = global_quota;
+        server.events = events;
+        Ok(server)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -173,8 +244,80 @@ impl WalletMcpServer {
             address_book: Arc::new(Mutex::new(address_book)),
             forks: Arc::new(Mutex::new(ForkStore::new())),
             simulations: Arc::new(Mutex::new(SimulationStore::new())),
+            client_namespace: uuid::Uuid::nil(),
+            global_quota: Arc::new(Mutex::new(GlobalAgentQuota::default())),
+            events: EventBus::default(),
             keys,
+            requesting_client: None,
         })
+    }
+
+    fn with_attribution(
+        &self,
+        apply: impl FnOnce(&mut DesktopStore, uuid::Uuid) -> Result<()>,
+    ) -> Result<()> {
+        let Some((client_id, desktop)) = &self.requesting_client else {
+            return Ok(());
+        };
+        let mut desktop = desktop
+            .lock()
+            .map_err(|_| anyhow::anyhow!("desktop database lock was poisoned"))?;
+        apply(&mut desktop, *client_id)
+    }
+
+    fn ensure_global_fork_capacity(&self) -> std::result::Result<(), ErrorData> {
+        self.global_quota
+            .lock()
+            .map_err(|_| ErrorData::internal_error("global quota lock was poisoned", None))?
+            .ensure_fork_capacity(Utc::now())
+            .map_err(|error| tool_error(&error))
+    }
+
+    fn register_global_fork(&self, session: &ForkSession) -> std::result::Result<(), ErrorData> {
+        self.global_quota
+            .lock()
+            .map_err(|_| ErrorData::internal_error("global quota lock was poisoned", None))?
+            .register_fork(self.client_namespace, session)
+            .map_err(|error| tool_error(&error))
+    }
+
+    fn release_global_fork(&self, fork_id: uuid::Uuid) {
+        if let Ok(mut quota) = self.global_quota.lock() {
+            quota.release_fork(self.client_namespace, fork_id);
+        }
+    }
+
+    fn register_global_simulation(&self, simulation: &RecordedSimulation) -> bool {
+        self.global_quota
+            .lock()
+            .is_ok_and(|mut quota| quota.register_simulation(self.client_namespace, simulation))
+    }
+
+    fn release_global_simulation(&self, simulation_id: uuid::Uuid) {
+        if let Ok(mut quota) = self.global_quota.lock() {
+            quota.release_simulation(self.client_namespace, simulation_id);
+        }
+    }
+
+    fn publish_execution_status(&self, output: &ExecutionStatusOutput) {
+        let stage = match output.status {
+            ExecutionStatus::ApprovalRequired => Some(TransactionStage::Proposed),
+            ExecutionStatus::Approved => Some(TransactionStage::Signed),
+            ExecutionStatus::SubmissionPending | ExecutionStatus::CancellationPending => {
+                Some(TransactionStage::Broadcast)
+            }
+            ExecutionStatus::Submitted => Some(TransactionStage::Confirmed),
+            ExecutionStatus::Reverted => Some(TransactionStage::Reverted),
+            ExecutionStatus::Cancelled => Some(TransactionStage::Cancelled),
+            ExecutionStatus::Replaced => Some(TransactionStage::Replaced),
+            ExecutionStatus::TimedOut | ExecutionStatus::Rejected => None,
+        };
+        if let Some(stage) = stage {
+            self.events.publish(DomainEventKind::Transaction {
+                request_id: output.request_id,
+                stage,
+            });
+        }
     }
 }
 
@@ -241,11 +384,9 @@ struct SimulateInput {
     /// integrity digest and byte count over what it actually fetched, so what
     /// the agent saw prepared is what gets simulated. An inline plan travels
     /// as an envelope whose url is a `data:application/json[;base64],…` URI
-    /// of its exact bytes (integrity optional there). A plan you assembled
-    /// yourself — two prepared plans spliced into one batch, say — can stay
-    /// on disk instead: write the JSON, run `ekubo-wallet meta-reference <path>`,
-    /// and pass the `file:` envelope it prints, integrity and byte count
-    /// included, so the calldata never travels through your context.
+    /// of its exact bytes (integrity optional there). Public HTTPS artifacts
+    /// must include their integrity digest and exact byte count. Local
+    /// filesystem references are not accepted.
     reference: ArtifactReference,
     /// Simulate on top of everything already applied to this temporary fork
     /// and, if execution succeeds, append this plan to it. Omit to simulate
@@ -275,9 +416,7 @@ struct SendExecutionPlanInput {
     wallet_id: String,
     chain_id: String,
     /// The producer's `artifact_reference` envelope for the plan to simulate
-    /// and send, passed through VERBATIM, or the `file:` envelope
-    /// `ekubo-wallet meta-reference <path>` prints for a plan you assembled and
-    /// wrote to disk. Provide exactly one of `reference`, `simulation_id`, or
+    /// and send, passed through VERBATIM. Provide exactly one of `reference`, `simulation_id`, or
     /// `request_id`.
     #[serde(default)]
     reference: Option<ArtifactReference>,
@@ -524,7 +663,7 @@ struct ProposeTokensInput {
     /// verifies the envelope's integrity digest and byte count over what it
     /// actually fetched. This changes only who carries the bytes — the
     /// entries still reach the owner as suggestions and are still named
-    /// nothing until they accept them in `ekubo-wallet meta-tokens review`. The
+    /// nothing until they accept them in the desktop Tokens review screen. The
     /// same 10000-entry cap applies: a longer list is refused rather than
     /// truncated.
     #[serde(default)]
@@ -820,7 +959,7 @@ struct MessageOutput {
     digest: String,
     status: MessageStatus,
     /// How the message reads, and everything about it that can mislead a
-    /// human reading it in a terminal.
+    /// human reading it in a native review.
     display: MessageDisplay,
     /// The parsed login, when the message is a recognized ERC-4361 payload.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -974,15 +1113,11 @@ impl WalletMcpServer {
         }))
     }
 
-    // Read-only in the strongest sense available: it installs nothing, and no
-    // tool here does. The upgrade it may name is a shell command for the agent
-    // to offer the user, run by the agent's own host under whatever approval
-    // that host asks for — which is the point. Replacing the wallet binary is
-    // the one action whose confirmation cannot live inside the wallet, because
-    // the approval surface is part of what gets replaced.
+    // Read-only in the strongest sense available: installation remains an
+    // explicit owner operation in the signed desktop updater.
     #[tool(
         name = "wallet_check_for_updates",
-        description = "Report whether a newer ekubo-wallet release has been published than the one this server is running, and, when there is one, the exact command that installs it. Reads a release listing and nothing else: no wallet, key, address, policy, or transaction is involved, and this tool never installs, downloads, or modifies anything. The wallet cannot update itself and offers no tool that does — installing is a shell command the user runs, or that you run for them only if they ask, and their agent host is what approves it. The command replaces the binary this server was launched from; the running process keeps the version it started with, so after a successful install tell the user to restart the wallet MCP server for the new version to take effect. Follow the returned instruction. An answer with update_available false, whether because this build is current or because the release listing could not be reached, is never a reason to suggest upgrading or to call this again.",
+        description = "Report whether a newer signed Ekubo Wallet desktop release has been published. Reads a release listing and nothing else: no wallet, key, address, policy, or transaction is involved, and this tool never installs, downloads, or modifies anything. When an update is available, direct the user to the wallet application's Updates screen; never download or install it on their behalf. Follow the returned instruction. An answer with update_available false, whether because this build is current or because the release listing could not be reached, is never a reason to suggest upgrading or to call this again.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1067,7 +1202,7 @@ impl WalletMcpServer {
     // in-process, short-lived, and invisible at approval time.
     #[tool(
         name = "wallet_simulate_execution_plan",
-        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet meta-reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
+        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over vetted public HTTPS or decodes a bounded data:application/json URI and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1134,21 +1269,22 @@ impl WalletMcpServer {
         // eth_simulateV1 request twice. A fork result never is: it describes a
         // world that does not exist.
         if session.is_none() {
-            let recorded = self
-                .simulations
-                .lock()
-                .map_err(|_| {
-                    ErrorData::internal_error("simulation registry lock was poisoned", None)
-                })?
-                .record(
-                    &wallet.id,
-                    &input.chain_id,
-                    execution_plan.clone(),
-                    Some(plan_source.to_string()),
-                    result.clone(),
-                    Utc::now(),
-                );
-            result.simulation_id = Some(recorded.simulation_id);
+            let mut simulations = self.simulations.lock().map_err(|_| {
+                ErrorData::internal_error("simulation registry lock was poisoned", None)
+            })?;
+            let recorded = simulations.record(
+                &wallet.id,
+                &input.chain_id,
+                execution_plan.clone(),
+                Some(plan_source.to_string()),
+                result.clone(),
+                Utc::now(),
+            );
+            if self.register_global_simulation(&recorded) {
+                result.simulation_id = Some(recorded.simulation_id);
+            } else {
+                simulations.discard(recorded.simulation_id);
+            }
         }
         if let Some(session) = session {
             // Only a plan that actually executed becomes part of the fork's
@@ -1223,6 +1359,7 @@ impl WalletMcpServer {
             .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
             .ensure_capacity(&wallet_id, Utc::now())
             .map_err(|error| tool_error(&error))?;
+        self.ensure_global_fork_capacity()?;
         let parent = pin_parent_block(&network)
             .await
             .map_err(|error| tool_error(&error))?;
@@ -1238,6 +1375,12 @@ impl WalletMcpServer {
                 Utc::now(),
             )
             .map_err(|error| tool_error(&error))?;
+        if let Err(error) = self.register_global_fork(&session) {
+            if let Ok(mut forks) = self.forks.lock() {
+                forks.discard(session.fork_id);
+            }
+            return Err(error);
+        }
         Ok(Json(ForkOutput {
             fork_id: session.fork_id,
             wallet_id: session.wallet_id.clone(),
@@ -1273,6 +1416,9 @@ impl WalletMcpServer {
             .lock()
             .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
             .discard(fork_id);
+        if discarded {
+            self.release_global_fork(fork_id);
+        }
         Ok(Json(DiscardForkOutput {
             fork_id,
             discarded,
@@ -1304,7 +1450,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_batch_eth_call",
-        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the stored call bundle itself instead of having it restated. A bundle you assembled yourself can stay on disk: write it, run `ekubo-wallet meta-reference <path>`, and pass the file: envelope it prints. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
+        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the bounded HTTPS or data:application/json call bundle itself instead of having it restated. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_batch_eth_call(
@@ -1385,7 +1531,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_tokens",
-        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. Provide the entries one of two ways: inline in tokens, or — for anything beyond a handful — as a producer's token_list artifact_reference envelope passed through VERBATIM as reference, which the wallet fetches and integrity-verifies itself instead of having the list restated a field at a time. Prefer the reference: a thousand-token list costs about fifty thousand output tokens to write out and a few hundred to reference, and the two paths are otherwise identical. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet meta-tokens review`, where they accept or reject them by list. The owner sees your list_name marked as a name you gave rather than one anything verified, so it can never be mistaken for a group wallet_import_token_list built from a publisher's own TLS host. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting reaches no chain at all: a contract cannot tell the owner whether the curator you cited is trustworthy, which is the only question a listing raises, so their approval is the check and an address with nothing behind it just yields a row that names nothing.",
+        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. Provide the entries one of two ways: inline in tokens, or — for anything beyond a handful — as a producer's token_list artifact_reference envelope passed through VERBATIM as reference, which the wallet fetches and integrity-verifies itself instead of having the list restated a field at a time. Prefer the reference: a thousand-token list costs about fifty thousand output tokens to write out and a few hundred to reference, and the two paths are otherwise identical. This never adds anything: suggestions wait until the owner reviews them in the Tokens review screen, where they accept or reject them by list. The owner sees your list_name marked as a name you gave rather than one anything verified, so it can never be mistaken for a group wallet_import_token_list built from a publisher's own TLS host. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting reaches no chain at all: a contract cannot tell the owner whether the curator you cited is trustworthy, which is the only question a listing raises, so their approval is the check and an address with nothing behind it just yields a row that names nothing.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1472,6 +1618,19 @@ impl WalletMcpServer {
                 &crate::token_store::ProposalSource::Claimed(&list_name),
             )
             .map_err(|error| tool_error(&error))?;
+        drop(store);
+        let attributed = listed
+            .iter()
+            .map(|token| (token.chain_id, token.address.into_array()))
+            .collect::<Vec<_>>();
+        self.with_attribution(|desktop, client_id| {
+            desktop.attribute_token_proposals(&attributed, client_id)
+        })
+        .map_err(|error| tool_error(&error))?;
+        let store = self
+            .tokens
+            .lock()
+            .map_err(|_| ErrorData::internal_error("token database lock was poisoned", None))?;
         let awaiting_review = store
             .count_proposals()
             .map_err(|error| tool_error(&error))?;
@@ -1479,7 +1638,7 @@ impl WalletMcpServer {
             summary,
             awaiting_review,
             skipped_non_evm,
-            next_step: "The owner reviews these with `ekubo-wallet meta-tokens review`. \
+            next_step: "The owner reviews these in the desktop Tokens review screen. \
                         Until they accept one, the wallet keeps showing that token by \
                         address alone."
                 .into(),
@@ -1488,7 +1647,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_import_token_list",
-        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 10000 entries after that selection, which fits the published lists people actually name, and an overflowing selection is refused rather than truncated — narrow the chains, or point at a more specific list. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the separate CLI with `ekubo-wallet meta-tokens review`, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
+        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 10000 entries after that selection, which fits the published lists people actually name, and an overflowing selection is refused rather than truncated — narrow the chains, or point at a more specific list. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the Tokens review screen, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1565,11 +1724,10 @@ impl WalletMcpServer {
             awaiting_review,
             skipped_non_evm: parsed.skipped_non_evm,
             skipped_other_chain: parsed.skipped_other_chain,
-            next_step:
-                "The owner reviews these with `ekubo-wallet meta-tokens review`, where they \
+            next_step: "The owner reviews these in the desktop Tokens review screen, where they \
                         accept or reject the whole list at once. Until they accept one, the \
                         wallet keeps showing that token by address alone."
-                    .into(),
+                .into(),
         }))
     }
 
@@ -1705,16 +1863,17 @@ impl WalletMcpServer {
         let chain_id = DecimalU256::new(input.chain_id).map_err(|error| tool_error(&error))?;
         let plan = transfer_plan(&chain_id, wallet.address, input.transfers)
             .map_err(|error| tool_error(&error))?;
-        Ok(Json(
+        let output =
             Box::pin(self.send_new_plan(wallet, network, plan, None, input.on_simulation_failure))
                 .await
-                .map_err(|error| tool_error(&error))?,
-        ))
+                .map_err(|error| tool_error(&error))?;
+        self.publish_execution_status(&output);
+        Ok(Json(output))
     }
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet meta-reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan no policy rule covers queues for approval either way, and a plan a deny rule matched fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's bounded HTTPS or data:application/json artifact_reference envelope passed through VERBATIM as reference; send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan no policy rule covers queues for approval either way, and a plan a deny rule matched fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1774,6 +1933,7 @@ impl WalletMcpServer {
             _ => unreachable!("exclusive input was checked"),
         }
         .map_err(|error| tool_error(&error))?;
+        self.publish_execution_status(&output);
         Ok(Json(output))
     }
 
@@ -1818,12 +1978,13 @@ impl WalletMcpServer {
         .map_err(|error| tool_error(&error))?;
         let mut output = execution_status_output(record);
         output.broadcast_error = broadcast.broadcast_error;
+        self.publish_execution_status(&output);
         Ok(Json(output))
     }
 
     #[tool(
         name = "wallet_propose_network",
-        description = "Suggest one complete server-wide EVM network for the owner to confirm with `ekubo-wallet network review`. Adds nothing: a proposal naming a chain ID that is already configured is an edit of that network, one naming a chain ID that is not is an addition, and neither takes effect until the owner accepts it in the terminal. The RPC endpoint is admitted (public https, no credentials, no private address) when proposed and its chain ID is verified when accepted.",
+        description = "Suggest one complete server-wide EVM network for the owner to review in the native wallet application. Adds nothing: a proposal naming a chain ID that is already configured is an edit of that network, one naming a chain ID that is not is an addition, and neither takes effect until the owner accepts it. The RPC endpoint is admitted (public https, no credentials, no private address) when proposed and its chain ID is verified when accepted.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1895,7 +2056,7 @@ impl WalletMcpServer {
             tool_error(&"another network proposal is already being checked; retry once it finishes")
         })?;
         // `validate_network` admits http and loopback so an owner can point
-        // their own terminal at a devnet. This caller is not the owner, so the
+        // their own wallet at a devnet. This caller is not the owner, so the
         // endpoint passes the same admission a referenced plan URL does.
         //
         // The chain ID is deliberately NOT probed here. Verifying it now would
@@ -1917,6 +2078,10 @@ impl WalletMcpServer {
             .map_err(|_| ErrorData::internal_error("policy store lock was poisoned", None))?
             .put_network_proposal(&candidate)
             .map_err(|error| tool_error(&error))?;
+        self.with_attribution(|desktop, client_id| {
+            desktop.attribute_network_proposal(candidate.chain_id, client_id)
+        })
+        .map_err(|error| tool_error(&error))?;
         Ok(Json(ProposedNetworkOutput {
             chain_id: candidate.chain_id.to_string(),
             replaces,
@@ -1926,7 +2091,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_wait_for_approval",
-        description = "Wait for a pending transaction to be approved and signed or rejected through the separate human CLI. This tool cannot approve, reject, sign, or submit it.",
+        description = "Wait for a pending transaction to be approved and signed or rejected through the native wallet review window. This tool cannot approve, reject, sign, or submit it.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn wallet_wait_for_approval(
@@ -2072,7 +2237,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_get_legal",
-        description = "Read the legal acceptance status, and optionally the complete text of the Terms of Service, Privacy Policy, or Third-Party Licenses. Acceptance itself is a separate human CLI operation; every other wallet tool fails until the user has accepted the current terms and privacy policy via `ekubo-wallet legal accept`.",
+        description = "Read the legal acceptance status, and optionally the complete text of the Terms of Service, Privacy Policy, or Third-Party Licenses. Acceptance is an owner-only operation in the native wallet application; every other wallet tool fails until the user has accepted the current terms and privacy policy there.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_get_legal(
@@ -2088,7 +2253,7 @@ impl WalletMcpServer {
         let instruction = if status.signing_allowed {
             "The current Terms of Service and Privacy Policy are accepted; the wallet tools are available.".into()
         } else {
-            "Every wallet tool except this one is disabled until the user accepts the current Terms of Service and separately acknowledges the Privacy Policy. Offer to display each document (this tool returns their text), then tell the user to run `ekubo-wallet legal accept` in their own terminal. Never run that command for them and never claim acceptance on their behalf.".to_string()
+            "Every wallet tool except this one is disabled until the user accepts the current Terms of Service and separately acknowledges the Privacy Policy. Offer to display each document (this tool returns their text), then tell the user to open Legal & Version and accept both documents. Never run that command for them and never claim acceptance on their behalf.".to_string()
         };
         Ok(Json(LegalOutput {
             status,
@@ -2104,7 +2269,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_address_book",
-        description = "Look up user-configured aliases for addresses on particular chains. These name an address for a human reading a transaction and decide nothing: no policy can refer to them, so an alias never widens what signs automatically. A policy that means to permit an address names it in the policy. Adding, changing, or removing entries is a separate human CLI operation the user confirms in their own terminal, and nothing reachable from here can write one. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
+        description = "Look up user-configured aliases for addresses on particular chains. These name an address for a human reading a transaction and decide nothing: no policy can refer to them, so an alias never widens what signs automatically. A policy that means to permit an address names it in the policy. Adding, changing, or removing entries is a native wallet review window operation the user confirms in the native wallet application, and nothing reachable from here can write one. Provide alias with chain_id for an exact lookup, or list with optional chain filter.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     fn wallet_address_book(
@@ -2143,7 +2308,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_policy",
-        description = "Propose a complete replacement signing policy for human review — the way to adapt permissions to planned actions (automatic token spends to certain recipients, approvals to certain spenders, native value limits). Read wallet://docs/policy-authoring and wallet://schemas/policy first, and base the proposal on the exact document from wallet_get_policy: source_revision must be the active revision. One proposal exists per wallet; a newer proposal replaces it. The user reviews a minimized permission diff plus your rationale in the separate CLI and applies it there; this tool can never change the active policy.",
+        description = "Propose a complete replacement signing policy for human review — the way to adapt permissions to planned actions (automatic token spends to certain recipients, approvals to certain spenders, native value limits). Read wallet://docs/policy-authoring and wallet://schemas/policy first, and base the proposal on the exact document from wallet_get_policy: source_revision must be the active revision. One proposal exists per wallet; a newer proposal replaces it. The user reviews a minimized permission diff plus your rationale in the native wallet application and applies it there; this tool can never change the active policy.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2191,6 +2356,11 @@ impl WalletMcpServer {
                 &input.rationale,
             )
             .map_err(|error| tool_error(&error))?;
+        drop(policies);
+        self.with_attribution(|desktop, client_id| {
+            desktop.attribute_policy_proposal(&wallet.id, client_id)
+        })
+        .map_err(|error| tool_error(&error))?;
         let diff = crate::core::policy::diff_policies(&current.policy, &proposal.policy);
         Ok(Json(ProposePolicyOutput {
             wallet_id: proposal.wallet_id.clone(),
@@ -2200,7 +2370,7 @@ impl WalletMcpServer {
             rationale: proposal.rationale,
             replaced_previous_proposal,
             instruction: format!(
-                "The proposal is stored. Tell the user to run `ekubo-wallet policy review {}` in their own terminal to see the permission diff and your rationale, then approve or reject it there (never run that command for them and never claim it was applied). Confirm the outcome by reading wallet_get_policy: the revision advances past {} when the user applies the proposal. Any policy change by the user invalidates this proposal.",
+                "The proposal is stored. Tell the user to open policy proposal {} in the Policies screen to see the permission diff and your rationale, then approve or reject it there (never run that command for them and never claim it was applied). Confirm the outcome by reading wallet_get_policy: the revision advances past {} when the user applies the proposal. Any policy change by the user invalidates this proposal.",
                 proposal.wallet_id, proposal.source_revision
             ),
         }))
@@ -2208,7 +2378,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_sign_typed_data",
-        description = "Queue an exact EIP-712 typed-data payload for explicit human approval through the separate CLI, which is the only way it can be signed: no policy is consulted, and there is no automatic path for any payload, including recognized permits. The domain must pin a configured chainId. Recognized permits (ERC-2612 Permit and canonical Permit2) are decoded into the token approvals they grant and shown to the user and returned to you, as review information only. Wait on the queued request with wallet_wait_for_typed_data.",
+        description = "Queue an exact EIP-712 typed-data payload for explicit human approval through the native wallet application, which is the only way it can be signed: no policy is consulted, and there is no automatic path for any payload, including recognized permits. The domain must pin a configured chainId. Recognized permits (ERC-2612 Permit and canonical Permit2) are decoded into the token approvals they grant and shown to the user and returned to you, as review information only. Wait on the queued request with wallet_wait_for_typed_data.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2247,6 +2417,10 @@ impl WalletMcpServer {
             .map_err(|_| ErrorData::internal_error("typed-data database lock was poisoned", None))?
             .create(&wallet.id, chain_id, &input.typed_data, digest, None)
             .map_err(|error| tool_error(&error))?;
+        self.with_attribution(|desktop, client_id| {
+            desktop.attribute_typed_data(record.request_id, client_id)
+        })
+        .map_err(|error| tool_error(&error))?;
         let mut output = typed_data_output(record);
         output.permit_approvals = permit_approvals;
         Ok(Json(output))
@@ -2254,7 +2428,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_wait_for_typed_data",
-        description = "Wait for a pending typed-data request to be approved and signed or rejected through the separate human CLI, and read the signature once signed. This tool cannot approve, reject, or sign.",
+        description = "Wait for a pending typed-data request to be approved and signed or rejected through the native wallet review window, and read the signature once signed. This tool cannot approve, reject, or sign.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn wallet_wait_for_typed_data(
@@ -2287,7 +2461,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_sign_message",
-        description = "Sign an exact EIP-191 `personal_sign` message — dapp logins (ERC-4361 Sign-In with Ethereum), address-ownership proofs, and off-chain attestations. Every message queues for explicit human approval through the separate CLI: no policy can evaluate what a message signature authorizes, so there is no automatic path. Pass exactly one of message_text and message_hex. Legacy raw eth_sign over a bare 32-byte digest is refused; use wallet_sign_typed_data for EIP-712. Wait on the queued request with wallet_wait_for_message.",
+        description = "Sign an exact EIP-191 `personal_sign` message — dapp logins (ERC-4361 Sign-In with Ethereum), address-ownership proofs, and off-chain attestations. Every message queues for explicit human approval through the native wallet application: no policy can evaluate what a message signature authorizes, so there is no automatic path. Pass exactly one of message_text and message_hex. Legacy raw eth_sign over a bare 32-byte digest is refused; use wallet_sign_typed_data for EIP-712. Wait on the queued request with wallet_wait_for_message.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2343,6 +2517,10 @@ impl WalletMcpServer {
                 None,
             )
             .map_err(|error| tool_error(&error))?;
+        self.with_attribution(|desktop, client_id| {
+            desktop.attribute_message(record.request_id, client_id)
+        })
+        .map_err(|error| tool_error(&error))?;
         Ok(Json(
             message_output(record, &self.config).map_err(|error| tool_error(&error))?,
         ))
@@ -2350,7 +2528,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_wait_for_message",
-        description = "Wait for a pending EIP-191 message request to be approved and signed or rejected through the separate human CLI, and read the signature once signed. This tool cannot approve, reject, or sign.",
+        description = "Wait for a pending EIP-191 message request to be approved and signed or rejected through the native wallet review window, and read the signature once signed. This tool cannot approve, reject, or sign.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn wallet_wait_for_message(
@@ -2402,8 +2580,14 @@ impl WalletMcpServer {
             .forks
             .lock()
             .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
-            .session(fork_id, Utc::now())
-            .map_err(|error| tool_error(&error))?;
+            .session(fork_id, Utc::now());
+        let session = match session {
+            Ok(session) => session,
+            Err(error) => {
+                self.release_global_fork(fork_id);
+                return Err(tool_error(&error));
+            }
+        };
         ensure_tool(
             session.chain_id.to_string() == chain_id,
             "fork was opened for a different chain",
@@ -2569,6 +2753,7 @@ impl WalletMcpServer {
             .lock()
             .map_err(|_| anyhow::anyhow!("simulation registry lock was poisoned"))?
             .take(simulation_id, Utc::now())?;
+        self.release_global_simulation(simulation_id);
         ensure!(
             recorded.wallet_id == wallet.id,
             "simulation {simulation_id} was recorded for wallet {}, not {}",
@@ -2659,10 +2844,13 @@ impl WalletMcpServer {
         )
         .await?;
         if let crate::orchestrator::SendDisposition::Queued(request) = disposition {
+            self.with_attribution(|desktop, client_id| {
+                desktop.attribute_transaction(request.request_id, client_id)
+            })?;
             let mut output = execution_status_output(request);
             output.instruction = Some(if simulation.simulation.success {
                 format!(
-                    "The plan needs explicit human approval before it can sign. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then immediately call wallet_wait_for_approval with this request_id and keep calling it after each timeout until the request is approved, rejected, or expired. On approved, submit with wallet_send_execution_plan and this request_id. Do not ask the user to report the approval in chat.",
+                    "The plan needs explicit human approval before it can sign. Tell the user to open review {} in the wallet application (never attempt to approve it on their behalf), then immediately call wallet_wait_for_approval with this request_id and keep calling it after each timeout until the request is approved, rejected, or expired. On approved, submit with wallet_send_execution_plan and this request_id. Do not ask the user to report the approval in chat.",
                     output.request_id
                 )
             } else {
@@ -2677,7 +2865,7 @@ impl WalletMcpServer {
                     |failure| format!("The plan producer's guidance: {}", failure.instruction),
                 );
                 format!(
-                    "{guidance} If the user instead explicitly chooses to override the failed simulation, they can run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them); in that case call wallet_wait_for_approval with this request_id until it resolves.",
+                    "{guidance} If the user instead explicitly chooses to override the failed simulation, they can open review {} in the wallet application (never attempt to approve it on their behalf); in that case call wallet_wait_for_approval with this request_id until it resolves.",
                     output.request_id
                 )
             });
@@ -2687,6 +2875,9 @@ impl WalletMcpServer {
         let crate::orchestrator::SendDisposition::Signed(record) = disposition else {
             unreachable!("queued disposition returned above");
         };
+        self.with_attribution(|desktop, client_id| {
+            desktop.attribute_transaction(record.request_id, client_id)
+        })?;
         self.submit_signed_record(&wallet, &network, record, Some(simulation))
             .await
     }
@@ -2878,13 +3069,13 @@ impl ServerHandler for WalletMcpServer {
             Resource::new(TERMS_RESOURCE_URI, "terms-of-service")
                 .with_title("Terms of Service")
                 .with_description(
-                    "Must be accepted via the separate human CLI before signing tools work.",
+                    "Must be accepted via the native wallet review window before signing tools work.",
                 )
                 .with_mime_type("text/markdown"),
             Resource::new(PRIVACY_RESOURCE_URI, "privacy-policy")
                 .with_title("Privacy Policy")
                 .with_description(
-                    "Discloses the default RPC endpoints; must be acknowledged separately via the human CLI.",
+                    "Discloses the default RPC endpoints; must be acknowledged separately via the native wallet application.",
                 )
                 .with_mime_type("text/markdown"),
             Resource::new(LICENSES_RESOURCE_URI, "third-party-licenses")
@@ -3027,7 +3218,7 @@ const fn default_confirmations() -> u16 {
 fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
     let instruction = match record.status {
         TypedDataStatus::AwaitingApproval => Some(format!(
-            "Typed-data signing requires explicit human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_typed_data with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
+            "Typed-data signing requires explicit human approval. Tell the user to open review {} in the wallet application (never attempt to approve it on their behalf), then call wallet_wait_for_typed_data with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
             record.request_id
         )),
         TypedDataStatus::Signed => Some(
@@ -3054,7 +3245,7 @@ fn typed_data_output(record: PendingTypedData) -> TypedDataOutput {
 fn message_output(record: PendingMessage, config: &ConfigStore) -> Result<MessageOutput> {
     let instruction = match record.status {
         MessageStatus::AwaitingApproval => Some(format!(
-            "Message signing requires explicit human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_message with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
+            "Message signing requires explicit human approval. Tell the user to open review {} in the wallet application (never attempt to approve it on their behalf), then call wallet_wait_for_message with this request_id and keep calling it after each timeout until the request is signed, rejected, or expired. Do not ask the user to report the approval in chat.",
             record.request_id
         )),
         MessageStatus::Signed => Some(
@@ -3115,7 +3306,7 @@ fn policy_denial_next_step(
             "A deny rule in the active policy refuses this plan outright. There is no approval \
              that can override it: do not queue it, and do not call wallet_send_execution_plan. \
              Report the denial to the user and let them decide whether to change the policy, \
-             which is a separate explicit CLI action."
+             which is a separate explicit owner action in the wallet application."
                 .to_string()
         }
         _ => format!(
@@ -3150,7 +3341,7 @@ fn execution_status_output(record: PendingTransaction) -> ExecutionStatusOutput 
     };
     let instruction = match status {
         ExecutionStatus::ApprovalRequired => Some(format!(
-            "Awaiting human approval. Tell the user to run `ekubo-wallet review {}` in their own terminal (never invoke that CLI for them), then call wallet_wait_for_approval with this request_id, repeating after each timeout, until it resolves. Approval is a step in the work, not the end of it: do not stop here holding an unresolved request, and do not ask the user to report their decision in chat.",
+            "Awaiting human approval. Tell the user to open review {} in the wallet application (never attempt to approve it on their behalf), then call wallet_wait_for_approval with this request_id, repeating after each timeout, until it resolves. Approval is a step in the work, not the end of it: do not stop here holding an unresolved request, and do not ask the user to report their decision in chat.",
             record.request_id
         )),
         ExecutionStatus::TimedOut => Some(
@@ -3265,8 +3456,7 @@ impl WalletMcpServer {
         anyhow::ensure!(
             present,
             "wallet {wallet_id} has no policy, so nothing it holds can be signed. Tell the user to \
-             run `ekubo-wallet policy require-approval {wallet_id}` in their own terminal, or to \
-             remove the wallet with `ekubo-wallet account remove {wallet_id}`."
+             open Accounts in Ekubo Wallet and install the require-approval preset or remove the account."
         );
         Ok(())
     }
@@ -3325,16 +3515,6 @@ fn strip_nonstandard_formats(value: &mut serde_json::Value) {
         }
         _ => {}
     }
-}
-
-pub async fn serve(config: ConfigStore) -> Result<()> {
-    let server = WalletMcpServer::production(config)?;
-    let running = server
-        .serve(stdio())
-        .await
-        .context("failed to initialize MCP stdio server")?;
-    running.waiting().await.context("MCP server task failed")?;
-    Ok(())
 }
 
 #[cfg(test)]

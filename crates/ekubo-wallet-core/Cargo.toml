@@ -10,8 +10,8 @@ publish = false
 
 [features]
 # Exposes in-memory key storage, a scriptable presence backend, and a
-# terminal-free InteractiveProof so the workspace's tests can exercise the
-# signing paths. Never enabled by a release build: dev-dependencies do not
+# scriptable owner-presence backend so workspace tests can exercise signing
+# paths. Never enabled by a release build: dev-dependencies do not
 # apply to `cargo build --release`, and the guard in lib.rs refuses the
 # combination outright.
 test-hooks = []
@@ -36,6 +36,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["bundled-
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
+subtle = "2.6.1"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["io-std", "macros", "rt-multi-thread", "signal", "sync", "time"] }
@@ -47,8 +48,6 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 proptest = "1.9.0"
 
 [target.'cfg(unix)'.dependencies]
-# Only for `O_NONBLOCK`, so that opening a `file:` reference cannot be made to
-# block on a FIFO the caller swapped in. See `plan_fetch::read_local_file`.
 libc = "0.2.189"
 
 [target.'cfg(target_os = "macos")'.dependencies]

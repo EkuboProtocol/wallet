@@ -45,14 +45,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 // So the number climbs past everything ever written instead. What it costs is
 // the cosmetic point it was reset for; what it buys is that no marker in this
 // file has ever meant anything but the shape it means now.
-const SCHEMA_VERSION: i64 = 13;
-/// The retired ladder wrote 1 through 10, and the equality check on open is
-/// the only thing standing between one of those files and this build reading
-/// its TEXT hashes as `BLOB`s. Reusing a number is a compile error, not a
-/// review comment.
-const _: () = assert!(SCHEMA_VERSION > 10);
-const DATABASE_FILE: &str = "policies.db";
-const DATABASE_LOCK_FILE: &str = "policies.lock";
+// Desktop storage deliberately starts a new lineage. The launcher archives
+// any pre-desktop directory before this file is opened, so version 1 can only
+// mean the desktop schema and is never interpreted as a pre-desktop schema.
+const SCHEMA_VERSION: i64 = 1;
+pub const DATABASE_FILE: &str = "wallet.db";
+const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
 ///
 /// Named for the database rather than for policies, because policies are only
@@ -60,7 +58,7 @@ const DATABASE_LOCK_FILE: &str = "policies.lock";
 /// queues, the address book, and the token names a reviewer reads before
 /// approving a transfer. A name that says "policy" invites the reading that
 /// everything else in there is incidental, and none of it is.
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.db";
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.db.v2";
 const KEYRING_USER: &str = "default";
 
 /// A raw 256-bit `SQLCipher` key. Debug output never exposes its contents.
@@ -359,9 +357,10 @@ impl PolicyStore {
             version == SCHEMA_VERSION,
             "policy database schema {version} is not the schema this build understands \
              ({SCHEMA_VERSION}); this pre-release build does not migrate databases — move it \
-             aside and let ekubo-wallet create a fresh one (any in-flight pending rows are \
+             aside and let Ekubo Wallet create a fresh one (any in-flight pending rows are \
              lost with it)"
         );
+        ensure_desktop_lineage(&connection)?;
         verify_integrity(&connection)?;
         // Narrowed through a handle that refuses to follow a link, not through
         // the name. This runs after the connection is open, which is exactly
@@ -373,7 +372,7 @@ impl PolicyStore {
 
     /// Re-reads the schema version through this connection. A long-running
     /// server holds its stores open, so a database migrated underneath it —
-    /// for example by a newer build's CLI — would otherwise be written to
+    /// for example by a newer desktop build — would otherwise be written to
     /// through a stale understanding of its shape. Refusing here turns that
     /// into an explicit "restart the server" error on every request.
     pub fn assert_schema_current(&self) -> Result<()> {
@@ -385,6 +384,7 @@ impl PolicyStore {
             "policy database schema changed from {SCHEMA_VERSION} to {version} underneath \
              this process; restart the ekubo-wallet MCP server"
         );
+        ensure_desktop_lineage(&self.connection)?;
         Ok(())
     }
 
@@ -522,9 +522,8 @@ impl PolicyStore {
         // still holds.
         //
         // `purge` runs at wallet creation, but only after a *successful*
-        // custody create; and the repair route -- `ekubo-wallet policy
-        // require-approval <id>`, the command the error message points a
-        // half-provisioned wallet at -- reaches here through `put` without it.
+        // custody create; the Accounts screen's repair route reaches here
+        // through `put` without it.
         // So a removal whose purge failed, or a creation interrupted between
         // the credential and the policy, left the queues and any proposal in
         // place under a name that a different key now answers to. A wallet
@@ -741,8 +740,7 @@ impl PolicyStore {
         let replacing = self.network_proposal(profile.chain_id)?.is_some();
         ensure!(
             replacing || pending < MAX_PENDING_NETWORK_PROPOSALS,
-            "{pending} network suggestions already await review; the owner must run \
-             `ekubo-wallet network review` before more can be suggested"
+            "{pending} network suggestions already await review; the owner must resolve them in the Networks screen before more can be suggested"
         );
         self.connection.execute(
             "INSERT INTO network_proposals(chain_id, profile_json, proposed_at)
@@ -973,6 +971,25 @@ fn schema_version(connection: &Connection) -> Result<Option<i64>> {
     Ok(Some(version))
 }
 
+/// Version numbers alone cannot distinguish the retired pre-desktop schema 1
+/// from desktop schema 1. A literal lineage value makes that boundary
+/// self-authenticating even if a database is opened outside the launcher.
+fn ensure_desktop_lineage(connection: &Connection) -> Result<()> {
+    let lineage = connection
+        .query_row(
+            "SELECT lineage FROM schema_metadata WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("policy database schema 1 is not a desktop schema")?;
+    ensure!(
+        lineage.as_deref() == Some("desktop-v1"),
+        "policy database schema 1 is not a desktop schema"
+    );
+    Ok(())
+}
+
 /// Creates the complete current schema in one transaction on an empty
 /// database. Every statement runs individually: passing one multi-statement
 /// string to `execute_batch` overflows the stack on Windows against the
@@ -985,14 +1002,34 @@ fn schema_version(connection: &Connection) -> Result<Option<i64>> {
 /// after some moment carries that deadline in the calldata the user approved,
 /// where the chain enforces it and simulation surfaces it.
 fn create_current_schema(connection: &Connection) -> Result<()> {
-    let record_version =
-        format!("INSERT INTO schema_metadata(singleton, version) VALUES (1, {SCHEMA_VERSION})");
+    let record_version = format!(
+        "INSERT INTO schema_metadata(singleton, version, lineage) \
+         VALUES (1, {SCHEMA_VERSION}, 'desktop-v1')"
+    );
     run_transaction(
         connection,
         &[
             "CREATE TABLE schema_metadata (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                 version INTEGER NOT NULL
+                 version INTEGER NOT NULL,
+                 lineage TEXT NOT NULL CHECK (lineage = 'desktop-v1')
+             ) STRICT",
+            "CREATE TABLE application_settings (
+                 key TEXT PRIMARY KEY NOT NULL,
+                 value_json TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             ) STRICT",
+            "CREATE TABLE mcp_clients (
+                 client_id BLOB PRIMARY KEY NOT NULL CHECK (length(client_id) = 16),
+                 display_name TEXT NOT NULL,
+                 agent_kind TEXT NOT NULL CHECK (agent_kind IN (
+                     'codex', 'claude_code', 'gemini_cli', 'cursor', 'opencode', 'other'
+                 )),
+                 token BLOB NOT NULL UNIQUE CHECK (length(token) = 32),
+                 registration_json TEXT,
+                 created_at INTEGER NOT NULL,
+                 last_used_at INTEGER,
+                 revoked_at INTEGER
              ) STRICT",
             "CREATE TABLE wallet_policies (
                  wallet_id TEXT PRIMARY KEY NOT NULL,
@@ -1016,6 +1053,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  plan_json TEXT NOT NULL,
                  plan_digest BLOB NOT NULL CHECK (length(plan_digest) = 32),
                  plan_source TEXT,
+                 requesting_client_id BLOB
+                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
                  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
                  status TEXT NOT NULL CHECK (status IN (
                      'awaiting_approval', 'rejected', 'signed', 'submitting',
@@ -1139,6 +1178,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- the deduplication that exists to keep the review short
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
+                 requesting_client_id BLOB
+                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
                  policy_revision INTEGER
@@ -1199,6 +1240,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  -- the deduplication that exists to keep the review short
                  -- would quietly stop working.
                  requester TEXT NOT NULL DEFAULT '',
+                 requesting_client_id BLOB
+                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
                  created_at INTEGER NOT NULL,
                  updated_at INTEGER NOT NULL,
                  -- One decision per request; `status` names which one it was.
@@ -1250,6 +1293,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  source_revision INTEGER NOT NULL CHECK (source_revision > 0),
                  policy_json TEXT NOT NULL,
                  rationale TEXT NOT NULL,
+                 requesting_client_id BLOB
+                     CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
                  created_at INTEGER NOT NULL
              ) STRICT",
             TOKEN_PROPOSALS_TABLE,
@@ -1275,6 +1320,8 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
 const NETWORK_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS network_proposals (
      chain_id INTEGER PRIMARY KEY NOT NULL CHECK (chain_id > 0),
      profile_json TEXT NOT NULL,
+     requesting_client_id BLOB
+         CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
      proposed_at INTEGER NOT NULL
  ) STRICT";
 
@@ -1291,6 +1338,8 @@ const TOKEN_PROPOSALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS token_proposals 
      name TEXT,
      decimals INTEGER NOT NULL CHECK (decimals >= 0 AND decimals <= 255),
      source TEXT NOT NULL,
+     requesting_client_id BLOB
+         CHECK (requesting_client_id IS NULL OR length(requesting_client_id) = 16),
      proposed_at INTEGER NOT NULL,
      PRIMARY KEY (chain_id, address)
  ) STRICT";

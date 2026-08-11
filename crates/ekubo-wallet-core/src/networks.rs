@@ -28,7 +28,7 @@
 //! against its own digest rather than against what an endpoint says, and the
 //! chain ID is re-verified on every endpoint before its answer is used. An
 //! owner with funds worth protecting should still point their networks at a
-//! dedicated provider with `ekubo-wallet network edit`.
+//! dedicated provider in the Networks screen.
 //!
 //! # Defaults and the rest
 //!

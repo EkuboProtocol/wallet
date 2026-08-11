@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::{
-    approval::{ApprovalDecision, ApprovalRequest, ReviewPresenter},
+    approval::{ApprovalDecision, ReviewDocument, ReviewPresenter},
     config::{NetworkConfig, WalletMetadata, WalletSource},
     custody::{MemoryKeyStore, PrivateKeyMaterial},
     human_presence::TestHumanPresence,
@@ -25,7 +25,7 @@ struct ApproveEverything;
 impl ReviewPresenter for ApproveEverything {
     async fn review_transaction(
         &self,
-        _request: &ApprovalRequest,
+        _document: &ReviewDocument,
         _simulation: &SimulationResult,
         _refresh: &dyn ekubo_wallet_core::approval::ReviewRefresh,
     ) -> anyhow::Result<ApprovalDecision> {
@@ -40,20 +40,20 @@ impl ReviewPresenter for ApproveEverything {
 /// change the plan.
 #[derive(Default)]
 struct RefreshThenApprove {
-    documents: StdMutex<Vec<ApprovalRequest>>,
+    documents: StdMutex<Vec<ReviewDocument>>,
 }
 
 #[async_trait::async_trait]
 impl ReviewPresenter for RefreshThenApprove {
     async fn review_transaction(
         &self,
-        request: &ApprovalRequest,
+        document: &ReviewDocument,
         _simulation: &SimulationResult,
         refresh: &dyn ekubo_wallet_core::approval::ReviewRefresh,
     ) -> anyhow::Result<ApprovalDecision> {
-        self.documents.lock().unwrap().push(request.clone());
+        self.documents.lock().unwrap().push(document.clone());
         let refreshed = refresh.resimulate().await?;
-        self.documents.lock().unwrap().push(refreshed.request);
+        self.documents.lock().unwrap().push(refreshed.document);
         Ok(ApprovalDecision::Approved)
     }
 }
@@ -69,7 +69,7 @@ struct ApproveAfterFailedRefresh {
 impl ReviewPresenter for ApproveAfterFailedRefresh {
     async fn review_transaction(
         &self,
-        _request: &ApprovalRequest,
+        _document: &ReviewDocument,
         _simulation: &SimulationResult,
         refresh: &dyn ekubo_wallet_core::approval::ReviewRefresh,
     ) -> anyhow::Result<ApprovalDecision> {
@@ -553,7 +553,6 @@ async fn an_uncovered_call_queues_and_the_approved_row_broadcasts_by_request_id(
         ),
         &read_policy,
         record,
-        crate::approval::InteractiveProof::for_tests(),
         &ApproveEverything,
         &TestHumanPresence { allow: true },
         &*server.keys,
@@ -751,7 +750,6 @@ async fn a_reviewer_can_re_simulate_before_approving() {
         ),
         &read_policy,
         record,
-        crate::approval::InteractiveProof::for_tests(),
         &presenter,
         &TestHumanPresence { allow: true },
         &*server.keys,
@@ -778,11 +776,11 @@ async fn a_reviewer_can_re_simulate_before_approving() {
     // a refresh re-reads the chain, it does not re-decide what is being
     // approved. The plan digest above all must survive it.
     assert_eq!(
-        documents[0].digest, documents[1].digest,
+        documents[0].request.digest, documents[1].request.digest,
         "a refresh changed the digest under review"
     );
     assert_eq!(
-        documents[0].facts, documents[1].facts,
+        documents[0].request.facts, documents[1].request.facts,
         "a refresh changed the facts under review"
     );
 
@@ -855,7 +853,6 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
         ),
         &read_policy,
         record,
-        crate::approval::InteractiveProof::for_tests(),
         &presenter,
         &TestHumanPresence { allow: true },
         &*server.keys,

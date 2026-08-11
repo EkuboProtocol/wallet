@@ -209,11 +209,10 @@ impl SigningOverrides {
     /// whose simulation failed. Neither reaches a `deny` rule, which is
     /// refused below whatever these say.
     ///
-    /// Mintable only with proof of an interactive terminal, so a
-    /// headless process cannot construct it: the fields are private and this
-    /// is the only constructor that sets either.
+    /// Crate-private because only the owner-review orchestrator may construct
+    /// an exception; MCP presentation code cannot mint it.
     #[must_use]
-    pub const fn human(_proof: &crate::approval::InteractiveProof) -> Self {
+    pub(crate) const fn reviewed() -> Self {
         Self {
             allow_policy_override: true,
             allow_simulation_failure: true,

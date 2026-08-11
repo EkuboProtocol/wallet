@@ -16,25 +16,6 @@
 //! URI that never touches the network — there the bytes are the reference,
 //! so integrity is verified only when supplied.
 //!
-//! A `file:` URL reads a body the caller left on this machine's disk. It
-//! exists so an agent can assemble one — download two prepared plans, splice
-//! their `ordered_steps` together, write the result — without carrying a
-//! megabyte of calldata through its context to say what it built. Such a body
-//! is verified exactly as a fetched one is, and for the same reason it is
-//! required to be: a local body is not the reference the way a `data:`
-//! payload is, so nothing but the digest ties the bytes read at send time to
-//! the bytes read at simulate time. `ekubo-wallet meta-reference <path>` prints
-//! the envelope, digest included, for a file the caller just wrote.
-//!
-//! Requiring the digest is also what keeps a `file:` reference from becoming
-//! a way to read this machine. The transport is stdio, so the caller already
-//! runs as the owner and can open any of these paths itself; what it must not
-//! gain is a way to make *the wallet* open one and repeat what it found to
-//! whoever supplied the envelope. It cannot, because naming a body requires
-//! its digest — which requires already holding its bytes — and because the
-//! two errors that would otherwise describe an unmatched local body, the byte
-//! count and the computed digest, are withheld for local reads.
-//!
 //! The `https` fetches are this process's only outbound requests that are not
 //! a configured chain RPC, so admission is deliberately narrow: `https` on the
 //! default port to a public, resolvable host; no credentials, fragments,
@@ -118,19 +99,11 @@ const MAX_REFERENCE_URL_BYTES: usize = MAX_DATA_URI_PAYLOAD_BYTES + 256;
 /// across several nameservers — and holds a blocking-pool thread with it.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long a `file:` body may take to read before the caller stops waiting.
-///
-/// Generous for local storage and short against a mount that has stopped
-/// answering. See [`read_local_file`].
-const LOCAL_READ_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// What transports `resolve_execution_plan` will accept.
 ///
-/// Production admits only public `https`, `data:`, and `file:` URIs. Debug
+/// Production admits only public `https` and bounded `data:` URIs. Debug
 /// builds may loosen that to plain `http` and loopback hosts for end-to-end
-/// testing against a local plan producer; release builds never do. `file:`
-/// needs no such loosening: it names this machine either way, and what makes
-/// it safe is the required digest rather than a build flag.
+/// testing against a local plan producer; release builds never do.
 #[derive(Clone, Copy, Debug)]
 pub struct FetchPolicy {
     allow_insecure: bool,
@@ -147,13 +120,6 @@ impl FetchPolicy {
         }
         Self {
             allow_insecure: false,
-        }
-    }
-
-    #[cfg(test)]
-    fn insecure_for_tests() -> Self {
-        Self {
-            allow_insecure: true,
         }
     }
 }
@@ -254,9 +220,8 @@ pub struct ArtifactReference {
     /// Must be `artifact_reference`.
     pub kind: String,
     pub artifact_type: ArtifactType,
-    /// Public `https` URL of the stored body, a
-    /// `data:application/json[;base64]` URI carrying it inline, or a `file:`
-    /// URL naming an absolute path on this machine.
+    /// Public `https` URL of the stored body or a bounded
+    /// `data:application/json[;base64]` URI carrying it inline.
     pub url: String,
     #[serde(default)]
     pub integrity: Option<ArtifactIntegrity>,
@@ -272,17 +237,12 @@ pub struct ArtifactReference {
 /// The `https` host is the vetted, pinned name admission checked, so showing
 /// it to the user is showing a TLS-verified fact.
 ///
-/// `LocalFile` deliberately does not carry the path. A hostname is evidence —
-/// TLS proved it — while a path is a string the caller chose, and one chosen
-/// as `/tmp/reviewed by owner - safe.json` would put its own caption on the
-/// approval screen. What the owner needs from provenance here is that the
-/// bytes came off this disk rather than from a vetted publisher, and that is
-/// the whole of what it says.
+/// Local files are deliberately absent: a path is caller-chosen text, not
+/// publisher provenance, and desktop MCP clients have no filesystem transport.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtifactSource {
     Https { host: String },
     InlineDataUri,
-    LocalFile,
 }
 
 impl fmt::Display for ArtifactSource {
@@ -290,7 +250,6 @@ impl fmt::Display for ArtifactSource {
         match self {
             Self::Https { host } => formatter.write_str(host),
             Self::InlineDataUri => formatter.write_str("inline data URI"),
-            Self::LocalFile => formatter.write_str("a file on this machine"),
         }
     }
 }
@@ -319,7 +278,7 @@ pub async fn resolve_execution_plan_reference(
 ///
 /// A token list earns no trust from having been fetched rather than typed:
 /// what comes back is a set of suggestions the owner still confirms one list
-/// at a time in `ekubo-wallet meta-tokens review`. Verifying the digest only
+/// at a time in the desktop Tokens review screen. Verifying the digest only
 /// establishes that the bytes are the ones the producer published, which is
 /// the same thing it establishes for a plan.
 pub async fn resolve_token_list_reference(
@@ -347,7 +306,7 @@ pub async fn resolve_token_list_reference(
 /// plan reference names bytes that get simulated and signed, so its digest is
 /// the only thing tying what the owner reviewed to what executes. A list names
 /// nothing: every entry becomes a suggestion that waits for the owner in
-/// `ekubo-wallet meta-tokens review`, and their review is the check the digest would
+/// the desktop Tokens review screen, and their review is the check the digest would
 /// otherwise stand in for. A digest would also be answering the wrong
 /// question — it proves the bytes are the ones the *caller* described, while
 /// what the owner is deciding is whether the curator is worth trusting, which
@@ -437,21 +396,6 @@ pub async fn fetch_reference(
             decode_data_uri(&reference.url, expected_type)?,
             ArtifactSource::InlineDataUri,
         )
-    } else if reference.url.starts_with("file:") {
-        // A local body is fetched, not carried, so it is verified like a
-        // fetched one — and unlike a fetched one, the verification is also
-        // what stops the read from describing a file the caller could not
-        // already describe itself.
-        require_verifiable(
-            reference,
-            noun,
-            "read from a local file",
-            "; `ekubo-wallet meta-reference <path>` prints an envelope for a file you just wrote",
-        )?;
-        (
-            read_local_file(&reference.url, expected_type).await?,
-            ArtifactSource::LocalFile,
-        )
     } else {
         // A body that travels over the network must be verifiable: the
         // silent skip-verification path of the old optional digest is gone.
@@ -460,43 +404,16 @@ pub async fn fetch_reference(
         (bytes, ArtifactSource::Https { host })
     };
 
-    // A body whose bytes the caller does not already hold must not be
-    // described back to it. For a `file:` read that is the point (see the
-    // module docs); for the other two the caller wrote or hosted the bytes,
-    // so naming what was actually found is free and much easier to debug.
-    let describe_body = source != ArtifactSource::LocalFile;
-    if describe_body {
-        if let Some(expected_bytes) = reference.bytes {
-            ensure!(
-                body.len() as u64 == expected_bytes,
-                "the reference promised {expected_bytes} bytes but the {noun} body is {} bytes; \
-                 the artifact was altered or truncated",
-                body.len()
-            );
-        }
-        if let Some(integrity) = &reference.integrity {
-            verify_digest(&body, &integrity.value, expected_type)?;
-        }
-    } else {
-        // `require_verifiable` established both fields before the local read.
-        // Evaluate both before returning one answer: returning early on a
-        // length mismatch and a different error on a digest mismatch made the
-        // file reference an exact-size oracle for anything this process could
-        // read.
-        let expected_bytes = reference
-            .bytes
-            .context("local reference has no byte count")?;
-        let integrity = reference
-            .integrity
-            .as_ref()
-            .context("local reference has no integrity digest")?;
-        let (digest_matches, _, _) = digest_check(&body, &integrity.value)?;
+    if let Some(expected_bytes) = reference.bytes {
         ensure!(
-            body.len() as u64 == expected_bytes && digest_matches,
-            "the file does not match the byte count and integrity promised for the {noun}, so {}; \
-             rebuild the reference for the file as it is now",
-            expected_type.mismatch_consequence()
+            body.len() as u64 == expected_bytes,
+            "the reference promised {expected_bytes} bytes but the {noun} body is {} bytes; \
+             the artifact was altered or truncated",
+            body.len()
         );
+    }
+    if let Some(integrity) = &reference.integrity {
+        verify_digest(&body, &integrity.value, expected_type)?;
     }
     Ok(FetchedArtifact {
         bytes: body,
@@ -521,124 +438,6 @@ fn require_verifiable(
         "{noun} references {how} must carry their exact byte count{hint}"
     );
     Ok(())
-}
-
-/// Read a body from the absolute local path a `file:` URL names, off the
-/// runtime's own threads and under a deadline.
-///
-/// Being a regular file and `O_NONBLOCK` between them stop a FIFO from holding
-/// the open and a character device from answering the read forever. Neither
-/// bounds a regular file on an NFS, SMB, autofs, or FUSE mount that has
-/// stopped responding, and the path comes from the caller. Run inline, that
-/// pins a runtime worker for as long as the mount stays down, and enough of
-/// them stall everything else this process is doing — including a signing
-/// review that has nothing to do with the file.
-///
-/// So the blocking work goes to the blocking pool, which exists to absorb
-/// exactly this, and the wait for it has a deadline. A thread stuck on a dead
-/// mount cannot be cancelled by anyone, but it is a thread the runtime was
-/// never using, and the caller stops waiting on it.
-async fn read_local_file(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
-    let url = url.to_owned();
-    let read = tokio::task::spawn_blocking(move || read_local_file_blocking(&url, artifact_type));
-    match tokio::time::timeout(LOCAL_READ_TIMEOUT, read).await {
-        Ok(joined) => joined.context("the local read task did not finish")?,
-        Err(_) => bail!(
-            "{} file did not answer within {LOCAL_READ_TIMEOUT:?}; a path on a mount that has \
-             stopped responding cannot be read from",
-            artifact_type.noun()
-        ),
-    }
-}
-
-fn read_local_file_blocking(url: &str, artifact_type: ArtifactType) -> Result<Vec<u8>> {
-    use std::io::Read as _;
-
-    let noun = artifact_type.noun();
-    let parsed = Url::parse(url).with_context(|| format!("{noun} URL is not a valid URL"))?;
-    ensure!(
-        parsed.query().is_none(),
-        "{noun} file URLs must not carry a query"
-    );
-    ensure!(
-        parsed.fragment().is_none(),
-        "{noun} file URLs must not carry a fragment"
-    );
-    // An authority is refused here rather than turned into a request: this
-    // process speaks to no file server. The check cannot be left to
-    // `to_file_path`, which rejects a host on Unix but on Windows maps one to
-    // the UNC path `\\files.example\plan.json` — an SMB read of a remote host,
-    // reached without any of the admission rules the `https` path applies. The
-    // parser has already folded an empty authority and `localhost` (in any
-    // case) to no host at all, so anything left is a real one.
-    ensure!(
-        parsed.host().is_none(),
-        "{noun} file URL must name an absolute local path on this machine, as in \
-         file:///tmp/plan.json, not a path on the host {}",
-        parsed.host_str().unwrap_or_default()
-    );
-    let path = parsed.to_file_path().map_err(|()| {
-        anyhow!("{noun} file URL must name an absolute local path, as in file:///tmp/plan.json")
-    })?;
-    // Nothing is asked of the name before the open. Statting the path and
-    // then opening it are two resolutions of one string, and whoever owns the
-    // directory chooses what sits there in between: a regular file for the
-    // check, a FIFO for the open, and the open is the call that never
-    // returns — on a thread the async runtime needs back, for a caller that
-    // can repeat the trick. `O_NONBLOCK` makes the open answer immediately
-    // for exactly the file types that would otherwise hold it, and means
-    // nothing to a regular file, whose reads are unaffected by it.
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NONBLOCK);
-    }
-    let file = match options.open(&path) {
-        Ok(file) => file,
-        Err(error) => {
-            // The name is consulted only to explain a refusal that has
-            // already happened, so a lie told to it changes no decision.
-            // Windows declines to open a directory at all, where Unix opens
-            // it and lets the check below name it; asking here leaves both
-            // saying the same sentence.
-            if std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
-                bail!("{noun} file {} is not a regular file", path.display());
-            }
-            return Err(anyhow::Error::new(error)
-                .context(format!("{noun} file {} could not be read", path.display())));
-        }
-    };
-    // The type and the size are read from the handle this function goes on to
-    // read, rather than from the name, so no swap can sit between the answer
-    // and its use.
-    let metadata = file
-        .metadata()
-        .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
-    ensure!(
-        metadata.is_file(),
-        "{noun} file {} is not a regular file",
-        path.display()
-    );
-    let max_bytes = artifact_type.max_body_bytes();
-    let measured = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-    ensure!(
-        measured <= max_bytes,
-        "{noun} file exceeds {max_bytes} bytes"
-    );
-    let mut body = Vec::with_capacity(measured.min(max_bytes));
-    // Read one byte past the cap rather than trusting the size just measured:
-    // the file may have grown between the two calls, and the limit is on what
-    // this process holds, not on what it expected to.
-    file.take(max_bytes as u64 + 1)
-        .read_to_end(&mut body)
-        .with_context(|| format!("{noun} file {} could not be read", path.display()))?;
-    ensure!(
-        body.len() <= max_bytes,
-        "{noun} file exceeds {max_bytes} bytes"
-    );
-    Ok(body)
 }
 
 /// Decode `data:application/json[;base64],…` without touching the network.
@@ -1068,5 +867,33 @@ fn is_public_ip(address: IpAddr) -> bool {
 }
 
 #[cfg(test)]
-#[path = "plan_fetch_test.rs"]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn file_references_are_never_accepted() {
+        let reference = ArtifactReference {
+            kind: "artifact_reference".into(),
+            artifact_type: ArtifactType::ExecutionPlan,
+            url: "file:///tmp/plan.json".into(),
+            integrity: Some(ArtifactIntegrity {
+                algorithm: "keccak256".into(),
+                value: format!("0x{}", "00".repeat(32)),
+            }),
+            bytes: Some(0),
+            instruction: None,
+        };
+        let error = fetch_reference(
+            &reference,
+            ArtifactType::ExecutionPlan,
+            FetchPolicy::production(),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("https") || message.contains("unsupported"),
+            "{message}"
+        );
+    }
+}

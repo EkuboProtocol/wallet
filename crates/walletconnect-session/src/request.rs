@@ -242,7 +242,7 @@ pub struct SendCallsRequest {
 ///
 /// The dapp's own `id`, if it sent one, is deliberately not carried out of
 /// here. This wallet answers with the id of the record the batch became —
-/// which is what `ekubo-wallet transaction show` and cancellation use — and
+/// which is what the Activity screen and cancellation use — and
 /// EIP-5792 has the dapp query whatever id the response returned.
 pub fn parse_send_calls(params: &Value) -> Result<SendCallsRequest> {
     let object = params

@@ -1,4 +1,4 @@
-//! Human-readable interpretation of an execution plan for terminal review.
+//! Human-readable interpretation of an execution plan for native review.
 //!
 //! Every interpretation here is supplemental. The review digest binds the exact
 //! ordered calldata; a reviewer must still verify targets, selectors, and

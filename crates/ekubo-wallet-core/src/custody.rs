@@ -9,7 +9,8 @@ use keyring::{Entry, Error as KeyringError};
 use std::{fmt, sync::Arc};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.v1";
+// The desktop release never reads or mutates pre-desktop keychain entries.
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.v2";
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKeyMaterial([u8; 32]);
@@ -402,7 +403,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 {
                     return Err(error).context(format!(
                         "wallet {wallet_id} was created and its key is stored, but the write \
-                         reported an error; verify with `ekubo-wallet account list` before retrying"
+                         reported an error; verify it in the Accounts screen before retrying"
                     ));
                 }
                 // Addressed by the key this call inserted, never by the id
@@ -628,7 +629,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                     Err(unreadable) => Err(error).context(format!(
                         "the credential store could not be re-read to establish whether the \
                          private key for {wallet_id} survived, so its metadata was not restored; \
-                         check with `ekubo-wallet account list` before recreating it: \
+                         check the Accounts screen before recreating it: \
                          {unreadable:#}"
                     )),
                 }

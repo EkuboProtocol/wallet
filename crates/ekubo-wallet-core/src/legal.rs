@@ -1,8 +1,8 @@
 //! Legal documents and their acceptance state.
 //!
 //! The terms of service and privacy policy are readable anywhere (MCP tools,
-//! resources, and the CLI), but acceptance is recorded only by the interactive
-//! CLI. Nothing signs — transactions or typed data — until the user has
+//! resources, and the desktop application), but acceptance is recorded only
+//! by the owner-only native UI. Nothing signs — transactions or typed data — until the user has
 //! separately accepted the current revision of both documents. Acceptance
 //! binds the exact document text by digest, so shipping a materially changed
 //! document automatically requires re-acceptance.
@@ -47,14 +47,14 @@ this software signs anything on your behalf.
 
 ## 1. What this software is
 
-Ekubo Wallet is a local-first EVM wallet, command-line tool, and MCP server
+Ekubo Wallet is a local-first native EVM desktop wallet and authenticated MCP server
 developed by Ekubo, Inc. Private keys are generated or imported on your
 machine and stay in your operating system's credential store. The developer
 operates no servers for this software and never has access to your keys or
 funds.
 
-`ekubo-wallet connect` additionally speaks the WalletConnect protocol to a
-dapp you choose, through a relay operated by a third party — by default
+The Connections → WalletConnect screen additionally speaks the WalletConnect
+protocol to a dapp you choose, through a relay operated by a third party — by default
 `wss://relay.walletconnect.org`. Neither the relay nor the dapp is operated
 by, endorsed by, or under the control of the developer, and this software's
 use of the WalletConnect protocol implies no relationship with, or approval
@@ -76,7 +76,7 @@ directory onto another machine does not restore one.
 
 Keeping a durable copy of any key you care about is entirely your
 responsibility, and doing so is out of the scope of this software. You can
-obtain a copy with `ekubo-wallet account export <wallet>`, and the key is
+obtain a timed copy through the account's Export Private Key action, and the key is
 also readable through the tooling your operating system provides for its own
 credential store. Storing, protecting, and securely destroying every copy you
 make is your responsibility alone, and the developer is not responsible or
@@ -177,7 +177,7 @@ wallet tries them in the order shown and moves to the next when one fails, so
 over time your requests for a network may reach any endpoint listed under it.
 Which one serves a given request depends on which are healthy at that moment,
 and is not something you select per request; to send your traffic to one
-operator only, replace the list with `ekubo-wallet network edit`.
+operator only, replace the list in the Networks screen.
 
 ## 3. Default RPC endpoints in this release
 ";
@@ -218,12 +218,11 @@ fetches over the network.
 
 ## 5. The WalletConnect relay
 
-`ekubo-wallet connect` pairs this wallet with a dapp over the WalletConnect
-protocol. While that command is running — and only then — this software holds
+The Connections → WalletConnect screen pairs this wallet with a dapp over the
+WalletConnect protocol. While a session is connected — and only then — this software holds
 an open websocket to a WalletConnect relay, by default
 `wss://relay.walletconnect.org`, operated by an independent third party
-outside the developer's control. `--relay-url` sends that traffic to a relay
-you name instead.
+outside the developer's control.
 
 The connection carries a project id that identifies this application, not
 you. It is a fixed value compiled into this release, shared by every copy of
@@ -245,7 +244,7 @@ The dapp on the other end is a separate third party. When you approve a
 connection it learns the single account address you chose to expose and the
 chains you allowed, and thereafter whatever it asks for and you approve. The
 developer is not responsible for data the relay operator or the dapp collects.
-Running no `connect` session means this software opens no relay connection at
+Having no connected session means this software opens no relay connection at
 all.
 
 ## 6. The release check
@@ -259,11 +258,10 @@ cookie, balance, policy, or transaction, and no identifier of your machine or
 your installation. The request carries a user agent naming this software and
 its version, which every copy of a given release shares.
 
-The check runs when you run `ekubo-wallet version` or `ekubo-wallet status`,
-and when an agent calls the `wallet_check_for_updates` tool. It runs at no
-other time: this software does not poll in the background, and a wallet you
-are not using makes no such request. The answer is cached in your wallet data
-directory for a day, so repeated commands within that window ask nothing.
+The check runs when you open or refresh the Updates screen and when an agent
+calls the `wallet_check_for_updates` tool. Automatic checks follow the updater
+preference stored in the application. The release-listing answer used by the
+read-only MCP tool is cached in your wallet data directory for a day.
 Setting `EKUBO_WALLET_SKIP_UPDATE_CHECK=1` disables the check entirely, and
 nothing else about the software changes when you do.
 
@@ -272,9 +270,9 @@ observe your IP address and the time of the request, and may log or retain
 that under its own policy. The developer receives nothing from this check and
 operates no service involved in it.
 
-Installing an update is never done by this software. When a newer release
-exists, the check reports the command that installs it; running that command
-is yours to do, or your agent's to do if you ask it to.
+An update is never installed silently. The Updates screen shows its version
+and notes, verifies its dedicated update signature, and requires your explicit
+confirmation before stopping services and launching the native installation.
 
 ## 7. Data exposed through agents and tooling
 
@@ -296,7 +294,7 @@ record of the request it becomes; the URL it was fetched from is not retained.
 Wallet metadata and network configuration, including the RPC URLs you
 configure, are stored unencrypted in the wallet data directory. A dapp session
 is not recorded: the pairing keys live only in memory and are gone when the
-command exits, though the transactions and signatures it produced are kept
+application restarts, though the transactions and signatures it produced are kept
 like any others. Nothing in this section leaves your machine except as
 described in sections 2, 4, 5, 6, and 7. The release check in section 6 reads
 a cache in this directory and writes the version tag it learned; that file
@@ -355,7 +353,7 @@ impl LegalDocument {
         keccak256(self.text())
     }
 
-    /// The same digest as the hex the CLI and MCP surfaces display.
+    /// The same digest as the hex the desktop and MCP surfaces display.
     #[must_use]
     pub fn digest(self) -> String {
         format!("{:#x}", self.digest_bytes())
@@ -377,7 +375,7 @@ pub struct AcceptanceRecord {
     pub accepted_at: DateTime<Utc>,
 }
 
-/// Acceptance state of one document, as reported to the CLI and MCP.
+/// Acceptance state of one document, as reported to the desktop and MCP.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DocumentStatus {
     /// Whether the current revision of the document has been accepted.
@@ -507,7 +505,7 @@ fn document_status(document: LegalDocument, record: Option<&AcceptanceRecord>) -
 /// Called once per request by the two dispatchers — the MCP server before
 /// every tool except `wallet_get_legal` (the privacy policy governs even
 /// read-only RPC and agent data exposure), and the `WalletConnect` session
-/// before every dapp method — and on entry by each CLI command that can reach
+/// before every dapp method — and on entry by each owner operation that can reach
 /// a signature.
 ///
 /// It is **not** called by the signing paths themselves. The sentence here
@@ -530,9 +528,9 @@ pub fn require_status_allows_use(status: &LegalStatus) -> Result<()> {
     ensure!(
         status.signing_allowed,
         "this wallet is disabled until the user accepts the current Terms of Service and Privacy \
-         Policy. The user must run `ekubo-wallet legal accept` in their own terminal (never run \
-         it for them). The documents can be read first with the wallet_get_legal tool or \
-         `ekubo-wallet legal show`."
+         Policy. The user must run the Legal screen in the desktop application (never run \
+         it for them). The documents can be read first with the wallet_get_legal tool or the \
+         Legal & Version screen."
     );
     Ok(())
 }

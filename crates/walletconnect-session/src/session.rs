@@ -5,7 +5,7 @@
 //! is acceptable — every one of those questions goes out through
 //! [`SessionHandler`], which is implemented against the wallet's own kernel in
 //! `connect.rs`. Keeping the split sharp is what lets the whole state machine
-//! be tested against a scripted handler with no terminal, no relay, and no
+//! be tested against a scripted handler with no GUI, no relay, and no
 //! chain.
 //!
 //! What this module *does* enforce is the session's own boundary: a request
@@ -182,7 +182,7 @@ impl RequestOutcome {
     }
 }
 
-/// Things worth telling the person running the command.
+/// Things worth presenting to the wallet owner.
 pub enum SessionEvent<'a> {
     Pairing,
     ProposalReceived,
@@ -213,13 +213,12 @@ pub enum SessionEvent<'a> {
 
 /// Everything the session needs from the wallet, and nothing more.
 ///
-/// `?Send`, because the implementation reaches the wallet's `SQLite` stores and
-/// a `rusqlite::Connection` is not `Sync`. That costs nothing: this future is
-/// awaited on the thread that owns the terminal and never spawned, which is
-/// also true of every approval path in `cli.rs`.
+/// `?Send`, because an implementation may reach the wallet's `SQLite` stores and
+/// a `rusqlite::Connection` is not `Sync`. The embedding application keeps the
+/// handler on its owning task and publishes results back to the UI.
 #[async_trait::async_trait(?Send)]
 pub trait SessionHandler {
-    /// Review a proposal and decide the scope. Runs on the terminal and may
+    /// Review a proposal and decide the scope. Runs through the owner UI and may
     /// take as long as the person takes.
     async fn review_proposal(&self, proposal: &ProposalSummary) -> Result<ProposalDecision>;
 
@@ -231,15 +230,15 @@ pub trait SessionHandler {
     /// keeps the session alive.
     async fn handle_request(&self, request: &DappRequest<'_>) -> Result<RequestOutcome>;
 
-    /// Progress, for the terminal. Never fails and never blocks the protocol.
+    /// Progress for the connection UI. Never fails and never blocks the protocol.
     fn notify(&self, event: &SessionEvent<'_>);
 
     /// Called before the session waits, so a handler that draws something
     /// while idle can put it back up.
     ///
     /// Idempotent: the session calls it before every wait, including the ones
-    /// that follow a request the handler served without touching the terminal.
-    /// A handler that needs the terminal takes it during `review_proposal` or
+    /// that follow a request the handler served without touching the UI.
+    /// A handler that needs owner input takes it during `review_proposal` or
     /// `handle_request` and simply does not put the idle surface back until
     /// this is called again — which is what keeps exactly one thing reading
     /// keystrokes at any moment.
@@ -258,7 +257,7 @@ pub trait SessionHandler {
 
 /// Why one turn of the session loop stopped waiting.
 enum Woke {
-    /// Ctrl-C, or the person asking to disconnect from the idle surface.
+    /// The owner asking to disconnect from the idle surface.
     Stop,
     /// The relay delivered something, or closed.
     Delivered(Option<super::relay::RelayMessage>),
@@ -418,7 +417,7 @@ pub struct Session<'a> {
     /// When the dapp said this pairing stops being valid, if it said.
     ///
     /// Carried rather than discarded after parsing. A pairing URI is a secret
-    /// that travels through a clipboard and a terminal's scrollback, and its
+    /// that travels through a clipboard and may appear in other UI history, and its
     /// deadline is the dapp's statement about how long a copy is worth
     /// anything. Checking it once when the string is pasted and then waiting
     /// on the topic indefinitely made that statement decorative.
@@ -471,7 +470,7 @@ impl<'a> Session<'a> {
 
     /// Run until the dapp disconnects, the relay closes, or `shutdown` fires.
     ///
-    /// `shutdown` is the terminal's Ctrl-C. It is awaited alongside the relay
+    /// `shutdown` is the application's disconnect signal. It is awaited alongside the relay
     /// rather than checked between messages so that it interrupts a wait that
     /// would otherwise last as long as the dapp stays quiet.
     pub async fn run(
@@ -487,7 +486,7 @@ impl<'a> Session<'a> {
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
             // Before every wait, not only the first: a request the handler
-            // just served may have taken the terminal to review something, and
+            // just served may have opened the UI to review something, and
             // this is where it gets to put its own surface back.
             self.handler.enter_idle().await;
             // Bound separately so the shared borrow of the handler and the
@@ -506,7 +505,7 @@ impl<'a> Session<'a> {
                 Woke::Delivered(None) => {
                     bail!(
                         "the relay connection closed. The dapp will show the session as \
-                         disconnected; run `ekubo-wallet connect` again with a fresh link."
+                         disconnected; open Connections → WalletConnect and use a fresh link."
                     );
                 }
                 Woke::Delivered(Some(message)) => {
@@ -674,7 +673,7 @@ impl<'a> Session<'a> {
         if self.settled.is_some() {
             // One `connect` run serves one session. A second proposal on the
             // same pairing would need a second review while the first session
-            // is live, and there is one terminal.
+            // is live, and there is one owner review surface.
             return self
                 .reject_proposal(
                     id,
@@ -887,8 +886,8 @@ impl<'a> Session<'a> {
     /// Tell the dapp the session is over, best effort.
     ///
     /// Failure is ignored on purpose: this runs while the person is shutting
-    /// the command down, and a relay that has already gone away must not turn
-    /// Ctrl-C into an error.
+    /// the application down, and a relay that has already gone away must not
+    /// turn an explicit disconnect into an error.
     async fn disconnect(&mut self, reason: &str) {
         let Some(settled) = self.settled.as_ref() else {
             return;

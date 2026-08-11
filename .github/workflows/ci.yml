@@ -28,6 +28,10 @@ jobs:
       - name: Install latest stable Rust
         run: rustup update stable --no-self-update
 
+      - name: Install GPUI and tray dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+
       # The Windows job spends most of its time compiling vendored SQLCipher
       # and OpenSSL; caching cuts that to minutes on unchanged dependencies.
       - name: Cache Rust build artifacts
@@ -58,15 +62,14 @@ jobs:
       - name: Install latest stable Rust
         run: rustup update stable --no-self-update
 
+      - name: Install GPUI and tray dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+
       - name: Check formatting
         run: cargo fmt --all --check
 
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-
-      # install.sh is piped to a shell by users, so it is linted like source.
-      - name: Lint the installer
-        run: shellcheck --shell=sh install.sh install-local.sh
 
       - name: Install RustSec audit client
         run: cargo install cargo-audit --locked --version 0.22.2

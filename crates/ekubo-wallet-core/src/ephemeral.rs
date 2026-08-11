@@ -16,7 +16,7 @@
 //! of the safety argument — the same one `test-hooks` makes one file over. A
 //! key sitting beside the database it decrypts is not protection; it is a
 //! convenience for a directory that holds nothing worth protecting. Two things
-//! keep it that way: the CLI refuses to enable it without an explicit
+//! keep it that way: the owner API refuses to enable it without an explicit
 //! `--data-dir`, so it can never fall back to the real wallet's directory, and
 //! [`crate::custody`] refuses the credential store entirely while it is on, so
 //! a scratch session cannot leave an orphaned private key behind either.

@@ -3,7 +3,7 @@
 //! This is the one piece of the protocol a person handles directly, so it is
 //! also the one place where a mistake is a typo rather than a bug: a truncated
 //! paste, a URI copied from a different dapp, or one that expired while the
-//! user was walking back to their terminal. Each of those gets its own
+//! user was returning to the wallet. Each of those gets its own
 //! sentence, because "invalid URI" sends someone to re-copy a URI that was
 //! never going to work.
 //!

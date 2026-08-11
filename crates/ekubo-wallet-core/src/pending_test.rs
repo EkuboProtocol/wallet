@@ -1211,7 +1211,7 @@ fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
 #[test]
 fn only_a_missing_row_invites_the_next_queue_to_be_searched() {
     // A request id does not say which of the three signing queues owns it, so
-    // the CLI tries each in turn -- and treated every failure as "not here".
+    // the reconciler tries each in turn -- and treated every failure as "not here".
     // A row that has already been decided, an envelope that no longer parses,
     // a database that cannot be read: each sent the search onward, where the
     // rejection path could terminally close whatever the next queue held under

@@ -69,7 +69,7 @@ const RELAY_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// handshake and then never sends a TLS record, or never answers the websocket
 /// upgrade, left `connect` awaiting one future forever. The relay is trusted
 /// for liveness, which is a statement about dropped messages rather than a
-/// licence to hold the owner's terminal open indefinitely — and the host on
+/// licence to hold the owner's connection UI open indefinitely — and the host on
 /// the other end is whatever the URL resolved to, not necessarily a relay at
 /// all.
 ///
@@ -158,6 +158,7 @@ impl RelayConnection {
         identity: &ClientIdentity,
         handshake: Duration,
     ) -> Result<Self> {
+        install_rustls_provider()?;
         let url = authenticated_url(relay, identity)?;
         // The websocket URL carries a bearer token in its query string. Over
         // `ws:` that token — and every topic this wallet subscribes to — is
@@ -356,6 +357,21 @@ impl RelayConnection {
             pending.remove(&id);
         }
     }
+}
+
+fn install_rustls_provider() -> Result<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // Feature unification in the desktop application can enable both Ring
+        // and AWS-LC through unrelated HTTPS clients. Rustls deliberately
+        // refuses to guess in that case, so WalletConnect selects the provider
+        // this crate enables explicitly.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+    ensure!(
+        rustls::crypto::CryptoProvider::get_default().is_some(),
+        "no process-level TLS crypto provider is available"
+    );
+    Ok(())
 }
 
 /// The id for the next call this client makes.

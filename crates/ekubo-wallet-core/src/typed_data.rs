@@ -4,7 +4,7 @@
 //! order authorizations, delegations), but the wallet policy language and
 //! simulation cannot evaluate their effects. Every typed-data request
 //! therefore queues for explicit human review: the MCP tool only creates a
-//! pending request, and the separate CLI displays the complete typed data,
+//! pending request, and the desktop review displays the complete typed data,
 //! requires terminal approval plus OS owner authentication, and only then
 //! signs. The signature is persisted in the encrypted database and handed
 //! back to the waiting agent.

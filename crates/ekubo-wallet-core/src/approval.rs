@@ -1,7 +1,6 @@
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::io::IsTerminal;
 use uuid::Uuid;
 
 /// The consequential operation presented to a human reviewer.
@@ -10,8 +9,8 @@ use uuid::Uuid;
 /// store, or leaves it for good. That is the boundary this whole review
 /// exists to guard, and the reason it is worth reading: a prompt that also
 /// appears before a saved alias or an edited RPC URL is a prompt people
-/// learn to clear. Local configuration changes ask with
-/// a terminal confirmation instead.
+/// learn to clear. Local configuration changes use a distinct native owner
+/// confirmation instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
@@ -56,6 +55,52 @@ pub struct ApprovalRequest {
     pub sections: Vec<ApprovalSection>,
     pub warnings: Vec<String>,
     pub digest: Option<String>,
+}
+
+/// UI-neutral document handed to native owner surfaces.
+///
+/// `identity` changes whenever any displayed byte changes. A UI can therefore
+/// discard stale scroll and click events without trying to understand the
+/// request content. Exact payloads are kept separate from explanatory facts
+/// so renderers always use a monospace, control-character-preserving view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewDocument {
+    pub request: ApprovalRequest,
+    pub exact_payloads: Vec<String>,
+    pub identity: String,
+}
+
+impl ReviewDocument {
+    #[must_use]
+    pub fn from_request(request: ApprovalRequest, exact_payloads: Vec<String>) -> Self {
+        let mut identity_input = serde_json::to_vec(&request).unwrap_or_default();
+        for payload in &exact_payloads {
+            identity_input.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+            identity_input.extend_from_slice(payload.as_bytes());
+        }
+        let identity = format!("{:#x}", alloy::primitives::keccak256(identity_input));
+        Self {
+            request,
+            exact_payloads,
+            identity,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewDecision {
+    Approve,
+    Reject,
+}
+
+impl From<ReviewDecision> for ApprovalDecision {
+    fn from(value: ReviewDecision) -> Self {
+        match value {
+            ReviewDecision::Approve => Self::Approved,
+            ReviewDecision::Reject => Self::Rejected,
+        }
+    }
 }
 
 impl ApprovalRequest {
@@ -118,63 +163,6 @@ pub enum ApprovalDecision {
     Rejected,
 }
 
-/// Evidence that this process is attached to a terminal.
-///
-/// A capability rather than a flag: it cannot be cloned, has no default, and
-/// its only production constructor requires stdin, stdout, and stderr to all
-/// be terminals. [`crate::execution::SigningOverrides::human`] — the only way
-/// to sign a plan no policy rule covers, or one whose simulation failed —
-/// demands one. Grep for `from_terminal` to enumerate every place a human
-/// override can originate.
-///
-/// # What this does not prove
-///
-/// It used to say that no headless caller could mint the overrides at all.
-/// That is not true, and V12 run 6304 (finding 203267) is the correction: any
-/// local process can allocate a pseudoterminal, attach all three descriptors
-/// to it, and satisfy every check below. The MCP server cannot — it runs over
-/// stdio pipes — but "runs over pipes" is a property of that one caller, not a
-/// property this type enforces.
-///
-/// So the honest reading is: this establishes that the three standard
-/// descriptors are terminals. It does not establish that a person is reading
-/// them, and nothing in this crate can. What still stands between a
-/// pseudoterminal-backed process and an exceptional signature is the platform
-/// owner-authentication prompt in [`crate::human_presence`], which is a real
-/// human gate — but it names the wallet and the operation, not the target,
-/// value, calldata, or simulation findings the review document carries.
-///
-/// The remaining gap is behavioural and is recorded as known work in
-/// `audits/v12-run-6304.md`: `ekubo-wallet review --decision approve` prints
-/// the document and then answers its own question, so the exceptional path can
-/// complete without any decision being collected from the terminal this type
-/// insists on. Closing that means requiring a keystroke there, which removes a
-/// documented affordance and is the maintainer's call.
-pub struct InteractiveProof(());
-
-impl InteractiveProof {
-    /// The only production constructor.
-    ///
-    /// See the type's own documentation for what these three checks establish
-    /// and what they do not: a pseudoterminal satisfies all of them.
-    pub fn from_terminal() -> Result<Self> {
-        ensure!(
-            std::io::stdin().is_terminal()
-                && std::io::stdout().is_terminal()
-                && std::io::stderr().is_terminal(),
-            "this operation requires an interactive terminal"
-        );
-        Ok(Self(()))
-    }
-
-    /// Tests exercise the human path without a terminal.
-    #[cfg(any(test, feature = "test-hooks"))]
-    #[must_use]
-    pub fn for_tests() -> Self {
-        Self(())
-    }
-}
-
 /// Presents a server-authored request. It never receives signing material.
 #[async_trait]
 pub trait ApprovalUi: Send + Sync {
@@ -182,9 +170,8 @@ pub trait ApprovalUi: Send + Sync {
 }
 
 /// Presents one transaction review — the complete server-authored document
-/// plus the fresh simulation — and returns the decision. UI-neutral: the
-/// terminal is one implementation; a future approval surface is another
-/// adapter. A presenter never receives key material or store handles, and
+/// plus the fresh simulation — and returns the decision. A presenter never
+/// receives key material or store handles, and
 /// never authors review content — the orchestrator builds the document, the
 /// presenter only shows it.
 ///
@@ -196,7 +183,7 @@ pub trait ApprovalUi: Send + Sync {
 pub trait ReviewPresenter: Send + Sync {
     async fn review_transaction(
         &self,
-        request: &ApprovalRequest,
+        document: &ReviewDocument,
         simulation: &crate::simulation::SimulationResult,
         refresh: &dyn ReviewRefresh,
     ) -> Result<ApprovalDecision>;
@@ -226,7 +213,7 @@ pub trait ReviewRefresh: Send + Sync {
 /// One re-authored review: the new document and the simulation behind it.
 #[derive(Clone, Debug)]
 pub struct Refreshed {
-    pub request: ApprovalRequest,
+    pub document: ReviewDocument,
     pub simulation: crate::simulation::SimulationResult,
 }
 

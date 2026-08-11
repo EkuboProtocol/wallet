@@ -76,7 +76,7 @@ mod cancellation_configuration_tests {
     /// that snapshot then decides endpoint selection, chain-ID validation, fee
     /// estimation, the gas ceiling, and where the envelope goes. Configuration
     /// writes replace the whole document atomically while readers hold
-    /// independent snapshots, so another CLI or the MCP server can replace the
+    /// independent snapshots, so another owner task or the MCP server can replace the
     /// profile while this runs -- and this is the one signing path with no
     /// policy and no review behind it.
     ///

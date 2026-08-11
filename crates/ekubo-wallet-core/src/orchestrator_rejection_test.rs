@@ -89,7 +89,10 @@ fn a_rejection_that_did_not_land_says_the_request_can_still_be_signed() {
     let error = format!("{:#}", record_rejection(&pending, missing).unwrap_err());
     assert!(error.contains("still awaiting approval"), "{error}");
     assert!(error.contains("can still be signed"), "{error}");
-    assert!(error.contains("--decision reject"), "{error}");
+    assert!(
+        error.contains("open that review") && error.contains("reject it again"),
+        "{error}"
+    );
 
     assert_eq!(
         lock(&pending)

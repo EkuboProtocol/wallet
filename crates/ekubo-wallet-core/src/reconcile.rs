@@ -5,7 +5,7 @@
 //! on other devices, so nothing local can know a broadcast envelope's fate
 //! without asking the chain: it may have mined, still be pending, or have had
 //! its nonce consumed by a different transaction entirely. Every reader of an
-//! in-flight record funnels through here — the MCP status tools, the CLI list
+//! in-flight record funnels through here — the MCP status tools, the activity view
 //! and show commands, and the interactive browser — so the record converges on
 //! chain truth wherever it is observed.
 //!
@@ -447,7 +447,7 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     // handed over then decides endpoint selection, chain-ID validation, fee
     // estimation, the gas ceiling, and where the envelope is broadcast.
     // Configuration writes replace the whole document atomically and readers
-    // hold independent snapshots, so another CLI or the MCP server can replace
+    // hold independent snapshots, so another owner task or the MCP server can replace
     // the profile -- or remove the wallet -- while this runs. A cancellation
     // priced and sent through endpoints the owner has already replaced is the
     // one signing path with no policy and no review behind it.
@@ -474,7 +474,7 @@ pub async fn attempt_cancellation<K: KeyStore + ?Sized>(
     );
     // Re-read before pricing anything. The caller hands over a snapshot: the
     // transaction browser captured its copy before the owner opened the detail
-    // view and pressed the key, and the CLI and the MCP server share this
+    // view and approved, and the desktop and the MCP server share this
     // database without sharing a lock. Pricing a replacement against a
     // cancellation that has since been superseded produces one that can be
     // cheaper than what is already in the mempool, which loses the race to the
