@@ -19,9 +19,12 @@
 //! without the presence check that precedes one.
 
 use crate::{
-    approval::{ApprovalDecision, ApprovalKind, ApprovalRequest, ReviewDocument, ReviewPresenter},
+    approval::{
+        ApprovalDecision, ApprovalKind, ApprovalRequest, ApprovalSectionKind, ReviewDocument,
+        ReviewPresenter,
+    },
     approval_summary::{
-        TokenMetadataMap, interpret_steps, plan_token_targets, render_balance_changes,
+        TokenMetadataMap, interpret_steps, plan_token_targets, render_balance_changes, token_label,
     },
     config::{ConfigStore, NetworkConfig, WalletMetadata},
     core::{execution_plan::ExecutionPlan, policy::FindingSeverity},
@@ -48,39 +51,19 @@ use std::{
     },
 };
 
-/// Calldata bytes shown in full at approval time.
-///
-/// A person reads these; past a few hundred bytes nobody is reading them, and
-/// the structured facts show a bounded preview; the complete value remains in
-/// [`crate::approval::ReviewDocument::exact_payloads`] for the scroll-gated
-/// monospace view.
-const MAX_DISPLAYED_CALLDATA_BYTES: usize = 512;
-
-/// Bytes per displayed row. Fixed so the grouping is a property of the
+/// Bytes per exact-data row. Fixed so the grouping is a property of the
 /// calldata rather than of the window's width.
 const CALLDATA_BYTES_PER_ROW: usize = 32;
 
-/// The calldata a reviewer is shown, as fixed-width rows.
+/// The complete calldata a reviewer is shown, as fixed-width rows.
 fn calldata_rows(calldata: &[u8]) -> Vec<String> {
     if calldata.is_empty() {
         return Vec::new();
     }
-    let shown = calldata.len().min(MAX_DISPLAYED_CALLDATA_BYTES);
-    let mut rows: Vec<String> = calldata[..shown]
+    calldata
         .chunks(CALLDATA_BYTES_PER_ROW)
         .map(hex::encode)
-        .collect();
-    if calldata.len() > shown {
-        // Named rather than silently truncated: the reviewer is told what they
-        // are not seeing, and given a digest that identifies all of it.
-        rows.push(format!(
-            "… {} of {} bytes not shown; keccak256 of the complete calldata is 0x{:x}",
-            calldata.len() - shown,
-            calldata.len(),
-            alloy::primitives::keccak256(calldata)
-        ));
-    }
-    rows
+        .collect()
 }
 
 /// A native value in the network's currency with the exact wei in reach —
@@ -583,10 +566,15 @@ impl TransactionReview<'_> {
                 .ordered_steps
                 .iter()
                 .map(|step| {
+                    let rows = calldata_rows(&step.transaction.data);
                     format!(
-                        "Step {} calldata\n0x{}",
+                        "Step {} exact calldata\n{}",
                         step.step,
-                        hex::encode(&step.transaction.data)
+                        if rows.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            format!("0x{}", rows.join("\n"))
+                        }
                     )
                 }),
         );
@@ -667,88 +655,84 @@ async fn transaction_approval_request(
         .into_iter()
         .sum::<BigUint>();
     let steps = &pending.execution_plan.ordered_steps;
-    let mut request = ApprovalRequest::new(
-        ApprovalKind::PolicyException,
-        "Approve policy exception",
-        "Review and sign this exact execution plan despite policy or simulation findings.",
-    )
-    .fact("Wallet", &pending.wallet_id)
-    .fact("Network", &pending.network_name)
-    .fact("Chain ID", &pending.chain_id)
-    // The vetted TLS host the plan body was fetched from, "inline data URI"
-    // for an agent-held plan, or "a file on this machine" for one read off
-    // local disk. A plan this wallet built itself shows that plainly, so a
-    // reviewer always knows which producer they are trusting.
-    .fact(
-        "Plan source",
-        pending
-            .plan_source
-            .as_deref()
-            .unwrap_or("constructed locally by this wallet"),
-    )
-    .fact("Sender", format!("{:#x}", pending.execution_plan.sender))
-    .fact(
-        "Total native value",
-        native_value(&total_native.to_string(), network),
-    )
-    .fact("Policy revision", pending.policy_revision.to_string())
-    .fact("Plan digest", &pending.digest)
-    .fact("Simulation parent block", &simulation.block_number)
-    .digest(prepared.review_digest());
+    let summary = if simulation.simulation.success {
+        "The simulation succeeded, but this transaction is outside the wallet's automatic policy. Review the expected wallet changes before approving."
+    } else {
+        "The simulation failed, so the wallet could not verify this transaction's effects. Approving will still sign the exact transaction shown below."
+    };
+    let mut request =
+        ApprovalRequest::new(ApprovalKind::PolicyException, "Review transaction", summary)
+            .fact("Wallet", &pending.wallet_id)
+            .fact("Network", &pending.network_name)
+            .fact("Chain ID", &pending.chain_id)
+            // The vetted TLS host the plan body was fetched from, "inline data URI"
+            // for an agent-held plan, or "a file on this machine" for one read off
+            // local disk. A plan this wallet built itself shows that plainly, so a
+            // reviewer always knows which producer they are trusting.
+            .fact(
+                "Plan source",
+                pending
+                    .plan_source
+                    .as_deref()
+                    .unwrap_or("constructed locally by this wallet"),
+            )
+            .fact("Sender", format!("{:#x}", pending.execution_plan.sender))
+            .fact(
+                "Total native value",
+                native_value(&total_native.to_string(), network),
+            )
+            .fact("Policy revision", pending.policy_revision.to_string())
+            .digest(prepared.review_digest());
     request.id = pending.request_id;
 
-    request = request
-        .section("Prepared transaction")
-        .fact("Type", prepared.transaction_type())
-        .fact("Nonce", prepared.nonce().to_string())
-        .fact("Gas limit", prepared.gas_limit().to_string())
-        .fact(
-            "Max fee per gas",
-            format!("{} wei", prepared.max_fee_per_gas()),
-        )
-        .fact(
-            "Max priority fee per gas",
-            format!("{} wei", prepared.max_priority_fee_per_gas()),
-        )
-        .fact(
-            "Maximum transaction fee",
-            native_value(&prepared.maximum_fee_wei(), network),
-        );
-    if let Some(authorization_nonce) = prepared.authorization_nonce() {
+    let interpretations = interpret_steps(steps, token_metadata).await;
+    request = request.section_kind(
+        ApprovalSectionKind::Effects,
+        "Expected wallet changes (simulation, excluding live gas)",
+    );
+    let balance_changes = render_balance_changes(simulation, network, token_metadata);
+    if balance_changes.is_empty() {
         request = request.fact(
-            "EIP-7702 authorization",
-            format!(
-                "implementation={}; nonce={authorization_nonce}",
-                simulation.implementation.as_deref().unwrap_or("missing")
-            ),
+            "Result",
+            if simulation.simulation.success {
+                "No asset balance changes were detected."
+            } else {
+                "Unavailable because the simulation failed."
+            },
         );
+    } else {
+        for (label, value) in balance_changes {
+            request = request.fact(label, value);
+        }
     }
 
-    let interpretations = interpret_steps(steps, token_metadata).await;
     for (step, interpretation) in steps.iter().zip(&interpretations) {
         let calldata = step.transaction.data.as_ref();
+        let target = token_metadata.get(&step.transaction.to).map_or_else(
+            || format!("{:#x}", step.transaction.to),
+            |metadata| token_label(step.transaction.to, metadata),
+        );
         request = request
-            .section(format!(
-                "Call {} of {} — {:?}",
-                step.step,
-                steps.len(),
-                step.kind
-            ))
-            .fact("Target", format!("{:#x}", step.transaction.to))
-            .fact(
-                "Value",
-                native_value(step.transaction.value.as_str(), network),
+            .section_kind(
+                ApprovalSectionKind::Action,
+                format!("Action {} of {}", step.step, steps.len()),
             )
             // The exact fields here are authoritative; the reading is a
             // supplemental interpretation from a vendored ERC-7730 descriptor
             // or from recognized standard calldata.
             .fact(
-                "Reads as",
+                "What it does",
                 interpretation.description.clone().unwrap_or_else(|| {
-                    "no matching descriptor or standard token operation; verify the target and selector directly"
+                    "Unrecognized contract call. Verify the target and exact data before approving."
                         .into()
                 }),
-            );
+            )
+            .fact("Target", target)
+            .fact(
+                "Native value",
+                native_value(step.transaction.value.as_str(), network),
+            )
+            .fact("Execution", format!("{:?}", step.kind));
         for detail in &interpretation.details {
             request = request.fact("·", detail);
         }
@@ -762,33 +746,36 @@ async fn transaction_approval_request(
             )
         };
         request = request.fact("Calldata", summary);
-        // The bytes themselves. Every line above is a description of them —
-        // the selector is the first four, the "reads as" line is a descriptor's
-        // account of the rest — and the fallback for an unrecognized call tells
-        // the reviewer to "verify the target and selector directly", which they
-        // could not do because the calldata appeared on no screen. A summary a
-        // reviewer cannot check against the thing it summarizes is a claim,
-        // not a review.
-        for row in calldata_rows(calldata) {
-            request = request.fact("", row);
-        }
     }
 
-    request = request.section("Simulated net balance changes (excludes live gas)");
-    let balance_changes = render_balance_changes(simulation, network, token_metadata);
-    if balance_changes.is_empty() {
-        request = request.fact(
-            "Result",
-            if simulation.simulation.success {
-                "none detected"
-            } else {
-                "unavailable because simulation failed"
-            },
+    request = request
+        .section_kind(
+            ApprovalSectionKind::Fees,
+            "Fee ceiling and transaction details",
+        )
+        .fact(
+            "Maximum transaction fee",
+            native_value(&prepared.maximum_fee_wei(), network),
+        )
+        .fact("Type", prepared.transaction_type())
+        .fact("Nonce", prepared.nonce().to_string())
+        .fact("Gas limit", prepared.gas_limit().to_string())
+        .fact(
+            "Max fee per gas",
+            format!("{} wei", prepared.max_fee_per_gas()),
+        )
+        .fact(
+            "Max priority fee per gas",
+            format!("{} wei", prepared.max_priority_fee_per_gas()),
         );
-    } else {
-        for (label, value) in balance_changes {
-            request = request.fact(label, value);
-        }
+    if let Some(authorization_nonce) = prepared.authorization_nonce() {
+        request = request.fact(
+            "EIP-7702 authorization",
+            format!(
+                "implementation={}; nonce={authorization_nonce}",
+                simulation.implementation.as_deref().unwrap_or("missing")
+            ),
+        );
     }
     if let Some(replaced) = &simulation.replaces_delegated_implementation {
         request = request.warning(format!(

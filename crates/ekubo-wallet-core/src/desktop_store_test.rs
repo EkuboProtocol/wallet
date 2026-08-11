@@ -130,10 +130,50 @@ fn owner_selected_oauth_session_lifetime_is_bound_to_the_authorization_code() {
 
     assert!(expiration >= before + chrono::Duration::weeks(1) - chrono::Duration::seconds(1));
     assert!(expiration <= chrono::Utc::now() + chrono::Duration::weeks(1));
+    assert_eq!(
+        store.clients().unwrap()[0].session_expires_at,
+        Some(expiration)
+    );
     assert_eq!(pair.expires_in, 10 * 60);
     assert_eq!(OAuthSessionDuration::OneDay.as_query_value(), "day");
     assert_eq!(OAuthSessionDuration::OneMonth.label(), "1 month");
     assert!(OAuthSessionDuration::parse_query_value("forever").is_err());
+}
+
+#[test]
+fn agent_session_listing_retains_an_expired_absolute_deadline() {
+    let mut store = store(40);
+    let client = register(&mut store);
+    let _pair = authorize_and_exchange(&mut store, &client);
+    let expired_at = chrono::DateTime::from_timestamp_millis(
+        (chrono::Utc::now() - chrono::Duration::minutes(1)).timestamp_millis(),
+    )
+    .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE oauth_refresh_tokens SET expires_at = ?1 WHERE client_id = ?2",
+            rusqlite::params![
+                crate::sql::Millis(expired_at),
+                crate::sql::Blob(*client.id.as_bytes())
+            ],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE oauth_authorization_codes SET session_expires_at = ?1 WHERE client_id = ?2",
+            rusqlite::params![
+                crate::sql::Millis(expired_at),
+                crate::sql::Blob(*client.id.as_bytes())
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        store.clients().unwrap()[0].session_expires_at,
+        Some(expired_at)
+    );
 }
 
 #[test]

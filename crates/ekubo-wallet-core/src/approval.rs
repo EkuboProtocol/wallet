@@ -31,6 +31,25 @@ pub struct ApprovalFact {
     pub value: String,
 }
 
+/// The human meaning of a review section, independent of its localized title.
+///
+/// Native presenters use this to put consequences before implementation
+/// details without parsing display strings. `Details` is the compatibility
+/// default for review kinds that do not need a specialized presentation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalSectionKind {
+    /// General request context or supporting information.
+    #[default]
+    Details,
+    /// Simulated changes to assets or durable permissions.
+    Effects,
+    /// A call or other concrete action the request performs.
+    Action,
+    /// Fee ceilings, nonce, and envelope mechanics.
+    Fees,
+}
+
 /// One titled group of facts in a review document: the calls of a plan, the
 /// prepared transaction, the simulated balance changes. Sections exist so a
 /// presenter can lay the document out — headings, aligned label columns —
@@ -38,6 +57,8 @@ pub struct ApprovalFact {
 /// orchestrator-authored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalSection {
+    #[serde(default)]
+    pub kind: ApprovalSectionKind,
     pub heading: String,
     pub facts: Vec<ApprovalFact>,
 }
@@ -136,8 +157,14 @@ impl ApprovalRequest {
 
     /// Start a new titled section; subsequent facts belong to it.
     #[must_use]
-    pub fn section(mut self, heading: impl Into<String>) -> Self {
+    pub fn section(self, heading: impl Into<String>) -> Self {
+        self.section_kind(ApprovalSectionKind::Details, heading)
+    }
+
+    #[must_use]
+    pub fn section_kind(mut self, kind: ApprovalSectionKind, heading: impl Into<String>) -> Self {
         self.sections.push(ApprovalSection {
+            kind,
             heading: heading.into(),
             facts: Vec::new(),
         });

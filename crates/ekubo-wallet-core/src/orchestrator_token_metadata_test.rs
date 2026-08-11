@@ -1,5 +1,6 @@
 use super::*;
 use crate::simulation::{BalanceChanges, NativeBalanceChange, SimulationExecution};
+use crate::{policy_store::DatabaseKey, token_store::ListedToken};
 use alloy::primitives::address;
 use std::collections::BTreeMap;
 
@@ -54,4 +55,53 @@ async fn review_metadata_includes_tokens_discovered_by_simulation() {
 
     let targets = review_token_targets(&[], &simulation).await;
     assert_eq!(targets, vec![ethena_token, circle_token]);
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = PolicyStore::open(
+        &directory.path().join("wallet.db"),
+        &DatabaseKey::new([41; 32]),
+    )
+    .unwrap();
+    let mut token_store = crate::token_store::TokenStore::new(database);
+    token_store
+        .add(
+            &ListedToken {
+                chain_id: 1,
+                address: circle_token,
+                symbol: "USDC".into(),
+                name: Some("USD Coin".into()),
+                decimals: 6,
+            },
+            "embedded default list",
+        )
+        .unwrap();
+    token_store
+        .add(
+            &ListedToken {
+                chain_id: 1,
+                address: ethena_token,
+                symbol: "USDe".into(),
+                name: Some("Ethena USDe".into()),
+                decimals: 18,
+            },
+            "embedded default list",
+        )
+        .unwrap();
+
+    let metadata = token_store.display_metadata(1, &targets).unwrap();
+    let network = crate::config::default_networks()
+        .into_iter()
+        .find(|network| network.chain_id == 1)
+        .unwrap();
+    let rendered = render_balance_changes(&simulation, &network, &metadata);
+    assert!(
+        rendered
+            .iter()
+            .any(|(label, value)| { label.starts_with("USDC (") && value.contains("USDC") })
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|(label, value)| { label.starts_with("USDe (") && value.contains("USDe") })
+    );
 }

@@ -5,7 +5,7 @@
 //! exactly the privacy access an inline one does, so nothing these can reach
 //! changes, and the test paths are the ones they always were.
 
-use super::{CALLDATA_BYTES_PER_ROW, MAX_DISPLAYED_CALLDATA_BYTES, calldata_rows};
+use super::{CALLDATA_BYTES_PER_ROW, calldata_rows};
 
 #[test]
 fn the_calldata_a_reviewer_signs_is_on_the_screen() {
@@ -17,17 +17,10 @@ fn the_calldata_a_reviewer_signs_is_on_the_screen() {
 }
 
 #[test]
-fn oversized_calldata_says_what_it_is_not_showing() {
-    let calldata = vec![0xab_u8; MAX_DISPLAYED_CALLDATA_BYTES + 100];
+fn large_exact_calldata_is_never_truncated() {
+    let calldata = vec![0xab_u8; 4_100];
     let rows = calldata_rows(&calldata);
-    let note = rows.last().unwrap();
-    assert!(note.contains("100 of 612 bytes not shown"), "{note}");
-    // The digest covers the whole thing, so the part that was elided is
-    // still identifiable rather than merely absent.
-    assert!(
-        note.contains(&format!("{:x}", alloy::primitives::keccak256(&calldata))),
-        "{note}"
-    );
+    assert_eq!(rows.concat(), hex::encode(calldata));
 }
 
 #[test]

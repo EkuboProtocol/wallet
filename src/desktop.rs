@@ -21,7 +21,9 @@ use crate::{
     },
 };
 use anyhow::{Context as _, Result, ensure};
-use ekubo_wallet_core::approval::{ReviewDecision, ReviewDocument};
+use ekubo_wallet_core::approval::{
+    ApprovalFact, ApprovalSection, ApprovalSectionKind, ReviewDecision, ReviewDocument,
+};
 use ekubo_wallet_core::config::{NetworkConfig, WalletMetadata};
 use ekubo_wallet_core::core::policy::{Effect, Rule, WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
@@ -149,6 +151,21 @@ fn legal_acceptance_label(status: &ekubo_wallet_core::legal::DocumentStatus) -> 
         }
         (true, None) => "Accepted".into(),
         (false, _) => "Review required".into(),
+    }
+}
+
+fn agent_session_expiry_label(
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, bool) {
+    let Some(expires_at) = expires_at else {
+        return ("No active session (expired or not completed)".into(), true);
+    };
+    let timestamp = expires_at.format("%b %d, %Y at %H:%M UTC");
+    if expires_at <= now {
+        (format!("Expired {timestamp}"), true)
+    } else {
+        (format!("Expires {timestamp}"), false)
     }
 }
 
@@ -790,6 +807,7 @@ struct ActiveReview {
     simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
     completion: Option<ActiveReviewCompletion>,
     awaiting_refresh: bool,
+    exact_payloads_expanded: bool,
     scroll_handle: ScrollHandle,
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
@@ -1519,6 +1537,25 @@ fn review_queue_decision_count(queues: &OwnerReviewQueues) -> usize {
         + queues.policy_proposals.len()
         + queues.network_proposals.len()
         + token_sources
+}
+
+fn review_section_priority(kind: ApprovalSectionKind) -> u8 {
+    match kind {
+        ApprovalSectionKind::Effects => 0,
+        ApprovalSectionKind::Action => 1,
+        ApprovalSectionKind::Fees => 2,
+        ApprovalSectionKind::Details => 3,
+    }
+}
+
+fn review_sections_for_display(document: &ReviewDocument) -> Vec<&ApprovalSection> {
+    let mut sections = document.request.sections.iter().collect::<Vec<_>>();
+    sections.sort_by_key(|section| review_section_priority(section.kind));
+    sections
+}
+
+fn review_exact_data_available(document: &ReviewDocument, expanded: bool) -> bool {
+    document.exact_payloads.is_empty() || expanded
 }
 
 impl RouteListDelegate {
@@ -3412,6 +3449,7 @@ impl WalletWindow {
                 response: prompt.response,
             }),
             awaiting_refresh: false,
+            exact_payloads_expanded: false,
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
@@ -4319,6 +4357,7 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
                     awaiting_refresh: false,
+                    exact_payloads_expanded: false,
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
@@ -5268,17 +5307,6 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn prepare_agent_repair(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
-        let kind = self
-            .cached_clients()
-            .ok()
-            .and_then(|clients| clients.iter().find(|client| client.id == client_id))
-            .map(|client| client.agent_kind);
-        if let Some(kind) = kind {
-            self.prepare_detected_agent_install(kind, cx);
-        }
-    }
-
     fn prepare_detected_agent_install(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
         if self.pending_agent_install.is_some()
             || self.agent_reinstall == AgentReinstallState::Running
@@ -5510,6 +5538,7 @@ impl WalletWindow {
                 active.scroll_handle = ScrollHandle::new();
                 active.scroll_check_scheduled = false;
                 active.scroll_layout_ready = false;
+                active.exact_payloads_expanded = false;
             }
             active.simulation = Some(prompt.simulation);
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
@@ -5536,6 +5565,7 @@ impl WalletWindow {
             simulation: Some(prompt.simulation),
             completion: Some(ActiveReviewCompletion::Transaction(prompt.response)),
             awaiting_refresh: false,
+            exact_payloads_expanded: false,
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
@@ -5556,6 +5586,7 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::Message { request_id, digest }),
                     awaiting_refresh: false,
+                    exact_payloads_expanded: false,
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
@@ -5586,6 +5617,7 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::TypedData { request_id, digest }),
                     awaiting_refresh: false,
+                    exact_payloads_expanded: false,
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
@@ -5648,7 +5680,10 @@ impl WalletWindow {
         let Some(review) = self.active_review.as_mut() else {
             return;
         };
-        if review.scroll_layout_ready
+        let exact_data_available =
+            review_exact_data_available(review.state.document(), review.exact_payloads_expanded);
+        if exact_data_available
+            && review.scroll_layout_ready
             && !review.state.approve_enabled()
             && scroll_reached_end(
                 review.scroll_handle.offset().y,
@@ -5660,6 +5695,21 @@ impl WalletWindow {
                 cx.notify();
             }
         }
+    }
+
+    fn toggle_review_exact_payloads(&mut self, generation: u64, cx: &mut Context<Self>) {
+        let Some(review) = self.active_review.as_mut() else {
+            return;
+        };
+        if review.state.generation() != generation
+            || review.state.document().exact_payloads.is_empty()
+        {
+            return;
+        }
+        review.exact_payloads_expanded = !review.exact_payloads_expanded;
+        review.scroll_check_scheduled = false;
+        review.scroll_layout_ready = false;
+        cx.notify();
     }
 
     fn send_review_command(
@@ -6588,96 +6638,91 @@ impl WalletWindow {
         let mut managed_agents = div().flex().flex_col().gap_1();
         for item in clients.iter().filter(|client| client.revoked_at.is_none()) {
             let client_id = item.id;
-            let active = item.revoked_at.is_none();
             let managed = item.agent_kind != AgentKind::Other;
-            let status = if let Some(revoked) = item.revoked_at {
-                format!("Revoked {revoked}")
-            } else if let Some(last_used) = item.last_used_at {
-                format!("Last used {last_used}")
-            } else {
-                item.authorized_at.map_or_else(
-                    || "Authorized, not yet used".into(),
-                    |authorized| format!("Authorized {authorized}; not yet used"),
-                )
-            };
-            managed_agents =
-                managed_agents.child(
-                    ListItem::new(SharedString::from(format!("managed-agent-{client_id}"))).child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .justify_between()
-                                    .gap_4()
-                                    .child(format!("{} · {:?}", item.display_name, item.agent_kind))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(status),
-                                    ),
+            let (expiration, expired) =
+                agent_session_expiry_label(item.session_expires_at, chrono::Utc::now());
+            let last_used = item.last_used_at.map_or_else(
+                || "Not used yet".into(),
+                |last_used| format!("Last used {}", last_used.format("%b %d, %Y at %H:%M UTC")),
+            );
+            managed_agents = managed_agents.child(
+                ListItem::new(SharedString::from(format!("managed-agent-{client_id}"))).child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .flex_wrap()
+                                .gap_4()
+                                .child(div().flex_1().min_w_0().font_semibold().child(format!(
+                                    "{} · {:?}",
+                                    item.display_name, item.agent_kind
+                                )))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(if expired {
+                                            cx.theme().danger
+                                        } else {
+                                            cx.theme().success
+                                        })
+                                        .child(expiration),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(last_used),
+                        )
+                        .when(managed, |row| {
+                            row.child(
+                                h_flex().gap_2().child(
+                                    Button::new(SharedString::from(format!(
+                                        "remove-agent-{client_id}"
+                                    )))
+                                    .label("Remove")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.prepare_agent_removal(client_id, cx);
+                                    })),
+                                ),
                             )
-                            .when(active && managed, |row| {
-                                row.child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "repair-agent-{client_id}"
-                                            )))
-                                            .label("Repair")
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.prepare_agent_repair(client_id, cx);
-                                            })),
-                                        )
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "remove-agent-{client_id}"
-                                            )))
-                                            .label("Remove")
-                                            .danger()
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.prepare_agent_removal(client_id, cx);
-                                            })),
-                                        ),
-                                )
-                            })
-                            .when(active && !managed, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "delete-agent-registration-{client_id}"
-                                    )))
-                                    .label("Delete registration")
-                                    .danger()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
+                        })
+                        .when(!managed, |row| {
+                            row.child(
+                                Button::new(SharedString::from(format!(
+                                    "delete-agent-registration-{client_id}"
+                                )))
+                                .label("Delete registration")
+                                .danger()
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
                                         view.prepare_agent_registration_removal(client_id, cx);
-                                    })),
-                                )
-                            })
-                            .when(active, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "revoke-agent-{client_id}"
-                                    )))
-                                    .label("Revoke access")
-                                    .danger()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.revoke_agent(client_id, cx);
-                                    })),
-                                )
-                            }),
-                    ),
-                );
+                                    },
+                                )),
+                            )
+                        })
+                        .child(
+                            Button::new(SharedString::from(format!("revoke-agent-{client_id}")))
+                                .label("Revoke access")
+                                .danger()
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.revoke_agent(client_id, cx);
+                                })),
+                        ),
+                ),
+            );
         }
         if clients.iter().all(|client| client.revoked_at.is_some()) {
             managed_agents = managed_agents.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No agent registrations have been created."),
+                    .child("No authorized agent sessions."),
             );
         }
         match &self.detected_agents {
@@ -6890,9 +6935,9 @@ impl WalletWindow {
             )
             .child(
                 GroupBox::new()
-                    .id("managed-agent-settings")
+                    .id("agent-session-settings")
                     .outline()
-                    .title("Managed agent connections")
+                    .title("Agent sessions")
                     .child(managed_agents),
             )
             .child(self.render_legal(cx))
@@ -9502,28 +9547,263 @@ impl WalletWindow {
         }
     }
 
+    fn render_review_fact(
+        &self,
+        fact: &ApprovalFact,
+        section_kind: ApprovalSectionKind,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        if section_kind == ApprovalSectionKind::Effects {
+            if fact.label.is_empty() {
+                return div()
+                    .pl_3()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(fact.value.clone());
+            }
+            let amount_color = if fact.value.trim_start().starts_with('-') {
+                cx.theme().danger
+            } else if fact.value.trim_start().starts_with('+') {
+                cx.theme().success
+            } else {
+                cx.theme().foreground
+            };
+            return div()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_start()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex_basis(px(260.0))
+                        .font_semibold()
+                        .child(fact.label.clone()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex_basis(px(220.0))
+                        .text_lg()
+                        .font_semibold()
+                        .text_color(amount_color)
+                        .child(fact.value.clone()),
+                );
+        }
+
+        if section_kind == ApprovalSectionKind::Action && fact.label == "What it does" {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("HUMAN-READABLE INTERPRETATION"),
+                )
+                .child(div().text_lg().font_semibold().child(fact.value.clone()));
+        }
+
+        let exact_value = matches!(fact.label.as_str(), "Address" | "Sender" | "Target");
+        div()
+            .min_w_0()
+            .flex()
+            .flex_wrap()
+            .items_start()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(138.0))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if fact.label.is_empty() {
+                        "·".to_owned()
+                    } else {
+                        fact.label.clone()
+                    }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_sm()
+                    .when(exact_value, |value| value.font_family(MONO_FONT_FAMILY))
+                    .child(fact.value.clone()),
+            )
+    }
+
+    fn render_review_section(
+        &self,
+        section: &ApprovalSection,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let (icon, heading_color) = match section.kind {
+            ApprovalSectionKind::Effects => (IconName::Star, cx.theme().foreground),
+            ApprovalSectionKind::Action => (IconName::Inspector, cx.theme().foreground),
+            ApprovalSectionKind::Fees => (IconName::Frame, cx.theme().muted_foreground),
+            ApprovalSectionKind::Details => (IconName::Inspector, cx.theme().muted_foreground),
+        };
+        div()
+            .w_full()
+            .min_w_0()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .text_color(heading_color)
+                    .child(Icon::new(icon).small())
+                    .child(div().font_semibold().child(section.heading.clone())),
+            )
+            .children(
+                section
+                    .facts
+                    .iter()
+                    .map(|fact| self.render_review_fact(fact, section.kind, cx)),
+            )
+    }
+
+    fn render_review_simulation(
+        &self,
+        simulation: &ekubo_wallet_core::simulation::SimulationResult,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let (icon, color, title) = if simulation.simulation.success {
+            (
+                IconName::CircleCheck,
+                cx.theme().success,
+                "Simulation succeeded",
+            )
+        } else {
+            (
+                IconName::TriangleAlert,
+                cx.theme().danger,
+                "Simulation failed",
+            )
+        };
+        let policy = match simulation.policy_outcome {
+            ekubo_wallet_core::core::policy::PolicyOutcome::Allowed => {
+                "The active policy allows this transaction."
+            }
+            ekubo_wallet_core::core::policy::PolicyOutcome::RequiresApproval => {
+                "The active policy requires this human approval."
+            }
+            ekubo_wallet_core::core::policy::PolicyOutcome::Rejected => {
+                "The active policy rejects this transaction."
+            }
+        };
+        let execution = match simulation.execution_mode {
+            ekubo_wallet_core::simulation::ExecutionMode::Direct => "direct transaction",
+            ekubo_wallet_core::simulation::ExecutionMode::CaliburBatch => "atomic batch",
+        };
+        div()
+            .w_full()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(color)
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .text_color(color)
+                    .child(Icon::new(icon).small())
+                    .child(div().font_semibold().child(title)),
+            )
+            .child(div().text_sm().child(format!(
+                "{policy} Results are from block {} using a {execution}.",
+                simulation.block_number
+            )))
+    }
+
     fn render_review_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(active) = &self.active_review else {
             return div().into_any_element();
         };
         let generation = active.state.generation();
         let document = active.state.document();
-        let approve_enabled = active.state.approve_enabled() && !active.awaiting_refresh;
+        let exact_data_required = !document.exact_payloads.is_empty();
+        let exact_data_available =
+            review_exact_data_available(document, active.exact_payloads_expanded);
+        let approve_enabled =
+            active.state.approve_enabled() && exact_data_available && !active.awaiting_refresh;
         let can_refresh = matches!(
             active.completion,
             Some(ActiveReviewCompletion::Transaction(_))
         );
         let mut review_body = div()
+            .w_full()
+            .max_w(px(920.0))
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             .child(
                 div()
-                    .text_xl()
+                    .text_2xl()
                     .font_semibold()
                     .child(document.request.title.clone()),
             )
-            .child(document.request.summary.clone());
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(document.request.summary.clone()),
+            );
+
+        if let Some(simulation) = &active.simulation {
+            review_body = review_body.child(self.render_review_simulation(simulation, cx));
+        }
+
+        for section in review_sections_for_display(document)
+            .into_iter()
+            .filter(|section| section.kind == ApprovalSectionKind::Effects)
+        {
+            review_body = review_body.child(self.render_review_section(section, cx));
+        }
+
+        if !document.request.warnings.is_empty() {
+            review_body = review_body.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_color(cx.theme().warning)
+                            .child(Icon::new(IconName::TriangleAlert).small())
+                            .child(div().font_semibold().child("Important warnings")),
+                    )
+                    .children(document.request.warnings.iter().enumerate().map(
+                        |(index, warning)| {
+                            div()
+                                .id(SharedString::from(format!(
+                                    "review-warning-{generation}-{index}"
+                                )))
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().warning)
+                                .child(warning.clone())
+                        },
+                    )),
+            );
+        }
+
         if let Some(ActiveReviewCompletion::WalletConnect {
             choices,
             selected_account,
@@ -9546,73 +9826,106 @@ impl WalletWindow {
                         })),
                 );
         }
-        for fact in &document.request.facts {
-            review_body = review_body.child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(div().w(px(150.0)).font_semibold().child(fact.label.clone()))
-                    .child(div().flex_1().child(fact.value.clone())),
-            );
+
+        for section in review_sections_for_display(document)
+            .into_iter()
+            .filter(|section| section.kind != ApprovalSectionKind::Effects)
+        {
+            review_body = review_body.child(self.render_review_section(section, cx));
         }
-        for section in &document.request.sections {
-            review_body =
-                review_body.child(div().mt_3().font_semibold().child(section.heading.clone()));
-            for fact in &section.facts {
-                review_body = review_body.child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(div().w(px(150.0)).child(fact.label.clone()))
-                        .child(div().flex_1().child(fact.value.clone())),
-                );
-            }
+
+        if !document.request.facts.is_empty() {
+            let context = ApprovalSection {
+                kind: ApprovalSectionKind::Details,
+                heading: "Request details".to_owned(),
+                facts: document.request.facts.clone(),
+            };
+            review_body = review_body.child(self.render_review_section(&context, cx));
         }
-        for warning in &document.request.warnings {
-            review_body = review_body.child(
-                div()
-                    .p_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(format!("Warning: {warning}")),
-            );
-        }
-        if let Some(digest) = &document.request.digest {
-            review_body = review_body.child(
-                div()
-                    .child("Digest")
-                    .child(div().font_family(MONO_FONT_FAMILY).child(digest.clone())),
-            );
-        }
-        for (index, payload) in document.exact_payloads.iter().enumerate() {
-            review_body = review_body.child(
-                div()
-                    .mt_3()
-                    .child(format!("Exact payload {}", index + 1))
-                    .child(
-                        div()
-                            .mt_1()
-                            .p_3()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .font_family(MONO_FONT_FAMILY)
-                            .whitespace_normal()
-                            .child(payload.clone()),
-                    ),
-            );
-        }
-        if let Some(simulation) = &active.simulation {
+
+        if exact_data_required {
             review_body = review_body
-                .child(div().mt_3().font_semibold().child("Fresh simulation"))
-                .child(format!(
-                    "Block {} · success {} · policy {:?} · mode {:?}",
-                    simulation.block_number,
-                    simulation.simulation.success,
-                    simulation.policy_outcome,
-                    simulation.execution_mode
-                ));
+                .child(
+                    div()
+                        .w_full()
+                        .p_4()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(div().font_semibold().child("Exact data"))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(
+                                                    "Required for approval. Compare the complete bytes with the human-readable interpretation above.",
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    Button::new(("toggle-review-exact-data", generation))
+                                        .label(if active.exact_payloads_expanded {
+                                            "Hide exact data"
+                                        } else {
+                                            "Review exact data"
+                                        })
+                                        .icon(if active.exact_payloads_expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                            view.toggle_review_exact_payloads(generation, cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .when(active.exact_payloads_expanded, |body| {
+                    body.children(document.exact_payloads.iter().enumerate().map(
+                        |(index, payload)| {
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(div().font_semibold().child(if index == 0 {
+                                    "Execution plan JSON".to_owned()
+                                } else {
+                                    format!("Action {index} exact calldata")
+                                }))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "review-exact-payload-{generation}-{index}"
+                                        )))
+                                        .w_full()
+                                        .min_w_0()
+                                        .overflow_x_scroll()
+                                        .p_3()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .bg(cx.theme().secondary)
+                                        .font_family(MONO_FONT_FAMILY)
+                                        .text_sm()
+                                        .whitespace_normal()
+                                        .child(payload.clone()),
+                                )
+                        },
+                    ))
+                });
         }
         div()
             .absolute()
@@ -9670,11 +9983,13 @@ impl WalletWindow {
                         });
                     }))
                     .pr_2()
-                    .child(review_body),
+                    .child(div().w_full().flex().justify_center().child(review_body)),
             )
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
+                    .gap_2()
                     .justify_between()
                     .items_center()
                     .child(
@@ -9696,7 +10011,15 @@ impl WalletWindow {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("Scroll to the end to enable approval"),
+                                        .child(
+                                            if exact_data_required
+                                                && !active.exact_payloads_expanded
+                                            {
+                                                "Review the exact data to enable approval"
+                                            } else {
+                                                "Scroll to the end to enable approval"
+                                            },
+                                        ),
                                 )
                             })
                             .child(

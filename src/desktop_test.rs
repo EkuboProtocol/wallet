@@ -1,4 +1,5 @@
 use super::*;
+use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
 
 #[test]
 fn command_palette_matches_route_labels_as_ordered_subsequences() {
@@ -8,6 +9,57 @@ fn command_palette_matches_route_labels_as_ordered_subsequences() {
     assert_eq!(fuzzy_route_score("Networks", "xyz"), None);
     assert_eq!(fuzzy_route_score("Tokens", "token"), Some(0));
     assert_eq!(fuzzy_route_score("WalletConnect", "token"), None);
+}
+
+#[test]
+fn review_sections_put_simulated_effects_before_actions_and_fees() {
+    let request = ApprovalRequest::new(ApprovalKind::Transaction, "Review", "Summary")
+        .section_kind(ApprovalSectionKind::Fees, "Fees")
+        .section_kind(ApprovalSectionKind::Details, "Details")
+        .section_kind(ApprovalSectionKind::Action, "Action")
+        .section_kind(ApprovalSectionKind::Effects, "Effects");
+    let document = ReviewDocument::from_request(request, Vec::new());
+
+    assert_eq!(
+        review_sections_for_display(&document)
+            .into_iter()
+            .map(|section| section.heading.as_str())
+            .collect::<Vec<_>>(),
+        ["Effects", "Action", "Fees", "Details"]
+    );
+}
+
+#[test]
+fn exact_payload_must_be_opened_before_review_can_finish() {
+    let request = ApprovalRequest::new(ApprovalKind::Transaction, "Review", "Summary");
+    let document = ReviewDocument::from_request(request.clone(), vec!["0x1234".into()]);
+    assert!(!review_exact_data_available(&document, false));
+    assert!(review_exact_data_available(&document, true));
+
+    let document = ReviewDocument::from_request(request, Vec::new());
+    assert!(review_exact_data_available(&document, false));
+}
+
+#[test]
+fn agent_session_expiry_labels_active_expired_and_missing_sessions() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-08-11T14:30:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let future = now + chrono::Duration::days(1);
+    let past = now - chrono::Duration::minutes(1);
+
+    assert_eq!(
+        agent_session_expiry_label(Some(future), now),
+        ("Expires Aug 12, 2026 at 14:30 UTC".into(), false)
+    );
+    assert_eq!(
+        agent_session_expiry_label(Some(past), now),
+        ("Expired Aug 11, 2026 at 14:29 UTC".into(), true)
+    );
+    assert_eq!(
+        agent_session_expiry_label(None, now),
+        ("No active session (expired or not completed)".into(), true)
+    );
 }
 
 #[test]

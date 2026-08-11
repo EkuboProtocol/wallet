@@ -125,6 +125,8 @@ pub struct McpClient {
     pub created_at: DateTime<Utc>,
     pub authorized_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub session_expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
@@ -298,6 +300,7 @@ impl DesktopStore {
             created_at: Utc::now(),
             authorized_at: None,
             last_used_at: None,
+            session_expires_at: None,
             revoked_at: None,
         };
         self.connection.execute(
@@ -373,6 +376,7 @@ impl DesktopStore {
             created_at,
             authorized_at,
             last_used_at,
+            session_expires_at: None,
             revoked_at,
         })
     }
@@ -726,11 +730,25 @@ impl DesktopStore {
 
     pub fn clients(&self) -> Result<Vec<McpClient>> {
         let mut statement = self.connection.prepare(
-            "SELECT client_id, display_name, agent_kind, registration_json,
-                    created_at, authorized_at, last_used_at, revoked_at
-             FROM mcp_clients
+            "SELECT c.client_id, c.display_name, c.agent_kind, c.registration_json,
+                    c.created_at, c.authorized_at, c.last_used_at, c.revoked_at,
+                    NULLIF(MAX(
+                        COALESCE(
+                            (SELECT MAX(t.expires_at)
+                             FROM oauth_refresh_tokens t
+                             WHERE t.client_id = c.client_id),
+                            0
+                        ),
+                        COALESCE(
+                            (SELECT MAX(a.session_expires_at)
+                             FROM oauth_authorization_codes a
+                             WHERE a.client_id = c.client_id),
+                            0
+                        )
+                    ), 0) AS session_expires_at
+             FROM mcp_clients c
              WHERE authorized_at IS NOT NULL AND revoked_at IS NULL
-             ORDER BY created_at, client_id",
+             ORDER BY c.created_at, c.client_id",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -742,6 +760,7 @@ impl DesktopStore {
                 row.get::<_, Option<Millis>>(5)?.map(|value| value.0),
                 row.get::<_, Option<Millis>>(6)?.map(|value| value.0),
                 row.get::<_, Option<Millis>>(7)?.map(|value| value.0),
+                row.get::<_, Option<Millis>>(8)?.map(|value| value.0),
             ))
         })?;
         rows.map(|row| {
@@ -754,6 +773,7 @@ impl DesktopStore {
                 authorized_at,
                 last_used_at,
                 revoked_at,
+                session_expires_at,
             ) = row?;
             Ok(McpClient {
                 id,
@@ -766,6 +786,7 @@ impl DesktopStore {
                 created_at,
                 authorized_at,
                 last_used_at,
+                session_expires_at,
                 revoked_at,
             })
         })
