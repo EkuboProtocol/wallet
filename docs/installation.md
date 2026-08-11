@@ -7,19 +7,24 @@ Install the signed native package for the platform:
 - Linux: AppImage, `.deb`, or `.rpm`, including desktop entry, icons,
   StatusNotifierItem integration, and the polkit policy.
 
-The app launches without arguments. On first agent registration it can enable
-launch-at-login. A login launch stays hidden when a tray host exists; on Linux
-without a tray host it retains a minimized taskbar window.
+The app launches without arguments. On startup it detects supported agents and
+upserts an authenticated `ekubo-wallet` MCP entry for each one. The first
+successful installation enables launch-at-login. A login launch stays hidden
+when a tray host exists; on Linux without a tray host it retains a minimized
+taskbar window.
 
 Settings detects Codex, Claude Code, Gemini CLI, Cursor,
-and opencode. Registration displays the exact typed configuration diff, creates
-a timestamped backup, writes atomically, validates, and rolls back on failure.
-Each installation can be repaired, rotated, revoked, or removed independently.
-The remote Ekubo MCP entry is offered by default and remains independently
+and opencode. Automatic installation uses the typed configuration adapter for
+that agent, creates a timestamped backup before changing an existing file,
+writes atomically, validates, and rolls back on failure. Settings and the tray
+both provide **Reinstall MCP Server**, which upserts every detected agent again;
+Settings also retains per-agent repair, token rotation, revocation, and removal.
+The remote Ekubo MCP entry is installed by default and remains independently
 removable.
 
 Codex entries use a Streamable HTTP `url` and static `http_headers` map. Tokens
-appear only in the one-time registration diff and are not displayed again.
+are written directly into the agent configuration and are never displayed
+again after installation.
 
 ## Running locally on macOS
 

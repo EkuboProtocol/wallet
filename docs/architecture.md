@@ -12,7 +12,8 @@ Background work runs on the Tokio executor bridged into GPUI. Domain events
 carry proposal, review, transaction, configuration, connection, and service
 changes back to focused GPUI entities. The desktop shell has routes for
 Overview, Reviews, Activity, Accounts, Policies, Networks, Tokens,
-Agents, WalletConnect, Settings, Legal/Version, and Updates.
+WalletConnect, Settings, and Updates. Agent management and Legal/Version live
+inside Settings.
 
 One process lock and owner-only activation channel enforce a single authority.
 Closing a window does not imply service shutdown; explicit Quit stops HTTP,
