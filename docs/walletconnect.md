@@ -173,7 +173,7 @@ typed-data review says who asked for the signature.
 
 Chains the dapp lists as *required* must already be configured in this wallet,
 or the proposal is refused with a message naming them; add one with
-`ekubo-wallet network add`. Chains it lists as *optional* are included only
+`ekubo-wallet settings network add`. Chains it lists as *optional* are included only
 when this wallet already has a configuration for them. Everything the session
 will expose is listed on the review screen before you decide.
 

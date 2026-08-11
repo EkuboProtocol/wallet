@@ -1,10 +1,10 @@
 # Networks
 
-`network presets` prints the built-in defaults; `network presets --search <term>`
-and `network presets --all` search the complete compiled-in registry. `network
-reset` asks for a yes or no and then replaces the configured list with fresh
-copies of the defaults, preserving wallets and policies. Configuration permits
-one profile per chain ID so MCP calls remain unambiguous.
+`settings network add` offers built-in profiles interactively and through shell
+completion. `settings network reset` asks for a yes or no and then replaces the
+configured list with fresh copies of the defaults, preserving wallets and
+policies. Configuration permits one profile per chain ID so MCP calls remain
+unambiguous.
 
 ## Several endpoints per network
 
@@ -30,7 +30,7 @@ endpoint in turn, because a rejection such as `already known` or `nonce too
 low` describes a submission that *succeeded*, and only the endpoint that
 produced it can be asked what it meant.
 
-`network list` prints every configured endpoint in full, so the configuration
+`settings network list` prints every configured endpoint in full, so the configuration
 can be read back and edited. RPC URLs are configuration rather than key
 material, and nothing redacts them: the CLI, MCP tools (`wallet_list` returns
 each network's endpoint list), and surfaced RPC errors all show them verbatim.
@@ -59,8 +59,8 @@ configured by this binary today; the boundary also permits a stateful or
 independently verified backend without teaching signing code about its
 transport.
 
-Set the strategy alongside any other network field in `network add`, the
-interactive `network edit` form, or an agent's `wallet_propose_network` (which
+Set the strategy alongside any other network field in `settings network add`, the
+interactive `settings network edit` form, or an agent's `wallet_propose_network` (which
 still queues for owner review). It defaults to `ordered` and is omitted from
 `config.json` at that default.
 ## Where the endpoints come from
@@ -160,7 +160,7 @@ method not found`; this is a property of those chains' clients, not of the
 selection. Point them at a provider that implements the method to sign on them:
 
 ```sh
-ekubo-wallet network add avalanche --rpc-url https://your-provider.example/avax
+ekubo-wallet settings network add avalanche --rpc-url https://your-provider.example/avax
 ```
 
 MegaETH used to be in that list and no longer is — its published endpoint still
@@ -178,25 +178,24 @@ traffic somewhere they did not choose.
 To take the new fallbacks for a network, name it again:
 
 ```sh
-ekubo-wallet network add ethereum      # re-offers the built-in list, for review
+ekubo-wallet settings network add ethereum      # re-offers the built-in list, for review
 ```
 
-or `network reset` to replace every configured network with fresh defaults,
+or `settings network reset` to replace every configured network with fresh defaults,
 which discards custom endpoints. Either way the shipped endpoint list is
 disclosed in the privacy policy, and changing it requires a fresh
 acknowledgment before signing resumes.
 
 ## Adding a network
 
-`network add` starts from whatever already describes the chain: the configured
+`settings network add` starts from whatever already describes the chain: the configured
 network with that name or alias, otherwise the compiled-in registry — all 852
 chains of it, not just the defaults. So configuring a chain the wallet did not
 default to is a chain ID and a confirmation rather than a hunt for a working
 endpoint:
 
 ```sh
-ekubo-wallet network presets --search celo
-ekubo-wallet network add 42220
+ekubo-wallet settings network add 42220
 ```
 
 Point any chain at a dedicated endpoint, keeping everything else. `--rpc-url`
@@ -204,7 +203,7 @@ is repeatable, and supplying it replaces the whole list rather than appending
 to it, so the command says what the network should reach:
 
 ```sh
-ekubo-wallet network add base \
+ekubo-wallet settings network add base \
   --rpc-url https://your-provider.example/base \
   --rpc-url https://mainnet.base.org
 ```
@@ -220,7 +219,7 @@ there is nothing else the second definition could mean.
 Omitting `--rpc-url` makes the CLI prompt for it, which keeps an endpoint key
 out of shell history; several endpoints can be typed separated by commas or
 spaces. The prompt shows what you type: an RPC URL is configuration this
-machine's owner already owns, not a signing credential, and `network list`
+machine's owner already owns, not a signing credential, and `settings network list`
 prints configured URLs in full. Every endpoint is shown in the authorization
 prompt, so a typo is caught before it is saved.
 
@@ -229,7 +228,7 @@ complete profile. Run it in a terminal and every missing value is prompted for
 in one pass, with defaults for the usual answers:
 
 ```sh
-ekubo-wallet network add mychain 987654
+ekubo-wallet settings network add mychain 987654
 ```
 
 Or pass them as flags for a scripted install. Any that are missing are
@@ -237,7 +236,7 @@ reported together, with an explanation and an example each, rather than one per
 attempt:
 
 ```sh
-ekubo-wallet network add mychain 987654 \
+ekubo-wallet settings network add mychain 987654 \
   --display-name "My Chain" \
   --alias mychain-mainnet \
   --native-currency-name Ether \
@@ -321,7 +320,7 @@ you would mind losing.
 A loopback endpoint is accepted from your own configuration:
 
 ```sh
-ekubo-wallet network add ethereum --rpc-url http://127.0.0.1:8545
+ekubo-wallet settings network add ethereum --rpc-url http://127.0.0.1:8545
 ```
 
 That replaces the whole endpoint list with your node. To keep public endpoints

@@ -15,7 +15,7 @@ untrusted. The wallet process and loaded code, OS credential/authentication
 APIs, and explicit human input are trusted. Administrator, kernel, debugger,
 malicious dependency, and arbitrary in-process code execution are out of scope.
 
-The supported server is one `ekubo-wallet server` stdio process. There is no
+The supported server is one `ekubo-wallet mcp serve` stdio process. There is no
 privileged daemon or custom IPC. CLI management commands are local, interactive
 processes and expose no generic signing primitive.
 
@@ -364,7 +364,7 @@ attributable to a plan's own digest, and each endpoint's chain ID is verified
 before its answer is used. What it does change is that a *single* dishonest
 operator no longer needs to be chosen by the owner to be reached; it needs only
 to be in the list. That is the argument for pointing a valuable wallet at one
-provider you chose, which `network add --rpc-url` does by replacing the list.
+provider you chose, which `settings network add --rpc-url` does by replacing the list.
 
 `wallet_propose_network` is the one MCP tool that makes this process send a request
 to an address its caller chose, so the address is admitted before the request
@@ -378,12 +378,12 @@ an RPC error carries the response body verbatim, so returning it would make a
 chain-ID check into a way to read whatever answered. This admission cannot pin
 what it vetted the way a plan fetch does — the URL is stored and used later, so
 a resolver that answers differently afterwards is not caught — and the backstop
-is that the stored endpoint is visible to the owner in `network list`.
+is that the stored endpoint is visible to the owner in `settings network list`.
 
 A network profile is metadata an MCP client supplies, and the endpoint in it is
 the wallet's entire view of its chain, so it moves like the rest of the
 metadata: `wallet_propose_network` queues a profile and writes nothing.
-`ekubo-wallet network review` shows the owner what would be stored — naming the
+`ekubo-wallet review` shows the owner what would be stored — naming the
 endpoint being replaced, when the proposal edits a chain they already use,
 because the difference between two URLs is the whole decision — verifies the
 chain ID against that endpoint, and takes an OS presence check before the

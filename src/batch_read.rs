@@ -91,7 +91,7 @@ pub struct BatchEthCallInput {
     /// `block_parameter` and `from`, `calls`). Fetched under the
     /// execution-plan admission policy — public https on the default port, a
     /// `data:application/json` URI, or a `file:` URL naming a bundle you
-    /// wrote yourself and described with `ekubo-wallet meta-reference <path>` —
+    /// wrote yourself and described with `ekubo-wallet mcp reference <path>` —
     /// then verified against the envelope's
     /// integrity digest and byte count. The body's `chain_id` must equal
     /// `chain_id` above, and the body alone supplies `block_parameter`,

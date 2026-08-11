@@ -111,7 +111,7 @@ is trained to authenticate their way past a prompt.
 Network profiles work the same way and matter most: the RPC endpoint in one is
 the wallet's entire view of its chain, so accepting a profile is a statement
 about who is trusted to describe reality. `wallet_propose_network` queues it;
-`ekubo-wallet network review` shows which endpoint would be replaced, verifies
+`ekubo-wallet review` shows which endpoint would be replaced, verifies
 the chain ID, and takes the presence check before writing.
 
 Owner authentication is in any case an application-level check in the CLI, not

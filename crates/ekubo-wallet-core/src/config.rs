@@ -779,8 +779,8 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
         );
         // Userinfo is a credential written in the one part of a URL that does
         // not have to look like one, and this wallet quotes its endpoints back
-        // verbatim: `wallet_list` hands them to the agent, `network show`
-        // prints them, and the disclosure text names them. A field repeated on
+        // verbatim: `wallet_list` hands them to the agent, `settings network
+        // list` prints them, and the disclosure text names them. A field repeated on
         // every read cannot hold a secret, so it is refused here rather than
         // redacted at each of the places it would otherwise surface — and
         // refused without echoing the URL, since the message that named it
@@ -938,7 +938,7 @@ pub fn add_configured_network(
 /// ID that is already configured is saying which network they mean rather than
 /// asking to configure a second copy of it. Naming a preset's chain under a
 /// different name therefore takes that chain over instead of failing and
-/// sending the user off to `network remove` first.
+/// sending the user off to `settings network remove` first.
 pub fn replace_configured_network(
     networks: &mut Vec<NetworkConfig>,
     next: NetworkConfig,
@@ -980,7 +980,7 @@ pub fn replace_configured_network(
     // Carried rather than required, because `None` here has only ever meant
     // "not specified". Nothing in the CLI or MCP surface sets a ceiling at
     // all; the owner writes one into the configuration by hand, and the
-    // owner's own `network edit` path clones the existing profile, so a
+    // owner's own `settings network edit` path clones the existing profile, so a
     // deliberate change arrives as `Some`. A future affordance for *removing*
     // one needs to say so explicitly rather than by omission.
     let inherited = networks

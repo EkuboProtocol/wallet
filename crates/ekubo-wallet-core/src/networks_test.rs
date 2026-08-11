@@ -27,7 +27,7 @@ fn registry_identifiers_are_unique_across_every_chain() {
             profile.config.chain_id
         );
         for identifier in std::iter::once(&profile.config.name).chain(&profile.config.aliases) {
-            // Uniqueness is what makes `network add <name>` unambiguous, and
+            // Uniqueness is what makes `settings network add <name>` unambiguous, and
             // the registry is large enough that a collision would otherwise be
             // found by whichever user typed the shadowed name first.
             assert!(

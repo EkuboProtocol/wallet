@@ -63,8 +63,8 @@ The installer also registers the Ekubo protocol server at
 `https://mcp.ekubo.org/mcp`, which is what gives a fresh install something to do
 — quotes, swaps, bridging, liquidity — beyond holding keys. It prepares
 unsigned transactions and never sees a key. Skip it with
-`EKUBO_WALLET_SKIP_COMPANION=1`, or remove both later with `ekubo-wallet
-meta-agent remove`.
+`EKUBO_WALLET_SKIP_COMPANION=1`, or remove both later with `ekubo-wallet mcp
+unregister`.
 
 On Linux, install the polkit action shipped in the archive before signing, and
 make sure a Secret Service provider is running. If you used `install.sh`, it
@@ -178,15 +178,15 @@ not a limit when the same agent can ask again tomorrow. A rule bounds *which*
 calls may be made.
 
 ```sh
-ekubo-wallet policy show primary
-ekubo-wallet policy allow-all primary
-ekubo-wallet policy require-approval primary
-ekubo-wallet policy validate ./my-policy.json   # needs no wallet or database
-ekubo-wallet policy set primary ./my-policy.json
-ekubo-wallet policy review primary              # apply an agent's proposal
+ekubo-wallet account policy show primary
+ekubo-wallet account policy allow-all primary
+ekubo-wallet account policy require-approval primary
+ekubo-wallet account policy validate ./my-policy.json   # needs no wallet or database
+ekubo-wallet account policy set primary ./my-policy.json
+ekubo-wallet review              # apply an agent's proposal
 ```
 
-Your agent can draft a policy and propose it, and `policy review` shows you a
+Your agent can draft a policy and propose it, and `review` shows you a
 human-readable diff of what would change about its authority, plus the agent's
 rationale, before you confirm it in the terminal.
 
@@ -237,7 +237,7 @@ tool can produce an execution plan; this wallet validates, simulates, and
 policy-checks every plan identically and treats all of them as untrusted input.
 Plans arrive by reference — an https URL verified against a published keccak256
 digest, a `data:` URI carrying it inline, or a `file:` path described with
-`ekubo-wallet meta-reference` — so the agent relaying one passes a line of text
+`ekubo-wallet mcp reference` — so the agent relaying one passes a line of text
 instead of the whole body.
 
 ## What it deliberately does not do

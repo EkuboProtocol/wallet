@@ -117,7 +117,7 @@ impl WalletMcpServer {
         ensure!(
             configured.wallets.is_empty() || config.data_dir().join("policies.db").is_file(),
             "{} lists wallets but {} does not exist. If a wallet was created or imported while \
-             policy initialization failed, repair it with `ekubo-wallet policy require-approval \
+             policy initialization failed, repair it with `ekubo-wallet account policy require-approval \
              <wallet-id>` or remove it with `ekubo-wallet account remove <wallet-id>`. If this \
              directory belongs to different wallet software, point EKUBO_WALLET_HOME elsewhere.",
             config.data_dir().join("config.json").display(),
@@ -243,7 +243,7 @@ struct SimulateInput {
     /// as an envelope whose url is a `data:application/json[;base64],…` URI
     /// of its exact bytes (integrity optional there). A plan you assembled
     /// yourself — two prepared plans spliced into one batch, say — can stay
-    /// on disk instead: write the JSON, run `ekubo-wallet meta-reference <path>`,
+    /// on disk instead: write the JSON, run `ekubo-wallet mcp reference <path>`,
     /// and pass the `file:` envelope it prints, integrity and byte count
     /// included, so the calldata never travels through your context.
     reference: ArtifactReference,
@@ -276,7 +276,7 @@ struct SendExecutionPlanInput {
     chain_id: String,
     /// The producer's `artifact_reference` envelope for the plan to simulate
     /// and send, passed through VERBATIM, or the `file:` envelope
-    /// `ekubo-wallet meta-reference <path>` prints for a plan you assembled and
+    /// `ekubo-wallet mcp reference <path>` prints for a plan you assembled and
     /// wrote to disk. Provide exactly one of `reference`, `simulation_id`, or
     /// `request_id`.
     #[serde(default)]
@@ -524,7 +524,7 @@ struct ProposeTokensInput {
     /// verifies the envelope's integrity digest and byte count over what it
     /// actually fetched. This changes only who carries the bytes — the
     /// entries still reach the owner as suggestions and are still named
-    /// nothing until they accept them in `ekubo-wallet meta-tokens review`. The
+    /// nothing until they accept them in `ekubo-wallet review`. The
     /// same 10000-entry cap applies: a longer list is refused rather than
     /// truncated.
     #[serde(default)]
@@ -1067,7 +1067,7 @@ impl WalletMcpServer {
     // in-process, short-lived, and invisible at approval time.
     #[tool(
         name = "wallet_simulate_execution_plan",
-        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet meta-reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
+        description = "Resolve an exact execution plan from a producer's artifact_reference envelope passed through VERBATIM as reference (the wallet fetches the body over public https — or decodes a data:application/json URI, or reads a file: path you described with `ekubo-wallet mcp reference <path>` — and verifies the envelope's integrity digest and byte count), validate and policy-check it, then execute its direct call or atomic EIP-7702 Calibur batch with eth_simulateV1 against a pinned parent block. Never rename, restate, or reconstruct the envelope or the plan body. The wallet verifies response linkage and locally derives policy findings from returned results and transfer logs; there is no local fork or eth_getProof path. Policy findings describe what the user will be asked to approve, not a reason to stop: an allowed=false result with policy_outcome \"requires_approval\" still goes to wallet_send_execution_plan, which queues it for human approval. The one exception is policy_outcome \"rejected\", meaning a deny rule in the user's own policy matched: that never queues and sending it only fails. Follow the returned instruction.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1304,7 +1304,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_batch_eth_call",
-        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the stored call bundle itself instead of having it restated. A bundle you assembled yourself can stay on disk: write it, run `ekubo-wallet meta-reference <path>`, and pass the file: envelope it prints. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
+        description = "Execute 1-128 read-only eth_call requests against one exact resolved block. Accepts inline calls, or a producer read_calls_reference envelope passed through VERBATIM as reference — the wallet fetches and integrity-verifies the stored call bundle itself instead of having it restated. A bundle you assembled yourself can stay on disk: write it, run `ekubo-wallet mcp reference <path>`, and pass the file: envelope it prints. Uses Multicall3 when caller semantics permit, otherwise bounded parallel individual calls, and can apply the same deterministic local ABI decoder inline.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn wallet_batch_eth_call(
@@ -1385,7 +1385,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_tokens",
-        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. Provide the entries one of two ways: inline in tokens, or — for anything beyond a handful — as a producer's token_list artifact_reference envelope passed through VERBATIM as reference, which the wallet fetches and integrity-verifies itself instead of having the list restated a field at a time. Prefer the reference: a thousand-token list costs about fifty thousand output tokens to write out and a few hundred to reference, and the two paths are otherwise identical. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet meta-tokens review`, where they accept or reject them by list. The owner sees your list_name marked as a name you gave rather than one anything verified, so it can never be mistaken for a group wallet_import_token_list built from a publisher's own TLS host. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting reaches no chain at all: a contract cannot tell the owner whether the curator you cited is trustworthy, which is the only question a listing raises, so their approval is the check and an address with nothing behind it just yields a row that names nothing.",
+        description = "Suggest tokens for the owner to add to the local token database, from a token list you name. Provide the entries one of two ways: inline in tokens, or — for anything beyond a handful — as a producer's token_list artifact_reference envelope passed through VERBATIM as reference, which the wallet fetches and integrity-verifies itself instead of having the list restated a field at a time. Prefer the reference: a thousand-token list costs about fifty thousand output tokens to write out and a few hundred to reference, and the two paths are otherwise identical. This never adds anything: suggestions wait until the owner reviews them in the separate CLI with `ekubo-wallet review`, where they accept or reject them by list. The owner sees your list_name marked as a name you gave rather than one anything verified, so it can never be mistaken for a group wallet_import_token_list built from a publisher's own TLS host. Symbols matter because the wallet shows them when the owner reviews a transaction that moves the token, and a name the owner trusts is worth forging — which is why they come from a curated list you cite rather than from each contract's own symbol(), a string any address can answer with anything, and why only the owner can turn a suggestion into a name. Pass the list's own symbol, name, and decimals for each entry; decimals scales every amount the owner is shown for the token and the contract is never consulted about it either. Tokens already confirmed are reported and not re-proposed; proposing the same address again replaces the earlier suggestion. Accepting reaches no chain at all: a contract cannot tell the owner whether the curator you cited is trustworthy, which is the only question a listing raises, so their approval is the check and an address with nothing behind it just yields a row that names nothing.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1479,7 +1479,7 @@ impl WalletMcpServer {
             summary,
             awaiting_review,
             skipped_non_evm,
-            next_step: "The owner reviews these with `ekubo-wallet meta-tokens review`. \
+            next_step: "The owner reviews these with `ekubo-wallet review`. \
                         Until they accept one, the wallet keeps showing that token by \
                         address alone."
                 .into(),
@@ -1488,7 +1488,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_import_token_list",
-        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 10000 entries after that selection, which fits the published lists people actually name, and an overflowing selection is refused rather than truncated — narrow the chains, or point at a more specific list. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the separate CLI with `ekubo-wallet meta-tokens review`, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
+        description = "Import a published token list by URL, so the owner can set up the lists they want by naming one rather than having it restated entry by entry. Takes the https URL a list is published at — https://tokens.uniswap.org, and the other lists catalogued at tokenlists.org — and reads the standard Uniswap token-list schema: a tokens array whose entries carry chainId, address, symbol, name, and decimals, with the list's own name, version, and timestamp reported back so the owner can see which revision they are accepting. Published lists span many chains, so entries are taken only for the chains this wallet has networks configured for; pass chain_ids to narrow that further. Everything else is skipped and counted rather than imported silently, including entries whose address is not a 20-byte EVM address, such as a list's Starknet or Solana rows. At most 10000 entries after that selection, which fits the published lists people actually name, and an overflowing selection is refused rather than truncated — narrow the chains, or point at a more specific list. This adds nothing to the token database: every entry becomes a suggestion the owner accepts or rejects as a group in the separate CLI with `ekubo-wallet review`, and until they do the wallet keeps showing those tokens by address alone. Unlike the reference path on wallet_propose_tokens there is no integrity digest here, because a list at a well-known URL is whatever its curator published today — which is why the owner is shown the host that served it rather than a name you chose, and why you cannot label the import: the suggestions are grouped under that host and the list's own declared name. Symbols and decimals come from the list and are never read from the contract, since any address can answer symbol() with anything, and decimals scales every amount the owner is ever shown for the token. Use wallet_propose_tokens instead when you hold entries inline or a producer handed you a token_list reference.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1565,11 +1565,10 @@ impl WalletMcpServer {
             awaiting_review,
             skipped_non_evm: parsed.skipped_non_evm,
             skipped_other_chain: parsed.skipped_other_chain,
-            next_step:
-                "The owner reviews these with `ekubo-wallet meta-tokens review`, where they \
+            next_step: "The owner reviews these with `ekubo-wallet review`, where they \
                         accept or reject the whole list at once. Until they accept one, the \
                         wallet keeps showing that token by address alone."
-                    .into(),
+                .into(),
         }))
     }
 
@@ -1714,7 +1713,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_send_execution_plan",
-        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet meta-reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan no policy rule covers queues for approval either way, and a plan a deny rule matched fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
+        description = "Simulate, policy-check, locally sign, persist, and broadcast an exact execution plan resolved from a producer's artifact_reference envelope passed through VERBATIM as reference (or from the file: envelope `ekubo-wallet mcp reference <path>` prints for a plan you assembled and wrote to disk); send a plan already simulated by wallet_simulate_execution_plan without simulating it again; or submit the exact signed bytes for a separately approved request_id. Provide exactly one of reference, simulation_id, or request_id. Prefer simulation_id whenever you have just simulated the plan: eth_simulateV1 is the most expensive request this wallet makes, and sending the plan itself pays for it a second time. Set on_simulation_failure to \"fail\" to be told about a failed simulation instead of queuing it for the user; a plan no policy rule covers queues for approval either way, and a plan a deny rule matched fails without queuing whatever you set. This tool cannot approve a request or create a replacement transaction on retry.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1823,7 +1822,7 @@ impl WalletMcpServer {
 
     #[tool(
         name = "wallet_propose_network",
-        description = "Suggest one complete server-wide EVM network for the owner to confirm with `ekubo-wallet network review`. Adds nothing: a proposal naming a chain ID that is already configured is an edit of that network, one naming a chain ID that is not is an addition, and neither takes effect until the owner accepts it in the terminal. The RPC endpoint is admitted (public https, no credentials, no private address) when proposed and its chain ID is verified when accepted.",
+        description = "Suggest one complete server-wide EVM network for the owner to confirm with `ekubo-wallet review`. Adds nothing: a proposal naming a chain ID that is already configured is an edit of that network, one naming a chain ID that is not is an addition, and neither takes effect until the owner accepts it in the terminal. The RPC endpoint is admitted (public https, no credentials, no private address) when proposed and its chain ID is verified when accepted.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1901,7 +1900,7 @@ impl WalletMcpServer {
         // The chain ID is deliberately NOT probed here. Verifying it now would
         // prove something about an endpoint at proposal time and store the
         // result for the owner to read later, which is the weaker claim; the
-        // check that matters happens in `network review`, immediately before
+        // check that matters happens in `review`, immediately before
         // the profile is written. Not probing also keeps an unconfirmed agent
         // action from producing a JSON-RPC request.
         // Every endpoint, not just the first. A proposal whose second entry
@@ -2200,7 +2199,7 @@ impl WalletMcpServer {
             rationale: proposal.rationale,
             replaced_previous_proposal,
             instruction: format!(
-                "The proposal is stored. Tell the user to run `ekubo-wallet policy review {}` in their own terminal to see the permission diff and your rationale, then approve or reject it there (never run that command for them and never claim it was applied). Confirm the outcome by reading wallet_get_policy: the revision advances past {} when the user applies the proposal. Any policy change by the user invalidates this proposal.",
+                "The proposal is stored. Tell the user to run `ekubo-wallet review {}` in their own terminal to see the permission diff and your rationale, then approve or reject it there (never run that command for them and never claim it was applied). Confirm the outcome by reading wallet_get_policy: the revision advances past {} when the user applies the proposal. Any policy change by the user invalidates this proposal.",
                 proposal.wallet_id, proposal.source_revision
             ),
         }))
@@ -3265,7 +3264,7 @@ impl WalletMcpServer {
         anyhow::ensure!(
             present,
             "wallet {wallet_id} has no policy, so nothing it holds can be signed. Tell the user to \
-             run `ekubo-wallet policy require-approval {wallet_id}` in their own terminal, or to \
+             run `ekubo-wallet account policy require-approval {wallet_id}` in their own terminal, or to \
              remove the wallet with `ekubo-wallet account remove {wallet_id}`."
         );
         Ok(())

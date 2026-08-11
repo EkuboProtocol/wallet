@@ -4,10 +4,10 @@ _ekubo-wallet() {
   local -a candidates
 
   # Everything already on the line, the command name included and the
-  # half-typed word at the cursor excluded. The binary decides what belongs
+  # half-typed word at the cursor passed separately. The binary decides what belongs
   # here — subcommands, flags, configured networks, account ids, queued
   # requests — so this script never has to know which position means what.
-  candidates=("${(@f)$("${words[1]}" __complete zsh "${words[@]:1:$((CURRENT-1))}" 2>/dev/null)}")
+  candidates=("${(@f)$("${words[1]}" __complete zsh --current "${words[CURRENT]}" "${words[@]:1:$((CURRENT-1))}" 2>/dev/null)}")
 
   if [[ "${candidates[1]}" == "__ekubo_wallet_complete_files__" ]]; then
     _files

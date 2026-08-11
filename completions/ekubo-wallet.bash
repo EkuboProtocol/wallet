@@ -4,10 +4,10 @@ _ekubo_wallet() {
   current="${COMP_WORDS[COMP_CWORD]}"
 
   # Everything already on the line, the command name included and the
-  # half-typed word at the cursor excluded. The binary decides what belongs
+  # half-typed word at the cursor passed separately. The binary decides what belongs
   # here — subcommands, flags, configured networks, account ids, queued
   # requests — so this script never has to know which position means what.
-  candidates="$("${COMP_WORDS[0]}" __complete plain "${COMP_WORDS[@]:0:COMP_CWORD}" 2>/dev/null)"
+  candidates="$("${COMP_WORDS[0]}" __complete plain --current "$current" "${COMP_WORDS[@]:0:COMP_CWORD}" 2>/dev/null)"
 
   # Both branches below read a command substitution into an array, which bash
   # splits on `$IFS` and then expands as a pathname pattern. Neither default is

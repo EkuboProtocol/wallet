@@ -145,6 +145,27 @@ fn transaction_lines_render_offline() {
         block_explorer_url: None,
         documentation_url: None,
     };
+    let token_proposals: Vec<_> = ["AAA", "BBB", "CCC", "DDD", "EEE"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, symbol)| crate::token_store::TokenProposal {
+            token: crate::token_store::ListedToken {
+                chain_id: 1,
+                address: alloy::primitives::Address::repeat_byte(
+                    u8::try_from(index + 1).expect("the fixture has fewer than 256 tokens"),
+                ),
+                symbol: symbol.into(),
+                name: None,
+                decimals: 18,
+            },
+            source: if symbol == "EEE" {
+                "second-list".into()
+            } else {
+                "example-list".into()
+            },
+            proposed_at: now,
+        })
+        .collect();
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
     let (rows, choices) = pending_approval_rows(
@@ -154,9 +175,10 @@ fn transaction_lines_render_offline() {
         std::slice::from_ref(&message),
         std::slice::from_ref(&proposal),
         std::slice::from_ref(&network_proposal),
+        &token_proposals,
     );
-    assert_eq!(rows.len(), 5);
-    assert_eq!(choices.len(), 5);
+    assert_eq!(rows.len(), 7);
+    assert_eq!(choices.len(), 7);
     // The default configuration names chain 1, so the row says
     // "ethereum" — the chain ID lives in the haystack instead.
     assert!(rows[0].haystack.contains("ethereum"));
@@ -174,6 +196,22 @@ fn transaction_lines_render_offline() {
     assert!(matches!(choices[4], PendingChoice::Network(chain) if chain == 42_161));
     assert!(rows[4].haystack.contains("example.invalid"));
     assert!(rows[4].haystack.contains("42161"));
+    assert!(matches!(&choices[5], PendingChoice::Tokens(source) if source == "example-list"));
+    assert!(rows[5].haystack.contains("4 token(s)"));
+    assert!(rows[5].haystack.contains("aaa"));
+    assert!(rows[5].haystack.contains("bbb"));
+    assert!(rows[5].haystack.contains("ccc"));
+    assert!(!rows[5].haystack.contains("ddd"));
+    assert!(matches!(&choices[6], PendingChoice::Tokens(source) if source == "second-list"));
+
+    let batches = token_proposal_batches(&token_proposals);
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0]["source"], "example-list");
+    assert_eq!(batches[0]["count"], 4);
+    assert_eq!(batches[0]["tokens"].as_array().unwrap().len(), 4);
+    assert_eq!(batches[0]["tokens"][3]["symbol"], "DDD");
+    assert_eq!(batches[1]["source"], "second-list");
+    assert_eq!(batches[1]["count"], 1);
 }
 
 #[test]
@@ -197,16 +235,29 @@ fn parses_transaction_network_and_completion_parity_commands() {
             },
         }) if account == "primary"
     ));
-    let cli = Cli::try_parse_from(["ekubo-wallet", "shell-completion", "zsh"]).unwrap();
+    let cli = Cli::try_parse_from(["ekubo-wallet", "settings", "completion", "zsh"]).unwrap();
     assert!(matches!(
         cli.command,
-        Command::Completion { shell: Shell::Zsh }
+        Command::Settings(SettingsArgs {
+            command: SettingsCommand::Completion { shell: Shell::Zsh }
+        })
     ));
-    let cli = Cli::try_parse_from(["ekubo-wallet", "network", "presets"]).unwrap();
-    assert!(matches!(
-        cli.command,
-        Command::Network(args) if matches!(args.command, NetworkCommand::Presets { .. })
-    ));
+    assert!(Cli::try_parse_from(["ekubo-wallet", "settings", "network", "presets"]).is_err());
+    for removed in [
+        vec!["ekubo-wallet", "server"],
+        vec!["ekubo-wallet", "policy", "schema"],
+        vec!["ekubo-wallet", "network", "list"],
+        vec!["ekubo-wallet", "meta-tokens", "list"],
+        vec!["ekubo-wallet", "meta-address-book", "list"],
+        vec!["ekubo-wallet", "meta-agent", "list"],
+        vec!["ekubo-wallet", "meta-reference", "plan.json"],
+        vec!["ekubo-wallet", "shell-completion", "zsh"],
+    ] {
+        assert!(
+            Cli::try_parse_from(removed.clone()).is_err(),
+            "removed command unexpectedly parsed: {removed:?}"
+        );
+    }
 }
 
 fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
@@ -227,7 +278,7 @@ fn add_args(name: &str, chain_id: Option<u64>) -> NetworkAddArgs {
     }
 }
 
-/// Resolves the candidate exactly as the `network add` arm does: the
+/// Resolves the candidate exactly as the `settings network add` arm does: the
 /// name is taken out of the parsed arguments first.
 fn candidate_of(mut args: NetworkAddArgs, configured: &[NetworkConfig]) -> Result<NetworkConfig> {
     let name = args
@@ -266,7 +317,7 @@ fn editing_a_configured_network_only_needs_the_field_that_changes() {
 
 #[test]
 fn a_chain_id_names_its_own_network_so_add_never_asks_for_one() {
-    // What `network add` asks first is the chain ID, and the answer is
+    // What `settings network add` asks first is the chain ID, and the answer is
     // only turned back into a name when nothing already holds that chain.
     let mut configured = default_networks();
     let base = configured
@@ -317,8 +368,8 @@ fn an_unknown_network_without_a_chain_id_says_where_to_look() {
     let error = candidate_of(add_args("nowhere", None), &default_networks())
         .expect_err("an unknown name is not a network");
     let message = error.to_string();
-    assert!(message.contains("network presets"), "{message}");
-    assert!(message.contains("network list"), "{message}");
+    assert!(message.contains("settings network add"), "{message}");
+    assert!(message.contains("settings network list"), "{message}");
     assert!(message.contains("chain ID"), "{message}");
 }
 
@@ -493,7 +544,7 @@ fn cursor_configuration_is_private_atomic_and_preserves_other_servers() {
     assert_eq!(value["mcpServers"]["other"]["command"], "other");
     assert_eq!(
         value["mcpServers"]["ekubo-wallet"]["args"],
-        serde_json::json!(["server"])
+        serde_json::json!(["mcp", "serve"])
     );
     #[cfg(unix)]
     {
@@ -574,7 +625,7 @@ fn status_summarizes_every_queue_that_is_waiting() {
     // Token suggestions are not part of the review inbox, so they are reported
     // on their own line pointing at their own screen.
     assert!(rendered.contains("40 suggested"));
-    assert!(rendered.contains("ekubo-wallet meta-tokens review"));
+    assert!(rendered.contains("ekubo-wallet review"));
 }
 
 #[test]
@@ -611,7 +662,7 @@ fn unregistering_cursor_leaves_every_other_entry_alone() {
 
 #[test]
 fn unregistering_cursor_without_a_configuration_is_not_an_error() {
-    // `meta-agent remove` with no agent named walks everything detected, so a
+    // `mcp unregister` with no agent named walks everything detected, so a
     // machine where Cursor was never configured must not fail the sweep.
     let home = tempfile::tempdir().unwrap();
     remove_cursor_mcp_at(home.path(), LOCAL_SERVER_NAME).unwrap();
@@ -704,7 +755,7 @@ fn opencode_configuration_is_private_and_preserves_everything_else() {
     assert_eq!(wallet["type"], "local");
     assert_eq!(
         wallet["command"],
-        serde_json::json!(["/usr/local/bin/ekubo-wallet", "server"])
+        serde_json::json!(["/usr/local/bin/ekubo-wallet", "mcp", "serve"])
     );
     assert_eq!(wallet["enabled"], true);
     assert!(wallet.get("args").is_none());
@@ -778,7 +829,7 @@ fn removing_the_wallet_from_opencode_leaves_the_companion_in_place() {
 
 #[test]
 fn unregistering_opencode_without_a_configuration_is_not_an_error() {
-    // `meta-agent remove` with no agent named walks everything detected, so a
+    // `mcp unregister` with no agent named walks everything detected, so a
     // machine where opencode was never configured must not fail the sweep.
     let config = tempfile::tempdir().unwrap();
     remove_opencode_mcp_at(config.path(), LOCAL_SERVER_NAME).unwrap();
@@ -874,7 +925,7 @@ fn a_commented_opencode_json_is_refused_rather_than_replaced() {
 fn opencode_detection_reads_every_file_and_tells_the_two_servers_apart() {
     let config = tempfile::tempdir().unwrap();
     // Nothing configured at all is a definite no, not an unanswerable
-    // question: `meta-agent list` has to be able to say "not registered".
+    // question: `mcp status` has to be able to say "not registered".
     let empty = opencode_registration_at(config.path()).unwrap();
     assert!(!empty.wallet);
     assert!(!empty.companion);
@@ -934,15 +985,16 @@ fn opencode_config_lives_under_xdg_rather_than_the_platform_convention() {
 fn a_registered_wallet_alone_does_not_read_as_a_registered_companion() {
     // The bug this exists for: `ekubo` is a prefix of `ekubo-wallet`, so the
     // obvious substring test reports both servers present when only the
-    // wallet is, and `meta-agent list` then never tells anyone the companion is
+    // wallet is, and `mcp status` then never tells anyone the companion is
     // missing.
-    let wallet_only =
-        read_registration("ekubo-wallet: /Users/x/.local/bin/ekubo-wallet server - ✓ Connected\n");
+    let wallet_only = read_registration(
+        "ekubo-wallet: /Users/x/.local/bin/ekubo-wallet mcp serve - ✓ Connected\n",
+    );
     assert!(wallet_only.wallet);
     assert!(!wallet_only.companion);
 
     let both = read_registration(
-        "ekubo-wallet: /Users/x/.local/bin/ekubo-wallet server - ✓ Connected\n\
+        "ekubo-wallet: /Users/x/.local/bin/ekubo-wallet mcp serve - ✓ Connected\n\
          ekubo: https://mcp.ekubo.org/mcp (HTTP) - ✓ Connected\n",
     );
     assert!(both.wallet);
@@ -1073,10 +1125,8 @@ fn no_spelling_is_a_prefix_of_a_sibling() {
 fn one_character_reaches_each_of_the_commands_people_actually_type() {
     // `review`, `account`, and `transaction` are the three a person reaches
     // for daily, so each is worth a whole letter of the top-level namespace.
-    // Everything that used to share one has moved rather than been abbreviated:
-    // `agent` and `address-book` to `meta-agent` and `meta-address-book`,
-    // `reference` to `meta-reference`, `token` to `meta-tokens`. The `meta-`
-    // prefix is not decoration — it is what keeps those letters clear.
+    // Configuration and MCP plumbing live under `settings` and `mcp`, so
+    // routine commands keep their natural root-level initials.
     //
     // A rival is another *command*, not another spelling: `tx` shares `t`
     // with `transaction` and reaches the same place, so the letter is still
@@ -1099,10 +1149,8 @@ fn one_character_reaches_each_of_the_commands_people_actually_type() {
 
 #[test]
 fn the_command_tree_has_no_shell_completion_ambiguity_for_connect() {
-    // `completion` sat on `c` beside `connect`, so the one command a person
-    // types while holding a pasted WalletConnect link could not be completed
-    // in a keystroke. Spelling it `shell-completion` is the fix, and the cost
-    // is that `s` now carries three commands — none of them typed often.
+    // Completion lives under `settings`, so the command a person types while
+    // holding a pasted WalletConnect link owns `c` at the root.
     let level = spellings(&Cli::command());
     let names: Vec<&str> = level
         .iter()
@@ -1233,7 +1281,7 @@ mod reviewed_wallet_tests {
                 .matches("ensure_reviewed_wallet(config, &wallet)?;")
                 .count(),
             2,
-            "the proposal review and the direct `policy set` both check"
+            "the proposal review and the direct `account policy set` both check"
         );
         // No newline in either needle. The checkout is CRLF on Windows, so a
         // `\n` in the pattern matches nothing there and `split_once` returns

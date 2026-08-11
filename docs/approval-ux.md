@@ -266,8 +266,8 @@ controls, not spending limits.
 The platform prompt is asked for at two boundaries. The first is the private
 key coming out of the credential store, or leaving it for good: transaction,
 typed-data, and message signing, `account export`, and `account remove`. The
-second is the signing policy being replaced — `policy set`, the presets, or an
-agent proposal applied through `policy review`. A policy change reads no key
+second is the signing policy being replaced — `account policy set`, the presets, or an
+agent proposal applied through `review`. A policy change reads no key
 material, but the policy is what decides what gets signed with nobody
 watching, so rewriting it is authenticated like signing. Changing a network,
 the address book, or the token database grants no signing authority and is

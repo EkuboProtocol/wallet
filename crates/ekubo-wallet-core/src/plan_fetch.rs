@@ -23,7 +23,7 @@
 //! is verified exactly as a fetched one is, and for the same reason it is
 //! required to be: a local body is not the reference the way a `data:`
 //! payload is, so nothing but the digest ties the bytes read at send time to
-//! the bytes read at simulate time. `ekubo-wallet meta-reference <path>` prints
+//! the bytes read at simulate time. `ekubo-wallet mcp reference <path>` prints
 //! the envelope, digest included, for a file the caller just wrote.
 //!
 //! Requiring the digest is also what keeps a `file:` reference from becoming
@@ -319,7 +319,7 @@ pub async fn resolve_execution_plan_reference(
 ///
 /// A token list earns no trust from having been fetched rather than typed:
 /// what comes back is a set of suggestions the owner still confirms one list
-/// at a time in `ekubo-wallet meta-tokens review`. Verifying the digest only
+/// at a time in `ekubo-wallet review`. Verifying the digest only
 /// establishes that the bytes are the ones the producer published, which is
 /// the same thing it establishes for a plan.
 pub async fn resolve_token_list_reference(
@@ -347,7 +347,7 @@ pub async fn resolve_token_list_reference(
 /// plan reference names bytes that get simulated and signed, so its digest is
 /// the only thing tying what the owner reviewed to what executes. A list names
 /// nothing: every entry becomes a suggestion that waits for the owner in
-/// `ekubo-wallet meta-tokens review`, and their review is the check the digest would
+/// `ekubo-wallet review`, and their review is the check the digest would
 /// otherwise stand in for. A digest would also be answering the wrong
 /// question — it proves the bytes are the ones the *caller* described, while
 /// what the owner is deciding is whether the curator is worth trusting, which
@@ -446,7 +446,7 @@ pub async fn fetch_reference(
             reference,
             noun,
             "read from a local file",
-            "; `ekubo-wallet meta-reference <path>` prints an envelope for a file you just wrote",
+            "; `ekubo-wallet mcp reference <path>` prints an envelope for a file you just wrote",
         )?;
         (
             read_local_file(&reference.url, expected_type).await?,
@@ -974,7 +974,7 @@ async fn resolve_with_deadline(host: &str, port: u16, noun: &str) -> Result<Vec<
 /// This cannot be as tight as the reference fetch: the URL is stored and used
 /// later, so there is no connection to pin the vetted addresses to, and a
 /// resolver that answers differently afterwards is not caught here. What backs
-/// it up is that the stored endpoint is visible to the owner in `network list`.
+/// it up is that the stored endpoint is visible to the owner in `settings network list`.
 pub async fn ensure_public_endpoint(url: &Url, noun: &str) -> Result<()> {
     ensure!(url.scheme() == "https", "{noun} must use https");
     ensure!(

@@ -85,8 +85,8 @@ installer changes that. The trust you extend by registering it is the trust
 you extend to any tool your agent can call: it can propose, and it can consume
 whatever you send it.
 
-`EKUBO_WALLET_SKIP_COMPANION=1` skips it at install time, `ekubo-wallet agent
-add --no-companion` skips it on a later re-run, and `ekubo-wallet meta-agent list`
+`EKUBO_WALLET_SKIP_COMPANION=1` skips it at install time, `ekubo-wallet mcp
+register --no-companion` skips it on a later re-run, and `ekubo-wallet mcp status`
 reports it separately so a wallet-only registration is visible rather than
 implied.
 
@@ -106,9 +106,9 @@ install -m 0755 ekubo-wallet-<version>-<target>/ekubo-wallet ~/.local/bin/
 
 The archive holds the executable, the license, the README, and — on Linux —
 the polkit action under `contrib/polkit/`. Everything else it used to carry is
-produced by the binary itself: `ekubo-wallet shell-completion bash|zsh|fish` writes
-the completion script, and `ekubo-wallet policy schema` writes the policy JSON
-Schema. Registration is `ekubo-wallet meta-agent add`.
+produced by the binary itself: `ekubo-wallet settings completion bash|zsh|fish` writes
+the completion script, and `ekubo-wallet account policy schema` writes the policy JSON
+Schema. Registration is `ekubo-wallet mcp register`.
 
 macOS archives are `.zip` rather than `.tar.gz`. If a release is published
 without Apple signing — its notes say so explicitly — Gatekeeper blocks the
@@ -141,7 +141,7 @@ wallet-only setup. Cursor reads exactly this shape. The CLIs spell it
 differently — `claude mcp add --transport http ekubo https://mcp.ekubo.org/mcp`,
 `gemini mcp add ekubo https://mcp.ekubo.org/mcp --transport http`, and
 `codex mcp add ekubo --url https://mcp.ekubo.org/mcp` — which is why
-`ekubo-wallet meta-agent add` exists rather than a documented command per agent.
+`ekubo-wallet mcp register` exists rather than a documented command per agent.
 
 opencode spells it differently again, under an `mcp` key in
 `~/.config/opencode/opencode.json` — that path on every platform, because
@@ -164,11 +164,11 @@ opencode follows the XDG variables rather than the native config directory:
 }
 ```
 
-`ekubo-wallet meta-agent add opencode` writes exactly that. It writes
+`ekubo-wallet mcp register opencode` writes exactly that. It writes
 `opencode.json` even when an `opencode.jsonc` is what you keep your settings
 in: opencode merges both, and this wallet will not rewrite a commented file
 through a serializer that would drop the comments. Remove an entry from a
-`.jsonc` by hand — `meta-agent remove` says so rather than passing over it.
+`.jsonc` by hand — `mcp unregister` says so rather than passing over it.
 
 Use an absolute path, such as `/home/you/.local/bin/ekubo-wallet`, if the agent
 does not inherit your login shell's `PATH`. Confirm the installed build with

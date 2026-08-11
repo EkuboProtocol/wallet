@@ -23,13 +23,16 @@ fn cli() -> Command {
 
 #[test]
 fn committed_policy_schema_matches_the_enforced_types() {
-    let output = cli().arg("policy").arg("schema").output().unwrap();
+    let output = cli()
+        .args(["account", "policy", "schema"])
+        .output()
+        .unwrap();
     assert!(output.status.success(), "policy schema exited non-zero");
     let generated: Value = serde_json::from_slice(&output.stdout).expect("schema is valid JSON");
     assert_eq!(
         generated,
         read_json("schemas/policy.schema.json"),
-        "schemas/policy.schema.json is stale; regenerate it with `ekubo-wallet policy schema`"
+        "schemas/policy.schema.json is stale; regenerate it with `ekubo-wallet account policy schema`"
     );
 }
 
@@ -64,7 +67,7 @@ fn every_shipped_policy_example_parses() {
 
 #[test]
 fn allow_all_template_matches_the_built_in_profile() {
-    // `policy allow-all` and the shipped template must install the same rules,
+    // `account policy allow-all` and the shipped template must install the same rules,
     // so a reader can inspect the template to learn exactly what that command
     // does.
     let template = WalletPolicy::parse(read_json(
@@ -78,7 +81,7 @@ fn allow_all_template_matches_the_built_in_profile() {
 
 #[test]
 fn require_approval_profile_matches_the_shipped_deny_all_example() {
-    // `policy require-approval` and the shipped example must install the same
+    // `account policy require-approval` and the shipped example must install the same
     // rules, so a reader can inspect the file to learn exactly what that
     // command does.
     let example =
@@ -155,7 +158,7 @@ fn every_documented_decode_plan_parses() {
 #[test]
 fn policy_validate_accepts_examples_and_rejects_malformed_documents() {
     let valid = cli()
-        .arg("policy")
+        .args(["account", "policy"])
         .arg("validate")
         .arg(repository_root().join("examples/policy.json"))
         .output()
@@ -177,7 +180,7 @@ fn policy_validate_accepts_examples_and_rejects_malformed_documents() {
     )
     .unwrap();
     cli()
-        .arg("policy")
+        .args(["account", "policy"])
         .arg("validate")
         .arg(unknown_field.path())
         .assert()
@@ -193,10 +196,13 @@ fn every_packaged_completion_asks_the_binary_and_reads_its_answer() {
     // handoff: asking in a format the binary does not print, or ignoring the
     // one answer that is a directive rather than a candidate.
     for (shell, format) in [("bash", "plain"), ("zsh", "zsh"), ("fish", "fish")] {
-        let output = cli().arg("shell-completion").arg(shell).output().unwrap();
+        let output = cli()
+            .args(["settings", "completion", shell])
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
-            "shell-completion {shell} exited non-zero"
+            "settings completion {shell} exited non-zero"
         );
         let script = String::from_utf8(output.stdout).expect("completion script is UTF-8");
         assert!(
@@ -209,7 +215,7 @@ fn every_packaged_completion_asks_the_binary_and_reads_its_answer() {
         );
         // A script that still names a subcommand is a script that has started
         // keeping its own list again.
-        for stale in ["meta-address-book", "rebroadcast", "require-approval"] {
+        for stale in ["address-book", "rebroadcast", "require-approval"] {
             assert!(
                 !script.contains(stale),
                 "{shell} completion hardcodes `{stale}` rather than asking"
@@ -238,7 +244,7 @@ fn the_completion_endpoint_answers_what_the_scripts_ask_it() {
         expected.len() > 20,
         "clap reported implausibly few subcommands: {expected:?}"
     );
-    for name in ["portfolio", "meta-address-book", "review", "--json"] {
+    for name in ["portfolio", "settings", "review", "inbox", "--json"] {
         assert!(
             offered.lines().any(|line| line == name),
             "the root completion never offers `{name}`: {offered}"
@@ -250,7 +256,14 @@ fn the_completion_endpoint_answers_what_the_scripts_ask_it() {
     );
 
     let file = cli()
-        .args(["__complete", "plain", "ekubo-wallet", "policy", "validate"])
+        .args([
+            "__complete",
+            "plain",
+            "ekubo-wallet",
+            "account",
+            "policy",
+            "validate",
+        ])
         .output()
         .unwrap();
     assert_eq!(
@@ -320,7 +333,7 @@ fn policy_validate_never_touches_wallet_state() {
     cli()
         .arg("--data-dir")
         .arg(empty_home.path())
-        .arg("policy")
+        .args(["account", "policy"])
         .arg("validate")
         .arg(repository_root().join("examples/policies/deny-all.json"))
         .assert()

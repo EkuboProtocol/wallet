@@ -18,13 +18,36 @@ fn config() -> (tempfile::TempDir, ConfigStore) {
 
 fn values(config: &ConfigStore, line: &str) -> Vec<String> {
     let words: Vec<String> = line.split_whitespace().map(ToOwned::to_owned).collect();
-    match offer(config, &words).unwrap() {
+    match offer(config, &words, "").unwrap() {
         Offer::Values(candidates) => candidates
             .into_iter()
             .map(|candidate| candidate.value)
             .collect(),
         Offer::Files => panic!("`{line}` asked for file completion"),
     }
+}
+
+#[test]
+fn root_completion_prioritizes_status_without_hiding_settings() {
+    let (_directory, config) = config();
+    let empty: Vec<String> = Vec::new();
+    let Offer::Values(prioritized) = offer(&config, &empty, "s").unwrap() else {
+        panic!("root completion must offer command names");
+    };
+    let prioritized: Vec<_> = prioritized
+        .into_iter()
+        .map(|candidate| candidate.value)
+        .filter(|value| !value.starts_with('-'))
+        .collect();
+    assert_eq!(prioritized, ["status"]);
+
+    let Offer::Values(all) = offer(&config, &empty, "").unwrap() else {
+        panic!("root completion must offer command names");
+    };
+    let all: Vec<_> = all.into_iter().map(|candidate| candidate.value).collect();
+    assert!(all.contains(&"settings".to_owned()));
+    assert!(all.contains(&"review".to_owned()));
+    assert!(all.contains(&"inbox".to_owned()));
 }
 
 #[test]
@@ -36,13 +59,13 @@ fn a_network_argument_reaches_the_configured_networks() {
     for line in [
         "portfolio main --network",
         "portfolio main -n",
-        "meta-tokens list --chain",
-        "meta-tokens search usdc --chain",
-        "meta-address-book list --network",
-        "meta-address-book add",
-        "meta-tokens remove",
-        "network edit",
-        "network remove",
+        "settings tokens list --chain",
+        "settings tokens search usdc --chain",
+        "settings address-book list --network",
+        "settings address-book add",
+        "settings tokens remove",
+        "settings network edit",
+        "settings network remove",
     ] {
         let offered = values(&config, line);
         assert!(
@@ -51,9 +74,9 @@ fn a_network_argument_reaches_the_configured_networks() {
         );
     }
 
-    // `network add` is the one that means the presets instead: the configured
+    // `settings network add` is the one that means the presets instead: the configured
     // list is what it would be adding to.
-    let presets = values(&config, "network add");
+    let presets = values(&config, "settings network add");
     assert!(presets.contains(&"ethereum".to_owned()));
 }
 
@@ -87,14 +110,14 @@ fn a_path_argument_hands_the_shell_its_own_file_completion() {
     // and get out of the way.
     let (_directory, config) = config();
     for line in [
-        "policy validate",
-        "policy set primary",
-        "meta-reference",
-        "meta-tokens import",
+        "account policy validate",
+        "account policy set primary",
+        "mcp reference",
+        "settings tokens import",
     ] {
         let words: Vec<String> = line.split_whitespace().map(ToOwned::to_owned).collect();
         assert_eq!(
-            offer(&config, &words).unwrap(),
+            offer(&config, &words, "").unwrap(),
             Offer::Files,
             "`{line}` should complete paths"
         );
@@ -107,11 +130,11 @@ fn clap_answers_for_every_argument_that_names_its_own_values() {
     // so a new one is completable the day it is added.
     let (_directory, config) = config();
     assert!(values(&config, "legal show").contains(&"privacy".to_owned()));
-    assert!(values(&config, "meta-agent add").contains(&"claude-code".to_owned()));
-    assert!(values(&config, "shell-completion").contains(&"fish".to_owned()));
+    assert!(values(&config, "mcp register").contains(&"claude-code".to_owned()));
+    assert!(values(&config, "settings completion").contains(&"fish".to_owned()));
     assert!(values(&config, "review --decision").contains(&"reject".to_owned()));
     assert!(
-        values(&config, "meta-reference /tmp/plan.json --type")
+        values(&config, "mcp reference /tmp/plan.json --type")
             .contains(&"execution_plan".to_owned())
     );
     assert!(values(&config, "account create main --policy").contains(&"allow-all".to_owned()));
@@ -180,16 +203,16 @@ fn a_flag_still_waiting_for_its_value_asks_nothing_else() {
 
 #[test]
 fn an_alias_is_offered_for_the_network_already_named() {
-    // The alias argument of `meta-address-book remove` means an alias *on that
+    // The alias argument of `settings address-book remove` means an alias *on that
     // chain*, so the network typed a word earlier is what scopes it. Without a
     // database there is nothing to list; what is checked here is that the
     // scope is read from the line rather than ignored.
     let (_directory, config) = config();
-    let words = ["meta-address-book", "remove", "ethereum"].map(ToOwned::to_owned);
+    let words = ["settings", "address-book", "remove", "ethereum"].map(ToOwned::to_owned);
     let mut root = <crate::cli::Cli as clap::CommandFactory>::command();
     root.build();
     let position = locate(&root, &words);
-    assert_eq!(position.path, "meta-address-book remove");
+    assert_eq!(position.path, "settings address-book remove");
     assert_eq!(position.positionals, vec!["ethereum".to_owned()]);
     assert_eq!(scoped_chain(&config, &position), Some(1));
 }
@@ -217,7 +240,7 @@ fn every_source_rule_names_a_real_command_and_argument() {
     // `SOURCE_RULES` is keyed by strings the compiler never compares against
     // the command tree. A key that matches nothing is not an error: `source_of`
     // returns `None` and the argument silently loses its candidates, which is
-    // precisely what renaming `token` to `meta-tokens` did to six of them. So
+    // precisely what moving commands between namespaces can do. So
     // the keys are resolved here, and a stale one fails the build instead.
     let root = <crate::cli::Cli as clap::CommandFactory>::command();
     for rule in SOURCE_RULES {

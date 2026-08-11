@@ -71,47 +71,40 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the stdio MCP server.
-    Server,
-    /// Print the server version.
-    Version,
     /// What is set up, what is missing, and what is waiting for you.
     ///
     /// Reads only local state, so it never blocks on an endpoint and works
     /// before the legal documents are accepted — finding out that they are
     /// what is blocking signing is most of the point.
     Status,
-    /// Read native and token balances for an account from a configured RPC.
-    ///
-    /// The one command here that talks to a chain. Balances come from the
-    /// endpoint configured for the network, read at a single pinned block so
-    /// the whole answer is one consistent view rather than a sequence of them.
-    #[command(alias = "balance")]
-    Portfolio(PortfolioArgs),
     /// Keys this wallet holds, and the addresses they control.
     ///
     /// Named `account` rather than `wallet` because the program is already
     /// called that: `ekubo-wallet wallet create` said it twice and the second
     /// one carried nothing.
     Account(AccountArgs),
-    /// Configured EVM networks and the endpoints they are reached through.
-    Network(Box<NetworkArgs>),
-    /// What each account may sign without being asked.
-    Policy(PolicyArgs),
+    /// Read native and token balances for an account from a configured RPC.
+    ///
+    /// An account may be a wallet id or any EVM address, including one this
+    /// wallet does not control.
+    #[command(alias = "balance")]
+    Portfolio(PortfolioArgs),
+    /// Everything waiting for a human decision.
+    #[command(visible_alias = "inbox")]
+    Review {
+        request_id: Option<Uuid>,
+        /// Decide without the interactive prompt.
+        ///
+        /// `reject` needs no terminal. `approve` still draws the review for a
+        /// message or typed-data request and always requires platform owner
+        /// authentication.
+        #[arg(long, value_enum)]
+        decision: Option<ReviewDecision>,
+    },
     /// Transactions signed or broadcast by this wallet, and what to do about
     /// one that is stuck.
     #[command(alias = "tx")]
     Transaction(TransactionArgs),
-    /// The local token database: what this wallet will display a name for.
-    ///
-    /// Under `meta-` because the first letter of a command is what tab
-    /// completion has to work with, and `t` belongs to `transaction`.
-    #[command(name = "meta-tokens")]
-    Token(TokenArgs),
-    /// Browse and edit per-chain address aliases used for agent lookups.
-    /// Bare, on a terminal, this opens the full-screen editor.
-    #[command(name = "meta-address-book")]
-    AddressBook(AddressBookArgs),
     #[allow(clippy::doc_markdown)]
     /// Connect this wallet to a dapp with a pasted WalletConnect link.
     ///
@@ -125,61 +118,14 @@ enum Command {
     ///
     ///   ekubo-wallet connect 'wc:a1b2…@2?relay-protocol=irn&symKey=…'
     Connect(ConnectArgs),
-    /// Register this wallet as an MCP server with the agents on this machine.
-    ///
-    /// The installer does this once. This is how to redo it after moving the
-    /// binary, and how to find out which agents currently point at it.
-    ///
-    /// Under `meta-` because `a` belongs to `account`.
-    #[command(name = "meta-agent")]
-    Agent(AgentArgs),
+    /// Persistent wallet configuration and shell integration.
+    Settings(SettingsArgs),
+    /// Run and configure the wallet's MCP integration.
+    Mcp(McpArgs),
     /// Read legal documents and record their acceptance.
     Legal(LegalArgs),
-    /// List exceptional requests, or review one locally and approve or reject it.
-    Review {
-        request_id: Option<Uuid>,
-        /// Decide without the interactive prompt.
-        ///
-        /// `reject` needs no terminal: it signs nothing, and a scripted
-        /// session must always be able to say no. `approve` still draws the
-        /// review for a message or typed-data request, because the review is
-        /// what that signature is about -- owner authentication names a wallet
-        /// and an operation, not the bytes. Approving still requires platform
-        /// owner authentication either way.
-        #[arg(long, value_enum)]
-        decision: Option<ReviewDecision>,
-    },
-    // clap prints this doc comment as `--help` text, where the backticks the
-    // lint wants would be shown literally. `artifact_reference` is the wire
-    // spelling an agent has to type, so it is written as it is typed.
-    #[allow(clippy::doc_markdown)]
-    /// Print the artifact_reference envelope for a JSON body on this machine.
-    ///
-    /// Producers publish their own envelopes, so this is for bodies nobody
-    /// published: an execution plan an agent assembled by splicing two
-    /// prepared plans into one batch, a read-call bundle it merged, a token
-    /// list it filtered. The file is checked to be the artifact it claims to
-    /// be and then described — path, keccak256 digest, exact byte count — so
-    /// the megabyte of calldata stays on disk and only the envelope is passed
-    /// to the wallet's tools.
-    ///
-    /// Under `meta-` because `r` belongs to `review`.
-    ///
-    ///   ekubo-wallet meta-reference /tmp/combined-plan.json
-    #[command(name = "meta-reference")]
-    Reference {
-        /// Path to the JSON body.
-        path: PathBuf,
-        /// What the file holds. Inferred from its top-level fields when
-        /// omitted.
-        #[arg(long = "type", value_enum)]
-        artifact_type: Option<ReferenceType>,
-    },
-    /// Print a shell completion script, including local dynamic candidates.
-    ///
-    /// Spelled in full so `c` reaches `connect` alone.
-    #[command(name = "shell-completion")]
-    Completion { shell: Shell },
+    /// Print the server version.
+    Version,
     /// Print the candidates for the cursor, given the words typed so far.
     ///
     /// The shipped completion scripts call this on every tab: they read the
@@ -191,6 +137,9 @@ enum Command {
         /// How to render each candidate: `plain` for bash, `zsh` for
         /// `value:description`, `fish` for a tab between the two.
         format: CompletionFormat,
+        /// The word currently being typed, excluded from `words`.
+        #[arg(long, allow_hyphen_values = true, default_value = "")]
+        current: String,
         /// The words already on the line, program name included, without
         /// whatever is half-typed at the cursor.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -279,6 +228,66 @@ enum AccountCommand {
     /// Remove an account and its key after terminal confirmation and owner
     /// authentication.
     Remove { wallet_id: String },
+    /// What an account may sign without asking, plus policy authoring tools.
+    Policy(PolicyArgs),
+}
+
+#[derive(Debug, Args)]
+struct SettingsArgs {
+    #[command(subcommand)]
+    command: SettingsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsCommand {
+    /// Configured EVM networks and the endpoints used to reach them.
+    Network(Box<NetworkArgs>),
+    /// Trusted token display metadata.
+    Tokens(TokenArgs),
+    /// Per-chain address aliases used for display and agent lookups.
+    AddressBook(AddressBookArgs),
+    /// Print a shell completion script, including local dynamic candidates.
+    Completion { shell: Shell },
+}
+
+#[derive(Debug, Args)]
+struct McpArgs {
+    #[command(subcommand)]
+    command: McpCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Run the stdio MCP server.
+    Serve,
+    /// Show supported agents and whether this server is registered with them.
+    Status,
+    /// Register this wallet and its companion server with an installed agent.
+    /// Without an agent, register every supported agent detected here.
+    Register {
+        agent: Option<AgentName>,
+        /// Register only this wallet, leaving the Ekubo companion server out.
+        #[arg(long)]
+        no_companion: bool,
+    },
+    /// Unregister this wallet and its companion server from an agent.
+    /// Without an agent, unregister every supported agent detected here.
+    Unregister { agent: Option<AgentName> },
+    // clap prints this doc comment as `--help` text, where the backticks the
+    // lint wants would be shown literally. `artifact_reference` is the wire
+    // spelling an agent has to type, so it is written as it is typed.
+    #[allow(clippy::doc_markdown)]
+    /// Print the artifact_reference envelope for a local JSON body.
+    ///
+    /// The file is validated as an execution plan, read-call bundle, or token
+    /// list, then described by path, keccak256 digest, and exact byte count.
+    Reference {
+        /// Path to the JSON body.
+        path: PathBuf,
+        /// What the file holds. Inferred from its top-level fields when omitted.
+        #[arg(long = "type", value_enum)]
+        artifact_type: Option<ReferenceType>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -310,25 +319,12 @@ enum PolicyCommand {
     Validate { policy_file: PathBuf },
     /// Print the JSON Schema describing a policy document.
     Schema,
-    /// Review the agent-proposed policy change as a permission diff and apply it.
-    Review { wallet_id: String },
 }
 
 #[derive(Debug, Subcommand)]
 enum NetworkCommand {
     /// List configured networks, including their complete RPC URLs.
     List,
-    /// Print the built-in public network presets.
-    Presets {
-        /// Search the complete compiled-in registry instead of the defaults:
-        /// every chain chainlist knows of that answered this wallet's probe.
-        /// Matches a chain ID, a name, or part of a display name.
-        #[arg(long)]
-        search: Option<String>,
-        /// List every chain in the registry. Long — hundreds of entries.
-        #[arg(long, conflicts_with = "search")]
-        all: bool,
-    },
     /// Replace configured networks with the built-in presets.
     Reset,
     /// Add or update a preset, or configure a complete custom network.
@@ -339,10 +335,6 @@ enum NetworkCommand {
     /// Remove a configured network by name or alias.
     #[command(alias = "delete")]
     Remove { name: String },
-    /// Review network profiles an agent has suggested, and accept or discard
-    /// each one. Nothing an agent proposes reaches the configuration until it
-    /// is accepted here.
-    Review,
 }
 
 #[derive(Debug, Args)]
@@ -383,13 +375,7 @@ struct NetworkAddArgs {
     documentation_url: Option<Url>,
 }
 
-#[derive(Debug, Args)]
-struct AgentArgs {
-    #[command(subcommand)]
-    command: AgentCommand,
-}
-
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 enum AgentCommand {
     /// Show which supported agents are installed here and whether this server
     /// is registered with each.
@@ -399,12 +385,10 @@ enum AgentCommand {
     Add {
         agent: Option<AgentName>,
         /// Register only this wallet, leaving the Ekubo protocol server out.
-        #[arg(long)]
         no_companion: bool,
     },
     /// Unregister this server and the Ekubo protocol server. Without an agent,
     /// every one detected here.
-    #[command(alias = "delete")]
     Remove { agent: Option<AgentName> },
 }
 
@@ -423,7 +407,7 @@ const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
 
 /// How an agent reaches one of the two servers.
 enum ServerTransport {
-    /// A subprocess: this executable, run as `<path> server`.
+    /// A subprocess: this executable, run as `<path> mcp serve`.
     Stdio(String),
     /// A remote streamable-HTTP endpoint.
     Http(&'static str),
@@ -439,7 +423,7 @@ enum ServerTransport {
 /// opencode is the near miss worth recording. It does have an `opencode mcp
 /// add`, but its `mcp` command tree is `add`, `list`, `auth`, `logout`, and
 /// `debug` — there is nothing that takes a server back out. Registering
-/// through a CLI that cannot unregister would leave `meta-agent remove`
+/// through a CLI that cannot unregister would leave `mcp unregister`
 /// editing the file regardless, so both directions go through the file and
 /// there is one mechanism to reason about rather than two that can disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -659,12 +643,6 @@ enum TokenCommand {
         /// Token contract address.
         address: String,
     },
-    /// Review tokens an agent suggested, and confirm the ones to trust.
-    ///
-    /// Confirming a token is what lets the wallet show its symbol when
-    /// reviewing a transaction, so nothing an agent proposes is displayed as a
-    /// name until it is accepted here.
-    Review,
     /// Import a token list, confirming what to trust in the terminal.
     ///
     /// Reads the standard token-list shape: a `tokens` array of entries with
@@ -675,7 +653,7 @@ enum TokenCommand {
     ///
     /// Pass `-` to read the list from standard input:
     ///
-    ///   curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet meta-tokens import -
+    ///   curl -fsSL https://prod-api.ekubo.org/tokens | ekubo-wallet settings tokens import -
     ///
     /// The review screen still opens, because piping in a list decides
     /// nothing: it only saves an agent from re-typing it.
@@ -742,12 +720,6 @@ and account operations are refused"
         };
         let mode = OutputMode::resolve(self.json);
         match self.command {
-            Command::Server => crate::mcp::serve(config).await,
-            Command::Version => {
-                println!("ekubo-wallet {BUILD_VERSION}");
-                crate::release_check::print_notice(config.data_dir()).await;
-                Ok(())
-            }
             Command::Status => {
                 let status = run_status(&config, mode);
                 // Only after the command itself succeeded, and only on the two
@@ -760,11 +732,7 @@ and account operations are refused"
             }
             Command::Portfolio(args) => run_portfolio(&config, &args, mode).await,
             Command::Account(args) => run_account(config, args.command, mode).await,
-            Command::Network(args) => run_network(&config, args.command, mode).await,
-            Command::Policy(args) => run_policy(&config, args.command, mode).await,
             Command::Transaction(args) => run_transaction(&config, args.command, mode).await,
-            Command::Token(args) => run_token(&config, &args.command, mode).await,
-            Command::AddressBook(args) => run_address_book(&config, args.command, mode).await,
             Command::Connect(args) => {
                 crate::connect::run(
                     &config,
@@ -776,21 +744,59 @@ and account operations are refused"
                 )
                 .await
             }
-            Command::Agent(args) => run_agent(&args.command, mode),
+            Command::Settings(args) => run_settings(&config, args.command, mode).await,
+            Command::Mcp(args) => run_mcp(config, args.command, mode).await,
             Command::Legal(args) => run_legal(&config, &args.command, mode),
             Command::Review {
                 request_id,
                 decision,
             } => run_review(&config, request_id, decision, mode).await,
-            Command::Reference {
-                path,
-                artifact_type,
-            } => run_reference(&path, artifact_type),
-            Command::Completion { shell } => print_completion_script(shell),
-            Command::Complete { format, words } => {
-                print_completion_candidates(&config, format, &words)
+            Command::Version => {
+                println!("ekubo-wallet {BUILD_VERSION}");
+                crate::release_check::print_notice(config.data_dir()).await;
+                Ok(())
             }
+            Command::Complete {
+                format,
+                current,
+                words,
+            } => print_completion_candidates(&config, format, &current, &words),
         }
+    }
+}
+
+async fn run_settings(
+    config: &ConfigStore,
+    command: SettingsCommand,
+    mode: OutputMode,
+) -> Result<()> {
+    match command {
+        SettingsCommand::Network(args) => run_network(config, args.command, mode).await,
+        SettingsCommand::Tokens(args) => run_token(config, &args.command, mode).await,
+        SettingsCommand::AddressBook(args) => run_address_book(config, args.command, mode).await,
+        SettingsCommand::Completion { shell } => print_completion_script(shell),
+    }
+}
+
+async fn run_mcp(config: ConfigStore, command: McpCommand, mode: OutputMode) -> Result<()> {
+    match command {
+        McpCommand::Serve => crate::mcp::serve(config).await,
+        McpCommand::Status => run_agent(&AgentCommand::List, mode),
+        McpCommand::Register {
+            agent,
+            no_companion,
+        } => run_agent(
+            &AgentCommand::Add {
+                agent,
+                no_companion,
+            },
+            mode,
+        ),
+        McpCommand::Unregister { agent } => run_agent(&AgentCommand::Remove { agent }, mode),
+        McpCommand::Reference {
+            path,
+            artifact_type,
+        } => run_reference(&path, artifact_type),
     }
 }
 
@@ -1020,7 +1026,7 @@ fn status_lines(facts: &StatusFacts<'_>) -> String {
             String::new()
         } else {
             format!(
-                " · {} suggested, waiting on `ekubo-wallet meta-tokens review`",
+                " · {} suggested, waiting in `ekubo-wallet review`",
                 facts.token_proposals
             )
         }
@@ -1100,7 +1106,7 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
                         "wallet {} was created but policy initialization failed. The wallet exists \
                      and its key is stored; it has no policy, so signing fails closed and the \
                      MCP server refuses to start until it has one. Give it one with \
-                     `ekubo-wallet policy require-approval {}`, then choose a policy from there.",
+                     `ekubo-wallet account policy require-approval {}`, then choose a policy from there.",
                         wallet.id, wallet.id
                     )
                 },
@@ -1142,7 +1148,7 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
                             "wallet {} was imported but policy initialization failed. The key is \
                              stored; the wallet has no policy, so signing fails closed and the \
                              MCP server refuses to start until it has one. Give it one with \
-                             `ekubo-wallet policy require-approval {}`.",
+                             `ekubo-wallet account policy require-approval {}`.",
                             wallet.id, wallet.id
                         )
                     })?;
@@ -1266,6 +1272,7 @@ async fn run_account(config: ConfigStore, command: AccountCommand, mode: OutputM
                 }
             }
         }
+        AccountCommand::Policy(args) => run_policy(&config, args.command, mode).await,
     }
 }
 
@@ -1370,7 +1377,6 @@ async fn run_token(config: &ConfigStore, command: &TokenCommand, mode: OutputMod
         TokenCommand::Remove { network, address } => {
             run_token_remove(config, network, address, mode)
         }
-        TokenCommand::Review => run_token_review(config, mode).await,
         TokenCommand::Import { path, list_name } => {
             run_token_import(config, path, list_name.as_deref(), mode).await
         }
@@ -1510,9 +1516,17 @@ async fn run_token_import(
 
 /// Review what agents have suggested. Accepting writes the names; rejecting
 /// forgets the suggestion so the same screen does not reappear unchanged.
-async fn run_token_review(config: &ConfigStore, mode: OutputMode) -> Result<()> {
+async fn run_token_review(
+    config: &ConfigStore,
+    source: Option<&str>,
+    mode: OutputMode,
+) -> Result<()> {
     let store = crate::token_store::TokenStore::production(config.data_dir())?;
-    let proposals = store.proposals()?;
+    let proposals: Vec<_> = store
+        .proposals()?
+        .into_iter()
+        .filter(|proposal| source.is_none_or(|source| proposal.source == source))
+        .collect();
     drop(store);
     if proposals.is_empty() {
         return emit(mode, &serde_json::json!({ "awaiting_review": 0 }), || {
@@ -1538,8 +1552,8 @@ async fn run_token_review(config: &ConfigStore, mode: OutputMode) -> Result<()> 
             }),
             || {
                 Ok(format!(
-                    "{} token(s) await review. Run `ekubo-wallet meta-tokens review` in a \
-                     terminal to confirm them.",
+                    "{} token(s) await review. Run `ekubo-wallet review` in a terminal to \
+                     confirm them.",
                     proposals.len()
                 ))
             },
@@ -1800,7 +1814,7 @@ fn list_address_book(
         || {
             if entries.is_empty() {
                 return Ok(
-                    "The address book is empty. Run `ekubo-wallet meta-address-book` to add aliases interactively, or `ekubo-wallet meta-address-book add <network> <alias> <address>`.".into(),
+                    "The address book is empty. Run `ekubo-wallet settings address-book` to add aliases interactively, or `ekubo-wallet settings address-book add <network> <alias> <address>`.".into(),
                 );
             }
             let mut lines = vec![format!("{total} entrie(s), showing {}:", entries.len())];
@@ -2043,9 +2057,6 @@ async fn run_policy(config: &ConfigStore, command: PolicyCommand, mode: OutputMo
         }
         // The schema is itself a JSON document; there is no human form.
         PolicyCommand::Schema => print_json(&policy_json_schema()),
-        PolicyCommand::Review { wallet_id } => {
-            review_policy_proposal(config, &wallet_id, mode).await
-        }
     }
 }
 
@@ -2192,7 +2203,7 @@ async fn review_policy_proposal(
 }
 
 /// The schema is derived from the same types the wallet enforces, so a document
-/// that validates here cannot drift from what `policy set` will accept.
+/// that validates here cannot drift from what `account policy set` will accept.
 fn policy_json_schema() -> serde_json::Value {
     crate::core::policy::json_schema()
 }
@@ -2419,6 +2430,8 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
         let proposals = policies.list_proposals()?;
         let network_proposals = policies.network_proposals()?;
         drop(policies);
+        let token_proposals =
+            crate::token_store::TokenStore::production(config.data_dir())?.proposals()?;
         if mode == OutputMode::Json || !crate::tui::interactive() {
             return print_pending_approvals(
                 mode,
@@ -2427,6 +2440,7 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
                 &awaiting_messages,
                 &proposals,
                 &network_proposals,
+                &token_proposals,
             );
         }
         if awaiting.is_empty()
@@ -2434,6 +2448,7 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
             && awaiting_messages.is_empty()
             && proposals.is_empty()
             && network_proposals.is_empty()
+            && token_proposals.is_empty()
         {
             crate::tui::info("Nothing is awaiting approval.");
             return Ok(());
@@ -2445,6 +2460,7 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
             &awaiting_messages,
             &proposals,
             &network_proposals,
+            &token_proposals,
         );
         let Some(index) =
             crate::fullscreen::pick_table("Pending approvals", "review", approval_columns(), rows)?
@@ -2461,6 +2477,7 @@ async fn list_pending_approvals(config: &ConfigStore, mode: OutputMode) -> Resul
             PendingChoice::Network(chain_id) => {
                 review_network_proposal_by_chain(config, *chain_id).await
             }
+            PendingChoice::Tokens(source) => run_token_review(config, Some(source), mode).await,
         };
         // A failed review (expired mid-browse, declined authentication)
         // should not tear down the whole browser; report it and return to
@@ -2480,6 +2497,8 @@ enum PendingChoice {
     Proposal(String),
     /// A proposed network profile, reviewed per chain.
     Network(u64),
+    /// One source list's token-name suggestions.
+    Tokens(String),
 }
 
 fn approval_columns() -> Vec<crate::fullscreen::TableColumn> {
@@ -2491,17 +2510,12 @@ fn approval_columns() -> Vec<crate::fullscreen::TableColumn> {
         TableColumn::new("Age", Constraint::Length(14)),
         TableColumn::new("Wallet", Constraint::Fill(1)),
         TableColumn::new("Network", Constraint::Fill(1)),
+        TableColumn::new("Details", Constraint::Fill(2)),
     ]
 }
 
-/// The five pending queues flattened into browser rows, with the action each
+/// The pending queues flattened into browser rows, with the action each
 /// row's Enter takes alongside.
-///
-/// Token suggestions are deliberately absent. One accepted list can propose
-/// hundreds of rows at once, and a queue that arrives by the hundred would
-/// bury the handful of things that actually block signing; `meta-tokens review`
-/// stays its own screen, where the suggestions can be grouped by the list
-/// that carried them.
 fn pending_approval_rows(
     config: &ConfigStore,
     awaiting: &[PendingTransaction],
@@ -2509,6 +2523,7 @@ fn pending_approval_rows(
     awaiting_messages: &[PendingMessage],
     proposals: &[crate::policy_store::PolicyProposal],
     network_proposals: &[crate::config::NetworkConfig],
+    token_proposals: &[crate::token_store::TokenProposal],
 ) -> (Vec<crate::fullscreen::TableRow>, Vec<PendingChoice>) {
     use crate::fullscreen::{Span, TableRow};
     use crate::tui::Tone;
@@ -2547,6 +2562,7 @@ fn pending_approval_rows(
                 Span::plain(relative_time(record.created_at)),
                 Span::plain(&record.wallet_id),
                 Span::plain(&network),
+                none(),
             ],
             &[
                 &record.request_id.to_string(),
@@ -2567,6 +2583,7 @@ fn pending_approval_rows(
                 Span::plain(relative_time(record.created_at)),
                 Span::plain(&record.wallet_id),
                 Span::plain(&network),
+                none(),
             ],
             &[
                 &record.request_id.to_string(),
@@ -2591,6 +2608,7 @@ fn pending_approval_rows(
                 Span::plain(relative_time(record.created_at)),
                 Span::plain(&record.wallet_id),
                 network.as_deref().map_or_else(none, Span::plain),
+                none(),
             ],
             &[
                 &record.request_id.to_string(),
@@ -2624,6 +2642,7 @@ fn pending_approval_rows(
                 none(),
                 none(),
                 Span::plain(&proposal.name),
+                none(),
             ],
             &[
                 "network proposal",
@@ -2633,6 +2652,51 @@ fn pending_approval_rows(
             ],
         ));
         choices.push(PendingChoice::Network(proposal.chain_id));
+    }
+    let mut token_batches: BTreeMap<&str, Vec<&crate::token_store::TokenProposal>> =
+        BTreeMap::new();
+    for proposal in token_proposals {
+        token_batches
+            .entry(&proposal.source)
+            .or_default()
+            .push(proposal);
+    }
+    for (source, batch) in token_batches {
+        let oldest = batch
+            .iter()
+            .map(|proposal| proposal.proposed_at)
+            .min()
+            .expect("a token batch is never empty");
+        let samples = batch
+            .iter()
+            .take(3)
+            .map(|proposal| {
+                format!(
+                    "{} ({})",
+                    proposal.token.symbol,
+                    proposal.token.address.to_checksum(None)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let details = format!("{source} · {} token(s) · {samples}", batch.len());
+        let chains = batch
+            .iter()
+            .map(|proposal| proposal.token.chain_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        rows.push(TableRow::new(
+            vec![
+                none(),
+                Span::plain("tokens"),
+                Span::plain(relative_time(oldest)),
+                none(),
+                Span::plain(format!("{chains} chain(s)")),
+                Span::plain(&details),
+            ],
+            &["token proposals", source, &details],
+        ));
+        choices.push(PendingChoice::Tokens(source.to_owned()));
     }
     (rows, choices)
 }
@@ -2646,12 +2710,14 @@ fn print_pending_approvals(
     awaiting_messages: &[PendingMessage],
     proposals: &[crate::policy_store::PolicyProposal],
     network_proposals: &[crate::config::NetworkConfig],
+    token_proposals: &[crate::token_store::TokenProposal],
 ) -> Result<()> {
     if awaiting.is_empty()
         && awaiting_typed_data.is_empty()
         && awaiting_messages.is_empty()
         && proposals.is_empty()
         && network_proposals.is_empty()
+        && token_proposals.is_empty()
     {
         eprintln!("No requests are awaiting approval.");
     } else {
@@ -2659,21 +2725,17 @@ fn print_pending_approvals(
             "{} request(s) awaiting approval. Review one with `ekubo-wallet review <request-id>`; \
              they wait indefinitely.{}",
             awaiting.len() + awaiting_typed_data.len() + awaiting_messages.len(),
-            if proposals.is_empty() {
+            if proposals.is_empty() && network_proposals.is_empty() && token_proposals.is_empty() {
                 String::new()
             } else {
                 format!(
-                    " {} policy proposal(s) await `ekubo-wallet policy review <wallet-id>`.",
+                    " {} other decision(s) are in `ekubo-wallet review`.",
                     proposals.len()
+                        + network_proposals.len()
+                        + token_proposal_batches(token_proposals).len()
                 )
             },
         );
-        if !network_proposals.is_empty() {
-            eprintln!(
-                "{} network suggestion(s) await `ekubo-wallet network review`.",
-                network_proposals.len()
-            );
-        }
     }
     let proposal_summaries: Vec<serde_json::Value> = proposals
         .iter()
@@ -2694,6 +2756,7 @@ fn print_pending_approvals(
             "pending_messages": awaiting_messages,
             "pending_policy_proposals": proposal_summaries,
             "pending_network_proposals": network_proposals,
+            "pending_token_batches": token_proposal_batches(token_proposals),
         }),
         || {
             let mut lines = Vec::new();
@@ -2723,11 +2786,17 @@ fn print_pending_approvals(
             }
             for proposal in proposals {
                 lines.push(format!(
-                    "{} · policy proposal for {} (from revision {}) · review with `ekubo-wallet policy review {}`",
+                    "{} · policy proposal for {} (from revision {})",
                     relative_time(proposal.created_at),
                     proposal.wallet_id,
                     proposal.source_revision,
-                    proposal.wallet_id,
+                ));
+            }
+            for batch in token_proposal_batches(token_proposals) {
+                lines.push(format!(
+                    "{} token-name suggestion(s) from {}",
+                    batch["count"].as_u64().unwrap_or_default(),
+                    batch["source"].as_str().unwrap_or("unknown source")
                 ));
             }
             if lines.is_empty() {
@@ -2736,6 +2805,34 @@ fn print_pending_approvals(
             Ok(lines.join("\n"))
         },
     )
+}
+
+fn token_proposal_batches(
+    proposals: &[crate::token_store::TokenProposal],
+) -> Vec<serde_json::Value> {
+    let mut grouped: BTreeMap<&str, Vec<&crate::token_store::TokenProposal>> = BTreeMap::new();
+    for proposal in proposals {
+        grouped.entry(&proposal.source).or_default().push(proposal);
+    }
+    grouped
+        .into_iter()
+        .map(|(source, proposals)| {
+            let oldest = proposals.iter().map(|proposal| proposal.proposed_at).min();
+            serde_json::json!({
+                "source": source,
+                "count": proposals.len(),
+                "oldest_proposed_at": oldest,
+                "tokens": proposals.iter().map(|proposal| serde_json::json!({
+                    "chain_id": proposal.token.chain_id,
+                    "address": proposal.token.address.to_checksum(None),
+                    "symbol": proposal.token.symbol,
+                    "name": proposal.token.name,
+                    "decimals": proposal.token.decimals,
+                    "proposed_at": proposal.proposed_at,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect()
 }
 
 /// Record a rejection without reviewing anything first.
@@ -3142,7 +3239,7 @@ async fn replace_policy(
     .fact("New policy digest", &digest)
     // The change itself, which this prompt did not show. The proposal review
     // has always rendered `diff_policies` and called it authoritative; the
-    // direct route asked the same authority question -- `policy set`,
+    // direct route asked the same authority question -- `account policy set`,
     // `allow-all`, `require-approval` all land here -- and answered it with a
     // wallet name, a revision number, and a generic warning. An owner could
     // approve a materially more permissive policy without being shown a single
@@ -3264,25 +3361,6 @@ async fn run_network(
                 Ok(networks_human(&networks))
             })
         }
-        NetworkCommand::Presets { search, all } => {
-            let networks = match (search, all) {
-                (None, false) => default_networks(),
-                (None, true) => registry_networks(None),
-                (Some(query), _) => {
-                    let networks = registry_networks(Some(&query));
-                    ensure!(
-                        !networks.is_empty(),
-                        "nothing in the built-in registry matches {query}"
-                    );
-                    networks
-                }
-            };
-            emit(
-                mode,
-                &serde_json::json!({ "networks": describe_networks(&networks) }),
-                || Ok(networks_human(&networks)),
-            )
-        }
         NetworkCommand::Reset => {
             let networks = default_networks();
             require_interactive("network reset")?;
@@ -3379,7 +3457,7 @@ async fn run_network(
             replace_configured_network(&mut prospective, candidate.clone())?;
             // The complete URL is shown, not just its origin. This is the
             // one moment the user can catch a typo or the wrong endpoint, and
-            // `network list` already prints configured URLs in full; an RPC
+            // `settings network list` already prints configured URLs in full; an RPC
             // URL is configuration this human owns, not a signing credential.
             if !confirm_network_change(
                 "Add or update network",
@@ -3424,7 +3502,6 @@ async fn run_network(
             )
         }
         NetworkCommand::Edit { name } => run_network_edit(config, name, mode).await,
-        NetworkCommand::Review => run_network_review(config, mode).await,
         NetworkCommand::Remove { name } => {
             let mut prospective = config.load()?.networks;
             let removed = remove_configured_network(&mut prospective, &name)?;
@@ -3498,39 +3575,6 @@ fn endpoint_lines(network: &NetworkConfig, indent: &str) -> String {
 /// gone by the time anything could split on them.
 fn endpoint_list(network: &NetworkConfig) -> Vec<String> {
     network.rpc_urls.iter().map(ToString::to_string).collect()
-}
-
-/// Registry entries, optionally narrowed to a query.
-///
-/// A chain ID matches exactly and nothing else, because someone who typed a
-/// number knows which chain they mean; anything else is matched loosely
-/// against the name, aliases, and display name.
-fn registry_networks(query: Option<&str>) -> Vec<NetworkConfig> {
-    let query = query.map(str::trim);
-    ekubo_wallet_core::networks::known_networks()
-        .iter()
-        .filter(|profile| match query {
-            None => true,
-            Some(query) => {
-                if let Ok(chain_id) = query.parse::<u64>() {
-                    return profile.config.chain_id == chain_id;
-                }
-                let needle = query.to_lowercase();
-                profile.config.name.contains(&needle)
-                    || profile
-                        .config
-                        .aliases
-                        .iter()
-                        .any(|alias| alias.contains(&needle))
-                    || profile
-                        .config
-                        .display_name
-                        .as_deref()
-                        .is_some_and(|name| name.to_lowercase().contains(&needle))
-            }
-        })
-        .map(|profile| profile.config.clone())
-        .collect()
 }
 
 /// One line for a table cell that cannot hold the whole list: the endpoint
@@ -3612,7 +3656,7 @@ fn network_candidate(
     } else {
         ensure!(
             args.chain_id.is_some(),
-            "unknown network {name}; run `ekubo-wallet network presets` to see the built-in ones, `ekubo-wallet network list` to see the configured ones, or pass a chain ID to define a custom network",
+            "unknown network {name}; complete `ekubo-wallet settings network add ` to see built-in profiles, run `ekubo-wallet settings network list` for configured networks, or pass a chain ID to define a custom network",
         );
         build_custom_network(name, &args)?
     };
@@ -3626,7 +3670,7 @@ fn network_candidate(
     Ok(candidate)
 }
 
-/// Work out what `network add` should configure when no name was given.
+/// Work out what `settings network add` should configure when no name was given.
 ///
 /// The chain ID is the first question because it, rather than a name, is what
 /// says which network this is. A chain that a preset or the configuration
@@ -3797,7 +3841,7 @@ fn pick_network(networks: &[NetworkConfig], action: &str) -> Result<Option<usize
 
 /// Interactive field-by-field editing of one configured network. Every
 /// change is drafted locally, shown in the menu, and only trusted after the
-/// same authorization and live chain-ID verification as `network add`.
+/// same authorization and live chain-ID verification as `settings network add`.
 async fn run_network_edit(
     config: &ConfigStore,
     name: Option<String>,
@@ -4166,7 +4210,7 @@ struct RequiredField {
     example: &'static str,
     /// Offered as the prompt default and accepted on an empty answer.
     default: Option<&'static str>,
-    /// Whether a scripted `network add` may leave this out and take the
+    /// Whether a scripted `settings network add` may leave this out and take the
     /// default.
     ///
     /// Every descriptive field is required, because a network nobody named is
@@ -4422,7 +4466,7 @@ fn collect_custom_network_fields(
             "{name} is neither a built-in preset nor an already-configured network, so defining \
 it as chain {chain_id} needs its complete profile.\n\nAll {} missing values:\n{lines}\n\n\
 Run the same command in a terminal to be prompted for them one at a time, or see \
-`ekubo-wallet network presets` for complete examples.",
+`ekubo-wallet settings network add` interactively for complete examples.",
             missing.len(),
         );
     }
@@ -4535,44 +4579,6 @@ fn normalize_aliases(aliases: Vec<String>) -> Result<Vec<String>> {
 /// and the change is undone by running the command again — so it is a yes or
 /// no with the endpoint spelled out, not the signing review. `Ok(false)`
 /// means leave the configuration alone.
-/// Decide each network an agent has suggested.
-///
-/// The endpoint in a network profile is the wallet's entire view of its chain:
-/// balances, gas, receipts, and the `eth_simulateV1` result every automatic
-/// signing decision is scored against. An agent can assemble a profile — that
-/// is tedious work it is good at — but pointing the wallet at an endpoint is a
-/// statement about who is trusted to describe reality, and only the owner
-/// makes it.
-async fn run_network_review(config: &ConfigStore, mode: OutputMode) -> Result<()> {
-    let proposals = PolicyStore::production(config.data_dir())?.network_proposals()?;
-    if proposals.is_empty() {
-        return emit(mode, &serde_json::json!({ "reviewed": 0 }), || {
-            Ok("No network suggestions are waiting.".into())
-        });
-    }
-
-    let mut accepted = Vec::new();
-    let mut discarded = Vec::new();
-    for proposal in proposals {
-        match review_one_network_proposal(config, &proposal).await? {
-            NetworkReviewOutcome::Accepted => accepted.push(proposal.name.clone()),
-            NetworkReviewOutcome::Discarded => discarded.push(proposal.chain_id.to_string()),
-        }
-    }
-
-    emit(
-        mode,
-        &serde_json::json!({ "accepted": accepted, "discarded": discarded }),
-        || {
-            Ok(format!(
-                "Accepted {} network(s); discarded {}.",
-                accepted.len(),
-                discarded.len()
-            ))
-        },
-    )
-}
-
 /// Review the network proposal for one chain, named by chain ID.
 ///
 /// The browser holds a chain ID rather than the profile it drew, so the row
@@ -4600,7 +4606,7 @@ enum NetworkReviewOutcome {
 
 /// Review exactly one proposed network profile and apply the answer.
 ///
-/// Split out from the `network review` loop so the pending-approvals browser
+/// Split out from the `review` loop so the pending-approvals browser
 /// can reach the same review for one row. Both paths must ask identically:
 /// this is where an agent's claim about how to reach a chain becomes the
 /// wallet's, and a second copy of that screen would eventually disagree with
@@ -4666,7 +4672,7 @@ async fn review_one_network_proposal(
         };
 
         // Full-screen on both paths that reach here: the pending-approvals
-        // browser is already a screen, and `network review` walks every
+        // browser is already a screen, and `review` walks every
         // proposal in a row, so an inline prompt would stack answered
         // exchanges behind the next one. Two endpoint lists side by side is
         // also the network fact most likely to outgrow a terminal.
@@ -4804,13 +4810,14 @@ fn confirm_network_change(
 fn print_completion_candidates(
     config: &ConfigStore,
     format: CompletionFormat,
+    current: &str,
     words: &[String],
 ) -> Result<()> {
     // The words arrive with the program name at the front, as every shell
     // reports them; the resolver walks subcommands, so it never sees it.
     let words = words.split_first().map_or(&[][..], |(_, rest)| rest);
     let mut stdout = io::stdout().lock();
-    match crate::completion::offer(config, words)? {
+    match crate::completion::offer(config, words, current)? {
         // The shells complete paths themselves. Saying so rather than listing
         // a directory keeps their own filename handling — trailing slashes,
         // spaces, `~` — which no list of candidates would reproduce.
@@ -5058,7 +5065,7 @@ fn agent_registered(agent: AgentName) -> Option<Registration> {
 /// Every CLI here prints its own layout and is free to change it, so this
 /// stays a substring search rather than a parse. The one trap is that `ekubo`
 /// is a prefix of `ekubo-wallet`: a plain search would report the companion
-/// registered whenever the wallet is, and then `meta-agent list` would tell people
+/// registered whenever the wallet is, and then `mcp status` would tell people
 /// they have swaps and bridging when they have neither. Blanking the longer
 /// name out first leaves only genuine mentions of the shorter one.
 fn read_registration(listing: &str) -> Registration {
@@ -5121,7 +5128,8 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
             AgentName::Gemini => arguments.extend([
                 name.to_string(),
                 command.clone(),
-                "server".into(),
+                "mcp".into(),
+                "serve".into(),
                 "--scope".into(),
                 "user".into(),
             ]),
@@ -5131,13 +5139,15 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
                 "user".into(),
                 "--".into(),
                 command.clone(),
-                "server".into(),
+                "mcp".into(),
+                "serve".into(),
             ]),
             _ => arguments.extend([
                 name.to_string(),
                 "--".into(),
                 command.clone(),
-                "server".into(),
+                "mcp".into(),
+                "serve".into(),
             ]),
         },
         ServerTransport::Http(url) => match agent {
@@ -5185,7 +5195,7 @@ fn register_server(agent: AgentName, name: &str, transport: &ServerTransport) ->
 fn unregister_agent(agent: AgentName) -> Result<()> {
     // The companion may never have been registered — `--no-companion`, or an
     // install that predates it — and every CLI here treats removing an absent
-    // name as an error. Removing the wallet is what `meta-agent remove` promises,
+    // name as an error. Removing the wallet is what `mcp unregister` promises,
     // so only that failure is one.
     let _ = unregister_server(agent, COMPANION_SERVER_NAME);
     unregister_server(agent, LOCAL_SERVER_NAME)
@@ -5261,7 +5271,7 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
                 .collect();
             emit(mode, &serde_json::json!({ "agents": rows }), || {
                 let mut lines = vec![
-                    format!("Server command: {}", server_command()?),
+                    format!("Server command: {} mcp serve", server_command()?),
                     format!("Companion server: {COMPANION_SERVER_URL}"),
                     String::new(),
                 ];
@@ -5277,11 +5287,11 @@ fn run_agent(command: &AgentCommand, mode: OutputMode) -> Result<()> {
                             }) => "registered".to_string(),
                             Some(Registration { wallet: true, .. }) => format!(
                                 "registered, without {COMPANION_SERVER_NAME} — \
-                                 `ekubo-wallet meta-agent add {}`",
+                                 `ekubo-wallet mcp register {}`",
                                 agent.key()
                             ),
                             Some(Registration { wallet: false, .. }) => format!(
-                                "installed, not registered — `ekubo-wallet meta-agent add {}`",
+                                "installed, not registered — `ekubo-wallet mcp register {}`",
                                 agent.key()
                             ),
                             None => "installed; could not read its MCP configuration".to_string(),
@@ -5415,7 +5425,7 @@ fn configure_cursor_mcp_at(
         match transport {
             ServerTransport::Stdio(command) => serde_json::json!({
                 "command": command,
-                "args": ["server"],
+                "args": ["mcp", "serve"],
             }),
             ServerTransport::Http(url) => serde_json::json!({ "url": url }),
         },
@@ -5464,14 +5474,14 @@ fn opencode_config_dir() -> Result<PathBuf> {
 ///
 /// The two forms are a tagged union rather than Cursor's "whichever key is
 /// present", and `command` is an argv array rather than a string: a local
-/// server written as `"command": "/path/to/ekubo-wallet server"` is rejected
+/// server written as `"command": "/path/to/ekubo-wallet mcp serve"` is rejected
 /// by opencode's schema, and one written with Cursor's `args` key is silently
 /// launched with no arguments at all.
 fn opencode_server_entry(transport: &ServerTransport) -> serde_json::Value {
     match transport {
         ServerTransport::Stdio(command) => serde_json::json!({
             "type": "local",
-            "command": [command, "server"],
+            "command": [command, "mcp", "serve"],
             "enabled": true,
         }),
         ServerTransport::Http(url) => serde_json::json!({
@@ -5505,7 +5515,7 @@ fn configure_opencode_mcp_at(
         .with_context(|| {
             format!(
                 "this wallet writes plain JSON and will not rewrite {}. Add the entry by hand — \
-                 `ekubo-wallet meta-agent list` prints the command and URL it would have used",
+                 `ekubo-wallet mcp status` prints the command and URL it would have used",
                 file.display()
             )
         })?
@@ -5547,7 +5557,7 @@ fn remove_opencode_mcp_at(directory: &Path, name: &str) -> Result<()> {
             // `serde_json` refuses, and rewriting such a file is not on offer.
             // One that never mentions the server cannot be registering it, so
             // it is passed over; one that does is reported, because silently
-            // leaving it would make `meta-agent remove` a lie.
+            // leaving it would make `mcp unregister` a lie.
             Err(error) => {
                 ensure!(
                     !file_mentions_server(&file, name),

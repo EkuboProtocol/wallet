@@ -361,7 +361,7 @@ impl SessionHandler for DappSession<'_> {
                 code: error_code::UNSUPPORTED_CHAINS,
                 message: format!(
                     "This wallet has no configuration for {}. Add the network with \
-                     `ekubo-wallet network add` and reconnect.",
+                     `ekubo-wallet settings network add` and reconnect.",
                     unconfigured.join(", ")
                 ),
             });

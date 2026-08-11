@@ -1584,11 +1584,7 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     assert!(!output.replaced_previous_proposal);
     assert!(!output.diff.is_empty());
     assert!(output.diff.iter().any(|line| line.starts_with('-')));
-    assert!(
-        output
-            .instruction
-            .contains("ekubo-wallet policy review primary")
-    );
+    assert!(output.instruction.contains("ekubo-wallet review"));
 
     // A newer proposal replaces the pending one; the tool never touches
     // the active policy.
