@@ -113,7 +113,7 @@ enum ConfigValidation {
 
 impl ConfigPreview {
     #[must_use]
-    pub fn exact_diff(&self) -> &str {
+    pub fn managed_diff(&self) -> &str {
         &self.diff
     }
 
@@ -258,7 +258,7 @@ impl AgentAdapter {
             }
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
         };
-        let diff = exact_diff(&before, &after);
+        let diff = managed_config_diff(self.kind, &before, &after)?;
         Ok(ConfigPreview {
             path: self.config_path.clone(),
             before,
@@ -281,7 +281,7 @@ impl AgentAdapter {
             AgentKind::Opencode => remove_json(&before, "mcp", remove_companion)?,
             AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
         };
-        let diff = exact_diff(&before, &after);
+        let diff = managed_config_diff(self.kind, &before, &after)?;
         Ok(ConfigPreview {
             path: self.config_path.clone(),
             before,
@@ -418,8 +418,156 @@ fn remove_json(before: &str, root: &str, companion: bool) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
 }
 
-fn exact_diff(before: &str, after: &str) -> String {
-    format!("--- current\n+++ proposed\n@@ exact files @@\n-{before}\n+{after}")
+fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<String> {
+    let mut changes = Vec::new();
+    match kind {
+        AgentKind::Codex => {
+            let before = parse_codex_document(before)?;
+            let after = parse_codex_document(after)?;
+            push_managed_change(
+                &mut changes,
+                "mcp_oauth_credentials_store",
+                codex_value(&before, None, "mcp_oauth_credentials_store"),
+                codex_value(&after, None, "mcp_oauth_credentials_store"),
+            );
+            for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
+                push_managed_change(
+                    &mut changes,
+                    &format!("mcp_servers.{server}"),
+                    codex_value(&before, Some("mcp_servers"), server),
+                    codex_value(&after, Some("mcp_servers"), server),
+                );
+            }
+        }
+        AgentKind::ClaudeCode | AgentKind::GeminiCli | AgentKind::Cursor | AgentKind::Opencode => {
+            let root = if kind == AgentKind::Opencode {
+                "mcp"
+            } else {
+                "mcpServers"
+            };
+            let before = parse_json_document(before)?;
+            let after = parse_json_document(after)?;
+            for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
+                push_managed_change(
+                    &mut changes,
+                    &format!("{root}.{server}"),
+                    json_value(&before, root, server),
+                    json_value(&after, root, server),
+                );
+            }
+        }
+        AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
+    }
+    if changes.is_empty() {
+        return Ok("No wallet-managed fields will change.".into());
+    }
+    Ok(format!(
+        "Only wallet-managed fields are shown; unrelated settings remain unchanged.\n\n{}",
+        changes.join("\n\n")
+    ))
+}
+
+fn parse_codex_document(contents: &str) -> Result<DocumentMut> {
+    if contents.trim().is_empty() {
+        Ok(DocumentMut::new())
+    } else {
+        contents
+            .parse::<DocumentMut>()
+            .context("Codex config is not valid TOML")
+    }
+}
+
+fn codex_value(document: &DocumentMut, table: Option<&str>, key: &str) -> Option<String> {
+    let item = match table {
+        Some(table) => document
+            .get(table)
+            .and_then(Item::as_table)
+            .and_then(|table| table.get(key)),
+        None => document.get(key),
+    }?;
+    Some(redact_toml_credentials(&item.to_string()))
+}
+
+fn redact_toml_credentials(contents: &str) -> String {
+    contents
+        .lines()
+        .map(|line| {
+            let key = line.split('=').next().unwrap_or_default();
+            if sensitive_config_key(key) {
+                format!(
+                    "{}<credential field redacted>",
+                    " ".repeat(line.len() - line.trim_start().len())
+                )
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_json_document(contents: &str) -> Result<Value> {
+    if contents.trim().is_empty() {
+        Ok(json!({}))
+    } else {
+        serde_json::from_str(contents).context("agent config is not valid JSON")
+    }
+}
+
+fn json_value(document: &Value, root: &str, server: &str) -> Option<String> {
+    let mut value = document.get(root)?.get(server)?.clone();
+    redact_json_credentials(&mut value);
+    serde_json::to_string_pretty(&value).ok()
+}
+
+fn redact_json_credentials(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            for (key, value) in fields {
+                if sensitive_config_key(key) {
+                    *value = Value::String("<credential field redacted>".into());
+                } else {
+                    redact_json_credentials(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_json_credentials(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sensitive_config_key(key: &str) -> bool {
+    let key = key.trim().trim_matches(['"', '\'']).to_ascii_lowercase();
+    [
+        "authorization",
+        "bearer",
+        "credential",
+        "env",
+        "header",
+        "password",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|marker| key.contains(marker))
+}
+
+fn push_managed_change(
+    changes: &mut Vec<String>,
+    path: &str,
+    before: Option<String>,
+    after: Option<String>,
+) {
+    if before == after {
+        return;
+    }
+    let before = before.unwrap_or_else(|| "<not configured>".into());
+    let after = after.unwrap_or_else(|| "<not configured>".into());
+    changes.push(format!("{path}\n- {before}\n+ {after}"));
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

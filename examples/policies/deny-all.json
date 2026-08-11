@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet-mcp-server/main/schemas/policy.schema.json",
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
   "version": 1,
   "chains": {
     "*": {

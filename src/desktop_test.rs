@@ -546,6 +546,63 @@ fn legal_markdown_is_split_without_changing_content_or_splitting_fences() {
     assert!(sections[1].contains("# not a heading"));
 }
 
+fn relative_luminance(rgb: u32) -> f64 {
+    let channel = |shift: u32| {
+        let value = f64::from(u8::try_from((rgb >> shift) & 0xff_u32).unwrap()) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+fn contrast_ratio(first: u32, second: u32) -> f64 {
+    let (lighter, darker) = {
+        let first = relative_luminance(first);
+        let second = relative_luminance(second);
+        if first > second {
+            (first, second)
+        } else {
+            (second, first)
+        }
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+#[test]
+fn every_button_interaction_state_has_aa_text_contrast_in_both_themes() {
+    for dark in [false, true] {
+        let palette = interface_interaction_palette(dark);
+        for (background, foreground) in [
+            (palette.button, palette.button_foreground),
+            (palette.button_hover, palette.button_foreground),
+            (palette.button_active, palette.button_foreground),
+            (palette.primary, palette.primary_foreground),
+            (palette.primary_hover, palette.primary_foreground),
+            (palette.primary_active, palette.primary_foreground),
+            (palette.danger, palette.danger_foreground),
+            (palette.danger_hover, palette.danger_foreground),
+            (palette.danger_active, palette.danger_foreground),
+        ] {
+            assert!(
+                contrast_ratio(background, foreground) >= 4.5,
+                "button state #{background:06x} on #{foreground:06x} failed AA contrast"
+            );
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::unreadable_literal)]
+fn light_selected_button_uses_secondary_purple_instead_of_dark_mode_surface() {
+    let light = interface_interaction_palette(false);
+    let dark = interface_interaction_palette(true);
+    assert_eq!(light.button_active, 0xf3e7fe);
+    assert_ne!(light.button_active, dark.button_active);
+}
+
 #[test]
 fn embedded_suisse_fonts_are_true_type_and_name_both_application_families() {
     assert_eq!(EMBEDDED_FONTS.len(), 6);
@@ -580,7 +637,7 @@ fn only_disabled_networks_offer_permanent_removal() {
 }
 
 #[test]
-fn networks_display_enabled_first_then_by_numeric_chain_id() {
+fn networks_stay_sorted_by_numeric_chain_id_when_enabled_state_changes() {
     let mut networks = ekubo_wallet_core::networks::default_networks();
     for network in &mut networks {
         network.disabled = network.chain_id != 42_161;
@@ -588,11 +645,8 @@ fn networks_display_enabled_first_then_by_numeric_chain_id() {
     networks.reverse();
 
     let sorted = networks_for_display(&networks);
-    assert_eq!(sorted[0].chain_id, 42_161);
-    assert!(!sorted[0].disabled);
-    assert!(sorted[1..].iter().all(|network| network.disabled));
     assert!(
-        sorted[1..]
+        sorted
             .windows(2)
             .all(|pair| pair[0].chain_id <= pair[1].chain_id)
     );
@@ -768,13 +822,15 @@ fn accepted_legal_documents_reopen_read_only() {
 }
 
 #[test]
-fn application_license_is_compiled_into_the_desktop_and_never_requires_acceptance() {
-    assert!(APPLICATION_LICENSE_TEXT.contains("Functional Source License, Version 1.1"));
-    assert!(APPLICATION_LICENSE_TEXT.contains("Copyright 2026 Ekubo, Inc."));
-    assert_eq!(
-        LegalReviewDocument::ApplicationLicense.title(),
-        "Application License"
-    );
+fn application_license_is_compiled_and_links_to_the_build_revision() {
+    assert!(crate::APPLICATION_LICENSE_TEXT.contains("Functional Source License, Version 1.1"));
+    assert!(crate::APPLICATION_LICENSE_TEXT.contains("Copyright 2026 Ekubo, Inc."));
+    let url = application_license_url();
+    assert!(url.starts_with("https://github.com/EkuboProtocol/wallet/blob/"));
+    assert!(url.ends_with("/LICENSE"));
+    if !BUILD_COMMIT.is_empty() {
+        assert!(url.contains(BUILD_COMMIT));
+    }
 }
 
 #[test]

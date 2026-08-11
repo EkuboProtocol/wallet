@@ -588,6 +588,33 @@ impl OwnerApi {
         Ok(())
     }
 
+    /// Create a new network without allowing the form to overwrite a row that
+    /// appeared while owner authentication was in progress.
+    pub async fn add_network(&self, network: NetworkConfig) -> Result<()> {
+        ekubo_wallet_core::config::validate_network(&network)?;
+        ekubo_wallet_core::rpc::verify_chain_id(&network).await?;
+        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
+        self.config.add_network(network, &authorization)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
+    /// Save an edit only if the encrypted network row is still byte-for-byte
+    /// the row the owner opened.
+    pub async fn replace_network(
+        &self,
+        reviewed: &NetworkConfig,
+        replacement: NetworkConfig,
+    ) -> Result<()> {
+        ekubo_wallet_core::config::validate_network(&replacement)?;
+        ekubo_wallet_core::rpc::verify_chain_id(&replacement).await?;
+        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
+        self.config
+            .replace_network(reviewed, replacement, &authorization)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
     pub async fn install_network_preset(&self, chain_id: u64) -> Result<NetworkConfig> {
         let preset = ekubo_wallet_core::networks::known_network(chain_id)
             .with_context(|| format!("chain {chain_id} has no built-in network preset"))?

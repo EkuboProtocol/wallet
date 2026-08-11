@@ -1,5 +1,5 @@
 use crate::{
-    BUILD_VERSION,
+    BUILD_COMMIT, BUILD_VERSION,
     agent_config::{AgentAdapter, ConfigPreview},
     authority::{
         ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioSnapshot,
@@ -50,12 +50,12 @@ use gpui_component::{
     dialog::DialogButtonProps,
     group_box::{GroupBox, GroupBoxVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     scroll::ScrollableElement,
     spinner::Spinner,
     switch::Switch,
-    text::TextView,
+    text::{TextView, TextViewState},
 };
 use std::{
     borrow::Cow,
@@ -76,7 +76,15 @@ const UI_FONT_FAMILY: &str = "Suisse Intl";
 const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
-const APPLICATION_LICENSE_TEXT: &str = include_str!("../LICENSE");
+const REPOSITORY_URL: &str = "https://github.com/EkuboProtocol/wallet";
+
+fn application_license_url() -> String {
+    if BUILD_COMMIT.is_empty() {
+        format!("{REPOSITORY_URL}/blob/main/LICENSE")
+    } else {
+        format!("{REPOSITORY_URL}/blob/{BUILD_COMMIT}/LICENSE")
+    }
+}
 
 const EMBEDDED_FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/SuisseIntl-Regular.ttf"),
@@ -142,19 +150,13 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: &LegalStatu
         }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LegalReviewDocument {
-    Core(LegalDocument),
-    ApplicationLicense,
-}
-
-impl LegalReviewDocument {
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Core(document) => document.title(),
-            Self::ApplicationLicense => "Application License",
-        }
-    }
+fn settings_section(title: &'static str, content: impl IntoElement) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(div().text_lg().font_semibold().child(title))
+        .child(content)
 }
 
 fn scroll_reached_end(offset_y: gpui::Pixels, max_offset_y: gpui::Pixels) -> bool {
@@ -512,7 +514,7 @@ pub struct WalletWindow {
     network_json_input: Option<Entity<InputState>>,
     network_json_error: Option<SharedString>,
     network_editor_open: bool,
-    network_editor_identity: Option<u64>,
+    network_editor_original: Option<NetworkConfig>,
     network_editor_disabled: bool,
     network_editor_rpc_strategy: RpcStrategy,
     network_editor_advanced: bool,
@@ -754,9 +756,10 @@ fn render_embedded_png(bytes: &[u8]) -> Result<Arc<RenderImage>> {
 // The persistent list state keeps long legal documents virtualized between
 // frames; only the digest is retained for the eventual acceptance write.
 struct LegalReview {
-    document: LegalReviewDocument,
+    document: LegalDocument,
     digest: String,
     sections: Arc<[SharedString]>,
+    parsed_sections: Option<Arc<[Entity<TextViewState>]>>,
     list_state: gpui::ListState,
     acceptance_required: bool,
     scroll_check_scheduled: bool,
@@ -1538,7 +1541,12 @@ fn validate_token_text(
     Some(value.to_owned())
 }
 
-const LEGAL_SECTION_TARGET_BYTES: usize = 8 * 1024;
+// Keep each rich-text item small enough that parsing and laying out the visible
+// overdraw never monopolizes a frame. The list supplies an up-front height hint
+// for every item, so virtualizing these chunks does not start with a zero-height
+// scrollbar which grows as the user reads.
+const LEGAL_SECTION_TARGET_BYTES: usize = 768;
+const LEGAL_SECTION_HEIGHT_HINT: gpui::Pixels = px(180.0);
 
 fn legal_markdown_sections(text: &str) -> Arc<[SharedString]> {
     let mut sections = Vec::new();
@@ -1594,7 +1602,7 @@ fn network_can_be_removed(network: &NetworkConfig) -> bool {
 
 fn networks_for_display(networks: &[NetworkConfig]) -> Vec<&NetworkConfig> {
     let mut networks = networks.iter().collect::<Vec<_>>();
-    networks.sort_by_key(|network| (network.disabled, network.chain_id, network.name.as_str()));
+    networks.sort_by_key(|network| (network.chain_id, network.name.as_str()));
     networks
 }
 
@@ -3000,7 +3008,7 @@ impl WalletWindow {
             network_json_input: None,
             network_json_error: None,
             network_editor_open: false,
-            network_editor_identity: None,
+            network_editor_original: None,
             network_editor_disabled: false,
             network_editor_rpc_strategy: RpcStrategy::Ordered,
             network_editor_advanced: false,
@@ -3264,19 +3272,6 @@ impl WalletWindow {
                 Some(cx.new(|cx| {
                     InputState::new(window, cx).placeholder("Optional documentation URL")
                 }));
-        }
-        if self.network_preset_search_input.is_none() {
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("Search presets by network name or chain ID")
-            });
-            self.network_preset_search_subscription =
-                Some(cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        cx.notify();
-                    }
-                }));
-            self.network_preset_search_input = Some(input);
         }
         if self.policy_json_input.is_none() {
             self.policy_json_input = Some(cx.new(|cx| {
@@ -4921,7 +4916,7 @@ impl WalletWindow {
             .legal_status()
             .is_ok_and(|status| legal_review_requires_acceptance(document, &status));
         self.legal_review = Some(Self::new_legal_review(
-            LegalReviewDocument::Core(document),
+            document,
             &text,
             digest,
             acceptance_required,
@@ -4930,33 +4925,31 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn open_application_license(&mut self, cx: &mut Context<Self>) {
-        self.legal_review = Some(Self::new_legal_review(
-            LegalReviewDocument::ApplicationLicense,
-            APPLICATION_LICENSE_TEXT,
-            format!(
-                "{:#x}",
-                alloy::primitives::keccak256(APPLICATION_LICENSE_TEXT)
-            ),
-            false,
-            cx,
-        ));
-        cx.notify();
-    }
-
     fn new_legal_review(
-        document: LegalReviewDocument,
+        document: LegalDocument,
         text: &str,
         digest: String,
         acceptance_required: bool,
         cx: &mut Context<Self>,
     ) -> LegalReview {
         let sections = legal_markdown_sections(text);
-        // Legal sections have intentionally variable rich-text heights. Measure them once
-        // before presenting the scrollbar so its extent is exact from the first frame;
-        // subsequent frames still render only the visible sections and overdraw.
-        let list_state =
-            gpui::ListState::new(sections.len(), gpui::ListAlignment::Top, px(600.0)).measure_all();
+        // The mandatory documents are short enough to parse once when opened.
+        // Persisting their TextViewState entities removes markdown parsing from
+        // the first scroll through each chunk. The 800+ KiB third-party notice
+        // remains lazy so opening an optional document never parses it all.
+        let parsed_sections = acceptance_required.then(|| {
+            sections
+                .iter()
+                .map(|section| cx.new(|cx| TextViewState::markdown(section.as_ref(), cx)))
+                .collect::<Vec<_>>()
+                .into()
+        });
+        // A uniform hint gives the scrollbar a stable extent on frame one while
+        // allowing GPUI to parse and measure only visible rich-text chunks. Using
+        // `measure_all` here synchronously parsed the entire privacy policy (and
+        // the much larger third-party notice) before the first scroll frame.
+        let list_state = gpui::ListState::new(sections.len(), gpui::ListAlignment::Top, px(720.0))
+            .with_uniform_item_height(LEGAL_SECTION_HEIGHT_HINT);
         let view = cx.entity().downgrade();
         let review_digest = digest.clone();
         list_state.set_scroll_handler(move |event, _, cx| {
@@ -4975,6 +4968,7 @@ impl WalletWindow {
             document,
             digest,
             sections,
+            parsed_sections,
             list_state,
             acceptance_required,
             scroll_check_scheduled: false,
@@ -4991,7 +4985,7 @@ impl WalletWindow {
         self.legal_gate = document.is_some();
         self.legal_review = document.map(|document| {
             let (text, digest) = self.owner.legal_document(document);
-            Self::new_legal_review(LegalReviewDocument::Core(document), &text, digest, true, cx)
+            Self::new_legal_review(document, &text, digest, true, cx)
         });
     }
 
@@ -5016,9 +5010,7 @@ impl WalletWindow {
         if !review.acceptance_required || !review.viewed_to_end {
             return;
         }
-        let LegalReviewDocument::Core(document) = review.document else {
-            return;
-        };
+        let document = review.document;
         match self.owner.accept_legal(document, &review.digest) {
             Ok(()) => {
                 self.open_next_required_legal(cx);
@@ -5221,7 +5213,7 @@ impl WalletWindow {
         }
         replace_input_value(self.network_json_input.as_ref(), "", window, cx);
         self.network_editor_open = true;
-        self.network_editor_identity = None;
+        self.network_editor_original = None;
         self.network_editor_disabled = false;
         self.network_editor_rpc_strategy = RpcStrategy::Ordered;
         self.network_editor_advanced = false;
@@ -5239,7 +5231,7 @@ impl WalletWindow {
             return;
         }
         self.network_editor_open = false;
-        self.network_editor_identity = None;
+        self.network_editor_original = None;
         self.network_editor_errors = NetworkEditorErrors::default();
         self.network_json_error = None;
         cx.notify();
@@ -5368,7 +5360,7 @@ impl WalletWindow {
             }
         }
         self.network_editor_open = true;
-        self.network_editor_identity = Some(network.chain_id);
+        self.network_editor_original = Some(network.clone());
         self.network_editor_disabled = network.disabled;
         self.network_editor_rpc_strategy = network.rpc_strategy;
         self.network_editor_advanced = false;
@@ -5402,11 +5394,13 @@ impl WalletWindow {
         };
         self.network_editor_busy = true;
         let owner = self.owner.clone();
-        let task =
-            gpui_tokio::Tokio::spawn_result(
-                cx,
-                async move { owner.install_network(network).await },
-            );
+        let original = self.network_editor_original.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            match original {
+                Some(reviewed) => owner.replace_network(&reviewed, network).await,
+                None => owner.add_network(network).await,
+            }
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -5414,12 +5408,12 @@ impl WalletWindow {
                 match result {
                     Ok(()) => {
                         view.network_editor_open = false;
-                        view.network_editor_identity = None;
+                        view.network_editor_original = None;
                         view.network_editor_errors = NetworkEditorErrors::default();
                     }
                     Err(error) => {
                         view.network_editor_errors.form =
-                            Some(format!("Network was not installed: {error:#}"));
+                            Some(format!("Network was not saved: {error:#}"));
                     }
                 }
                 cx.notify();
@@ -5452,11 +5446,13 @@ impl WalletWindow {
         self.network_json_error = None;
         self.network_editor_busy = true;
         let owner = self.owner.clone();
-        let task =
-            gpui_tokio::Tokio::spawn_result(
-                cx,
-                async move { owner.install_network(network).await },
-            );
+        let original = self.network_editor_original.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            match original {
+                Some(reviewed) => owner.replace_network(&reviewed, network).await,
+                None => owner.add_network(network).await,
+            }
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -5465,11 +5461,11 @@ impl WalletWindow {
                     Ok(()) => {
                         view.network_json_error = None;
                         view.network_editor_open = false;
-                        view.network_editor_identity = None;
+                        view.network_editor_original = None;
                     }
                     Err(error) => {
                         view.network_json_error =
-                            Some(format!("Network was not installed: {error:#}").into());
+                            Some(format!("Network was not saved: {error:#}").into());
                     }
                 }
                 cx.notify();
@@ -5500,6 +5496,54 @@ impl WalletWindow {
                     Err(error) => {
                         view.network_preset_error =
                             Some(format!("Could not install the network preset: {error:#}").into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn restore_network_preset(&mut self, reviewed: NetworkConfig, cx: &mut Context<Self>) {
+        let name = reviewed.name.clone();
+        if self.network_action_busy.contains(&name) {
+            return;
+        }
+        let Some(preset) = self
+            .network_presets
+            .iter()
+            .find(|profile| profile.config.chain_id == reviewed.chain_id)
+            .map(|profile| profile.config.clone())
+        else {
+            self.network_action_errors
+                .insert(name, "This network has no built-in defaults.".into());
+            cx.notify();
+            return;
+        };
+        self.network_action_busy.insert(name.clone());
+        self.network_action_errors.remove(&name);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.replace_network(&reviewed, preset).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.network_action_busy.remove(&name);
+                match result {
+                    Ok(()) => {
+                        view.network_action_errors.remove(&name);
+                        view.invalidate_portfolio();
+                    }
+                    Err(error) => {
+                        view.network_action_errors.insert(
+                            name,
+                            format!(
+                                "Defaults were not restored; review the current row and try again: {error:#}"
+                            )
+                            .into(),
+                        );
                     }
                 }
                 cx.notify();
@@ -6954,7 +6998,7 @@ impl WalletWindow {
                 } else {
                     self.sidebar_logo_light.clone()
                 };
-                button.child(img(logo).w(px(34.0)).h(px(34.0)))
+                button.child(img(logo).w(px(41.0)).h(px(41.0)))
             } else {
                 button.child(Icon::new(route.icon()).size(px(30.0)))
             };
@@ -6978,7 +7022,9 @@ impl WalletWindow {
         match self.cached_reviews() {
             Ok(queues) => {
                 let total = review_queue_decision_count(queues);
-                content = content.child(format!("{total} request(s) need your attention."));
+                if total > 0 {
+                    content = content.child(format!("{total} request(s) need your attention."));
+                }
                 for request in &queues.transactions {
                     let request_id = request.request_id;
                     content =
@@ -7166,8 +7212,19 @@ impl WalletWindow {
                 if total == 0 {
                     content = content.child(
                         div()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Nothing is waiting for review."),
+                            .p_5()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().font_semibold().child("Inbox is clear"))
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Transactions, messages, typed data, WalletConnect requests, and proposed policy, network, or token changes that need your decision will appear here."),
+                            ),
                     );
                 }
             }
@@ -7660,11 +7717,11 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_4()
-            .child(
+            .child(settings_section(
+                "Appearance",
                 GroupBox::new()
                     .id("appearance-settings")
                     .outline()
-                    .title("Appearance")
                     .child(
                         div()
                             .text_sm()
@@ -7721,12 +7778,12 @@ impl WalletWindow {
                                     })),
                             ),
                     ),
-            )
-            .child(
+            ))
+            .child(settings_section(
+                "Notifications",
                 GroupBox::new()
                     .id("notification-settings")
                     .outline()
-                    .title("Notifications")
                     .child(
                         h_flex()
                             .w_full()
@@ -7753,12 +7810,12 @@ impl WalletWindow {
                                     })),
                             ),
                     ),
-            )
-            .child(
+            ))
+            .child(settings_section(
+                "Detected agents",
                 GroupBox::new()
                     .id("detected-agent-settings")
                     .outline()
-                    .title("Detected agents")
                     .child(
                         Button::new("reinstall-all-detected-agents")
                             .label(if self.agent_reinstall == AgentReinstallState::Running {
@@ -7776,14 +7833,14 @@ impl WalletWindow {
                             })),
                     )
                     .child(agents),
-            )
-            .child(
+            ))
+            .child(settings_section(
+                "Agent sessions",
                 GroupBox::new()
                     .id("agent-session-settings")
                     .outline()
-                    .title("Agent sessions")
                     .child(managed_agents),
-            )
+            ))
             .child(self.render_updates(cx))
             .child(self.render_legal(cx))
     }
@@ -7809,8 +7866,15 @@ impl WalletWindow {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .gap_2()
-                        .child(div().flex_1().child(Input::new(input)))
+                        .child(
+                            div()
+                                .min_w(px(180.0))
+                                .flex_1()
+                                .flex_basis(px(320.0))
+                                .child(Input::new(input)),
+                        )
                         .child(
                             Button::new("create-account")
                                 .label("Create")
@@ -7829,8 +7893,15 @@ impl WalletWindow {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .gap_2()
-                        .child(Input::new(input).mask_toggle().flex_1())
+                        .child(
+                            div()
+                                .min_w(px(180.0))
+                                .flex_1()
+                                .flex_basis(px(320.0))
+                                .child(Input::new(input).mask_toggle()),
+                        )
                         .child(
                             Button::new("import-account")
                                 .label("Import private key")
@@ -7872,12 +7943,32 @@ impl WalletWindow {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
-                                .justify_between()
-                                .child(div().child(format!("{} · {:#x}", item.id, item.address)))
+                                .gap_3()
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex_basis(px(260.0))
+                                        .child(
+                                            div().font_semibold().truncate().child(item.id.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .max_w_full()
+                                                .truncate()
+                                                .font_family(MONO_FONT_FAMILY)
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("{:#x}", item.address)),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
                                         .flex()
+                                        .flex_wrap()
                                         .gap_2()
                                         .child(
                                             Button::new(SharedString::from(format!(
@@ -8956,12 +9047,26 @@ impl WalletWindow {
     }
 
     fn render_legal(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let license_url = application_license_url();
         let panel = GroupBox::new()
             .id("legal-and-version")
             .outline()
             .child(format!("Version {BUILD_VERSION}"))
             .child("Copyright © 2026 Ekubo, Inc.")
-            .child("Licensed under FSL-1.1-MIT");
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .child("Licensed under FSL-1.1-MIT")
+                    .child(
+                        Button::new("review-license")
+                            .label("View")
+                            .tooltip("View the license for this exact source revision on GitHub")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.open_url(&license_url);
+                            })),
+                    ),
+            );
         let panel =
             match self.cached_legal_status() {
                 Ok(status) => panel
@@ -8999,17 +9104,6 @@ impl WalletWindow {
                         h_flex()
                             .w_full()
                             .justify_between()
-                            .child("Application License · FSL-1.1-MIT")
-                            .child(Button::new("review-license").label("View").on_click(
-                                cx.listener(|view, _, _, cx| {
-                                    view.open_application_license(cx);
-                                }),
-                            )),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
                             .child("Third-Party Licenses")
                             .child(Button::new("review-licenses").label("View").on_click(
                                 cx.listener(|view, _, _, cx| {
@@ -9019,12 +9113,7 @@ impl WalletWindow {
                     ),
                 Err(error) => panel.child(format!("Legal status unavailable: {error:#}")),
             };
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().text_lg().font_semibold().child("Legal & version"))
-            .child(panel)
+        settings_section("About Ekubo Wallet", panel)
     }
 
     fn render_walletconnect(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -9235,7 +9324,7 @@ impl WalletWindow {
             return div();
         };
         let busy = self.network_editor_busy;
-        let editing = self.network_editor_identity.is_some();
+        let editing = self.network_editor_original.is_some();
         let field = |label: &'static str,
                      input: &Entity<InputState>,
                      error: Option<String>,
@@ -9287,7 +9376,7 @@ impl WalletWindow {
                         "Chain ID",
                         chain_id,
                         self.network_editor_errors.chain_id.clone(),
-                        editing,
+                        false,
                     )),
             )
             .child(field(
@@ -9436,7 +9525,11 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Advanced mode installs this complete object independently of the guided fields above."),
+                            .child(if editing {
+                                "Advanced mode replaces the exact network row you opened with this complete object. If that row changed elsewhere, saving stops and asks you to review it again."
+                            } else {
+                                "Advanced mode creates this complete object. It will not overwrite an existing chain or conflicting identifier."
+                            }),
                     )
                     .child(Input::new(input).h(px(320.0)).disabled(busy))
                     .when_some(self.network_json_error.clone(), |panel, error| {
@@ -9464,6 +9557,7 @@ impl WalletWindow {
         )
     }
 
+    #[allow(dead_code)]
     fn render_network_registry(
         &self,
         configured: &[NetworkConfig],
@@ -9808,9 +9902,6 @@ impl WalletWindow {
                 ));
             }
         }
-        if let Ok(networks) = self.cached_networks() {
-            content = content.child(self.render_network_registry(networks, cx));
-        }
         content = content.child(self.render_network_editor(cx));
         match self.cached_networks() {
             Ok(networks) => {
@@ -9824,6 +9915,12 @@ impl WalletWindow {
                     let disabled = network.disabled;
                     let expanded = self.expanded_networks.contains(&name);
                     let busy = self.network_action_busy.contains(&name);
+                    let restore = self
+                        .network_presets
+                        .iter()
+                        .find(|profile| profile.config.chain_id == network.chain_id)
+                        .filter(|profile| profile.config != *network)
+                        .map(|_| network.clone());
                     let confirming_removal =
                         self.pending_network_removal.as_deref() == Some(name.as_str());
                     let action_error = self.network_action_errors.get(&name).cloned();
@@ -9944,7 +10041,25 @@ impl WalletWindow {
                                                             );
                                                         },
                                                     )),
-                                                ),
+                                                )
+                                                .when_some(restore, |actions, reviewed| {
+                                                    actions.child(
+                                                        Button::new(SharedString::from(format!(
+                                                            "restore-network-{name}"
+                                                        )))
+                                                        .label("Restore defaults")
+                                                        .tooltip("Restore this network's bundled configuration")
+                                                        .disabled(busy)
+                                                        .on_click(cx.listener(
+                                                            move |view, _, _, cx| {
+                                                                view.restore_network_preset(
+                                                                    reviewed.clone(),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                    )
+                                                }),
                                         ),
                                 )
                                 .child(
@@ -10070,11 +10185,13 @@ impl WalletWindow {
     }
 
     fn render_portfolio(&self, cx: &mut Context<Self>) -> gpui::Div {
+        // Rendering and scrolling must never open SQLCipher or consult the OS
+        // credential store. The background snapshot already owns the exact
+        // configured rows needed by this picker.
         let enabled_networks = self
-            .owner
-            .networks()
+            .cached_networks()
             .unwrap_or_default()
-            .into_iter()
+            .iter()
             .filter(|network| !network.disabled)
             .collect::<Vec<_>>();
         let mut network_picker = div().flex().flex_wrap().gap_2();
@@ -10908,17 +11025,13 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
                 ),
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().text_lg().font_semibold().child("Updates"))
-            .child(
-                GroupBox::new()
-                    .id("software-updates")
-                    .outline()
-                    .child(panel),
-            )
+        settings_section(
+            "Updates",
+            GroupBox::new()
+                .id("software-updates")
+                .outline()
+                .child(panel),
+        )
     }
 
     fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -11460,7 +11573,7 @@ impl WalletWindow {
                     .border_1()
                     .border_color(cx.theme().border)
                     .font_family(MONO_FONT_FAMILY)
-                    .child(pending.preview.exact_diff().to_owned()),
+                    .child(pending.preview.managed_diff().to_owned()),
             )
             .child(
                 div()
@@ -11492,20 +11605,23 @@ impl WalletWindow {
             return div().into_any_element();
         };
         let sections = review.sections.clone();
+        let parsed_sections = review.parsed_sections.clone();
         let document_title = review.document.title();
         let document = gpui::list(review.list_state.clone(), move |index, _, _| {
-            div()
-                .w_full()
-                .pr_3()
-                .pb_3()
-                .child(
+            let text = parsed_sections.as_ref().map_or_else(
+                || {
                     TextView::markdown(
                         SharedString::from(format!("legal-markdown-{document_title}-{index}")),
                         sections[index].clone(),
                     )
-                    .w_full()
-                    .selectable(true),
-                )
+                },
+                |states| TextView::new(&states[index]),
+            );
+            div()
+                .w_full()
+                .pr_3()
+                .pb_3()
+                .child(text.w_full().selectable(true))
                 .into_any_element()
         })
         .size_full();
@@ -11839,10 +11955,47 @@ fn dark_appearance(appearance: WindowAppearance) -> bool {
     )
 }
 
+#[derive(Clone, Copy)]
+struct InterfaceInteractionPalette {
+    button: u32,
+    button_hover: u32,
+    button_active: u32,
+    button_foreground: u32,
+    primary: u32,
+    primary_hover: u32,
+    primary_active: u32,
+    primary_foreground: u32,
+    danger: u32,
+    danger_hover: u32,
+    danger_active: u32,
+    danger_foreground: u32,
+}
+
+#[allow(clippy::unreadable_literal)] // Six-digit literals are RGB colors from the interface palette.
+const fn interface_interaction_palette(dark: bool) -> InterfaceInteractionPalette {
+    InterfaceInteractionPalette {
+        button: if dark { 0x1d1d1d } else { 0xf6f6f9 },
+        button_hover: if dark { 0x373737 } else { 0xe5e4e4 },
+        button_active: if dark { 0x261b34 } else { 0xf3e7fe },
+        button_foreground: if dark { 0xffffff } else { 0x101010 },
+        // Keep off-purple for accents. Small white labels need the darker
+        // Ekubo purple to meet AA contrast in every interaction state.
+        primary: 0x661cc4,
+        primary_hover: 0x752ccf,
+        primary_active: 0x4c1396,
+        primary_foreground: 0xffffff,
+        danger: 0xc0165b,
+        danger_hover: 0xd11868,
+        danger_active: 0x981047,
+        danger_foreground: 0xffffff,
+    }
+}
+
 #[allow(clippy::unreadable_literal)] // Six-digit literals match the interface repository's RGB palette.
 fn apply_interface_palette(cx: &mut App) {
     let dark = Theme::global(cx).is_dark();
     let color = |hex: u32| -> gpui::Hsla { gpui::rgb(hex).into() };
+    let interaction = interface_interaction_palette(dark);
     let (background, surface, hover, border, muted, foreground, muted_foreground) = if dark {
         (
             color(0x101010),
@@ -11864,9 +12017,10 @@ fn apply_interface_palette(cx: &mut App) {
             color(0x666666),
         )
     };
-    let primary = color(0x9d5af2);
-    let primary_active = color(0x261b34);
-    let danger = color(0xeb1e74);
+    let accent = color(0x9d5af2);
+    let primary = color(interaction.primary);
+    let primary_active = color(interaction.primary_active);
+    let danger = color(interaction.danger);
     let success = color(0x26e8ad);
     let warning = color(0xdf7b32);
     let theme = Theme::global_mut(cx);
@@ -11877,22 +12031,22 @@ fn apply_interface_palette(cx: &mut App) {
     colors.accent = hover;
     colors.accent_foreground = foreground;
     colors.accordion = surface;
-    colors.button = surface;
-    colors.button_active = primary_active;
-    colors.button_foreground = foreground;
-    colors.button_hover = hover;
+    colors.button = color(interaction.button);
+    colors.button_active = color(interaction.button_active);
+    colors.button_foreground = color(interaction.button_foreground);
+    colors.button_hover = color(interaction.button_hover);
     colors.button_primary = primary;
     colors.button_primary_active = primary_active;
-    colors.button_primary_foreground = color(0xffffff);
-    colors.button_primary_hover = primary.mix_oklab(background, 0.12);
-    colors.button_secondary = surface;
-    colors.button_secondary_active = primary_active;
-    colors.button_secondary_foreground = foreground;
-    colors.button_secondary_hover = hover;
+    colors.button_primary_foreground = color(interaction.primary_foreground);
+    colors.button_primary_hover = color(interaction.primary_hover);
+    colors.button_secondary = color(interaction.button);
+    colors.button_secondary_active = color(interaction.button_active);
+    colors.button_secondary_foreground = color(interaction.button_foreground);
+    colors.button_secondary_hover = color(interaction.button_hover);
     colors.button_danger = danger;
-    colors.button_danger_active = danger.mix_oklab(background, 0.25);
-    colors.button_danger_foreground = color(0xffffff);
-    colors.button_danger_hover = danger.mix_oklab(background, 0.12);
+    colors.button_danger_active = color(interaction.danger_active);
+    colors.button_danger_foreground = color(interaction.danger_foreground);
+    colors.button_danger_hover = color(interaction.danger_hover);
     colors.button_success = success;
     colors.button_success_active = success.mix_oklab(background, 0.25);
     colors.button_success_foreground = color(0x101010);
@@ -11905,8 +12059,8 @@ fn apply_interface_palette(cx: &mut App) {
     colors.group_box_foreground = foreground;
     colors.input = border;
     colors.list = surface;
-    colors.list_active = primary_active;
-    colors.list_active_border = primary;
+    colors.list_active = color(interaction.button_active);
+    colors.list_active_border = accent;
     colors.list_even = surface;
     colors.list_head = muted;
     colors.list_hover = hover;
@@ -11916,20 +12070,20 @@ fn apply_interface_palette(cx: &mut App) {
     colors.popover_foreground = foreground;
     colors.primary = primary;
     colors.primary_active = primary_active;
-    colors.primary_foreground = color(0xffffff);
-    colors.primary_hover = primary.mix_oklab(background, 0.12);
-    colors.ring = primary;
+    colors.primary_foreground = color(interaction.primary_foreground);
+    colors.primary_hover = color(interaction.primary_hover);
+    colors.ring = accent;
     colors.secondary = surface;
-    colors.secondary_active = primary_active;
+    colors.secondary_active = color(interaction.button_active);
     colors.secondary_foreground = foreground;
     colors.secondary_hover = hover;
     colors.sidebar = surface;
-    colors.sidebar_accent = primary_active;
+    colors.sidebar_accent = color(interaction.button_active);
     colors.sidebar_accent_foreground = foreground;
     colors.sidebar_border = border;
     colors.sidebar_foreground = foreground;
     colors.sidebar_primary = primary;
-    colors.sidebar_primary_foreground = color(0xffffff);
+    colors.sidebar_primary_foreground = color(interaction.primary_foreground);
     colors.danger = danger;
     colors.danger_foreground = color(0xffffff);
     colors.success = success;
@@ -12011,7 +12165,7 @@ fn show_wallet_window(
         view.network_preset_search_input = None;
         view.network_preset_search_subscription = None;
         view.network_editor_open = false;
-        view.network_editor_identity = None;
+        view.network_editor_original = None;
         view.policy_json_input = None;
         view.policy_editor = None;
         view.policy_chain_input = None;

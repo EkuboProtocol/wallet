@@ -26,5 +26,9 @@ mod walletconnect_handler;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_VERSION: &str = env!("EKUBO_WALLET_BUILD_VERSION");
+pub const BUILD_COMMIT: &str = env!("EKUBO_WALLET_BUILD_COMMIT");
+/// Exact application license shipped inside every binary, independent of
+/// network access to the source repository.
+pub const APPLICATION_LICENSE_TEXT: &str = include_str!("../LICENSE");
 
 pub use desktop::run_desktop;

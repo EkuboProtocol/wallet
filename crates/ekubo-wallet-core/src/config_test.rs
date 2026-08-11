@@ -132,6 +132,68 @@ fn network_deletion_requires_an_owner_authorized_disable_first() {
 }
 
 #[test]
+fn network_create_never_overwrites_an_existing_chain() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    let before = store.load().unwrap();
+    let mut conflicting = before.networks[0].clone();
+    conflicting.name = "not-ethereum".into();
+    conflicting.display_name = Some("Not Ethereum".into());
+
+    assert!(store.add_network(conflicting, &authorized).is_err());
+    assert_eq!(store.load().unwrap(), before);
+}
+
+#[test]
+fn network_update_replaces_only_the_exact_row_the_owner_opened() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    let reviewed = store.load().unwrap().networks[0].clone();
+    let mut replacement = reviewed.clone();
+    replacement.name = "ethereum-owner".into();
+    replacement.display_name = Some("Owner Ethereum".into());
+    replacement.chain_id = 9_999_991;
+    replacement.aliases.clear();
+    replacement.rpc_urls = vec!["https://owner-rpc.example".parse().unwrap()];
+
+    store
+        .replace_network(&reviewed, replacement.clone(), &authorized)
+        .unwrap();
+    let networks = store.load().unwrap().networks;
+    assert!(!networks.iter().any(|network| network == &reviewed));
+    assert!(networks.iter().any(|network| network == &replacement));
+}
+
+#[test]
+fn stale_network_update_cannot_overwrite_newer_rpc_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    let reviewed = store.load().unwrap().networks[0].clone();
+    let mut newer = reviewed.clone();
+    newer.rpc_urls = vec!["https://newer-owner-rpc.example".parse().unwrap()];
+    store.install_network(newer.clone(), &authorized).unwrap();
+
+    let mut stale_edit = reviewed.clone();
+    stale_edit.display_name = Some("Stale editor".into());
+    assert!(
+        store
+            .replace_network(&reviewed, stale_edit, &authorized)
+            .is_err()
+    );
+    assert!(
+        store
+            .load()
+            .unwrap()
+            .networks
+            .iter()
+            .any(|network| network == &newer)
+    );
+}
+
+#[test]
 fn network_reset_requires_authorization_and_the_exact_reviewed_snapshot() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 description = "WalletConnect v2 Sign session handling for EIP-155 wallets"
-repository = "https://github.com/EkuboProtocol/wallet-mcp-server"
+repository = "https://github.com/EkuboProtocol/wallet"
 license = "FSL-1.1-MIT"
 publish = false
 

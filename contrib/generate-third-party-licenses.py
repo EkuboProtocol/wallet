@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate THIRD_PARTY_LICENSES.md from cargo metadata.
 
-Runs `cargo metadata` against the workspace lockfile, lists every third-party
+Runs `cargo metadata` against the workspace lockfile, traverses normal and
+build dependencies from this workspace's roots, lists every third-party
 package that can end up in a shipped binary (all platforms), groups packages
 by license expression, and appends the full text of each referenced license.
 License texts are read from the package's own source directory when it ships
@@ -11,8 +12,8 @@ license file fall back to a single canonical text per license family.
 Usage: contrib/generate-third-party-licenses.py [--check]
 
 --check exits nonzero when THIRD_PARTY_LICENSES.md is stale instead of
-rewriting it. tests/shipped_assets.rs separately asserts the shipped document
-covers every package in Cargo.lock.
+rewriting it. Both modes also reject a resolved dependency whose only offered
+license branches are GPL-family or other strong reciprocal licenses.
 """
 
 import json
@@ -47,6 +48,19 @@ CANONICAL_FALLBACKS = {
     "0BSD": "Zero-Clause BSD: https://opensource.org/license/0bsd",
     "BSL-1.0": "Boost Software License 1.0: https://www.boost.org/LICENSE_1_0.txt",
 }
+
+# A distributed FSL application must not silently acquire a strong-copyleft
+# obligation through a linked Rust dependency. An SPDX `OR` expression is
+# acceptable when at least one offered branch is non-copyleft: the project
+# deliberately selects that branch. MPL-2.0 is handled separately as weak,
+# file-level copyleft and remains allowed.
+FORBIDDEN_LICENSE_MARKERS = (
+    "AGPL-",
+    "GPL-",
+    "LGPL-",
+    "SSPL-",
+    "BUSL-",
+)
 
 
 def metadata():
@@ -107,14 +121,88 @@ def normalized_expression(package):
     return re.sub(r"\s+", " ", expression.replace("/", " OR ")).strip()
 
 
+def reachable_packages(data):
+    """Return packages reachable through non-dev edges from workspace roots.
+
+    Git workspace dependencies such as Zed cause `cargo metadata` to describe
+    many sibling packages which this application never links. Listing every
+    metadata package both obscures the actual audit and can incorrectly assign
+    an unrelated sibling crate's license to the wallet.
+    """
+    nodes = {node["id"]: node for node in data["resolve"]["nodes"]}
+    reachable = set()
+    pending = list(data["workspace_members"])
+    while pending:
+        package_id = pending.pop()
+        if package_id in reachable:
+            continue
+        reachable.add(package_id)
+        node = nodes.get(package_id)
+        if node is None:
+            continue
+        for dependency in node["deps"]:
+            kinds = dependency.get("dep_kinds") or [{"kind": None}]
+            if any(kind.get("kind") != "dev" for kind in kinds):
+                pending.append(dependency["pkg"])
+    return [
+        package
+        for package in data["packages"]
+        if package["id"] in reachable
+    ]
+
+
+def forbidden_license(package):
+    expression = normalized_expression(package).upper()
+    if expression == "(LICENSE FILE ONLY)":
+        files = license_files_for(package)
+        texts = []
+        for path in files:
+            try:
+                texts.append(path.read_text(encoding="utf-8", errors="replace").upper())
+            except OSError:
+                continue
+        combined = "\n".join(texts)
+        if (
+            "APACHE LICENSE" in combined
+            or "MIT LICENSE" in combined
+            or "BSD LICENSE" in combined
+        ):
+            return None
+        return "LICENSE FILE ONLY (UNRECOGNIZED BY AUDIT)"
+    # Choosing any one branch satisfies an SPDX OR expression. Within a branch,
+    # an AND expression carries every obligation, so one forbidden marker makes
+    # that branch unsuitable.
+    alternatives = re.split(r"\s+OR\s+", expression)
+    if any(
+        not any(marker in alternative for marker in FORBIDDEN_LICENSE_MARKERS)
+        for alternative in alternatives
+    ):
+        return None
+    return expression
+
+
 def main():
     check = "--check" in sys.argv[1:]
     data = metadata()
     workspace = set(data["workspace_members"])
     packages = [
-        package for package in data["packages"] if package["id"] not in workspace
+        package for package in reachable_packages(data) if package["id"] not in workspace
     ]
     packages.sort(key=lambda package: (package["name"], package["version"]))
+
+    forbidden = [
+        (package, expression)
+        for package in packages
+        if (expression := forbidden_license(package)) is not None
+    ]
+    if forbidden:
+        for package, expression in forbidden:
+            print(
+                f"forbidden dependency license: {package['name']} "
+                f"{package['version']} ({expression})",
+                file=sys.stderr,
+            )
+        return 2
 
     by_license = defaultdict(list)
     for package in packages:
@@ -183,7 +271,9 @@ def main():
         lines.append(f"## License text for: {', '.join(holders)}")
         lines.append("")
         lines.append("```text")
-        lines.append(text.replace("```", "` ` `"))
+        lines.append(
+            "\n".join(line.rstrip() for line in text.replace("```", "` ` `").splitlines())
+        )
         lines.append("```")
         lines.append("")
 

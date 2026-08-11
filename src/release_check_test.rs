@@ -5,7 +5,7 @@
 
 use super::*;
 
-const REPOSITORY: &str = "EkuboProtocol/wallet-mcp-server";
+const REPOSITORY: &str = "EkuboProtocol/wallet";
 
 fn at(text: &str) -> DateTime<Utc> {
     text.parse().expect("a fixed timestamp")
@@ -75,7 +75,7 @@ fn a_tag_that_could_escape_a_release_url_is_refused() {
 
 #[test]
 fn a_repository_override_is_owner_and_name_only() {
-    assert!(valid_repository("EkuboProtocol/wallet-mcp-server"));
+    assert!(valid_repository("EkuboProtocol/wallet"));
     assert!(valid_repository("owner/name.with.dots"));
 
     assert!(!valid_repository("EkuboProtocol"));
@@ -102,7 +102,7 @@ async fn an_available_update_points_to_the_desktop_updater() {
     assert_eq!(check.source, CheckSource::Network);
     assert_eq!(
         check.release_url.as_deref(),
-        Some("https://github.com/EkuboProtocol/wallet-mcp-server/releases/tag/v1.5.0")
+        Some("https://github.com/EkuboProtocol/wallet/releases/tag/v1.5.0")
     );
     assert!(check.instruction.contains("Updates"));
     assert!(check.instruction.contains("Never download or install"));

@@ -383,6 +383,58 @@ impl ConfigStore {
         self.update(|config| replace_configured_network(&mut config.networks, network))
     }
 
+    /// Add a genuinely new network after core-verified owner authorization.
+    ///
+    /// The desktop's Create affordance must not inherit upsert semantics: a
+    /// chain appearing while the owner is authenticating is a conflict to
+    /// review, not a row the stale form may silently replace.
+    pub fn add_network(
+        &self,
+        network: NetworkConfig,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        self.update(|config| add_configured_network(&mut config.networks, network))
+    }
+
+    /// Replace the exact network row an owner opened in the desktop editor.
+    ///
+    /// The complete old row is the optimistic revision: RPC URLs are
+    /// security-sensitive simulation inputs, so a stale editor may not
+    /// overwrite a newer owner decision. Removing the reviewed row and adding
+    /// the replacement happen in the same encrypted-database transaction.
+    pub fn replace_network(
+        &self,
+        reviewed: &NetworkConfig,
+        replacement: NetworkConfig,
+        authorization: &OwnerAuthorization,
+    ) -> Result<()> {
+        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        validate_network(&replacement)?;
+        self.update(|config| {
+            let index = config
+                .networks
+                .iter()
+                .position(|network| network.chain_id == reviewed.chain_id)
+                .with_context(|| {
+                    format!(
+                        "network {} (chain {}) no longer exists",
+                        reviewed.name, reviewed.chain_id
+                    )
+                })?;
+            ensure!(
+                config.networks[index] == *reviewed,
+                "network {} changed while it was being edited; review the current settings",
+                reviewed.name
+            );
+            let mut networks = config.networks.clone();
+            networks.remove(index);
+            add_configured_network(&mut networks, replacement)?;
+            config.networks = networks;
+            Ok(())
+        })
+    }
+
     /// Replace every configured network with the exact built-in defaults.
     ///
     /// This intentionally discards custom RPC URLs and network rows, so the

@@ -74,11 +74,7 @@ section 6, this software makes no network requests."
 fn privacy_policy_discloses_the_release_check() {
     let policy = privacy_policy();
     assert!(policy.contains("## 6. The release check"));
-    assert!(
-        policy.contains(
-            "https://api.github.com/repos/EkuboProtocol/wallet-mcp-server/releases/latest"
-        )
-    );
+    assert!(policy.contains("https://api.github.com/repos/EkuboProtocol/wallet/releases/latest"));
     assert!(policy.contains("EKUBO_WALLET_SKIP_UPDATE_CHECK=1"));
     // What triggers it, because "when you run a command" is the difference
     // between this and the background telemetry section 1 promises is absent.

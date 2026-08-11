@@ -11,9 +11,9 @@ use minisign_verify::{PublicKey, Signature};
 use std::{io::Read as _, path::PathBuf, process::Command, time::Duration};
 
 const UPDATE_ENDPOINT: &str =
-    "https://github.com/EkuboProtocol/wallet-mcp-server/releases/latest/download/latest.json";
+    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json";
 const UPDATE_METADATA_SIGNATURE_ENDPOINT: &str =
-    "https://github.com/EkuboProtocol/wallet-mcp-server/releases/latest/download/latest.json.sig";
+    "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json.sig";
 const MAX_UPDATE_METADATA_BYTES: u64 = 1 << 20;
 const MAX_UPDATE_METADATA_SIGNATURE_BYTES: u64 = 16 << 10;
 const UPDATE_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);

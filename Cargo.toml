@@ -5,13 +5,24 @@ edition = "2024"
 rust-version = "1.91"
 build = "build.rs"
 description = "Local-first EVM desktop wallet with policy-enforced agent signing"
-repository = "https://github.com/EkuboProtocol/wallet-mcp-server"
+repository = "https://github.com/EkuboProtocol/wallet"
 license = "FSL-1.1-MIT"
 keywords = ["mcp", "ethereum", "wallet", "eip-7702"]
 categories = ["cryptography::cryptocurrencies", "gui"]
 
 [workspace]
-members = ["crates/ekubo-wallet-core", "crates/walletconnect-session"]
+members = [
+    "crates/ekubo-wallet-core",
+    "crates/walletconnect-session",
+    "crates/ztracing-compat",
+]
+
+# GPUI is Apache-2.0, but its pinned workspace dependency named `ztracing`
+# is GPL-3.0-or-later. The wallet only needs that crate's tracing facade, so
+# resolve it to our small Apache-2.0 compatibility crate instead of linking
+# GPL code into the desktop application.
+[patch."https://github.com/zed-industries/zed"]
+ztracing = { path = "crates/ztracing-compat" }
 
 [[bin]]
 name = "ekubo-wallet"

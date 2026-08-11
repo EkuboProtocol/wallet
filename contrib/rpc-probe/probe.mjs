@@ -40,7 +40,7 @@ const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
 // atomic batch. Its exact shape is what makes the override probe meaningful.
 const CALIBUR = "0x000000005c84F8Fd50b21CAC312528A64437030e";
 const PROBE_ADDRESS = "0x000000000000000000000000000000000000dEaD";
-const USER_AGENT = "ekubo-wallet-rpc-probe/1.0 (+https://github.com/EkuboProtocol/wallet-mcp-server)";
+const USER_AGENT = "ekubo-wallet-rpc-probe/1.0 (+https://github.com/EkuboProtocol/wallet)";
 
 const candidates = JSON.parse(readFileSync(join(dir, "candidates.json"), "utf8"));
 

@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use std::{fmt::Write as _, path::Path};
 
 /// Shipped attribution document for third-party dependencies. Regenerate with
-/// `contrib/generate-third-party-licenses.py`; `tests/shipped_assets.rs`
-/// fails when it no longer covers every locked dependency.
+/// `contrib/generate-third-party-licenses.py`; CI fails when it is stale or a
+/// resolved dependency only offers a forbidden strong-copyleft license.
 pub const THIRD_PARTY_LICENSES: &str = include_str!("../../../THIRD_PARTY_LICENSES.md");
 
 pub const TERMS_OF_SERVICE: &str = "\
@@ -252,7 +252,7 @@ all.
 
 To tell you when the copy you are running is out of date, this software asks
 GitHub which release is newest. It sends an unauthenticated HTTPS GET to
-`https://api.github.com/repos/EkuboProtocol/wallet-mcp-server/releases/latest`,
+`https://api.github.com/repos/EkuboProtocol/wallet/releases/latest`,
 which is the same listing the installer reads, and uses only the version tag
 in the answer. Nothing of yours is sent: no wallet address, key, credential,
 cookie, balance, policy, or transaction, and no identifier of your machine or

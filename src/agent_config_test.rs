@@ -84,6 +84,38 @@ fn every_json_shape_preserves_unrelated_servers() {
 }
 
 #[test]
+fn managed_json_diff_shows_only_changed_server_fields() {
+    let before =
+        r#"{"keep":{"large":"unrelated"},"mcpServers":{"other":{"url":"https://example.com"}}}"#;
+    let after = merge_json(
+        before,
+        "mcpServers",
+        JsonShape::Url,
+        "http://127.0.0.1:61744/mcp",
+        false,
+    )
+    .unwrap();
+    let diff = managed_config_diff(AgentKind::Cursor, before, &after).unwrap();
+
+    assert!(diff.contains("mcpServers.ekubo-wallet"));
+    assert!(diff.contains("http://127.0.0.1:61744/mcp"));
+    assert!(!diff.contains("large"));
+    assert!(!diff.contains("other"));
+}
+
+#[test]
+fn managed_codex_diff_does_not_echo_static_credentials_or_unrelated_settings() {
+    let before = "model = \"gpt\"\n[mcp_servers.ekubo-wallet]\nurl = \"http://127.0.0.1:1/mcp\"\nhttp_headers = { Authorization = \"Bearer do-not-display\" }\n";
+    let after = merge_codex(before, "http://127.0.0.1:61744/mcp", false).unwrap();
+    let diff = managed_config_diff(AgentKind::Codex, before, &after).unwrap();
+
+    assert!(diff.contains("mcp_servers.ekubo-wallet"));
+    assert!(diff.contains("<credential field redacted>"));
+    assert!(!diff.contains("do-not-display"));
+    assert!(!diff.contains("model ="));
+}
+
+#[test]
 fn a_failed_install_restores_the_timestamped_backup() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mcp.json");
@@ -120,7 +152,7 @@ fn managed_preview_contains_no_credential() {
             companion: false,
         },
     };
-    assert!(!preview.exact_diff().contains("Authorization"));
+    assert!(!preview.managed_diff().contains("Authorization"));
     assert!(!preview.after.contains("Bearer"));
 }
 

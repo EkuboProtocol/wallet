@@ -15,7 +15,7 @@ use std::path::Path;
 use std::time::Duration;
 
 /// The repository from which signed desktop releases are published.
-const DEFAULT_REPOSITORY: &str = "EkuboProtocol/wallet-mcp-server";
+const DEFAULT_REPOSITORY: &str = "EkuboProtocol/wallet";
 
 /// Set to `1` to make every check here a no-op.
 const SKIP_ENVIRONMENT_VARIABLE: &str = "EKUBO_WALLET_SKIP_UPDATE_CHECK";

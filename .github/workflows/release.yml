@@ -24,6 +24,7 @@ jobs:
       - run: test "$GITHUB_REF_NAME" = "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
       - run: cargo fmt --all --check
       - run: cargo test --locked --workspace
+      - run: contrib/generate-third-party-licenses.py --check
       - run: cargo tree --locked | (! grep -E ' (clap|clap_complete|crossterm|ratatui) v')
       - run: '! grep -R "transport-io" Cargo.toml Cargo.lock'
 

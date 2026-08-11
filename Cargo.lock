@@ -12701,17 +12701,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zlog"
-version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
-dependencies = [
- "anyhow",
- "chrono",
- "collections",
- "log",
-]
-
-[[package]]
 name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12720,18 +12709,9 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
 dependencies = [
  "tracing",
- "tracing-subscriber",
- "zlog",
- "ztracing_macro",
 ]
-
-[[package]]
-name = "ztracing_macro"
-version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed#cc053a4a6fa2fd0e8793201ed9099466af1be0b1"
 
 [[package]]
 name = "zune-core"

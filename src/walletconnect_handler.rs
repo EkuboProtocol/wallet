@@ -62,7 +62,7 @@ fn wallet_metadata() -> AppMetadata {
     AppMetadata {
         name: "Ekubo Wallet".to_owned(),
         description: "Policy-enforced local EVM wallet".to_owned(),
-        url: "https://github.com/EkuboProtocol/wallet-mcp-server".to_owned(),
+        url: "https://github.com/EkuboProtocol/wallet".to_owned(),
         icons: Vec::new(),
     }
 }

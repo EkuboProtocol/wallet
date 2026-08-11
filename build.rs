@@ -9,6 +9,10 @@ fn main() {
         "cargo:rustc-env=EKUBO_WALLET_BUILD_VERSION={}",
         build_version(&version)
     );
+    println!(
+        "cargo:rustc-env=EKUBO_WALLET_BUILD_COMMIT={}",
+        exact_build_commit().unwrap_or_default()
+    );
 
     println!("cargo:rerun-if-changed=build.rs");
     for path in ["HEAD", "index"] {
@@ -21,6 +25,12 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=crates");
     create_package_icon();
+}
+
+fn exact_build_commit() -> Option<String> {
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+        .is_some_and(|status| !status.is_empty());
+    (!dirty).then(|| git(&["rev-parse", "HEAD"])).flatten()
 }
 
 fn build_version(version: &str) -> String {

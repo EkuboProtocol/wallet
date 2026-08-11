@@ -71,6 +71,9 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      - name: Verify dependency licenses and notices
+        run: contrib/generate-third-party-licenses.py --check
+
       - name: Install RustSec audit client
         run: cargo install cargo-audit --locked --version 0.22.2
 

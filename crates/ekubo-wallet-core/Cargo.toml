@@ -4,7 +4,7 @@ version = "1.0.0-rc.0"
 edition = "2024"
 rust-version = "1.91"
 description = "The security kernel of the ekubo-wallet binary: policy, custody, signing, storage"
-repository = "https://github.com/EkuboProtocol/wallet-mcp-server"
+repository = "https://github.com/EkuboProtocol/wallet"
 license = "FSL-1.1-MIT"
 publish = false
 
