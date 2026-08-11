@@ -13,8 +13,8 @@ use ekubo_wallet_core::{
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{
-        AgentKind, DesktopStore, McpClient, OAuthAuthorizationCode, OAuthSessionDuration,
-        OAuthTokenPair,
+        AgentKind, AppearancePreference, DesktopStore, McpClient, OAuthAuthorizationCode,
+        OAuthSessionDuration, OAuthTokenPair,
     },
     execution::BroadcastResult,
     human_presence::{
@@ -359,8 +359,8 @@ impl OwnerApi {
             .refresh_access_token(refresh_token, client_id, resource)
     }
 
-    pub fn revoke_client(&self, client_id: Uuid, authorization: &OwnerAuthorization) -> Result<()> {
-        self.desktop()?.revoke_client(client_id, authorization)?;
+    pub fn revoke_client(&self, client_id: Uuid) -> Result<()> {
+        self.desktop()?.revoke_client(client_id)?;
         self.events
             .publish(DomainEventKind::AgentConnectionChanged { client_id });
         Ok(())
@@ -412,6 +412,16 @@ impl OwnerApi {
         let authorization = authorize_owner(OwnerAuthorizationScope::SoftwareUpdate).await?;
         self.desktop()?
             .set_automatic_update_checks(enabled, &authorization)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
+    pub fn appearance_preference(&self) -> Result<AppearancePreference> {
+        self.desktop()?.appearance_preference()
+    }
+
+    pub fn set_appearance_preference(&self, preference: AppearancePreference) -> Result<()> {
+        self.desktop()?.set_appearance_preference(preference)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }
@@ -482,6 +492,11 @@ impl OwnerApi {
 
     pub fn networks(&self) -> Result<Vec<NetworkConfig>> {
         Ok(self.config.load()?.networks)
+    }
+
+    #[must_use]
+    pub fn network_presets(&self) -> Vec<ekubo_wallet_core::networks::NetworkProfile> {
+        ekubo_wallet_core::networks::known_networks().to_vec()
     }
 
     pub fn network_by_chain_id(&self, chain_id: u64) -> Result<NetworkConfig> {
@@ -566,10 +581,32 @@ impl OwnerApi {
 
     pub async fn install_network(&self, network: NetworkConfig) -> Result<()> {
         ekubo_wallet_core::config::validate_network(&network)?;
+        ekubo_wallet_core::rpc::verify_chain_id(&network).await?;
         let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
         self.config.install_network(network, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
+    }
+
+    pub async fn install_network_preset(&self, chain_id: u64) -> Result<NetworkConfig> {
+        let preset = ekubo_wallet_core::networks::known_network(chain_id)
+            .with_context(|| format!("chain {chain_id} has no built-in network preset"))?
+            .config
+            .clone();
+        self.install_network(preset.clone()).await?;
+        Ok(preset)
+    }
+
+    pub async fn reset_networks_to_defaults(
+        &self,
+        reviewed_networks: &[NetworkConfig],
+    ) -> Result<Vec<NetworkConfig>> {
+        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
+        let networks = self
+            .config
+            .reset_networks_to_defaults(reviewed_networks, &authorization)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(networks)
     }
 
     pub async fn remove_network(&self, identifier: &str) -> Result<NetworkConfig> {

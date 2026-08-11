@@ -34,6 +34,15 @@ const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
 const ACCESS_TOKEN_TTL: Duration = Duration::minutes(10);
 const MAX_OAUTH_CLIENTS: i64 = 128;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppearancePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 /// The owner-selected absolute lifetime of an OAuth refresh-token family.
 /// Access tokens remain short-lived and can never outlive this boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,6 +254,14 @@ impl DesktopStore {
     ) -> Result<()> {
         authorization.require(OwnerAuthorizationScope::SoftwareUpdate)?;
         self.set_setting("automatic_update_checks", &enabled)
+    }
+
+    pub fn appearance_preference(&self) -> Result<AppearancePreference> {
+        Ok(self.setting("appearance_preference")?.unwrap_or_default())
+    }
+
+    pub fn set_appearance_preference(&mut self, preference: AppearancePreference) -> Result<()> {
+        self.set_setting("appearance_preference", &preference)
     }
 
     /// Record public OAuth client metadata. This does not authorize the client
@@ -472,12 +489,9 @@ impl DesktopStore {
         })
     }
 
-    pub fn revoke_client(
-        &mut self,
-        client_id: Uuid,
-        authorization: &OwnerAuthorization,
-    ) -> Result<()> {
-        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+    /// Immediately revoke an OAuth session. Revocation only removes authority,
+    /// so the owner surface deliberately does not require human presence.
+    pub fn revoke_client(&mut self, client_id: Uuid) -> Result<()> {
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
             "UPDATE mcp_clients SET revoked_at = ?1

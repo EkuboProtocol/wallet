@@ -165,18 +165,22 @@ endpoints collect.
 Apart from these RPC endpoints, the referenced-artifact fetches described in
 section 4, the WalletConnect relay described in section 5, and the release
 check described in section 6, this software makes no network requests. If you
-add or replace a network, requests for that
-network go to the endpoints you configure. Each release keeps the following
-list current with its built-in defaults.
+add or replace a network, requests for that network go to the endpoints you
+configure. Each release keeps the complete built-in network configuration
+below current with its actual defaults. This includes disabled networks,
+names and aliases, endpoint ordering and failover strategy, transaction safety
+limits, native currency metadata, and reference URLs. A disabled network sends
+no RPC requests until you enable it.
 
-Each network below lists several endpoints, run by unrelated operators. The
-wallet tries them in the order shown and moves to the next when one fails, so
-over time your requests for a network may reach any endpoint listed under it.
-Which one serves a given request depends on which are healthy at that moment,
-and is not something you select per request; to send your traffic to one
-operator only, replace the list in the Networks screen.
+Enabled networks can list several endpoints run by unrelated operators. The
+wallet uses the configured strategy and can move to another endpoint when one
+fails, so over time your requests for a network may reach any configured
+endpoint. To send your traffic to one operator only, keep one endpoint in the
+Networks screen.
 
-## 3. Default RPC endpoints in this release
+## 3. Complete default network configuration in this release
+
+```json
 ";
 
 const PRIVACY_POLICY_CLOSING: &str = "
@@ -289,7 +293,7 @@ records, and pending policy proposals are stored in an encrypted local
 database. A resolved execution plan is stored in that database as part of the
 record of the request it becomes; the URL it was fetched from is not retained.
 Wallet metadata and network configuration, including the RPC URLs you
-configure, are stored unencrypted in the wallet data directory. A dapp session
+configure, are stored in that encrypted database. A dapp session
 is not recorded: the pairing keys live only in memory and are gone when the
 application restarts, though the transactions and signatures it produced are kept
 like any others. Nothing in this section leaves your machine except as
@@ -305,26 +309,15 @@ endpoints, or anything else disclosed here, changes this document and
 requires a fresh acknowledgment before signing resumes.
 ";
 
-/// The complete privacy policy, with the default endpoint list generated from
-/// the same catalog the wallet configures by default.
-///
-/// Every endpoint is listed, not just the first one for each network. A
-/// network now carries several so that one of them being down does not stop
-/// the wallet, and failover moves between them on its own — so all of them
-/// are endpoints an owner's requests can reach, and a disclosure that named
-/// only the first would understate who sees their traffic.
+/// The complete privacy policy, with the complete default network catalog
+/// generated from the same typed values the wallet installs.
 #[must_use]
 pub fn privacy_policy() -> String {
     let mut text = String::from(PRIVACY_POLICY_PREAMBLE);
-    for network in crate::config::default_networks()
-        .into_iter()
-        .filter(|network| !network.disabled)
-    {
-        let _ = writeln!(text, "- {} (chain {}):", network.name, network.chain_id);
-        for endpoint in &network.rpc_urls {
-            let _ = writeln!(text, "  - {endpoint}");
-        }
-    }
+    let defaults = crate::config::default_networks();
+    let json = serde_json::to_string_pretty(&defaults)
+        .expect("the statically typed default network catalog must serialize");
+    let _ = writeln!(text, "{json}\n```");
     text.push_str(PRIVACY_POLICY_CLOSING);
     text
 }

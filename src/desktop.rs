@@ -1,12 +1,12 @@
 use crate::{
     BUILD_VERSION,
-    agent_config::{AgentAdapter, ConfigBatchInstall, ConfigPreview},
+    agent_config::{AgentAdapter, ConfigPreview},
     authority::{
         ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioSnapshot,
         OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
     },
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
-    http_server::{MCP_REQUEST_LIMIT_BYTES, McpHttpServer},
+    http_server::McpHttpServer,
     notifications::{
         NotificationPreferences, NotificationRoute, NotificationService as _,
         PlatformNotificationService, initialize_platform_notifications, notification_for,
@@ -24,12 +24,13 @@ use anyhow::{Context as _, Result, ensure};
 use ekubo_wallet_core::approval::{
     ApprovalFact, ApprovalSection, ApprovalSectionKind, ReviewDecision, ReviewDocument,
 };
-use ekubo_wallet_core::config::{NetworkConfig, WalletMetadata};
+use ekubo_wallet_core::config::{NativeCurrency, NetworkConfig, RpcStrategy, WalletMetadata};
 use ekubo_wallet_core::core::policy::{Effect, Rule, WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
-use ekubo_wallet_core::desktop_store::{AgentKind, McpClient};
+use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, McpClient};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
+use ekubo_wallet_core::networks::NetworkProfile;
 use ekubo_wallet_core::pending::PendingStatus;
 use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
@@ -41,15 +42,15 @@ use gpui::{
     prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
-    Sizable, StyledExt, Theme, WindowExt as _,
+    ActiveTheme, Colorize, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root,
+    Selectable, Sizable, StyledExt, Theme, ThemeMode, ThemeTokens, WindowExt as _,
     alert::Alert,
     badge::Badge,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     group_box::{GroupBox, GroupBoxVariants as _},
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     scroll::ScrollableElement,
     spinner::Spinner,
@@ -69,12 +70,13 @@ use std::{
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
-actions!(ekubo_wallet, [OpenCommandPalette, Quit]);
+actions!(ekubo_wallet, [OpenCommandPalette, CloseOverlay, Quit]);
 
 const UI_FONT_FAMILY: &str = "Suisse Intl";
 const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
+const APPLICATION_LICENSE_TEXT: &str = include_str!("../LICENSE");
 
 const EMBEDDED_FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/SuisseIntl-Regular.ttf"),
@@ -140,6 +142,21 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: &LegalStatu
         }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegalReviewDocument {
+    Core(LegalDocument),
+    ApplicationLicense,
+}
+
+impl LegalReviewDocument {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Core(document) => document.title(),
+            Self::ApplicationLicense => "Application License",
+        }
+    }
+}
+
 fn scroll_reached_end(offset_y: gpui::Pixels, max_offset_y: gpui::Pixels) -> bool {
     -offset_y >= max_offset_y - px(1.0)
 }
@@ -167,6 +184,16 @@ fn agent_session_expiry_label(
     } else {
         (format!("Expires {timestamp}"), false)
     }
+}
+
+fn visible_agent_sessions<'a>(
+    clients: &'a [McpClient],
+    hidden: &BTreeSet<uuid::Uuid>,
+) -> Vec<&'a McpClient> {
+    clients
+        .iter()
+        .filter(|client| client.revoked_at.is_none() && !hidden.contains(&client.id))
+        .collect()
 }
 
 fn format_asset_balance(
@@ -399,6 +426,12 @@ const SETTINGS_ALTERNATE_KEY_BINDING: &str = "cmd-,";
 #[cfg(not(target_os = "macos"))]
 const SETTINGS_ALTERNATE_KEY_BINDING: &str = "ctrl-,";
 
+fn reset_route_scroll_if_changed(current: Route, next: Route, scroll: &ScrollHandle) {
+    if current != next {
+        scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+    }
+}
+
 // These flags describe independent controls and async operations. Combining
 // them into one state machine would admit fewer valid combinations, not make
 // the state safer.
@@ -411,6 +444,8 @@ pub struct WalletWindow {
     desktop_snapshot_dirty: bool,
     desktop_snapshot_error: Option<SharedString>,
     tray: Rc<RefCell<Option<PlatformTray>>>,
+    sidebar_logo_light: Arc<RenderImage>,
+    sidebar_logo_dark: Arc<RenderImage>,
     appearance_subscription: Option<Subscription>,
     review_presenter: GuiReviewPresenter,
     route: Route,
@@ -445,6 +480,7 @@ pub struct WalletWindow {
     agent_reinstall: AgentReinstallState,
     detected_agents: AgentDetectionState,
     detected_agents_generation: u64,
+    hidden_agent_sessions: BTreeSet<uuid::Uuid>,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
     account_id_error: Option<SharedString>,
@@ -455,6 +491,7 @@ pub struct WalletWindow {
     legal_gate: bool,
     route_errors: BTreeMap<Route, SharedString>,
     detailed_notification_previews: Arc<AtomicBool>,
+    appearance_preference: AppearancePreference,
     automatic_update_checks: bool,
     notification_preference_busy: bool,
     update_preference_busy: bool,
@@ -474,6 +511,33 @@ pub struct WalletWindow {
     walletconnect_scan_generation: u64,
     network_json_input: Option<Entity<InputState>>,
     network_json_error: Option<SharedString>,
+    network_editor_open: bool,
+    network_editor_identity: Option<u64>,
+    network_editor_disabled: bool,
+    network_editor_rpc_strategy: RpcStrategy,
+    network_editor_advanced: bool,
+    network_editor_busy: bool,
+    network_editor_errors: NetworkEditorErrors,
+    network_name_input: Option<Entity<InputState>>,
+    network_display_name_input: Option<Entity<InputState>>,
+    network_aliases_input: Option<Entity<InputState>>,
+    network_chain_id_input: Option<Entity<InputState>>,
+    network_rpc_urls_input: Option<Entity<InputState>>,
+    network_max_gas_limit_input: Option<Entity<InputState>>,
+    network_max_fee_per_gas_input: Option<Entity<InputState>>,
+    network_native_name_input: Option<Entity<InputState>>,
+    network_native_symbol_input: Option<Entity<InputState>>,
+    network_native_decimals_input: Option<Entity<InputState>>,
+    network_explorer_url_input: Option<Entity<InputState>>,
+    network_documentation_url_input: Option<Entity<InputState>>,
+    network_presets: Arc<[NetworkProfile]>,
+    network_preset_search_input: Option<Entity<InputState>>,
+    network_preset_search_subscription: Option<Subscription>,
+    network_preset_busy: Option<u64>,
+    network_preset_error: Option<SharedString>,
+    network_reset_error: Option<SharedString>,
+    pending_network_reset: Option<Vec<NetworkConfig>>,
+    network_reset_busy: bool,
     network_action_busy: BTreeSet<String>,
     network_action_errors: BTreeMap<String, SharedString>,
     expanded_networks: BTreeSet<String>,
@@ -680,10 +744,17 @@ fn render_qr_preview(mut preview: QrPreview) -> Result<Arc<RenderImage>> {
     Ok(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
 }
 
+fn render_embedded_png(bytes: &[u8]) -> Result<Arc<RenderImage>> {
+    let buffer = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .context("embedded PNG could not be decoded")?
+        .into_rgba8();
+    Ok(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
+}
+
 // The persistent list state keeps long legal documents virtualized between
 // frames; only the digest is retained for the eventual acceptance write.
 struct LegalReview {
-    document: LegalDocument,
+    document: LegalReviewDocument,
     digest: String,
     sections: Arc<[SharedString]>,
     list_state: gpui::ListState,
@@ -798,10 +869,10 @@ struct GuidedPolicyRuleDraft {
 
 struct PendingAgentInstall {
     display_name: String,
-    preview: Option<ConfigPreview>,
-    remove_client_id: Option<uuid::Uuid>,
+    preview: ConfigPreview,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct ActiveReview {
     state: ReviewState,
     simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
@@ -901,6 +972,37 @@ struct TokenEditorErrors {
     name: Option<String>,
     decimals: Option<String>,
     form: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NetworkEditorErrors {
+    name: Option<String>,
+    display_name: Option<String>,
+    aliases: Option<String>,
+    chain_id: Option<String>,
+    rpc_urls: Option<String>,
+    max_gas_limit: Option<String>,
+    max_fee_per_gas: Option<String>,
+    native_currency: Option<String>,
+    block_explorer_url: Option<String>,
+    documentation_url: Option<String>,
+    form: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NetworkEditorDraft {
+    name: String,
+    display_name: String,
+    aliases: String,
+    chain_id: String,
+    rpc_urls: String,
+    max_gas_limit: String,
+    max_fee_per_gas: String,
+    native_currency_name: String,
+    native_currency_symbol: String,
+    native_currency_decimals: String,
+    block_explorer_url: String,
+    documentation_url: String,
 }
 
 #[derive(Clone)]
@@ -1494,6 +1596,314 @@ fn networks_for_display(networks: &[NetworkConfig]) -> Vec<&NetworkConfig> {
     let mut networks = networks.iter().collect::<Vec<_>>();
     networks.sort_by_key(|network| (network.disabled, network.chain_id, network.name.as_str()));
     networks
+}
+
+fn network_preset_match_rank(profile: &NetworkProfile, query: &str) -> Option<(usize, usize)> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Some((usize::from(!profile.is_default), 0));
+    }
+    let chain_id = profile.config.chain_id.to_string();
+    let display_name = profile
+        .config
+        .display_name
+        .as_deref()
+        .unwrap_or_default()
+        .to_lowercase();
+    let name = profile.config.name.to_lowercase();
+    let aliases = profile
+        .config
+        .aliases
+        .iter()
+        .map(|alias| alias.to_lowercase())
+        .collect::<Vec<_>>();
+    std::iter::once(chain_id.as_str())
+        .chain(std::iter::once(name.as_str()))
+        .chain(std::iter::once(display_name.as_str()))
+        .chain(aliases.iter().map(String::as_str))
+        .filter_map(|value| {
+            let position = value.find(&query)?;
+            let kind = if value.len() == query.len() {
+                0
+            } else if position == 0 {
+                1
+            } else {
+                2
+            };
+            Some((kind, position))
+        })
+        .min()
+}
+
+fn network_presets_for_display<'a>(
+    presets: &'a [NetworkProfile],
+    configured: &[NetworkConfig],
+    query: &str,
+    limit: usize,
+) -> Vec<&'a NetworkProfile> {
+    let configured_chains = configured
+        .iter()
+        .map(|network| network.chain_id)
+        .collect::<BTreeSet<_>>();
+    let mut matches = presets
+        .iter()
+        .filter_map(|profile| network_preset_match_rank(profile, query).map(|rank| (rank, profile)))
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(rank, profile)| {
+        (
+            *rank,
+            profile.is_testnet,
+            configured_chains.contains(&profile.config.chain_id),
+            profile.config.chain_id,
+        )
+    });
+    matches
+        .into_iter()
+        .take(limit)
+        .map(|(_, profile)| profile)
+        .collect()
+}
+
+fn networks_discarded_by_default_reset(
+    configured: &[NetworkConfig],
+    defaults: &[NetworkConfig],
+) -> Vec<String> {
+    let mut discarded = configured
+        .iter()
+        .filter(|network| !defaults.contains(network))
+        .map(|network| network.name.clone())
+        .collect::<Vec<_>>();
+    discarded.sort();
+    discarded
+}
+
+fn parse_network_editor_draft(
+    draft: &NetworkEditorDraft,
+    disabled: bool,
+    rpc_strategy: RpcStrategy,
+) -> (Option<NetworkConfig>, NetworkEditorErrors) {
+    let mut errors = NetworkEditorErrors::default();
+    let name = draft.name.trim();
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        errors.name = Some(
+            "Use 1–64 letters, numbers, underscores, or hyphens for the internal name.".into(),
+        );
+    }
+    let display_name = draft.display_name.trim();
+    if !display_name.is_empty()
+        && (display_name.len() > 128
+            || display_name
+                .chars()
+                .any(ekubo_wallet_core::sanitize::is_disallowed))
+    {
+        errors.display_name =
+            Some("Use at most 128 characters with no invisible or control characters.".into());
+    }
+    let aliases = draft
+        .aliases
+        .split(',')
+        .map(str::trim)
+        .filter(|alias| !alias.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if aliases.len() > ekubo_wallet_core::config::MAX_NETWORK_ALIASES
+        || aliases.iter().any(|alias| {
+            alias.len() > 64
+                || !alias
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        || aliases.iter().collect::<BTreeSet<_>>().len() != aliases.len()
+        || aliases.iter().any(|alias| alias == name)
+    {
+        errors.aliases = Some(format!(
+            "Enter at most {} unique aliases using letters, numbers, underscores, or hyphens.",
+            ekubo_wallet_core::config::MAX_NETWORK_ALIASES
+        ));
+    }
+    let chain_id = match draft.chain_id.trim().parse::<u64>() {
+        Ok(chain_id) if chain_id > 0 => Some(chain_id),
+        _ => {
+            errors.chain_id = Some("Enter a positive decimal chain ID.".into());
+            None
+        }
+    };
+    let mut rpc_urls = Vec::new();
+    for value in draft
+        .rpc_urls
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match value.parse::<url::Url>() {
+            Ok(url)
+                if matches!(url.scheme(), "http" | "https")
+                    && url.username().is_empty()
+                    && url.password().is_none() =>
+            {
+                rpc_urls.push(url);
+            }
+            _ => {
+                errors.rpc_urls = Some(
+                    "Enter one valid http:// or https:// RPC URL per line, without embedded credentials."
+                        .into(),
+                );
+                break;
+            }
+        }
+    }
+    if rpc_urls.is_empty()
+        || rpc_urls.len() > ekubo_wallet_core::config::MAX_NETWORK_RPC_URLS
+        || rpc_urls.iter().collect::<BTreeSet<_>>().len() != rpc_urls.len()
+    {
+        errors.rpc_urls = Some(format!(
+            "Enter 1–{} unique RPC URLs, one per line.",
+            ekubo_wallet_core::config::MAX_NETWORK_RPC_URLS
+        ));
+    }
+
+    let max_gas_limit = draft.max_gas_limit.trim();
+    let max_gas_limit = if max_gas_limit.is_empty() {
+        None
+    } else if max_gas_limit.starts_with('0')
+        || !max_gas_limit.bytes().all(|byte| byte.is_ascii_digit())
+        || max_gas_limit.parse::<u64>().is_err()
+        || max_gas_limit
+            .parse::<u64>()
+            .is_ok_and(|value| value < ekubo_wallet_core::config::INTRINSIC_GAS)
+    {
+        errors.max_gas_limit = Some(format!(
+            "Enter a canonical integer of at least {} gas.",
+            ekubo_wallet_core::config::INTRINSIC_GAS
+        ));
+        None
+    } else {
+        Some(max_gas_limit.to_owned())
+    };
+    let max_fee_per_gas = draft.max_fee_per_gas.trim();
+    let max_fee_per_gas = if max_fee_per_gas.is_empty() {
+        None
+    } else if max_fee_per_gas.starts_with('0')
+        || !max_fee_per_gas.bytes().all(|byte| byte.is_ascii_digit())
+        || max_fee_per_gas.parse::<u128>().is_err()
+    {
+        errors.max_fee_per_gas =
+            Some("Enter a canonical positive decimal wei amount that fits uint128.".into());
+        None
+    } else {
+        Some(max_fee_per_gas.to_owned())
+    };
+
+    let native_values = [
+        draft.native_currency_name.trim(),
+        draft.native_currency_symbol.trim(),
+        draft.native_currency_decimals.trim(),
+    ];
+    let native_currency = if native_values.iter().all(|value| value.is_empty()) {
+        None
+    } else if native_values.iter().any(|value| value.is_empty()) {
+        errors.native_currency = Some(
+            "Enter the native currency name, symbol, and decimals together, or leave all three blank."
+                .into(),
+        );
+        None
+    } else {
+        match native_values[2].parse::<u8>() {
+            Ok(decimals)
+                if native_values[0].len() <= 64
+                    && native_values[1].len() <= 32
+                    && !native_values[0]
+                        .chars()
+                        .any(ekubo_wallet_core::sanitize::is_disallowed)
+                    && !native_values[1]
+                        .chars()
+                        .any(ekubo_wallet_core::sanitize::is_disallowed) =>
+            {
+                Some(NativeCurrency {
+                    name: native_values[0].to_owned(),
+                    symbol: native_values[1].to_owned(),
+                    decimals,
+                })
+            }
+            _ => {
+                errors.native_currency = Some(
+                    "Use a 1–64 character name, a 1–32 character symbol, and decimals from 0 through 255."
+                        .into(),
+                );
+                None
+            }
+        }
+    };
+
+    let parse_optional_base_url = |value: &str| -> std::result::Result<Option<url::Url>, ()> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let url = value.parse::<url::Url>().map_err(|_| ())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(());
+        }
+        Ok(Some(url))
+    };
+    let block_explorer_url =
+        parse_optional_base_url(&draft.block_explorer_url).unwrap_or_else(|()| {
+            errors.block_explorer_url = Some(
+                "Enter an http:// or https:// base URL with no query string or fragment.".into(),
+            );
+            None
+        });
+    let documentation_url =
+        parse_optional_base_url(&draft.documentation_url).unwrap_or_else(|()| {
+            errors.documentation_url =
+                Some("Enter an http:// or https:// URL with no query string or fragment.".into());
+            None
+        });
+
+    if errors != NetworkEditorErrors::default() {
+        return (None, errors);
+    }
+    let network = NetworkConfig {
+        name: name.to_owned(),
+        disabled,
+        display_name: (!display_name.is_empty()).then(|| display_name.to_owned()),
+        aliases,
+        chain_id: chain_id.expect("validated above"),
+        rpc_urls,
+        rpc_strategy,
+        max_gas_limit,
+        max_fee_per_gas,
+        native_currency,
+        block_explorer_url,
+        documentation_url,
+    };
+    if let Err(error) = ekubo_wallet_core::config::validate_network(&network) {
+        errors.form = Some(format!("Network settings are invalid: {error:#}"));
+        (None, errors)
+    } else {
+        (Some(network), errors)
+    }
+}
+
+fn replace_input_value(
+    input: Option<&Entity<InputState>>,
+    value: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some(input) = input {
+        input.update(cx, |input, cx| {
+            input.set_value(value.into(), window, cx);
+        });
+    }
 }
 
 fn token_removal_is_confirmed(
@@ -2505,7 +2915,15 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let automatic_update_checks = owner.automatic_update_checks().unwrap_or(true);
+        let appearance_preference = owner.appearance_preference().unwrap_or_default();
+        let network_presets = Arc::from(owner.network_presets());
         let route_scroll_handle = ScrollHandle::new();
+        let sidebar_logo_light =
+            render_embedded_png(include_bytes!("../assets/tray/light_mode_tray_icon.png"))
+                .expect("embedded light tray icon must be valid");
+        let sidebar_logo_dark =
+            render_embedded_png(include_bytes!("../assets/tray/dark_mode_tray_icon.png"))
+                .expect("embedded dark tray icon must be valid");
         let mut window = Self {
             owner,
             desktop_snapshot: None,
@@ -2514,6 +2932,8 @@ impl WalletWindow {
             desktop_snapshot_dirty: false,
             desktop_snapshot_error: None,
             tray,
+            sidebar_logo_light,
+            sidebar_logo_dark,
             appearance_subscription: None,
             review_presenter,
             route: Route::Overview,
@@ -2548,6 +2968,7 @@ impl WalletWindow {
             agent_reinstall: AgentReinstallState::Idle,
             detected_agents: AgentDetectionState::Loading,
             detected_agents_generation: 0,
+            hidden_agent_sessions: BTreeSet::new(),
             account_id_input: None,
             private_key_input: None,
             account_id_error: None,
@@ -2558,6 +2979,7 @@ impl WalletWindow {
             legal_gate: false,
             route_errors: BTreeMap::new(),
             detailed_notification_previews,
+            appearance_preference,
             automatic_update_checks,
             notification_preference_busy: false,
             update_preference_busy: false,
@@ -2577,6 +2999,33 @@ impl WalletWindow {
             walletconnect_scan_generation: 0,
             network_json_input: None,
             network_json_error: None,
+            network_editor_open: false,
+            network_editor_identity: None,
+            network_editor_disabled: false,
+            network_editor_rpc_strategy: RpcStrategy::Ordered,
+            network_editor_advanced: false,
+            network_editor_busy: false,
+            network_editor_errors: NetworkEditorErrors::default(),
+            network_name_input: None,
+            network_display_name_input: None,
+            network_aliases_input: None,
+            network_chain_id_input: None,
+            network_rpc_urls_input: None,
+            network_max_gas_limit_input: None,
+            network_max_fee_per_gas_input: None,
+            network_native_name_input: None,
+            network_native_symbol_input: None,
+            network_native_decimals_input: None,
+            network_explorer_url_input: None,
+            network_documentation_url_input: None,
+            network_presets,
+            network_preset_search_input: None,
+            network_preset_search_subscription: None,
+            network_preset_busy: None,
+            network_preset_error: None,
+            network_reset_error: None,
+            pending_network_reset: None,
+            network_reset_busy: false,
             network_action_busy: BTreeSet::new(),
             network_action_errors: BTreeMap::new(),
             expanded_networks: BTreeSet::new(),
@@ -2625,12 +3074,19 @@ impl WalletWindow {
         let mut token_lists_created = false;
         if self.appearance_subscription.is_none() {
             let tray = self.tray.clone();
-            self.appearance_subscription =
-                Some(cx.observe_window_appearance(window, move |_, window, _| {
+            self.appearance_subscription = Some(cx.observe_window_appearance(
+                window,
+                move |view, window, cx| {
                     if let Some(tray) = tray.borrow_mut().as_mut() {
                         tray.set_dark_mode(dark_appearance(window.appearance()));
                     }
-                }));
+                    if view.appearance_preference == AppearancePreference::System {
+                        Theme::sync_system_appearance(Some(window), cx);
+                        apply_interface_palette(cx);
+                        cx.notify();
+                    }
+                },
+            ));
         }
         if self.command_palette_list.is_none() {
             let list =
@@ -2743,6 +3199,84 @@ impl WalletWindow {
                     .rows(12)
                     .placeholder("Paste a complete network JSON object")
             }));
+        }
+        if self.network_name_input.is_none() {
+            self.network_name_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Internal name, for example ethereum")
+            }));
+        }
+        if self.network_display_name_input.is_none() {
+            self.network_display_name_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Display name, for example Ethereum")
+            }));
+        }
+        if self.network_aliases_input.is_none() {
+            self.network_aliases_input =
+                Some(cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("Aliases separated by commas")
+                }));
+        }
+        if self.network_chain_id_input.is_none() {
+            self.network_chain_id_input =
+                Some(cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("Positive decimal chain ID")
+                }));
+        }
+        if self.network_rpc_urls_input.is_none() {
+            self.network_rpc_urls_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .rows(5)
+                    .placeholder("One http:// or https:// RPC URL per line")
+            }));
+        }
+        if self.network_max_gas_limit_input.is_none() {
+            self.network_max_gas_limit_input =
+                Some(cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("Optional maximum gas limit")
+                }));
+        }
+        if self.network_max_fee_per_gas_input.is_none() {
+            self.network_max_fee_per_gas_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Optional maximum fee per gas in wei")
+            }));
+        }
+        if self.network_native_name_input.is_none() {
+            self.network_native_name_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Currency name, for example Ether")
+            }));
+        }
+        if self.network_native_symbol_input.is_none() {
+            self.network_native_symbol_input = Some(
+                cx.new(|cx| InputState::new(window, cx).placeholder("Symbol, for example ETH")),
+            );
+        }
+        if self.network_native_decimals_input.is_none() {
+            self.network_native_decimals_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("Decimals, usually 18")));
+        }
+        if self.network_explorer_url_input.is_none() {
+            self.network_explorer_url_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Optional block explorer base URL")
+            }));
+        }
+        if self.network_documentation_url_input.is_none() {
+            self.network_documentation_url_input =
+                Some(cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("Optional documentation URL")
+                }));
+        }
+        if self.network_preset_search_input.is_none() {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Search presets by network name or chain ID")
+            });
+            self.network_preset_search_subscription =
+                Some(cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        cx.notify();
+                    }
+                }));
+            self.network_preset_search_input = Some(input);
         }
         if self.policy_json_input.is_none() {
             self.policy_json_input = Some(cx.new(|cx| {
@@ -2871,6 +3405,13 @@ impl WalletWindow {
                 view.desktop_snapshot_loading = false;
                 match result {
                     Ok(snapshot) => {
+                        if let Ok(clients) = &snapshot.clients {
+                            view.hidden_agent_sessions.retain(|client_id| {
+                                clients.iter().any(|client| {
+                                    client.id == *client_id && client.revoked_at.is_some()
+                                })
+                            });
+                        }
                         if let Ok(networks) = &snapshot.networks {
                             if let Some(list) = view.token_list.as_ref() {
                                 list.update(cx, |list, cx| {
@@ -4380,7 +4921,7 @@ impl WalletWindow {
             .legal_status()
             .is_ok_and(|status| legal_review_requires_acceptance(document, &status));
         self.legal_review = Some(Self::new_legal_review(
-            document,
+            LegalReviewDocument::Core(document),
             &text,
             digest,
             acceptance_required,
@@ -4389,8 +4930,22 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn open_application_license(&mut self, cx: &mut Context<Self>) {
+        self.legal_review = Some(Self::new_legal_review(
+            LegalReviewDocument::ApplicationLicense,
+            APPLICATION_LICENSE_TEXT,
+            format!(
+                "{:#x}",
+                alloy::primitives::keccak256(APPLICATION_LICENSE_TEXT)
+            ),
+            false,
+            cx,
+        ));
+        cx.notify();
+    }
+
     fn new_legal_review(
-        document: LegalDocument,
+        document: LegalReviewDocument,
         text: &str,
         digest: String,
         acceptance_required: bool,
@@ -4436,7 +4991,7 @@ impl WalletWindow {
         self.legal_gate = document.is_some();
         self.legal_review = document.map(|document| {
             let (text, digest) = self.owner.legal_document(document);
-            Self::new_legal_review(document, &text, digest, true, cx)
+            Self::new_legal_review(LegalReviewDocument::Core(document), &text, digest, true, cx)
         });
     }
 
@@ -4461,7 +5016,10 @@ impl WalletWindow {
         if !review.acceptance_required || !review.viewed_to_end {
             return;
         }
-        match self.owner.accept_legal(review.document, &review.digest) {
+        let LegalReviewDocument::Core(document) = review.document else {
+            return;
+        };
+        match self.owner.accept_legal(document, &review.digest) {
             Ok(()) => {
                 self.open_next_required_legal(cx);
                 if !self.legal_gate && self.automatic_update_checks {
@@ -4475,6 +5033,13 @@ impl WalletWindow {
             }
         }
         cx.notify();
+    }
+
+    fn close_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.legal_review.is_some() && !self.legal_gate {
+            self.legal_review = None;
+            cx.notify();
+        }
     }
 
     fn reinstall_detected_agents(&mut self, cx: &mut Context<Self>) {
@@ -4560,34 +5125,314 @@ impl WalletWindow {
         self.refresh_portfolio(cx);
     }
 
+    fn current_network_editor_draft(&self, cx: &App) -> Option<NetworkEditorDraft> {
+        Some(NetworkEditorDraft {
+            name: self
+                .network_name_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            display_name: self
+                .network_display_name_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            aliases: self
+                .network_aliases_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            chain_id: self
+                .network_chain_id_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            rpc_urls: self
+                .network_rpc_urls_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            max_gas_limit: self
+                .network_max_gas_limit_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            max_fee_per_gas: self
+                .network_max_fee_per_gas_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            native_currency_name: self
+                .network_native_name_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            native_currency_symbol: self
+                .network_native_symbol_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            native_currency_decimals: self
+                .network_native_decimals_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            block_explorer_url: self
+                .network_explorer_url_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+            documentation_url: self
+                .network_documentation_url_input
+                .as_ref()?
+                .read(cx)
+                .value()
+                .to_string(),
+        })
+    }
+
+    fn open_new_network_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [
+            self.network_name_input.as_ref(),
+            self.network_display_name_input.as_ref(),
+            self.network_aliases_input.as_ref(),
+            self.network_chain_id_input.as_ref(),
+            self.network_rpc_urls_input.as_ref(),
+            self.network_max_gas_limit_input.as_ref(),
+            self.network_max_fee_per_gas_input.as_ref(),
+            self.network_native_name_input.as_ref(),
+            self.network_native_symbol_input.as_ref(),
+            self.network_native_decimals_input.as_ref(),
+            self.network_explorer_url_input.as_ref(),
+            self.network_documentation_url_input.as_ref(),
+        ] {
+            replace_input_value(input, "", window, cx);
+        }
+        replace_input_value(self.network_json_input.as_ref(), "", window, cx);
+        self.network_editor_open = true;
+        self.network_editor_identity = None;
+        self.network_editor_disabled = false;
+        self.network_editor_rpc_strategy = RpcStrategy::Ordered;
+        self.network_editor_advanced = false;
+        self.network_editor_errors = NetworkEditorErrors::default();
+        self.network_json_error = None;
+        if let Some(input) = self.network_name_input.as_ref() {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        }
+        self.network_editor_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    fn close_network_editor(&mut self, cx: &mut Context<Self>) {
+        if self.network_editor_busy {
+            return;
+        }
+        self.network_editor_open = false;
+        self.network_editor_identity = None;
+        self.network_editor_errors = NetworkEditorErrors::default();
+        self.network_json_error = None;
+        cx.notify();
+    }
+
+    fn set_network_editor_strategy(&mut self, strategy: RpcStrategy, cx: &mut Context<Self>) {
+        self.network_editor_rpc_strategy = strategy;
+        cx.notify();
+    }
+
+    fn toggle_network_advanced_editor(&mut self, cx: &mut Context<Self>) {
+        self.network_editor_advanced = !self.network_editor_advanced;
+        cx.notify();
+    }
+
     fn edit_network(
         &mut self,
         network: &NetworkConfig,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(input) = self.network_json_input.as_ref() else {
-            return;
-        };
-        match serde_json::to_string_pretty(&network) {
+        replace_input_value(
+            self.network_name_input.as_ref(),
+            network.name.clone(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_display_name_input.as_ref(),
+            network.display_name.clone().unwrap_or_default(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_aliases_input.as_ref(),
+            network.aliases.join(", "),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_chain_id_input.as_ref(),
+            network.chain_id.to_string(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_rpc_urls_input.as_ref(),
+            network
+                .rpc_urls
+                .iter()
+                .map(url::Url::as_str)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_max_gas_limit_input.as_ref(),
+            network.max_gas_limit.clone().unwrap_or_default(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_max_fee_per_gas_input.as_ref(),
+            network.max_fee_per_gas.clone().unwrap_or_default(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_native_name_input.as_ref(),
+            network
+                .native_currency
+                .as_ref()
+                .map(|currency| currency.name.clone())
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_native_symbol_input.as_ref(),
+            network
+                .native_currency
+                .as_ref()
+                .map(|currency| currency.symbol.clone())
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_native_decimals_input.as_ref(),
+            network
+                .native_currency
+                .as_ref()
+                .map(|currency| currency.decimals.to_string())
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_explorer_url_input.as_ref(),
+            network
+                .block_explorer_url
+                .as_ref()
+                .map(url::Url::to_string)
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        replace_input_value(
+            self.network_documentation_url_input.as_ref(),
+            network
+                .documentation_url
+                .as_ref()
+                .map(url::Url::to_string)
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        match serde_json::to_string_pretty(network) {
             Ok(document) => {
-                input.update(cx, |input, cx| {
-                    input.set_value(document, window, cx);
-                    input.set_selected_range(0..input.value().len(), cx);
-                    input.focus(window, cx);
-                });
-                self.network_json_error = None;
-                self.network_editor_anchor.scroll_to(window, cx);
+                replace_input_value(self.network_json_input.as_ref(), document, window, cx);
             }
             Err(error) => {
                 self.network_json_error =
                     Some(format!("Could not serialize network: {error:#}").into());
             }
         }
+        self.network_editor_open = true;
+        self.network_editor_identity = Some(network.chain_id);
+        self.network_editor_disabled = network.disabled;
+        self.network_editor_rpc_strategy = network.rpc_strategy;
+        self.network_editor_advanced = false;
+        self.network_editor_errors = NetworkEditorErrors::default();
+        if let Some(input) = self.network_display_name_input.as_ref() {
+            input.update(cx, |input, cx| {
+                input.set_selected_range(0..input.value().len(), cx);
+                input.focus(window, cx);
+            });
+        }
+        self.network_editor_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    fn save_network_editor(&mut self, cx: &mut Context<Self>) {
+        if self.network_editor_busy {
+            return;
+        }
+        let Some(draft) = self.current_network_editor_draft(cx) else {
+            return;
+        };
+        let (network, errors) = parse_network_editor_draft(
+            &draft,
+            self.network_editor_disabled,
+            self.network_editor_rpc_strategy,
+        );
+        self.network_editor_errors = errors;
+        let Some(network) = network else {
+            cx.notify();
+            return;
+        };
+        self.network_editor_busy = true;
+        let owner = self.owner.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.install_network(network).await },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.network_editor_busy = false;
+                match result {
+                    Ok(()) => {
+                        view.network_editor_open = false;
+                        view.network_editor_identity = None;
+                        view.network_editor_errors = NetworkEditorErrors::default();
+                    }
+                    Err(error) => {
+                        view.network_editor_errors.form =
+                            Some(format!("Network was not installed: {error:#}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
     fn install_network_from_editor(&mut self, cx: &mut Context<Self>) {
+        if self.network_editor_busy {
+            return;
+        }
         let Some(input) = self.network_json_input.as_ref() else {
             return;
         };
@@ -4605,6 +5450,7 @@ impl WalletWindow {
             return;
         }
         self.network_json_error = None;
+        self.network_editor_busy = true;
         let owner = self.owner.clone();
         let task =
             gpui_tokio::Tokio::spawn_result(
@@ -4614,8 +5460,13 @@ impl WalletWindow {
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
+                view.network_editor_busy = false;
                 match result {
-                    Ok(()) => view.network_json_error = None,
+                    Ok(()) => {
+                        view.network_json_error = None;
+                        view.network_editor_open = false;
+                        view.network_editor_identity = None;
+                    }
                     Err(error) => {
                         view.network_json_error =
                             Some(format!("Network was not installed: {error:#}").into());
@@ -4625,6 +5476,103 @@ impl WalletWindow {
             });
         })
         .detach();
+    }
+
+    fn install_network_preset(&mut self, chain_id: u64, cx: &mut Context<Self>) {
+        if self.network_preset_busy.is_some() || self.network_reset_busy {
+            return;
+        }
+        self.network_preset_busy = Some(chain_id);
+        self.network_preset_error = None;
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.install_network_preset(chain_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.network_preset_busy != Some(chain_id) {
+                    return;
+                }
+                view.network_preset_busy = None;
+                match result {
+                    Ok(_) => view.network_preset_error = None,
+                    Err(error) => {
+                        view.network_preset_error =
+                            Some(format!("Could not install the network preset: {error:#}").into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn begin_network_reset(&mut self, cx: &mut Context<Self>) {
+        if self.network_preset_busy.is_some() || self.network_reset_busy {
+            return;
+        }
+        match self.cached_networks() {
+            Ok(networks) => {
+                self.pending_network_reset = Some(networks.to_vec());
+                self.network_reset_error = None;
+            }
+            Err(error) => {
+                self.network_reset_error =
+                    Some(format!("Could not prepare the network reset: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_network_reset(&mut self, cx: &mut Context<Self>) {
+        if self.network_reset_busy {
+            return;
+        }
+        self.pending_network_reset = None;
+        cx.notify();
+    }
+
+    fn confirm_network_reset(&mut self, cx: &mut Context<Self>) {
+        let Some(reviewed_networks) = self.pending_network_reset.clone() else {
+            return;
+        };
+        if self.network_reset_busy || self.network_preset_busy.is_some() {
+            return;
+        }
+        self.network_reset_busy = true;
+        self.network_reset_error = None;
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.reset_networks_to_defaults(&reviewed_networks).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.network_reset_busy = false;
+                match result {
+                    Ok(_) => {
+                        view.pending_network_reset = None;
+                        view.network_reset_error = None;
+                        view.portfolio_chain_id = None;
+                        view.invalidate_portfolio();
+                    }
+                    Err(error) => {
+                        view.pending_network_reset = None;
+                        view.network_reset_error = Some(
+                            format!(
+                                "Networks were not reset; review the current configuration and try again: {error:#}"
+                            )
+                            .into(),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn set_network_disabled(&mut self, name: &str, disabled: bool, cx: &mut Context<Self>) {
@@ -5285,25 +6233,16 @@ impl WalletWindow {
 
     fn revoke_agent(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
         self.clear_route_error(Route::Settings);
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let authorization = owner.authorize_agent_access().await?;
-            owner.revoke_client(client_id, &authorization)
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                match result {
-                    Ok(()) => view.clear_route_error(Route::Settings),
-                    Err(error) => view.set_route_error(
-                        Route::Settings,
-                        format!("Could not revoke agent: {error:#}"),
-                    ),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        match self.owner.revoke_client(client_id) {
+            Ok(()) => {
+                self.hidden_agent_sessions.insert(client_id);
+                self.reload_desktop_snapshot(cx);
+            }
+            Err(error) => self.set_route_error(
+                Route::Settings,
+                format!("Could not revoke agent: {error:#}"),
+            ),
+        }
         cx.notify();
     }
 
@@ -5330,8 +6269,7 @@ impl WalletWindow {
                 let preview = adapter.preview_install(true)?;
                 Ok::<_, anyhow::Error>(PendingAgentInstall {
                     display_name: format!("Install {}", adapter.display_name),
-                    preview: Some(preview),
-                    remove_client_id: None,
+                    preview,
                 })
             })
             .await
@@ -5355,97 +6293,6 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn prepare_agent_removal(&mut self, client_id: uuid::Uuid, cx: &mut Context<Self>) {
-        if self.pending_agent_install.is_some() {
-            self.set_route_error(Route::Settings, "Finish the current agent change first.");
-            cx.notify();
-            return;
-        }
-        let client_kind = match self.cached_clients().and_then(|clients| {
-            clients
-                .iter()
-                .find(|client| client.id == client_id)
-                .map(|client| client.agent_kind)
-                .context("the selected agent registration no longer exists")
-        }) {
-            Ok(kind) => kind,
-            Err(error) => {
-                self.set_route_error(
-                    Route::Settings,
-                    format!("Could not prepare agent change: {error:#}"),
-                );
-                cx.notify();
-                return;
-            }
-        };
-        self.agent_reinstall = AgentReinstallState::Running;
-        self.clear_route_error(Route::Settings);
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                let adapter = AgentAdapter::supported()?
-                    .into_iter()
-                    .find(|adapter| adapter.kind == client_kind)
-                    .context("the selected agent has no managed configuration adapter")?;
-                Ok::<_, anyhow::Error>(PendingAgentInstall {
-                    display_name: format!("Remove {}", adapter.display_name),
-                    preview: Some(adapter.preview_remove(false)?),
-                    remove_client_id: Some(client_id),
-                })
-            })
-            .await
-            .context("agent removal preview task failed")?
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.agent_reinstall = AgentReinstallState::Idle;
-                match result {
-                    Ok(pending) => view.pending_agent_install = Some(pending),
-                    Err(error) => view.set_route_error(
-                        Route::Settings,
-                        format!("Could not prepare agent change: {error:#}"),
-                    ),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn prepare_agent_registration_removal(
-        &mut self,
-        client_id: uuid::Uuid,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pending_agent_install.is_some() {
-            self.set_route_error(Route::Settings, "Finish the current agent change first.");
-            cx.notify();
-            return;
-        }
-        match self.cached_clients().and_then(|clients| {
-            clients
-                .iter()
-                .find(|client| client.id == client_id && client.revoked_at.is_none())
-                .cloned()
-                .context("the selected agent registration is no longer active")
-        }) {
-            Ok(client) => {
-                self.pending_agent_install = Some(PendingAgentInstall {
-                    display_name: format!("Delete {}", client.display_name),
-                    preview: None,
-                    remove_client_id: Some(client_id),
-                });
-                self.clear_route_error(Route::Settings);
-            }
-            Err(error) => self.set_route_error(
-                Route::Settings,
-                format!("Could not prepare registration removal: {error:#}"),
-            ),
-        }
-        cx.notify();
-    }
-
     fn cancel_agent_install(&mut self, cx: &mut Context<Self>) {
         if self.pending_agent_install.take().is_some() {
             self.clear_route_error(Route::Settings);
@@ -5454,58 +6301,17 @@ impl WalletWindow {
     }
 
     fn confirm_agent_install(&mut self, cx: &mut Context<Self>) {
-        let Some(mut pending) = self.pending_agent_install.take() else {
+        let Some(pending) = self.pending_agent_install.take() else {
             return;
         };
         let display_name = pending.display_name.clone();
-        let preview = pending.preview.take();
-        let Some(client_id) = pending.remove_client_id else {
-            let preview = preview.expect("an installation always has its preview");
-            self.agent_reinstall = AgentReinstallState::Running;
-            self.clear_route_error(Route::Settings);
-            let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                tokio::task::spawn_blocking(move || preview.install())
-                    .await
-                    .context("agent configuration installation task failed")??;
-                Ok::<_, anyhow::Error>(())
-            });
-            cx.spawn(async move |view, cx| {
-                let result = task.await;
-                let _ = view.update(cx, |view, cx| {
-                    view.agent_reinstall = AgentReinstallState::Idle;
-                    match result {
-                        Ok(()) => view.clear_route_error(Route::Settings),
-                        Err(error) => view.set_route_error(
-                            Route::Settings,
-                            format!("Could not install {display_name}: {error:#}"),
-                        ),
-                    }
-                    view.reload_detected_agents(cx);
-                    cx.notify();
-                });
-            })
-            .detach();
-            cx.notify();
-            return;
-        };
+        let preview = pending.preview;
         self.agent_reinstall = AgentReinstallState::Running;
         self.clear_route_error(Route::Settings);
-        let owner = self.owner.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let batch = if let Some(preview) = preview {
-                Some(
-                    tokio::task::spawn_blocking(move || ConfigBatchInstall::install(vec![preview]))
-                        .await
-                        .context("agent configuration removal task failed")??,
-                )
-            } else {
-                None
-            };
-            let authorization = owner.authorize_agent_access().await?;
-            owner.remove_client(client_id, &authorization)?;
-            if let Some(batch) = batch {
-                batch.commit();
-            }
+            tokio::task::spawn_blocking(move || preview.install())
+                .await
+                .context("agent configuration installation task failed")??;
             Ok::<_, anyhow::Error>(())
         });
         cx.spawn(async move |view, cx| {
@@ -5516,7 +6322,7 @@ impl WalletWindow {
                     Ok(()) => view.clear_route_error(Route::Settings),
                     Err(error) => view.set_route_error(
                         Route::Settings,
-                        format!("Could not complete {display_name}: {error:#}"),
+                        format!("Could not install {display_name}: {error:#}"),
                     ),
                 }
                 view.reload_detected_agents(cx);
@@ -5972,6 +6778,7 @@ impl WalletWindow {
     }
 
     fn set_route(&mut self, route: Route) {
+        reset_route_scroll_if_changed(self.route, route, &self.route_scroll_handle);
         if route != Route::WalletConnect {
             self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
             self.walletconnect_scan = WalletConnectScanState::Idle;
@@ -5984,8 +6791,6 @@ impl WalletWindow {
             return;
         }
         self.set_route(route);
-        self.route_scroll_handle
-            .set_offset(gpui::point(px(0.0), px(0.0)));
         self.command_palette = false;
         cx.notify();
     }
@@ -6048,6 +6853,32 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn set_appearance_preference(
+        &mut self,
+        preference: AppearancePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.appearance_preference == preference {
+            return;
+        }
+        match self.owner.set_appearance_preference(preference) {
+            Ok(()) => {
+                self.appearance_preference = preference;
+                apply_appearance_preference(preference, Some(window), cx);
+                if let Some(tray) = self.tray.borrow_mut().as_mut() {
+                    tray.set_dark_mode(cx.theme().is_dark());
+                }
+                self.clear_route_error(Route::Settings);
+            }
+            Err(error) => self.set_route_error(
+                Route::Settings,
+                format!("Could not save appearance preference: {error:#}"),
+            ),
+        }
+        cx.notify();
+    }
+
     fn set_automatic_update_checks(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.update_preference_busy {
             return;
@@ -6100,24 +6931,33 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .items_center()
-            .gap_1();
+            .gap_2();
         for route in Route::ALL {
             let button = Button::new(SharedString::from(format!(
                 "sidebar-route-{}",
                 route.label()
             )))
             .with_size(NAVIGATION_BUTTON_SIZE)
-            .icon(route.icon())
+            .w(NAVIGATION_BUTTON_SIZE)
+            .h(NAVIGATION_BUTTON_SIZE)
             .ghost()
             .selected(route == self.route)
             .disabled(self.legal_gate)
             .accessibility_id(route.label())
             .tooltip(format!("{}  {}", route.label(), route.shortcut()))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.route = route;
-                this.command_palette = false;
-                cx.notify();
+                this.navigate_route(route, cx);
             }));
+            let button = if route == Route::Reviews {
+                let logo = if cx.theme().is_dark() {
+                    self.sidebar_logo_dark.clone()
+                } else {
+                    self.sidebar_logo_light.clone()
+                };
+                button.child(img(logo).w(px(34.0)).h(px(34.0)))
+            } else {
+                button.child(Icon::new(route.icon()).size(px(30.0)))
+            };
             if route == Route::Reviews {
                 menu = menu.child(
                     Badge::new()
@@ -6138,7 +6978,7 @@ impl WalletWindow {
         match self.cached_reviews() {
             Ok(queues) => {
                 let total = review_queue_decision_count(queues);
-                content = content.child(format!("{total} request(s) awaiting an owner decision"));
+                content = content.child(format!("{total} request(s) need your attention."));
                 for request in &queues.transactions {
                     let request_id = request.request_id;
                     content =
@@ -6635,10 +7475,10 @@ impl WalletWindow {
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut agents = div().flex().flex_col().gap_1();
         let clients = self.cached_clients().unwrap_or_default();
+        let visible_sessions = visible_agent_sessions(clients, &self.hidden_agent_sessions);
         let mut managed_agents = div().flex().flex_col().gap_1();
-        for item in clients.iter().filter(|client| client.revoked_at.is_none()) {
+        for item in &visible_sessions {
             let client_id = item.id;
-            let managed = item.agent_kind != AgentKind::Other;
             let (expiration, expired) =
                 agent_session_expiry_label(item.session_expires_at, chrono::Utc::now());
             let last_used = item.last_used_at.map_or_else(
@@ -6649,6 +7489,8 @@ impl WalletWindow {
                 ListItem::new(SharedString::from(format!("managed-agent-{client_id}"))).child(
                     div()
                         .w_full()
+                        .px_3()
+                        .py_3()
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -6656,69 +7498,58 @@ impl WalletWindow {
                             h_flex()
                                 .w_full()
                                 .justify_between()
-                                .flex_wrap()
                                 .gap_4()
-                                .child(div().flex_1().min_w_0().font_semibold().child(format!(
-                                    "{} · {:?}",
-                                    item.display_name, item.agent_kind
-                                )))
                                 .child(
                                     div()
-                                        .text_sm()
-                                        .text_color(if expired {
-                                            cx.theme().danger
-                                        } else {
-                                            cx.theme().success
-                                        })
-                                        .child(expiration),
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().font_semibold().truncate().child(format!(
+                                            "{} · {:?}",
+                                            item.display_name, item.agent_kind
+                                        )))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(last_used),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .flex()
+                                        .flex_col()
+                                        .items_end()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(if expired {
+                                                    cx.theme().danger
+                                                } else {
+                                                    cx.theme().success
+                                                })
+                                                .child(expiration),
+                                        )
+                                        .when(!expired, |actions| {
+                                            actions.child(
+                                                Button::new(SharedString::from(format!(
+                                                    "revoke-agent-{client_id}"
+                                                )))
+                                                .label("Revoke")
+                                                .small()
+                                                .danger()
+                                                .on_click(cx.listener(move |view, _, _, cx| {
+                                                    view.revoke_agent(client_id, cx);
+                                                })),
+                                            )
+                                        }),
                                 ),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(last_used),
-                        )
-                        .when(managed, |row| {
-                            row.child(
-                                h_flex().gap_2().child(
-                                    Button::new(SharedString::from(format!(
-                                        "remove-agent-{client_id}"
-                                    )))
-                                    .label("Remove")
-                                    .danger()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.prepare_agent_removal(client_id, cx);
-                                    })),
-                                ),
-                            )
-                        })
-                        .when(!managed, |row| {
-                            row.child(
-                                Button::new(SharedString::from(format!(
-                                    "delete-agent-registration-{client_id}"
-                                )))
-                                .label("Delete registration")
-                                .danger()
-                                .on_click(cx.listener(
-                                    move |view, _, _, cx| {
-                                        view.prepare_agent_registration_removal(client_id, cx);
-                                    },
-                                )),
-                            )
-                        })
-                        .child(
-                            Button::new(SharedString::from(format!("revoke-agent-{client_id}")))
-                                .label("Revoke access")
-                                .danger()
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.revoke_agent(client_id, cx);
-                                })),
                         ),
                 ),
             );
         }
-        if clients.iter().all(|client| client.revoked_at.is_some()) {
+        if visible_sessions.is_empty() {
             managed_agents = managed_agents.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
@@ -6831,19 +7662,64 @@ impl WalletWindow {
             .gap_4()
             .child(
                 GroupBox::new()
-                    .id("mcp-settings")
+                    .id("appearance-settings")
                     .outline()
-                    .title("MCP service")
-                    .child(self.mcp_status.clone())
-                    .child(format!(
-                        "Request limit: {} MiB",
-                        MCP_REQUEST_LIMIT_BYTES / 1024 / 1024
-                    ))
+                    .title("Appearance")
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("OAuth access tokens are issued only after you choose a one-day, one-week, or one-month session and complete wallet-mediated human presence. Agent configuration files contain no credential; Codex is forced to use the OS keyring, while other harnesses control their own credential storage. Access tokens last 10 minutes and refresh rotation cannot extend your selected absolute expiry. A stolen bearer token can exercise the same Agent API and policy as its harness, so use narrowly scoped policies—an allow-all policy intentionally grants full unattended signing authority. Plaintext loopback HTTP cannot protect against malicious code already running as your OS user."),
+                            .child("System follows your operating-system appearance and updates while the wallet is running."),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("appearance-system")
+                                    .label("System")
+                                    .selected(
+                                        self.appearance_preference
+                                            == AppearancePreference::System,
+                                    )
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.set_appearance_preference(
+                                            AppearancePreference::System,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("appearance-light")
+                                    .label("Light")
+                                    .selected(
+                                        self.appearance_preference
+                                            == AppearancePreference::Light,
+                                    )
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.set_appearance_preference(
+                                            AppearancePreference::Light,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new("appearance-dark")
+                                    .label("Dark")
+                                    .selected(
+                                        self.appearance_preference
+                                            == AppearancePreference::Dark,
+                                    )
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.set_appearance_preference(
+                                            AppearancePreference::Dark,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            ),
                     ),
             )
             .child(
@@ -6880,38 +7756,6 @@ impl WalletWindow {
             )
             .child(
                 GroupBox::new()
-                    .id("update-settings")
-                    .outline()
-                    .title("Updates")
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .child("Check automatically at launch")
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Checks signed metadata after legal acceptance. Updates are never downloaded or installed without explicit confirmation."),
-                                    ),
-                            )
-                            .child(
-                                Switch::new("automatic-update-checks")
-                                    .checked(self.automatic_update_checks)
-                                    .disabled(self.update_preference_busy)
-                                    .tooltip("Check signed update metadata when the wallet starts")
-                                    .on_click(cx.listener(|view, checked, _, cx| {
-                                        view.set_automatic_update_checks(*checked, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                GroupBox::new()
                     .id("detected-agent-settings")
                     .outline()
                     .title("Detected agents")
@@ -6940,8 +7784,8 @@ impl WalletWindow {
                     .title("Agent sessions")
                     .child(managed_agents),
             )
-            .child(self.render_legal(cx))
             .child(self.render_updates(cx))
+            .child(self.render_legal(cx))
     }
 
     fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -8112,19 +8956,15 @@ impl WalletWindow {
     }
 
     fn render_legal(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let panel = div()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().font_semibold().child("Legal & Version"));
-        match self.cached_legal_status() {
-            Ok(status) => {
-                panel
-                    .child(format!("Signing enabled: {}", status.signing_allowed))
+        let panel = GroupBox::new()
+            .id("legal-and-version")
+            .outline()
+            .child(format!("Version {BUILD_VERSION}"))
+            .child("Copyright © 2026 Ekubo, Inc.")
+            .child("Licensed under FSL-1.1-MIT");
+        let panel =
+            match self.cached_legal_status() {
+                Ok(status) => panel
                     .child(
                         div()
                             .flex()
@@ -8156,16 +8996,35 @@ impl WalletWindow {
                             )),
                     )
                     .child(
-                        Button::new("review-licenses")
-                            .label("Third-Party Licenses")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
-                            })),
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .child("Application License · FSL-1.1-MIT")
+                            .child(Button::new("review-license").label("View").on_click(
+                                cx.listener(|view, _, _, cx| {
+                                    view.open_application_license(cx);
+                                }),
+                            )),
                     )
-                    .child(format!("Version {BUILD_VERSION}"))
-            }
-            Err(error) => panel.child(format!("Legal status unavailable: {error:#}")),
-        }
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .child("Third-Party Licenses")
+                            .child(Button::new("review-licenses").label("View").on_click(
+                                cx.listener(|view, _, _, cx| {
+                                    view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
+                                }),
+                            )),
+                    ),
+                Err(error) => panel.child(format!("Legal status unavailable: {error:#}")),
+            };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_lg().font_semibold().child("Legal & version"))
+            .child(panel)
     }
 
     fn render_walletconnect(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -8327,6 +9186,522 @@ impl WalletWindow {
         }))
     }
 
+    fn render_network_editor(&self, cx: &mut Context<Self>) -> gpui::Div {
+        if !self.network_editor_open {
+            return div().child(
+                Button::new("open-custom-network-editor")
+                    .label("Add custom network")
+                    .primary()
+                    .icon(IconName::Plus)
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.open_new_network_editor(window, cx);
+                    })),
+            );
+        }
+        let Some(name) = self.network_name_input.as_ref() else {
+            return div();
+        };
+        let Some(display_name) = self.network_display_name_input.as_ref() else {
+            return div();
+        };
+        let Some(aliases) = self.network_aliases_input.as_ref() else {
+            return div();
+        };
+        let Some(chain_id) = self.network_chain_id_input.as_ref() else {
+            return div();
+        };
+        let Some(rpc_urls) = self.network_rpc_urls_input.as_ref() else {
+            return div();
+        };
+        let Some(max_gas_limit) = self.network_max_gas_limit_input.as_ref() else {
+            return div();
+        };
+        let Some(max_fee_per_gas) = self.network_max_fee_per_gas_input.as_ref() else {
+            return div();
+        };
+        let Some(native_name) = self.network_native_name_input.as_ref() else {
+            return div();
+        };
+        let Some(native_symbol) = self.network_native_symbol_input.as_ref() else {
+            return div();
+        };
+        let Some(native_decimals) = self.network_native_decimals_input.as_ref() else {
+            return div();
+        };
+        let Some(explorer) = self.network_explorer_url_input.as_ref() else {
+            return div();
+        };
+        let Some(documentation) = self.network_documentation_url_input.as_ref() else {
+            return div();
+        };
+        let busy = self.network_editor_busy;
+        let editing = self.network_editor_identity.is_some();
+        let field = |label: &'static str,
+                     input: &Entity<InputState>,
+                     error: Option<String>,
+                     disabled: bool| {
+            div()
+                .min_w(px(180.0))
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().text_sm().child(label))
+                .child(Input::new(input).disabled(disabled || busy))
+                .when_some(error, |field, error| {
+                    field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                })
+        };
+        let mut panel = GroupBox::new()
+            .id("guided-network-editor")
+            .outline()
+            .title(if editing {
+                "Edit network"
+            } else {
+                "Add custom network"
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("RPC endpoints provide balances and transaction simulations. The wallet validates every field, verifies the live chain ID, then requires owner authentication before saving to the encrypted database."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(field(
+                        "Internal name",
+                        name,
+                        self.network_editor_errors.name.clone(),
+                        false,
+                    ))
+                    .child(field(
+                        "Display name (optional)",
+                        display_name,
+                        self.network_editor_errors.display_name.clone(),
+                        false,
+                    ))
+                    .child(field(
+                        "Chain ID",
+                        chain_id,
+                        self.network_editor_errors.chain_id.clone(),
+                        editing,
+                    )),
+            )
+            .child(field(
+                "Aliases (optional, comma-separated)",
+                aliases,
+                self.network_editor_errors.aliases.clone(),
+                false,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_sm().child("RPC URLs in failover order"))
+                    .child(Input::new(rpc_urls).disabled(busy).h(px(132.0)))
+                    .when_some(self.network_editor_errors.rpc_urls.clone(), |field, error| {
+                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().child("Endpoint order"))
+                    .child(
+                        Button::new("network-strategy-ordered")
+                            .label("Configured order")
+                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
+                            .disabled(busy)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.set_network_editor_strategy(RpcStrategy::Ordered, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("network-strategy-random")
+                            .label("Random each request")
+                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Random)
+                            .disabled(busy)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.set_network_editor_strategy(RpcStrategy::Random, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(field(
+                        "Maximum gas limit (optional)",
+                        max_gas_limit,
+                        self.network_editor_errors.max_gas_limit.clone(),
+                        false,
+                    ))
+                    .child(field(
+                        "Maximum fee per gas, wei (optional)",
+                        max_fee_per_gas,
+                        self.network_editor_errors.max_fee_per_gas.clone(),
+                        false,
+                    )),
+            )
+            .child(div().font_semibold().child("Native currency (optional)"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(field("Name", native_name, None, false))
+                    .child(field("Symbol", native_symbol, None, false))
+                    .child(field("Decimals", native_decimals, None, false)),
+            )
+            .when_some(self.network_editor_errors.native_currency.clone(), |panel, error| {
+                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(field(
+                        "Block explorer URL (optional)",
+                        explorer,
+                        self.network_editor_errors.block_explorer_url.clone(),
+                        false,
+                    ))
+                    .child(field(
+                        "Documentation URL (optional)",
+                        documentation,
+                        self.network_editor_errors.documentation_url.clone(),
+                        false,
+                    )),
+            )
+            .when_some(self.network_editor_errors.form.clone(), |panel, error| {
+                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("save-guided-network")
+                            .label(if busy {
+                                "Verifying & authenticating…"
+                            } else {
+                                "Verify, authenticate & save"
+                            })
+                            .primary()
+                            .disabled(busy)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.save_network_editor(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("cancel-guided-network")
+                            .label("Cancel")
+                            .disabled(busy)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.close_network_editor(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("toggle-advanced-network-json")
+                            .label(if self.network_editor_advanced {
+                                "Hide advanced JSON"
+                            } else {
+                                "Advanced JSON"
+                            })
+                            .disabled(busy)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.toggle_network_advanced_editor(cx);
+                            })),
+                    ),
+            );
+        if self.network_editor_advanced
+            && let Some(input) = self.network_json_input.as_ref()
+        {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Advanced mode installs this complete object independently of the guided fields above."),
+                    )
+                    .child(Input::new(input).h(px(320.0)).disabled(busy))
+                    .when_some(self.network_json_error.clone(), |panel, error| {
+                        panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        Button::new("install-network-json")
+                            .label(if busy {
+                                "Verifying & authenticating…"
+                            } else {
+                                "Verify, authenticate & install JSON"
+                            })
+                            .disabled(busy)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.install_network_from_editor(cx);
+                            })),
+                    ),
+            );
+        }
+        div().child(
+            div()
+                .id("network-editor-anchor")
+                .anchor_scroll(Some(self.network_editor_anchor.clone()))
+                .child(panel),
+        )
+    }
+
+    fn render_network_registry(
+        &self,
+        configured: &[NetworkConfig],
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut registry = div().flex().flex_col().gap_4();
+        if let Some(search) = self.network_preset_search_input.as_ref() {
+            let query = search.read(cx).value().to_string();
+            let matches =
+                network_presets_for_display(self.network_presets.as_ref(), configured, &query, 10);
+            let mut rows = div().flex().flex_col().gap_2();
+            if matches.is_empty() {
+                rows = rows.child(
+                    div()
+                        .py_3()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No built-in network preset matches this search."),
+                );
+            }
+            for profile in matches {
+                let chain_id = profile.config.chain_id;
+                let configured_network = configured
+                    .iter()
+                    .find(|network| network.chain_id == chain_id);
+                let exact = configured_network == Some(&profile.config);
+                let installing = self.network_preset_busy == Some(chain_id);
+                let any_action_busy = self.network_preset_busy.is_some() || self.network_reset_busy;
+                let title = profile
+                    .config
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&profile.config.name)
+                    .to_owned();
+                let mut rpc_urls = div().flex().flex_col().gap_1();
+                for (index, url) in profile.config.rpc_urls.iter().enumerate() {
+                    rpc_urls = rpc_urls.child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "network-preset-{chain_id}-rpc-{index}"
+                            )))
+                            .max_w_full()
+                            .overflow_x_scroll()
+                            .font_family(MONO_FONT_FAMILY)
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(url.to_string()),
+                    );
+                }
+                rows = rows.child(
+                    div()
+                        .p_3()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_wrap()
+                                .items_start()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .flex_basis(px(220.0))
+                                        .child(div().font_semibold().child(title))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "{} · chain {}{}",
+                                                    profile.config.name,
+                                                    chain_id,
+                                                    if profile.is_testnet {
+                                                        " · testnet"
+                                                    } else {
+                                                        ""
+                                                    }
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "install-network-preset-{chain_id}"
+                                    )))
+                                    .label(if installing {
+                                        "Authenticating…"
+                                    } else if exact {
+                                        "Current preset"
+                                    } else if configured_network.is_some() {
+                                        "Restore preset"
+                                    } else {
+                                        "Install preset"
+                                    })
+                                    .primary()
+                                    .disabled(any_action_busy || exact)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.install_network_preset(chain_id, cx);
+                                    })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(if profile.simulate_endpoints == 0 {
+                                    cx.theme().warning
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(if profile.simulate_endpoints == 0 {
+                                    "No bundled endpoint currently supports the simulation method required for signing. Install only for read access, then configure a compatible RPC."
+                                        .to_owned()
+                                } else {
+                                    format!(
+                                        "{} measured simulation endpoint(s) · {} fork-capable endpoint(s)",
+                                        profile.simulate_endpoints, profile.fork_endpoints
+                                    )
+                                }),
+                        )
+                        .child(rpc_urls),
+                );
+            }
+            registry = registry.child(
+                GroupBox::new()
+                    .id("network-preset-registry")
+                    .outline()
+                    .title("Built-in network presets")
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Search the bundled registry instead of finding RPC URLs yourself. The wallet verifies the chain ID before asking you to authenticate the change. RPC URLs are shown in full because they supply security-sensitive simulation results."),
+                    )
+                    .child(Input::new(search).cleanable(true))
+                    .when_some(self.network_preset_error.clone(), |panel, error| {
+                        panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Showing up to 10 matches."),
+                    )
+                    .child(rows),
+            );
+        }
+
+        let defaults = ekubo_wallet_core::config::default_networks();
+        let pending = self.pending_network_reset.as_deref();
+        let discarded = pending
+            .map(|reviewed| networks_discarded_by_default_reset(reviewed, &defaults))
+            .unwrap_or_default();
+        let reset_panel = GroupBox::new()
+            .id("network-default-reset")
+            .outline()
+            .title("Reset network configuration")
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!(
+                        "Replace every configured network with fresh copies of the {} built-in defaults. Accounts, policies, tokens, and activity are untouched.",
+                        defaults.len()
+                    )),
+            )
+            .when_some(self.network_reset_error.clone(), |panel, error| {
+                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .when(pending.is_none(), |panel| {
+                panel.child(
+                    Button::new("prepare-network-reset")
+                        .label("Review reset")
+                        .danger()
+                        .disabled(self.network_preset_busy.is_some() || self.network_reset_busy)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.begin_network_reset(cx);
+                        })),
+                )
+            })
+            .when_some(pending, |panel, _| {
+                panel
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().danger)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().font_semibold().child("Confirm complete network reset"))
+                            .child(if discarded.is_empty() {
+                                "The configured rows already match the shipped defaults. Resetting will still restore their shipped enabled/disabled state and exact RPC lists."
+                                    .to_owned()
+                            } else {
+                                format!(
+                                    "Custom or modified configuration will be discarded for: {}.",
+                                    discarded.join(", ")
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("confirm-network-reset")
+                                            .label(if self.network_reset_busy {
+                                                "Authenticating…"
+                                            } else {
+                                                "Authenticate & reset"
+                                            })
+                                            .danger()
+                                            .disabled(self.network_reset_busy)
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.confirm_network_reset(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("cancel-network-reset")
+                                            .label("Cancel")
+                                            .disabled(self.network_reset_busy)
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.cancel_network_reset(cx);
+                                            })),
+                                    ),
+                            ),
+                    )
+            });
+        registry.child(reset_panel)
+    }
+
     fn render_networks(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_4();
         match self
@@ -8433,42 +9808,10 @@ impl WalletWindow {
                 ));
             }
         }
-        if let Some(input) = self.network_json_input.as_ref() {
-            content = content.child(
-                div()
-                    .id("network-editor-anchor")
-                    .anchor_scroll(Some(self.network_editor_anchor.clone()))
-                    .child(
-                        GroupBox::new()
-                            .id("network-editor")
-                            .outline()
-                            .title("Add or update network")
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Paste a complete network object, or choose Edit below. Existing chain IDs are updated in place."),
-                            )
-                            .child(Input::new(input).h(px(260.0)))
-                            .when_some(self.network_json_error.clone(), |panel, error| {
-                                panel.child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().danger)
-                                        .child(error),
-                                )
-                            })
-                            .child(
-                                Button::new("install-network-json")
-                                    .label("Authenticate & install")
-                                    .primary()
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.install_network_from_editor(cx);
-                                    })),
-                            ),
-                    ),
-            );
+        if let Ok(networks) = self.cached_networks() {
+            content = content.child(self.render_network_registry(networks, cx));
         }
+        content = content.child(self.render_network_editor(cx));
         match self.cached_networks() {
             Ok(networks) => {
                 content.children(networks_for_display(networks).into_iter().map(|network| {
@@ -8495,9 +9838,7 @@ impl WalletWindow {
                         .flex_col()
                         .gap_3()
                         .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
+                            h_flex()
                                 .items_start()
                                 .w_full()
                                 .justify_between()
@@ -8506,7 +9847,9 @@ impl WalletWindow {
                                     div()
                                         .min_w_0()
                                         .flex_1()
-                                        .flex_basis(px(220.0))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
                                         .child(
                                             div()
                                                 .flex()
@@ -8524,6 +9867,15 @@ impl WalletWindow {
                                                                 .clone()
                                                                 .unwrap_or_else(|| name.clone()),
                                                         ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(format!(
+                                                            "{} · chain {}",
+                                                            name, network.chain_id,
+                                                        )),
                                                 )
                                                 .child(
                                                     div()
@@ -8550,63 +9902,68 @@ impl WalletWindow {
                                                 ),
                                         )
                                         .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "{} · chain {}",
-                                                    name, network.chain_id,
-                                                )),
+                                            h_flex()
+                                                .flex_wrap()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "inspect-network-{name}"
+                                                    )))
+                                                    .label(if expanded {
+                                                        "Hide configuration"
+                                                    } else {
+                                                        "Show configuration"
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |view, _, _, cx| {
+                                                            view.toggle_network_details(
+                                                                &details_name,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                                )
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "toggle-network-{name}"
+                                                    )))
+                                                    .label(if busy {
+                                                        "Authenticating…"
+                                                    } else if disabled {
+                                                        "Enable"
+                                                    } else {
+                                                        "Disable"
+                                                    })
+                                                    .disabled(busy)
+                                                    .on_click(cx.listener(
+                                                        move |view, _, _, cx| {
+                                                            view.set_network_disabled(
+                                                                &toggle_name,
+                                                                !disabled,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                                ),
                                         ),
                                 )
                                 .child(
                                     div()
-                                        .max_w_full()
+                                        .flex_none()
                                         .flex()
-                                        .flex_wrap()
-                                        .justify_end()
-                                        .gap_2()
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "inspect-network-{name}"
-                                            )))
-                                            .label(if expanded {
-                                                "Hide configuration"
-                                            } else {
-                                                "Show configuration"
-                                            })
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.toggle_network_details(&details_name, cx);
-                                            })),
-                                        )
+                                        .flex_col()
+                                        .gap_1()
                                         .child(
                                             Button::new(SharedString::from(format!(
                                                 "edit-network-{name}"
                                             )))
-                                            .label("Edit")
+                                            .icon(IconName::Settings2)
+                                            .ghost()
+                                            .tooltip("Edit network")
+                                            .accessibility_id("Edit network")
                                             .disabled(busy)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 view.edit_network(&edit, window, cx);
-                                            })),
-                                        )
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "toggle-network-{name}"
-                                            )))
-                                            .label(if busy {
-                                                "Authenticating…"
-                                            } else if disabled {
-                                                "Enable"
-                                            } else {
-                                                "Disable"
-                                            })
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.set_network_disabled(
-                                                    &toggle_name,
-                                                    !disabled,
-                                                    cx,
-                                                );
                                             })),
                                         )
                                         .when(network_can_be_removed(network), |buttons| {
@@ -8614,11 +9971,10 @@ impl WalletWindow {
                                                 Button::new(SharedString::from(format!(
                                                     "delete-network-{name}"
                                                 )))
-                                                .label(if confirming_removal {
-                                                    "Awaiting confirmation"
-                                                } else {
-                                                    "Delete"
-                                                })
+                                                .icon(IconName::Delete)
+                                                .ghost()
+                                                .tooltip("Delete disabled network")
+                                                .accessibility_id("Delete disabled network")
                                                 .danger()
                                                 .disabled(busy || confirming_removal)
                                                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -9405,21 +10761,42 @@ impl WalletWindow {
 
     fn render_updates(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut panel = div()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
             .flex()
             .flex_col()
             .gap_4()
-            .child(format!("Installed version: {BUILD_VERSION}"))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child("Check automatically at launch")
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Checks signed metadata after legal acceptance. Updates are never downloaded or installed without explicit confirmation."),
+                            ),
+                    )
+                    .child(
+                        Switch::new("automatic-update-checks")
+                            .checked(self.automatic_update_checks)
+                            .disabled(self.update_preference_busy)
+                            .tooltip("Check signed update metadata when the wallet starts")
+                            .on_click(cx.listener(|view, checked, _, cx| {
+                                view.set_automatic_update_checks(*checked, cx);
+                            })),
+                    ),
+            )
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child("Updates are installed only after their embedded Minisign signature is verified and you explicitly confirm the exact version and release notes."),
             );
-        match &self.update_state {
+        panel = match &self.update_state {
             SoftwareUpdateState::Idle => panel.child(
                 Button::new("check-for-software-update")
                     .label("Check for updates")
@@ -9530,7 +10907,18 @@ impl WalletWindow {
                         .label("Try again")
                         .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
                 ),
-        }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_lg().font_semibold().child("Updates"))
+            .child(
+                GroupBox::new()
+                    .id("software-updates")
+                    .outline()
+                    .child(panel),
+            )
     }
 
     fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -9548,7 +10936,6 @@ impl WalletWindow {
     }
 
     fn render_review_fact(
-        &self,
         fact: &ApprovalFact,
         section_kind: ApprovalSectionKind,
         cx: &mut Context<Self>,
@@ -9638,11 +11025,7 @@ impl WalletWindow {
             )
     }
 
-    fn render_review_section(
-        &self,
-        section: &ApprovalSection,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    fn render_review_section(section: &ApprovalSection, cx: &mut Context<Self>) -> gpui::Div {
         let (icon, heading_color) = match section.kind {
             ApprovalSectionKind::Effects => (IconName::Star, cx.theme().foreground),
             ApprovalSectionKind::Action => (IconName::Inspector, cx.theme().foreground),
@@ -9671,12 +11054,11 @@ impl WalletWindow {
                 section
                     .facts
                     .iter()
-                    .map(|fact| self.render_review_fact(fact, section.kind, cx)),
+                    .map(|fact| Self::render_review_fact(fact, section.kind, cx)),
             )
     }
 
     fn render_review_simulation(
-        &self,
         simulation: &ekubo_wallet_core::simulation::SimulationResult,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -9764,14 +11146,14 @@ impl WalletWindow {
             );
 
         if let Some(simulation) = &active.simulation {
-            review_body = review_body.child(self.render_review_simulation(simulation, cx));
+            review_body = review_body.child(Self::render_review_simulation(simulation, cx));
         }
 
         for section in review_sections_for_display(document)
             .into_iter()
             .filter(|section| section.kind == ApprovalSectionKind::Effects)
         {
-            review_body = review_body.child(self.render_review_section(section, cx));
+            review_body = review_body.child(Self::render_review_section(section, cx));
         }
 
         if !document.request.warnings.is_empty() {
@@ -9831,7 +11213,7 @@ impl WalletWindow {
             .into_iter()
             .filter(|section| section.kind != ApprovalSectionKind::Effects)
         {
-            review_body = review_body.child(self.render_review_section(section, cx));
+            review_body = review_body.child(Self::render_review_section(section, cx));
         }
 
         if !document.request.facts.is_empty() {
@@ -9840,7 +11222,7 @@ impl WalletWindow {
                 heading: "Request details".to_owned(),
                 facts: document.request.facts.clone(),
             };
-            review_body = review_body.child(self.render_review_section(&context, cx));
+            review_body = review_body.child(Self::render_review_section(&context, cx));
         }
 
         if exact_data_required {
@@ -10067,34 +11449,19 @@ impl WalletWindow {
                     .font_semibold()
                     .child(format!("Review {}", pending.display_name)),
             )
-            .when(pending.preview.is_some(), |panel| {
-                panel.child("Review the exact configuration change. A timestamped backup is created before installation.")
-            })
-            .when(pending.remove_client_id.is_some(), |panel| {
-                panel.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Removal also deletes this wallet registration and revokes all of its OAuth credentials after operating-system authentication. The configuration change is rolled back if authentication or database removal fails."),
-                )
-            })
-            .when_some(pending.preview.as_ref(), |panel, preview| {
-                panel.child(
-                    div()
-                        .id("agent-configuration-diff-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scrollbar()
-                        .p_3()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .font_family(MONO_FONT_FAMILY)
-                        .child(preview.exact_diff().to_owned()),
-                )
-            })
-            .when(pending.preview.is_none(), |panel| {
-                panel.child("No managed configuration file belongs to this registration. Only its encrypted wallet registration and OAuth credentials will be deleted.")
-            })
+            .child("Review the exact configuration change. A timestamped backup is created before installation.")
+            .child(
+                div()
+                    .id("agent-configuration-diff-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .font_family(MONO_FONT_FAMILY)
+                    .child(pending.preview.exact_diff().to_owned()),
+            )
             .child(
                 div()
                     .flex()
@@ -10109,11 +11476,7 @@ impl WalletWindow {
                     )
                     .child(
                         Button::new("confirm-agent-install")
-                            .label(if pending.remove_client_id.is_some() {
-                                "Authenticate & remove"
-                            } else {
-                                "Apply"
-                            })
+                            .label("Apply")
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.confirm_agent_install(cx);
@@ -10175,49 +11538,46 @@ impl WalletWindow {
             .when_some(review.error.clone(), |panel, error| {
                 panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink_0()
-                    .flex_wrap()
-                    .justify_between()
-                    .child(
-                        Button::new("close-legal-review")
-                            .label("Close")
-                            .disabled(self.legal_gate)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                if !view.legal_gate {
-                                    view.legal_review = None;
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                    .child(div().flex().items_center().gap_2().when(
-                        review.acceptance_required,
-                        |buttons| {
-                            buttons
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(if review.viewed_to_end {
-                                            "Document read to end"
-                                        } else {
-                                            "Scroll to the end to accept"
-                                        }),
-                                )
-                                .child(
-                                    Button::new("accept-legal")
-                                        .label("Accept")
-                                        .primary()
-                                        .disabled(!review.viewed_to_end)
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.accept_legal(cx);
-                                        })),
-                                )
-                        },
-                    )),
-            )
+            .when(review.acceptance_required, |panel| {
+                panel.child(
+                    h_flex()
+                        .w_full()
+                        .flex_shrink_0()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if review.viewed_to_end {
+                                    "Document read to end"
+                                } else {
+                                    "Scroll to the end to accept"
+                                }),
+                        )
+                        .child(
+                            Button::new("accept-legal")
+                                .label("Accept")
+                                .primary()
+                                .disabled(!review.viewed_to_end)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.accept_legal(cx);
+                                })),
+                        ),
+                )
+            })
+            .when(!review.acceptance_required, |panel| {
+                panel.child(
+                    Button::new("close-legal-review")
+                        .label("Close")
+                        .large()
+                        .primary()
+                        .w_full()
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.close_overlay(cx);
+                        })),
+                )
+            })
             .focus_trap("legal-review-focus", &self.modal_focus)
             .into_any_element()
     }
@@ -10442,6 +11802,9 @@ impl Render for WalletWindow {
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(|view, _: &CloseOverlay, _, cx| {
+                view.close_overlay(cx);
+            }))
             .relative()
             .size_full()
             .flex()
@@ -10476,6 +11839,128 @@ fn dark_appearance(appearance: WindowAppearance) -> bool {
     )
 }
 
+#[allow(clippy::unreadable_literal)] // Six-digit literals match the interface repository's RGB palette.
+fn apply_interface_palette(cx: &mut App) {
+    let dark = Theme::global(cx).is_dark();
+    let color = |hex: u32| -> gpui::Hsla { gpui::rgb(hex).into() };
+    let (background, surface, hover, border, muted, foreground, muted_foreground) = if dark {
+        (
+            color(0x101010),
+            color(0x1d1d1d),
+            color(0x373737),
+            color(0x373737),
+            color(0x272727),
+            color(0xffffff),
+            color(0x878787),
+        )
+    } else {
+        (
+            color(0xffffff),
+            color(0xf6f6f9),
+            color(0xe5e4e4),
+            color(0xe5e4e4),
+            color(0xf6f6f9),
+            color(0x101010),
+            color(0x666666),
+        )
+    };
+    let primary = color(0x9d5af2);
+    let primary_active = color(0x261b34);
+    let danger = color(0xeb1e74);
+    let success = color(0x26e8ad);
+    let warning = color(0xdf7b32);
+    let theme = Theme::global_mut(cx);
+    let colors = &mut theme.colors;
+    colors.background = background;
+    colors.foreground = foreground;
+    colors.border = border;
+    colors.accent = hover;
+    colors.accent_foreground = foreground;
+    colors.accordion = surface;
+    colors.button = surface;
+    colors.button_active = primary_active;
+    colors.button_foreground = foreground;
+    colors.button_hover = hover;
+    colors.button_primary = primary;
+    colors.button_primary_active = primary_active;
+    colors.button_primary_foreground = color(0xffffff);
+    colors.button_primary_hover = primary.mix_oklab(background, 0.12);
+    colors.button_secondary = surface;
+    colors.button_secondary_active = primary_active;
+    colors.button_secondary_foreground = foreground;
+    colors.button_secondary_hover = hover;
+    colors.button_danger = danger;
+    colors.button_danger_active = danger.mix_oklab(background, 0.25);
+    colors.button_danger_foreground = color(0xffffff);
+    colors.button_danger_hover = danger.mix_oklab(background, 0.12);
+    colors.button_success = success;
+    colors.button_success_active = success.mix_oklab(background, 0.25);
+    colors.button_success_foreground = color(0x101010);
+    colors.button_success_hover = success.mix_oklab(background, 0.12);
+    colors.button_warning = warning;
+    colors.button_warning_active = warning.mix_oklab(background, 0.25);
+    colors.button_warning_foreground = color(0x101010);
+    colors.button_warning_hover = warning.mix_oklab(background, 0.12);
+    colors.group_box = surface;
+    colors.group_box_foreground = foreground;
+    colors.input = border;
+    colors.list = surface;
+    colors.list_active = primary_active;
+    colors.list_active_border = primary;
+    colors.list_even = surface;
+    colors.list_head = muted;
+    colors.list_hover = hover;
+    colors.muted = muted;
+    colors.muted_foreground = muted_foreground;
+    colors.popover = surface;
+    colors.popover_foreground = foreground;
+    colors.primary = primary;
+    colors.primary_active = primary_active;
+    colors.primary_foreground = color(0xffffff);
+    colors.primary_hover = primary.mix_oklab(background, 0.12);
+    colors.ring = primary;
+    colors.secondary = surface;
+    colors.secondary_active = primary_active;
+    colors.secondary_foreground = foreground;
+    colors.secondary_hover = hover;
+    colors.sidebar = surface;
+    colors.sidebar_accent = primary_active;
+    colors.sidebar_accent_foreground = foreground;
+    colors.sidebar_border = border;
+    colors.sidebar_foreground = foreground;
+    colors.sidebar_primary = primary;
+    colors.sidebar_primary_foreground = color(0xffffff);
+    colors.danger = danger;
+    colors.danger_foreground = color(0xffffff);
+    colors.success = success;
+    colors.success_foreground = color(0x101010);
+    colors.warning = warning;
+    colors.warning_foreground = color(0x101010);
+    theme.tokens = ThemeTokens::from(&theme.colors);
+}
+
+fn apply_appearance_preference(
+    preference: AppearancePreference,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) {
+    match preference {
+        AppearancePreference::System => {
+            cx.set_window_appearance(None);
+            Theme::sync_system_appearance(window, cx);
+        }
+        AppearancePreference::Light => {
+            cx.set_window_appearance(Some(WindowAppearance::Light));
+            Theme::change(ThemeMode::Light, window, cx);
+        }
+        AppearancePreference::Dark => {
+            cx.set_window_appearance(Some(WindowAppearance::Dark));
+            Theme::change(ThemeMode::Dark, window, cx);
+        }
+    }
+    apply_interface_palette(cx);
+}
+
 fn show_wallet_window(
     cx: &mut App,
     wallet_view: &Entity<WalletWindow>,
@@ -10498,13 +11983,47 @@ fn show_wallet_window(
         view.appearance_subscription = None;
         view.token_list = None;
         view.token_proposal_list = None;
+        view.token_list_url_input = None;
+        view.token_chain_id_input = None;
+        view.token_address_input = None;
+        view.token_symbol_input = None;
+        view.token_name_input = None;
+        view.token_decimals_input = None;
+        view.token_editor_open = false;
+        view.token_editor_identity = None;
         view.token_list_generation = view.token_list_generation.wrapping_add(1);
         view.account_id_input = None;
         view.private_key_input = None;
         view.walletconnect_uri_input = None;
         view.network_json_input = None;
+        view.network_name_input = None;
+        view.network_display_name_input = None;
+        view.network_aliases_input = None;
+        view.network_chain_id_input = None;
+        view.network_rpc_urls_input = None;
+        view.network_max_gas_limit_input = None;
+        view.network_max_fee_per_gas_input = None;
+        view.network_native_name_input = None;
+        view.network_native_symbol_input = None;
+        view.network_native_decimals_input = None;
+        view.network_explorer_url_input = None;
+        view.network_documentation_url_input = None;
+        view.network_preset_search_input = None;
+        view.network_preset_search_subscription = None;
+        view.network_editor_open = false;
+        view.network_editor_identity = None;
         view.policy_json_input = None;
         view.policy_editor = None;
+        view.policy_chain_input = None;
+        view.policy_chain_label_input = None;
+        view.policy_chain_max_calls_input = None;
+        view.policy_chain_native_values_input = None;
+        view.policy_rule_label_input = None;
+        view.policy_rule_targets_input = None;
+        view.policy_rule_senders_input = None;
+        view.policy_rule_values_input = None;
+        view.policy_rule_abi_input = None;
+        view.policy_rule_args_input = None;
         view.policy_installing = false;
         view.token_proposal_busy = false;
         view.network_proposal_busy = false;
@@ -10562,6 +12081,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            apply_appearance_preference(
+                owner.appearance_preference().unwrap_or_default(),
+                None,
+                cx,
+            );
             load_application_fonts(cx).expect("embedded Suisse fonts must be valid");
             gpui_tokio::init(cx);
             cx.set_quit_mode(QuitMode::Explicit);
@@ -10593,6 +12117,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             let mut key_bindings = vec![
                 KeyBinding::new("cmd-k", OpenCommandPalette, None),
                 KeyBinding::new("ctrl-k", OpenCommandPalette, None),
+                KeyBinding::new("escape", CloseOverlay, Some("Wallet")),
                 #[cfg(target_os = "macos")]
                 KeyBinding::new("cmd-q", Quit, None),
                 #[cfg(not(target_os = "macos"))]

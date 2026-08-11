@@ -242,9 +242,7 @@ fn revocation_invalidates_access_without_removing_harness_registration() {
     let mut store = store(34);
     let client = register(&mut store);
     let pair = authorize_and_exchange(&mut store, &client);
-    store
-        .revoke_client(client.id, &agent_authorization())
-        .unwrap();
+    store.revoke_client(client.id).unwrap();
     assert!(
         store
             .authenticate_access_token(&pair.access_token.expose_base64url(), MCP_RESOURCE)
@@ -336,4 +334,29 @@ fn protected_desktop_settings_reject_the_wrong_authorization_scope() {
             .is_err()
     );
     assert!(store.clients().unwrap().is_empty());
+}
+
+#[test]
+fn appearance_defaults_to_system_and_persists_in_the_encrypted_store() {
+    let mut store = store(36);
+    assert_eq!(
+        store.appearance_preference().unwrap(),
+        AppearancePreference::System
+    );
+
+    store
+        .set_appearance_preference(AppearancePreference::Dark)
+        .unwrap();
+    assert_eq!(
+        store.appearance_preference().unwrap(),
+        AppearancePreference::Dark
+    );
+
+    store
+        .set_appearance_preference(AppearancePreference::Light)
+        .unwrap();
+    assert_eq!(
+        store.appearance_preference().unwrap(),
+        AppearancePreference::Light
+    );
 }

@@ -63,6 +63,127 @@ fn agent_session_expiry_labels_active_expired_and_missing_sessions() {
 }
 
 #[test]
+fn revoked_and_optimistically_hidden_agent_sessions_are_not_rendered() {
+    let active_id = uuid::Uuid::new_v4();
+    let hidden_id = uuid::Uuid::new_v4();
+    let revoked_id = uuid::Uuid::new_v4();
+    let client = |id, revoked_at| McpClient {
+        id,
+        display_name: "Agent".into(),
+        agent_kind: AgentKind::Codex,
+        registration: None,
+        created_at: chrono::Utc::now(),
+        authorized_at: Some(chrono::Utc::now()),
+        last_used_at: None,
+        session_expires_at: None,
+        revoked_at,
+    };
+    let clients = vec![
+        client(active_id, None),
+        client(hidden_id, None),
+        client(revoked_id, Some(chrono::Utc::now())),
+    ];
+    let hidden = BTreeSet::from([hidden_id]);
+
+    let visible = visible_agent_sessions(&clients, &hidden);
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].id, active_id);
+}
+
+#[test]
+fn network_preset_search_prefers_exact_names_and_chain_ids() {
+    let presets = ekubo_wallet_core::networks::known_networks();
+    let configured = ekubo_wallet_core::config::default_networks();
+
+    let by_chain = network_presets_for_display(presets, &configured, "8453", 10);
+    assert_eq!(by_chain[0].config.chain_id, 8453);
+
+    let by_name = network_presets_for_display(presets, &configured, "base", 10);
+    assert_eq!(by_name[0].config.name, "base");
+    assert!(
+        by_name
+            .iter()
+            .all(|profile| { network_preset_match_rank(profile, "base").is_some() })
+    );
+}
+
+#[test]
+fn network_reset_preview_names_every_custom_or_modified_row() {
+    let defaults = ekubo_wallet_core::config::default_networks();
+    let mut configured = defaults.clone();
+    configured[0].rpc_urls = vec!["https://owner-rpc.example".parse().unwrap()];
+    configured.push(NetworkConfig {
+        name: "owner-chain".into(),
+        disabled: true,
+        display_name: Some("Owner Chain".into()),
+        aliases: Vec::new(),
+        chain_id: 9_999_991,
+        rpc_urls: vec!["https://owner-chain.example".parse().unwrap()],
+        rpc_strategy: RpcStrategy::default(),
+        max_gas_limit: None,
+        max_fee_per_gas: None,
+        native_currency: None,
+        block_explorer_url: None,
+        documentation_url: None,
+    });
+
+    let discarded = networks_discarded_by_default_reset(&configured, &defaults);
+    assert!(discarded.contains(&configured[0].name));
+    assert!(discarded.contains(&"owner-chain".to_owned()));
+    assert_eq!(discarded.len(), 2);
+}
+
+#[test]
+fn structured_network_editor_builds_the_complete_network_configuration() {
+    let draft = NetworkEditorDraft {
+        name: "owner-chain".into(),
+        display_name: "Owner Chain".into(),
+        aliases: "owner, owner_test".into(),
+        chain_id: "9999991".into(),
+        rpc_urls: "https://rpc-one.example\nhttps://rpc-two.example".into(),
+        max_gas_limit: "30000000".into(),
+        max_fee_per_gas: "100000000000".into(),
+        native_currency_name: "Ether".into(),
+        native_currency_symbol: "ETH".into(),
+        native_currency_decimals: "18".into(),
+        block_explorer_url: "https://explorer.example".into(),
+        documentation_url: "https://docs.example/network".into(),
+    };
+
+    let (network, errors) = parse_network_editor_draft(&draft, true, RpcStrategy::Random);
+    assert_eq!(errors, NetworkEditorErrors::default());
+    let network = network.unwrap();
+    assert_eq!(network.name, "owner-chain");
+    assert_eq!(network.display_name.as_deref(), Some("Owner Chain"));
+    assert_eq!(network.aliases, ["owner", "owner_test"]);
+    assert_eq!(network.chain_id, 9_999_991);
+    assert_eq!(network.rpc_urls.len(), 2);
+    assert_eq!(network.rpc_strategy, RpcStrategy::Random);
+    assert!(network.disabled);
+    assert_eq!(network.native_currency.unwrap().symbol, "ETH");
+}
+
+#[test]
+fn structured_network_editor_reports_errors_beside_the_relevant_fields() {
+    let draft = NetworkEditorDraft {
+        name: "not valid".into(),
+        chain_id: "zero".into(),
+        rpc_urls: "https://user:secret@rpc.example\nhttps://user:secret@rpc.example".into(),
+        max_gas_limit: "12".into(),
+        native_currency_name: "Ether".into(),
+        ..NetworkEditorDraft::default()
+    };
+
+    let (network, errors) = parse_network_editor_draft(&draft, false, RpcStrategy::Ordered);
+    assert!(network.is_none());
+    assert!(errors.name.is_some());
+    assert!(errors.chain_id.is_some());
+    assert!(errors.rpc_urls.is_some());
+    assert!(errors.max_gas_limit.is_some());
+    assert!(errors.native_currency.is_some());
+}
+
+#[test]
 fn serial_review_queue_never_overwrites_and_preserves_arrival_order() {
     let mut queue = SerialQueue::default();
 
@@ -647,6 +768,16 @@ fn accepted_legal_documents_reopen_read_only() {
 }
 
 #[test]
+fn application_license_is_compiled_into_the_desktop_and_never_requires_acceptance() {
+    assert!(APPLICATION_LICENSE_TEXT.contains("Functional Source License, Version 1.1"));
+    assert!(APPLICATION_LICENSE_TEXT.contains("Copyright 2026 Ekubo, Inc."));
+    assert_eq!(
+        LegalReviewDocument::ApplicationLicense.title(),
+        "Application License"
+    );
+}
+
+#[test]
 fn legal_acceptance_shows_when_the_current_document_was_accepted() {
     let accepted_at = chrono::DateTime::parse_from_rfc3339("2026-08-11T14:30:00Z")
         .unwrap()
@@ -735,4 +866,16 @@ fn policy_draft_validation_rejects_non_policy_json() {
     .unwrap_err();
 
     assert!(format!("{error:#}").contains("unknown field"));
+}
+
+#[test]
+fn changing_routes_resets_scroll_without_disturbing_the_current_route() {
+    let scroll = ScrollHandle::new();
+    scroll.set_offset(gpui::point(px(-14.0), px(-220.0)));
+
+    reset_route_scroll_if_changed(Route::Networks, Route::Networks, &scroll);
+    assert_eq!(scroll.offset().y, px(-220.0));
+
+    reset_route_scroll_if_changed(Route::Networks, Route::Tokens, &scroll);
+    assert_eq!(scroll.offset(), gpui::point(px(0.0), px(0.0)));
 }

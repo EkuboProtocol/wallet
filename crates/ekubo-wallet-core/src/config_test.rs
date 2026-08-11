@@ -132,6 +132,47 @@ fn network_deletion_requires_an_owner_authorized_disable_first() {
 }
 
 #[test]
+fn network_reset_requires_authorization_and_the_exact_reviewed_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let reviewed = store.load().unwrap().networks;
+    let wrong_scope = OwnerAuthorization::for_test(OwnerAuthorizationScope::TokenMetadata);
+
+    assert!(
+        store
+            .reset_networks_to_defaults(&reviewed, &wrong_scope)
+            .is_err()
+    );
+    assert_eq!(store.load().unwrap().networks, reviewed);
+
+    store
+        .update_for_test(|config| {
+            config.networks[0].display_name = Some("Owner-edited name".into());
+            Ok(())
+        })
+        .unwrap();
+    let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    assert!(
+        store
+            .reset_networks_to_defaults(&reviewed, &authorized)
+            .is_err()
+    );
+    assert_eq!(
+        store.load().unwrap().networks[0].display_name.as_deref(),
+        Some("Owner-edited name")
+    );
+
+    let current = store.load().unwrap().networks;
+    assert_eq!(
+        store
+            .reset_networks_to_defaults(&current, &authorized)
+            .unwrap(),
+        default_networks()
+    );
+    assert_eq!(store.load().unwrap().networks, default_networks());
+}
+
+#[test]
 fn round_trips_private_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());

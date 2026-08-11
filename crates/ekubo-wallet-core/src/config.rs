@@ -383,6 +383,29 @@ impl ConfigStore {
         self.update(|config| replace_configured_network(&mut config.networks, network))
     }
 
+    /// Replace every configured network with the exact built-in defaults.
+    ///
+    /// This intentionally discards custom RPC URLs and network rows, so the
+    /// owner authorization is enforced here at the encrypted persistence
+    /// boundary rather than being trusted to a desktop confirmation alone.
+    pub fn reset_networks_to_defaults(
+        &self,
+        reviewed_networks: &[NetworkConfig],
+        authorization: &OwnerAuthorization,
+    ) -> Result<Vec<NetworkConfig>> {
+        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        let defaults = default_networks();
+        self.update(|config| {
+            ensure!(
+                config.networks == reviewed_networks,
+                "network configuration changed during reset review"
+            );
+            config.networks.clone_from(&defaults);
+            Ok(())
+        })?;
+        Ok(defaults)
+    }
+
     /// Enable or disable one network after core-verified owner authorization.
     pub fn set_network_disabled(
         &self,

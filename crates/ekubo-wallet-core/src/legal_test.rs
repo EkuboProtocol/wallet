@@ -21,24 +21,18 @@ fn documents_have_stable_nonempty_digests() {
 }
 
 #[test]
-fn privacy_policy_discloses_only_enabled_default_endpoints() {
+fn privacy_policy_embeds_the_complete_default_network_catalog() {
     let policy = privacy_policy();
-    for network in crate::config::default_networks() {
-        for url in network.rpc_urls.iter().map(url::Url::as_str) {
-            if network.disabled {
-                assert!(
-                    !policy.contains(url),
-                    "privacy policy discloses disabled endpoint {url}"
-                );
-            } else {
-                assert!(
-                    policy.contains(url),
-                    "privacy policy does not disclose enabled endpoint {url}"
-                );
-            }
-        }
-    }
+    let json = policy
+        .split_once("```json\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .map(|(json, _)| json)
+        .expect("privacy policy should contain a JSON network catalog");
+    let documented: Vec<crate::config::NetworkConfig> = serde_json::from_str(json).unwrap();
+    assert_eq!(documented, crate::config::default_networks());
+    assert!(documented.iter().any(|network| network.disabled));
     assert!(policy.contains("Apart from these RPC endpoints"));
+    assert!(policy.contains("stored in that encrypted database"));
 }
 
 /// The only outbound requests that are not a configured RPC are the

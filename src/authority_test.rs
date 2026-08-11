@@ -116,6 +116,35 @@ async fn automatic_update_preference_is_owner_controlled_and_persisted() {
 }
 
 #[test]
+fn appearance_preference_is_core_owned_and_publishes_configuration_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.db");
+    let desktop = DesktopStore::open(&database, &DatabaseKey::new([20; 32])).unwrap();
+    let owner = OwnerApi {
+        config: ConfigStore::open(directory.path(), DatabaseKey::new([20; 32])),
+        desktop: Arc::new(Mutex::new(desktop)),
+        events: EventBus::default(),
+    };
+    let mut events = owner.event_bus().subscribe();
+
+    assert_eq!(
+        owner.appearance_preference().unwrap(),
+        AppearancePreference::System
+    );
+    owner
+        .set_appearance_preference(AppearancePreference::Dark)
+        .unwrap();
+    assert_eq!(
+        owner.appearance_preference().unwrap(),
+        AppearancePreference::Dark
+    );
+    assert!(matches!(
+        events.try_recv().unwrap().kind,
+        DomainEventKind::ConfigurationChanged
+    ));
+}
+
+#[test]
 fn policy_revision_revalidation_handles_initial_and_replacement_writes() {
     assert!(ensure_optional_revision(None, None).is_ok());
     assert!(ensure_optional_revision(Some(3), Some(3)).is_ok());
@@ -153,5 +182,39 @@ fn owner_token_imports_select_only_enabled_networks() {
         owner
             .enabled_token_import_chains(&[disabled.chain_id])
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn owner_network_reset_persists_defaults_and_publishes_the_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.db");
+    let desktop = DesktopStore::open(&database, &DatabaseKey::new([23; 32])).unwrap();
+    let owner = OwnerApi {
+        config: ConfigStore::open(directory.path(), DatabaseKey::new([23; 32])),
+        desktop: Arc::new(Mutex::new(desktop)),
+        events: EventBus::default(),
+    };
+    owner
+        .config
+        .update_for_test(|config| {
+            config.networks[0].display_name = Some("Owner-edited name".into());
+            Ok(())
+        })
+        .unwrap();
+    let reviewed = owner.networks().unwrap();
+    let mut events = owner.event_bus().subscribe();
+
+    let reset = owner.reset_networks_to_defaults(&reviewed).await.unwrap();
+
+    assert_eq!(reset, ekubo_wallet_core::config::default_networks());
+    assert_eq!(owner.networks().unwrap(), reset);
+    assert!(matches!(
+        events.try_recv().unwrap().kind,
+        DomainEventKind::ConfigurationChanged
+    ));
+    assert_eq!(
+        owner.network_presets().len(),
+        ekubo_wallet_core::networks::known_networks().len()
     );
 }
