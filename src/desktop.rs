@@ -1,7 +1,10 @@
 use crate::{
     BUILD_VERSION,
     agent_config::{AgentAdapter, ConfigPreview},
-    authority::{ApplicationAuthority, ExportLease, OwnerApi, PRIVATE_KEY_REVEAL_DURATION},
+    authority::{
+        ApplicationAuthority, ExportLease, OwnerApi, OwnerPortfolioSnapshot,
+        PRIVATE_KEY_REVEAL_DURATION,
+    },
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     http_server::{MCP_REQUEST_LIMIT_BYTES, McpHttpServer},
     notifications::{
@@ -23,15 +26,19 @@ use ekubo_wallet_core::desktop_store::AgentKind;
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::pending::PendingStatus;
 use gpui::{
-    App, ClipboardItem, Context, Entity, KeyBinding, MouseButton, QuitMode, Render, SharedString,
-    Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*,
-    px, size,
+    App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, QuitMode, Render,
+    SharedString, Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions,
+    div, prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, IconName, Root, StyledExt,
+    ActiveTheme, Disableable, FocusTrapElement, IconName, Root, StyledExt,
+    alert::Alert,
     button::{Button, ButtonVariants},
+    h_flex,
     input::{Input, InputState},
     scroll::ScrollableElement,
+    sidebar::{Sidebar, SidebarMenu, SidebarMenuItem, SidebarToggleButton},
+    spinner::Spinner,
 };
 use std::{
     cell::RefCell,
@@ -60,6 +67,19 @@ fn next_required_legal(status: &LegalStatus) -> Option<LegalDocument> {
     } else {
         None
     }
+}
+
+fn format_asset_balance(
+    raw: &str,
+    decimals: Option<u8>,
+    symbol: Option<&str>,
+    base_unit: &str,
+) -> String {
+    let Some(decimals) = decimals else {
+        return format!("{raw} {base_unit}");
+    };
+    let amount = ekubo_wallet_core::approval_summary::format_fixed_point(raw, decimals);
+    symbol.map_or(amount.clone(), |symbol| format!("{amount} {symbol}"))
 }
 
 fn upsert_detected_agents(owner: &OwnerApi, port: u16) -> Result<String> {
@@ -207,12 +227,16 @@ pub struct WalletWindow {
     selected_record: Option<uuid::Uuid>,
     active_review: Option<ActiveReview>,
     pending_agent_install: Option<PendingAgentInstall>,
+    agent_reinstall: AgentReinstallState,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
     account_export: Option<AccountExport>,
     legal_review: Option<LegalReview>,
     legal_gate: bool,
     operation_status: Option<SharedString>,
+    portfolio: PortfolioState,
+    portfolio_generation: u64,
+    modal_focus: FocusHandle,
     nav_collapsed: bool,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_presenter: ProposalPresenter,
@@ -221,6 +245,19 @@ pub struct WalletWindow {
     address_alias_input: Option<Entity<InputState>>,
     address_value_input: Option<Entity<InputState>>,
     address_note_input: Option<Entity<InputState>>,
+}
+
+enum PortfolioState {
+    Idle,
+    Loading,
+    Ready(OwnerPortfolioSnapshot),
+    Failed(SharedString),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentReinstallState {
+    Idle,
+    Running,
 }
 
 struct LegalReview {
@@ -305,6 +342,7 @@ impl WalletWindow {
         review_presenter: GuiReviewPresenter,
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
+        cx: &mut Context<Self>,
     ) -> Self {
         let mut window = Self {
             owner,
@@ -315,12 +353,16 @@ impl WalletWindow {
             selected_record: None,
             active_review: None,
             pending_agent_install: None,
+            agent_reinstall: AgentReinstallState::Idle,
             account_id_input: None,
             private_key_input: None,
             account_export: None,
             legal_review: None,
             legal_gate: false,
             operation_status: None,
+            portfolio: PortfolioState::Idle,
+            portfolio_generation: 0,
+            modal_focus: cx.focus_handle(),
             nav_collapsed: true,
             walletconnect,
             walletconnect_presenter,
@@ -663,10 +705,31 @@ impl WalletWindow {
     }
 
     fn reinstall_detected_agents(&mut self, port: u16, cx: &mut Context<Self>) {
-        self.operation_status = Some(match upsert_detected_agents(&self.owner, port) {
-            Ok(summary) => summary.into(),
-            Err(error) => format!("Could not reinstall MCP server: {error:#}").into(),
-        });
+        if self.agent_reinstall == AgentReinstallState::Running {
+            self.operation_status = Some("Agent configuration repair is already running.".into());
+            cx.notify();
+            return;
+        }
+        self.agent_reinstall = AgentReinstallState::Running;
+        self.operation_status = Some("Updating detected agent configurations…".into());
+        let owner = self.owner.clone();
+        let task =
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { upsert_detected_agents(&owner, port) },
+            );
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.agent_reinstall = AgentReinstallState::Idle;
+                view.operation_status = Some(match result {
+                    Ok(summary) => summary.into(),
+                    Err(error) => format!("Could not reinstall MCP server: {error:#}").into(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -682,6 +745,38 @@ impl WalletWindow {
                 cx.notify();
             }
         }
+    }
+
+    fn refresh_portfolio(&mut self, cx: &mut Context<Self>) {
+        if self.legal_gate || matches!(self.portfolio, PortfolioState::Loading) {
+            return;
+        }
+        self.portfolio_generation = self.portfolio_generation.wrapping_add(1);
+        let generation = self.portfolio_generation;
+        self.portfolio = PortfolioState::Loading;
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.portfolio().await });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.portfolio_generation != generation {
+                    return;
+                }
+                view.portfolio = match result {
+                    Ok(snapshot) => PortfolioState::Ready(snapshot),
+                    Err(error) => PortfolioState::Failed(
+                        format!("Could not load portfolio: {error:#}").into(),
+                    ),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn invalidate_portfolio(&mut self) {
+        self.portfolio_generation = self.portfolio_generation.wrapping_add(1);
+        self.portfolio = PortfolioState::Idle;
     }
 
     fn discard_unsent_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
@@ -1252,61 +1347,38 @@ impl WalletWindow {
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let collapsed = self.nav_collapsed;
-        let mut sidebar = div()
-            .w(if collapsed { px(60.0) } else { px(196.0) })
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .p_3()
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
+        let menu = SidebarMenu::new().children(Route::ALL.into_iter().map(|route| {
+            SidebarMenuItem::new(route.label())
+                .icon(route.icon())
+                .active(route == self.route)
+                .disable(self.legal_gate)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.route = route;
+                    this.command_palette = false;
+                    cx.notify();
+                }))
+        }));
+        Sidebar::new("wallet-sidebar")
+            .w(px(196.0))
+            .collapsed(collapsed)
+            .header(
+                h_flex()
+                    .w_full()
                     .justify_between()
-                    .mb_3()
                     .when(!collapsed, |header| {
                         header.child(div().text_lg().font_semibold().child("Ekubo Wallet"))
                     })
                     .child(
-                        Button::new("toggle-navigation")
-                            .icon(if collapsed {
-                                IconName::PanelLeftOpen
-                            } else {
-                                IconName::PanelLeftClose
-                            })
-                            .tooltip(if collapsed {
-                                "Expand navigation"
-                            } else {
-                                "Collapse navigation"
-                            })
+                        SidebarToggleButton::new()
+                            .collapsed(collapsed)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.nav_collapsed = !view.nav_collapsed;
                                 cx.notify();
                             })),
                     ),
-            );
-        for route in Route::ALL {
-            let selected = route == self.route;
-            sidebar = sidebar.child(
-                Button::new(SharedString::from(format!("route-{route:?}")))
-                    .icon(route.icon())
-                    .tooltip(route.label())
-                    .when(!collapsed, |button| button.label(route.label()))
-                    .disabled(self.legal_gate)
-                    .when(selected, ButtonVariants::primary)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.route = route;
-                        this.command_palette = false;
-                        cx.notify();
-                    })),
-            );
-        }
-        sidebar.child(
-            div().mt_auto().child(
+            )
+            .child(menu)
+            .footer(
                 Button::new("reinstall-all-agents")
                     .icon(IconName::Redo2)
                     .tooltip("Reinstall MCP server for every detected agent")
@@ -1315,8 +1387,7 @@ impl WalletWindow {
                     .on_click(cx.listener(|view, _, _, cx| {
                         view.reinstall_detected_agents_from_menu(cx);
                     })),
-            ),
-        )
+            )
     }
 
     fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1836,6 +1907,210 @@ impl WalletWindow {
         }
     }
 
+    fn render_portfolio(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut content = div().flex().flex_col().gap_4().child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Block-pinned balances from your configured networks"),
+                )
+                .child(
+                    Button::new("refresh-portfolio")
+                        .label(if matches!(self.portfolio, PortfolioState::Loading) {
+                            "Refreshing…"
+                        } else {
+                            "Refresh"
+                        })
+                        .disabled(matches!(self.portfolio, PortfolioState::Loading))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.refresh_portfolio(cx);
+                        })),
+                ),
+        );
+        match &self.portfolio {
+            PortfolioState::Idle | PortfolioState::Loading => content.child(
+                div()
+                    .p_5()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Spinner::new())
+                            .child("Loading account balances…"),
+                    ),
+            ),
+            PortfolioState::Failed(error) => content.child(
+                Alert::error("portfolio-error", error.clone()).title("Portfolio unavailable"),
+            ),
+            PortfolioState::Ready(snapshot) if snapshot.accounts.is_empty() => content.child(
+                div()
+                    .p_5()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().font_semibold().child("Create your first account"))
+                    .child("A wallet account is required before there are balances to show.")
+                    .child(
+                        Button::new("portfolio-create-account")
+                            .label("Go to Accounts")
+                            .primary()
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.route = Route::Accounts;
+                                cx.notify();
+                            })),
+                    ),
+            ),
+            PortfolioState::Ready(snapshot) => {
+                for account in &snapshot.accounts {
+                    let mut networks = div().flex().flex_wrap().gap_3();
+                    for item in &account.networks {
+                        let network_name = item
+                            .network
+                            .display_name
+                            .as_deref()
+                            .unwrap_or(&item.network.name);
+                        let mut card = div()
+                            .min_w(px(230.0))
+                            .flex_1()
+                            .p_3()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().font_semibold().child(network_name.to_owned()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("Chain {}", item.network.chain_id)),
+                            );
+                        card = match &item.result {
+                            Ok(portfolio) => {
+                                let native = item.network.native_currency.as_ref();
+                                let native_balance = format_asset_balance(
+                                    &portfolio.native_balance,
+                                    native.map(|currency| currency.decimals),
+                                    native.map(|currency| currency.symbol.as_str()),
+                                    "wei",
+                                );
+                                let mut balances = div().flex().flex_col().gap_2().child(
+                                    div()
+                                        .py_2()
+                                        .border_b_1()
+                                        .border_color(cx.theme().border)
+                                        .flex()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child("Native")
+                                        .child(
+                                            div()
+                                                .font_family("monospace")
+                                                .text_sm()
+                                                .child(native_balance),
+                                        ),
+                                );
+                                for token in &portfolio.tokens {
+                                    let label = token
+                                        .symbol
+                                        .as_deref()
+                                        .unwrap_or(token.address.as_str())
+                                        .to_owned();
+                                    let balance = format_asset_balance(
+                                        &token.balance,
+                                        token.decimals,
+                                        token.symbol.as_deref(),
+                                        "base units",
+                                    );
+                                    balances = balances.child(
+                                        div()
+                                            .py_2()
+                                            .border_b_1()
+                                            .border_color(cx.theme().border)
+                                            .flex()
+                                            .justify_between()
+                                            .gap_3()
+                                            .child(
+                                                div().min_w_0().child(label).child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_family("monospace")
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(token.address.clone()),
+                                                ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .font_family("monospace")
+                                                    .text_sm()
+                                                    .child(balance),
+                                            ),
+                                    );
+                                }
+                                card.child(balances).child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "Block {} · {} confirmed token(s) checked{}",
+                                            portfolio.block_number,
+                                            portfolio.tokens_checked,
+                                            portfolio
+                                                .tokens_skipped
+                                                .map_or_else(String::new, |n| {
+                                                    format!(" · {n} skipped by safety limit")
+                                                })
+                                        )),
+                                )
+                            }
+                            Err(error) => card.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(error.clone()),
+                            ),
+                        };
+                        networks = networks.child(card);
+                    }
+                    content = content.child(
+                        div()
+                            .p_4()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .child(div().font_semibold().child(account.wallet.id.clone()))
+                                    .child(
+                                        div()
+                                            .font_family("monospace")
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(account.wallet.address.to_checksum(None)),
+                                    ),
+                            )
+                            .child(networks),
+                    );
+                }
+                content
+            }
+        }
+    }
+
     fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
@@ -1846,18 +2121,7 @@ impl WalletWindow {
             .flex_col()
             .gap_2();
         match self.route {
-            Route::Overview => {
-                let accounts = self.owner.accounts().map_or(0, |items| items.len());
-                let agents = self.owner.clients().map_or(0, |items| items.len());
-                let reviews = self.owner.reviews(None).map_or(0, |queues| {
-                    queues.transactions.len() + queues.typed_data.len() + queues.messages.len()
-                });
-                panel
-                    .child(format!("{accounts} account(s)"))
-                    .child(format!("{agents} registered agent(s)"))
-                    .child(format!("{reviews} pending review(s)"))
-                    .child(self.mcp_status.clone())
-            }
+            Route::Overview => self.render_portfolio(cx),
             Route::Activity => match self.owner.transactions(None, 200) {
                 Ok(items) => panel.children(items.into_iter().map(|item| {
                     let request_id = item.request_id;
@@ -2047,9 +2311,9 @@ impl WalletWindow {
         }
     }
 
-    fn render_review_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_review_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(active) = &self.active_review else {
-            return div();
+            return div().into_any_element();
         };
         let generation = active.state.generation();
         let document = active.state.document();
@@ -2278,11 +2542,13 @@ impl WalletWindow {
                             ),
                     ),
             )
+            .focus_trap("security-review-focus", &self.modal_focus)
+            .into_any_element()
     }
 
-    fn render_agent_install_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_agent_install_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(pending) = &self.pending_agent_install else {
-            return div();
+            return div().into_any_element();
         };
         div()
             .absolute()
@@ -2342,11 +2608,13 @@ impl WalletWindow {
                             })),
                     ),
             )
+            .focus_trap("agent-install-focus", &self.modal_focus)
+            .into_any_element()
     }
 
-    fn render_legal_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_legal_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(review) = &self.legal_review else {
-            return div();
+            return div().into_any_element();
         };
         let informational = review.document == LegalDocument::ThirdPartyLicenses;
         div()
@@ -2427,11 +2695,13 @@ impl WalletWindow {
                             }),
                     ),
             )
+            .focus_trap("legal-review-focus", &self.modal_focus)
+            .into_any_element()
     }
 
-    fn render_account_security_overlay(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_account_security_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(export) = self.account_export.as_ref() else {
-            return div();
+            return div().into_any_element();
         };
         let visible = export.lease.as_ref().and_then(ExportLease::visible_value);
         div()
@@ -2500,6 +2770,8 @@ impl WalletWindow {
                             }),
                     ),
             )
+            .focus_trap("account-security-focus", &self.modal_focus)
+            .into_any_element()
     }
 
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2562,6 +2834,19 @@ impl WalletWindow {
 impl Render for WalletWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.attach_window(window, cx);
+        let modal_open = self.active_review.is_some()
+            || self.pending_agent_install.is_some()
+            || self.legal_review.is_some()
+            || self.account_export.is_some();
+        if modal_open && !self.modal_focus.contains_focused(window, cx) {
+            self.modal_focus.focus(window, cx);
+        }
+        if self.route == Route::Overview
+            && !self.legal_gate
+            && matches!(self.portfolio, PortfolioState::Idle)
+        {
+            self.refresh_portfolio(cx);
+        }
         div()
             .key_context("Wallet")
             .on_action(cx.listener(Self::toggle_palette))
@@ -2714,12 +2999,13 @@ pub fn run_desktop() -> Result<()> {
             })
             .detach();
 
-            let wallet_view = cx.new(|_| {
+            let wallet_view = cx.new(|cx| {
                 WalletWindow::new(
                     owner.clone(),
                     review_presenter.clone(),
                     walletconnect.clone(),
                     walletconnect_presenter.clone(),
+                    cx,
                 )
             });
             let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
@@ -2768,9 +3054,22 @@ pub fn run_desktop() -> Result<()> {
                     let changed = match view_events.recv().await {
                         Ok(event) => {
                             if let crate::events::DomainEventKind::McpStatusChanged { online } =
-                                event.kind
+                                &event.kind
                             {
-                                mcp_online = online;
+                                mcp_online = *online;
+                            }
+                            let portfolio_changed = matches!(
+                                &event.kind,
+                                crate::events::DomainEventKind::ConfigurationChanged
+                                    | crate::events::DomainEventKind::Transaction {
+                                        stage: crate::events::TransactionStage::Confirmed
+                                            | crate::events::TransactionStage::Reverted
+                                            | crate::events::TransactionStage::Replaced,
+                                        ..
+                                    }
+                            );
+                            if portfolio_changed {
+                                event_view.update(cx, |view, _| view.invalidate_portfolio());
                             }
                             true
                         }

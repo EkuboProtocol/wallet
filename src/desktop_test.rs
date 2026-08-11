@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn portfolio_amounts_preserve_every_significant_digit() {
+    assert_eq!(
+        format_asset_balance("123450000", Some(6), Some("USDC"), "base units"),
+        "123.45 USDC"
+    );
+    assert_eq!(
+        format_asset_balance(
+            "340282366920938463463374607431768211455",
+            Some(18),
+            Some("TKN"),
+            "base units"
+        ),
+        "340282366920938463463.374607431768211455 TKN"
+    );
+    assert_eq!(
+        format_asset_balance("7", None, Some("UNKNOWN"), "base units"),
+        "7 base units"
+    );
+}
+
+#[test]
 fn tray_artwork_tracks_both_system_appearance_families() {
     assert!(!dark_appearance(WindowAppearance::Light));
     assert!(!dark_appearance(WindowAppearance::VibrantLight));

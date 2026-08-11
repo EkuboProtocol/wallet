@@ -24,7 +24,7 @@ use ekubo_wallet_core::{
     },
     pending::{PendingStore, PendingTransaction},
     policy_store::{PolicyStore, StoredPolicy},
-    token_store::{StoredToken, TokenStore},
+    token_store::{MAX_PORTFOLIO_TOKENS, Portfolio, StoredToken, TokenStore, read_portfolio},
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
 use std::{
@@ -32,6 +32,26 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+
+/// One owner account's balances across every configured network.
+#[derive(Clone, Debug)]
+pub struct OwnerPortfolioAccount {
+    pub wallet: WalletMetadata,
+    pub networks: Vec<OwnerPortfolioNetwork>,
+}
+
+/// A network read is isolated so one unavailable public RPC does not hide the
+/// rest of the portfolio.
+#[derive(Clone, Debug)]
+pub struct OwnerPortfolioNetwork {
+    pub network: NetworkConfig,
+    pub result: std::result::Result<Portfolio, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnerPortfolioSnapshot {
+    pub accounts: Vec<OwnerPortfolioAccount>,
+}
 
 /// The restricted capability cloned into authenticated MCP sessions.
 ///
@@ -266,6 +286,75 @@ impl OwnerApi {
 
     pub fn network_by_chain_id(&self, chain_id: u64) -> Result<NetworkConfig> {
         self.config.network_by_chain_id(&chain_id.to_string())
+    }
+
+    /// Read every account on every configured network with bounded
+    /// concurrency. Each network is block-pinned by the same core path exposed
+    /// to agents, and failures remain local to their network card.
+    pub async fn portfolio(&self) -> Result<OwnerPortfolioSnapshot> {
+        use futures::{StreamExt as _, stream};
+
+        let snapshot = self.config.load()?;
+        let token_store = TokenStore::production(self.config.data_dir())?;
+        let mut known_by_chain = std::collections::BTreeMap::new();
+        for network in &snapshot.networks {
+            known_by_chain.insert(
+                network.chain_id,
+                token_store.list(
+                    Some(network.chain_id),
+                    MAX_PORTFOLIO_TOKENS.saturating_add(1),
+                    0,
+                )?,
+            );
+        }
+
+        let mut accounts: Vec<OwnerPortfolioAccount> = snapshot
+            .wallets
+            .iter()
+            .cloned()
+            .map(|wallet| OwnerPortfolioAccount {
+                wallet,
+                networks: Vec::with_capacity(snapshot.networks.len()),
+            })
+            .collect();
+        let mut jobs = Vec::with_capacity(
+            snapshot
+                .wallets
+                .len()
+                .saturating_mul(snapshot.networks.len()),
+        );
+        for (account_index, wallet) in snapshot.wallets.into_iter().enumerate() {
+            for (network_index, network) in snapshot.networks.iter().cloned().enumerate() {
+                let known = known_by_chain
+                    .get(&network.chain_id)
+                    .cloned()
+                    .unwrap_or_default();
+                jobs.push((account_index, network_index, wallet.address, network, known));
+            }
+        }
+        let mut reads = stream::iter(jobs)
+            .map(
+                |(account_index, network_index, address, network, known)| async move {
+                    let result = read_portfolio(&network, address, &known, None)
+                        .await
+                        .map_err(|error| {
+                            ekubo_wallet_core::sanitize::stripped_capped(&format!("{error:#}"), 500)
+                        });
+                    (
+                        account_index,
+                        network_index,
+                        OwnerPortfolioNetwork { network, result },
+                    )
+                },
+            )
+            .buffer_unordered(6)
+            .collect::<Vec<_>>()
+            .await;
+        reads.sort_by_key(|(account_index, network_index, _)| (*account_index, *network_index));
+        for (account_index, _, network) in reads {
+            accounts[account_index].networks.push(network);
+        }
+        Ok(OwnerPortfolioSnapshot { accounts })
     }
 
     pub async fn install_network(&self, network: NetworkConfig) -> Result<()> {
