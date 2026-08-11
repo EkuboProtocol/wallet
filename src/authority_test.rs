@@ -2,6 +2,18 @@ use super::*;
 use ekubo_wallet_core::policy_store::DatabaseKey;
 
 #[test]
+fn owner_management_can_find_disabled_configured_chains() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let mut config = store.load().unwrap();
+    let chain_id = config.networks[0].chain_id;
+    config.networks[0].disabled = true;
+
+    assert!(contains_configured_chain(&config, chain_id));
+    assert!(!contains_configured_chain(&config, u64::MAX));
+}
+
+#[test]
 fn exact_review_payloads_escape_invisible_and_bidirectional_text() {
     let rendered = escape_review_payload("safe\namount\u{202e}123\u{200b}");
     assert!(rendered.starts_with("safe\namount"));

@@ -41,6 +41,13 @@ use std::{
 };
 use uuid::Uuid;
 
+fn contains_configured_chain(config: &WalletConfig, chain_id: u64) -> bool {
+    config
+        .networks
+        .iter()
+        .any(|network| network.chain_id == chain_id)
+}
+
 /// One owner account's balances across every configured network.
 #[derive(Clone, Debug)]
 pub struct OwnerPortfolioAccount {
@@ -1070,8 +1077,15 @@ impl OwnerApi {
     }
 
     pub async fn remove_token(&self, chain_id: u64, address: Address) -> Result<bool> {
-        self.config.network_by_chain_id(&chain_id.to_string())?;
+        ensure!(
+            contains_configured_chain(&self.config.load()?, chain_id),
+            "chain {chain_id} is not a configured network"
+        );
         let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
+        ensure!(
+            contains_configured_chain(&self.config.load()?, chain_id),
+            "chain {chain_id} was removed during authentication"
+        );
         let removed = TokenStore::production(self.config.data_dir())?.remove_authorized(
             chain_id,
             address,

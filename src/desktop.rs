@@ -544,14 +544,10 @@ struct TokenListDelegate {
     query: String,
     loading: bool,
     error: Option<SharedString>,
-    status: Option<TokenListStatus>,
+    action_errors: BTreeMap<(u64, alloy::primitives::Address), SharedString>,
+    selected: Option<IndexPath>,
+    pending_removal: Option<(u64, alloy::primitives::Address)>,
     removing: BTreeSet<(u64, alloy::primitives::Address)>,
-}
-
-#[derive(Clone)]
-enum TokenListStatus {
-    Message(SharedString),
-    Error(SharedString),
 }
 
 #[derive(Clone)]
@@ -602,7 +598,9 @@ impl TokenListDelegate {
             query: String::new(),
             loading: true,
             error: None,
-            status: None,
+            action_errors: BTreeMap::new(),
+            selected: None,
+            pending_removal: None,
             removing: BTreeSet::new(),
         }
     }
@@ -634,6 +632,12 @@ impl TokenListDelegate {
             .filter(|token| token_matches_filter(token, self.chain_filter, &self.query))
             .cloned()
             .collect();
+        self.selected = None;
+    }
+
+    fn selected_token(&self) -> Option<&StoredToken> {
+        self.selected
+            .and_then(|index| self.visible_tokens.get(index.row))
     }
 }
 
@@ -656,6 +660,13 @@ fn token_matches_filter(token: &StoredToken, chain_filter: Option<u64>, query: &
 
 fn network_can_be_removed(network: &NetworkConfig) -> bool {
     network.disabled
+}
+
+fn token_removal_is_confirmed(
+    pending: Option<(u64, alloy::primitives::Address)>,
+    identity: (u64, alloy::primitives::Address),
+) -> bool {
+    pending == Some(identity)
 }
 
 const TOKEN_INVENTORY_PAGE_SIZE: usize = 10_000;
@@ -777,10 +788,11 @@ impl ListDelegate for TokenListDelegate {
 
     fn set_selected_index(
         &mut self,
-        _: Option<IndexPath>,
+        index: Option<IndexPath>,
         _: &mut Window,
         _: &mut Context<ListState<Self>>,
     ) {
+        self.selected = index;
     }
 
     fn render_item(
@@ -792,96 +804,162 @@ impl ListDelegate for TokenListDelegate {
         let token = self.visible_tokens.get(index.row)?.clone();
         let chain_id = token.chain_id.parse::<u64>().ok();
         let address = token.address.parse::<alloy::primitives::Address>().ok();
-        let owner = self.owner.clone();
         let state = cx.entity().downgrade();
         let removing = chain_id
             .zip(address)
             .is_some_and(|identity| self.removing.contains(&identity));
+        let pending_removal = chain_id
+            .zip(address)
+            .is_some_and(|identity| self.pending_removal == Some(identity));
+        let action_error = chain_id
+            .zip(address)
+            .and_then(|identity| self.action_errors.get(&identity).cloned());
         let row_id = format!("token-{}-{}", token.chain_id, token.address);
-        Some(
-            ListItem::new(SharedString::from(row_id)).child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(format!(
-                                "{} · chain {}",
-                                token.symbol.as_deref().unwrap_or("Unnamed token"),
-                                token.chain_id
-                            ))
-                            .child(
-                                div()
-                                    .font_family("monospace")
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .truncate()
-                                    .child(token.address.clone()),
-                            ),
-                    )
-                    .child(
-                        Button::new(("remove-token", index.row))
-                            .label(if removing {
-                                "Authenticating…"
-                            } else {
-                                "Remove"
-                            })
-                            .danger()
-                            .disabled(chain_id.zip(address).is_none() || removing)
-                            .on_click(move |_, _, cx| {
-                                let Some((chain_id, address)) = chain_id.zip(address) else {
-                                    return;
-                                };
+        let mut actions = h_flex().gap_2();
+        if pending_removal {
+            let confirm_state = state.clone();
+            let owner = self.owner.clone();
+            actions = actions
+                .child(
+                    Button::new(("confirm-remove-token", index.row))
+                        .label(if removing {
+                            "Authenticating…"
+                        } else {
+                            "Authenticate & remove"
+                        })
+                        .danger()
+                        .disabled(removing)
+                        .on_click(move |_, _, cx| {
+                            let Some((chain_id, address)) = chain_id.zip(address) else {
+                                return;
+                            };
+                            let should_remove = confirm_state
+                                .update(cx, |list, cx| {
+                                    let delegate = list.delegate_mut();
+                                    if !token_removal_is_confirmed(
+                                        delegate.pending_removal,
+                                        (chain_id, address),
+                                    ) {
+                                        return false;
+                                    }
+                                    delegate.action_errors.remove(&(chain_id, address));
+                                    delegate.removing.insert((chain_id, address));
+                                    cx.notify();
+                                    true
+                                })
+                                .unwrap_or(false);
+                            if !should_remove {
+                                return;
+                            }
+                            let owner = owner.clone();
+                            let state = confirm_state.clone();
+                            let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                                owner.remove_token(chain_id, address).await
+                            });
+                            cx.spawn(async move |cx| {
+                                let result = task.await;
                                 let _ = state.update(cx, |list, cx| {
-                                    list.delegate_mut().removing.insert((chain_id, address));
+                                    let delegate = list.delegate_mut();
+                                    delegate.removing.remove(&(chain_id, address));
+                                    match result {
+                                        Ok(_) => {
+                                            delegate.pending_removal = None;
+                                            delegate.action_errors.remove(&(chain_id, address));
+                                            delegate.all_tokens.retain(|item| {
+                                                !(item.chain_id.parse::<u64>().ok()
+                                                    == Some(chain_id)
+                                                    && item
+                                                        .address
+                                                        .parse::<alloy::primitives::Address>()
+                                                        .ok()
+                                                        == Some(address))
+                                            });
+                                            delegate.apply_filters();
+                                        }
+                                        Err(error) => {
+                                            delegate.action_errors.insert(
+                                                (chain_id, address),
+                                                format!("Could not remove token: {error:#}").into(),
+                                            );
+                                        }
+                                    }
                                     cx.notify();
                                 });
-                                let owner = owner.clone();
-                                let state = state.clone();
-                                let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                                    owner.remove_token(chain_id, address).await
+                            })
+                            .detach();
+                        }),
+                )
+                .child(
+                    Button::new(("cancel-remove-token", index.row))
+                        .label("Cancel")
+                        .disabled(removing)
+                        .on_click({
+                            let state = state.clone();
+                            move |_, _, cx| {
+                                let _ = state.update(cx, |list, cx| {
+                                    list.delegate_mut().pending_removal = None;
+                                    cx.notify();
                                 });
-                                cx.spawn(async move |cx| {
-                                    let result = task.await;
-                                    let _ = state.update(cx, |list, cx| {
-                                        let delegate = list.delegate_mut();
-                                        delegate.removing.remove(&(chain_id, address));
-                                        match result {
-                                            Ok(removed) => {
-                                                delegate.status =
-                                                    Some(TokenListStatus::Message(if removed {
-                                                        "Removed token metadata.".into()
-                                                    } else {
-                                                        "Token metadata was already absent.".into()
-                                                    }));
-                                                delegate.all_tokens.retain(|item| {
-                                                    !(item.chain_id.parse::<u64>().ok()
-                                                        == Some(chain_id)
-                                                        && item
-                                                            .address
-                                                            .parse::<alloy::primitives::Address>()
-                                                            .ok()
-                                                            == Some(address))
-                                                });
-                                                delegate.apply_filters();
-                                            }
-                                            Err(error) => {
-                                                delegate.status = Some(TokenListStatus::Error(
-                                                    format!("Could not remove token: {error:#}")
-                                                        .into(),
-                                                ));
-                                            }
-                                        }
-                                        cx.notify();
-                                    });
-                                })
-                                .detach();
-                            }),
-                    ),
-            ),
+                            }
+                        }),
+                );
+        } else {
+            actions = actions.child(
+                Button::new(("remove-token", index.row))
+                    .label("Remove")
+                    .danger()
+                    .disabled(chain_id.zip(address).is_none() || removing)
+                    .on_click(move |_, _, cx| {
+                        let Some(identity) = chain_id.zip(address) else {
+                            return;
+                        };
+                        let _ = state.update(cx, |list, cx| {
+                            let delegate = list.delegate_mut();
+                            delegate.action_errors.remove(&identity);
+                            delegate.pending_removal = Some(identity);
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        Some(
+            ListItem::new(SharedString::from(row_id))
+                .selected(self.selected == Some(index))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .gap_4()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(format!(
+                                            "{} · chain {}",
+                                            token.symbol.as_deref().unwrap_or("Unnamed token"),
+                                            token.chain_id
+                                        ))
+                                        .child(
+                                            div()
+                                                .font_family("monospace")
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .truncate()
+                                                .child(token.address.clone()),
+                                        ),
+                                )
+                                .child(actions),
+                        )
+                        .when_some(action_error, |row, error| {
+                            row.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        }),
+                ),
         )
     }
 
@@ -5382,7 +5460,7 @@ impl WalletWindow {
         let active_chain = delegate.chain_filter;
         let visible = delegate.visible_tokens.len();
         let total = delegate.all_tokens.len();
-        let token_status = delegate.status.clone();
+        let selected_token = delegate.selected_token().cloned();
         let networks = self.owner.networks().unwrap_or_default();
         let (selected_source, selected_count, viewed_to_end) = {
             let delegate = proposal_list.read(cx).delegate();
@@ -5591,7 +5669,7 @@ impl WalletWindow {
                                 }
                             }),
                     )
-                    .children(networks.into_iter().map(|network| {
+                    .children(networks.iter().cloned().map(|network| {
                         let chain_id = network.chain_id;
                         let list = list.clone();
                         Button::new(SharedString::from(format!("token-network-{chain_id}")))
@@ -5611,16 +5689,51 @@ impl WalletWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("Showing {visible} of {total} token(s)")),
             )
-            .when_some(token_status, |content, status| match status {
-                TokenListStatus::Message(message) => content.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(message),
-                ),
-                TokenListStatus::Error(error) => {
-                    content.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                }
+            .when_some(selected_token, |content, token| {
+                let network = token
+                    .chain_id
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|chain_id| {
+                        networks.iter().find(|network| network.chain_id == chain_id)
+                    })
+                    .map_or_else(
+                        || format!("Chain {}", token.chain_id),
+                        |network| {
+                            network
+                                .display_name
+                                .as_deref()
+                                .unwrap_or(&network.name)
+                                .to_owned()
+                        },
+                    );
+                content.child(
+                    GroupBox::new()
+                        .id("selected-token-details")
+                        .outline()
+                        .title("Selected token")
+                        .child(format!(
+                            "{} · {}",
+                            token.symbol.as_deref().unwrap_or("No symbol"),
+                            token.name.as_deref().unwrap_or("No name")
+                        ))
+                        .child(format!(
+                            "{network} · {} decimals",
+                            token
+                                .decimals
+                                .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+                        ))
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_sm()
+                                .child(token.address),
+                        )
+                        .child(format!(
+                            "Source: {} · added {}",
+                            token.source, token.added_at
+                        )),
+                )
             })
             .child(
                 List::new(list)

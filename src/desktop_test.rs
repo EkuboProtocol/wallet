@@ -93,6 +93,16 @@ fn only_disabled_networks_offer_permanent_removal() {
 }
 
 #[test]
+fn token_removal_confirmation_is_bound_to_the_exact_row() {
+    let first = (1, alloy::primitives::Address::repeat_byte(0x11));
+    let second = (1, alloy::primitives::Address::repeat_byte(0x22));
+
+    assert!(token_removal_is_confirmed(Some(first), first));
+    assert!(!token_removal_is_confirmed(Some(first), second));
+    assert!(!token_removal_is_confirmed(None, first));
+}
+
+#[test]
 fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
     let token = StoredToken {
         chain_id: "1".into(),
