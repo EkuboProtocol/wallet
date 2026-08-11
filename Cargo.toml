@@ -73,6 +73,7 @@ interprocess = "2.4.3"
 
 [dev-dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core", features = ["test-hooks"] }
+qrcode = "0.14.1"
 sha2 = "0.10.9"
 
 [build-dependencies]

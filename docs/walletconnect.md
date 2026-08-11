@@ -1,8 +1,10 @@
 # WalletConnect
 
 The Connections → WalletConnect route supports multiple concurrent sessions.
-Users can paste a `wc:` URI or select a screen/window for one ephemeral capture.
-The app validates pairing syntax and expiry before connecting.
+Users can paste a `wc:` URI. On macOS, **Scan Screen** opens the native
+screen/window selection UI for one ephemeral capture. The app validates pairing
+syntax and expiry before connecting. Native picker adapters for Windows and
+Linux are not yet exposed; those builds currently use URI paste.
 
 QR decoding is pure Rust and in memory. Pixels, decoded URIs, and cropped
 choices are not written, logged, cached, or added to history; buffers are

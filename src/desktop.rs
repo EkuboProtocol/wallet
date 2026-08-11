@@ -16,8 +16,8 @@ use crate::{
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
     updater::{UpdateSummary, VerifiedUpdate},
     walletconnect::{
-        ProposalCommand, ProposalPresenter, ProposalPrompt, SessionSummary, WalletConnectManager,
-        run_session,
+        ProposalCommand, ProposalPresenter, ProposalPrompt, QrChoices, QrPreview, SessionSummary,
+        SystemScreenPicker, WalletConnectManager, run_session, scan_screen,
     },
 };
 use anyhow::{Context as _, Result, ensure};
@@ -33,10 +33,10 @@ use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
-    App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, QuitMode, Render,
-    ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, WeakEntity, Window,
-    WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px,
-    size,
+    App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, ObjectFit, QuitMode,
+    Render, RenderImage, ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, WeakEntity,
+    Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, img,
+    prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Sizable,
@@ -64,6 +64,7 @@ use std::{
     },
 };
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
 
 actions!(ekubo_wallet, [OpenCommandPalette, Quit]);
 
@@ -427,6 +428,8 @@ pub struct WalletWindow {
     walletconnect_sessions: Vec<SessionSummary>,
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
+    walletconnect_scan: WalletConnectScanState,
+    walletconnect_scan_generation: u64,
     network_json_input: Option<Entity<InputState>>,
     network_json_error: Option<SharedString>,
     network_action_busy: BTreeSet<String>,
@@ -561,6 +564,33 @@ enum ReviewFlowState {
 enum TokenImportState {
     Idle,
     Fetching,
+}
+
+enum WalletConnectScanState {
+    Idle,
+    Scanning,
+    Choices {
+        choices: QrChoices,
+        previews: Vec<Arc<RenderImage>>,
+    },
+}
+
+fn render_qr_preview(mut preview: QrPreview) -> Result<Arc<RenderImage>> {
+    let expected = usize::try_from(preview.width)?
+        .checked_mul(usize::try_from(preview.height)?)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("QR preview dimensions overflow")?;
+    ensure!(
+        preview.rgba.len() == expected,
+        "QR preview has inconsistent dimensions"
+    );
+    for pixel in preview.rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let pixels = std::mem::take(&mut preview.rgba);
+    let buffer = image::RgbaImage::from_raw(preview.width, preview.height, pixels)
+        .context("QR preview has inconsistent dimensions")?;
+    Ok(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
 }
 
 // The persistent list state keeps long legal documents virtualized between
@@ -1512,6 +1542,8 @@ impl WalletWindow {
             walletconnect_sessions: Vec::new(),
             walletconnect_presenter,
             walletconnect_uri_input: None,
+            walletconnect_scan: WalletConnectScanState::Idle,
+            walletconnect_scan_generation: 0,
             network_json_input: None,
             network_json_error: None,
             network_action_busy: BTreeSet::new(),
@@ -1558,7 +1590,7 @@ impl WalletWindow {
                 |view, list, event: &ListEvent, cx| match event {
                     ListEvent::Confirm(index) => {
                         if let Some(route) = list.read(cx).delegate().route(*index) {
-                            view.route = route;
+                            view.navigate_route(route, cx);
                         }
                         view.command_palette = false;
                         cx.notify();
@@ -2038,25 +2070,31 @@ impl WalletWindow {
             }
             Ok(_) => {}
         }
-        let uri = input.read(cx).value().trim().to_owned();
-        let start = match self
+        let uri = Zeroizing::new(input.read(cx).value().trim().to_owned());
+        if let Err(error) = self.begin_walletconnect_uri(&uri, cx) {
+            self.set_route_error(
+                Route::WalletConnect,
+                format!("Could not connect: {error:#}"),
+            );
+            cx.notify();
+            return;
+        }
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    fn begin_walletconnect_uri(&mut self, uri: &str, cx: &mut Context<Self>) -> Result<()> {
+        match self.cached_accounts() {
+            Ok([]) => anyhow::bail!("create an account before starting a WalletConnect pairing"),
+            Err(error) => anyhow::bail!("could not verify a signing account: {error:#}"),
+            Ok(_) => {}
+        }
+        let start = self
             .walletconnect
             .lock()
-            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))
-            .and_then(|mut manager| manager.begin_uri(&uri).map(|(start, _)| start))
-        {
-            Ok(start) => start,
-            Err(error) => {
-                self.set_route_error(
-                    Route::WalletConnect,
-                    format!("Could not connect: {error:#}"),
-                );
-                cx.notify();
-                return;
-            }
-        };
+            .map_err(|_| anyhow::anyhow!("WalletConnect session state is unavailable"))?
+            .begin_uri(uri)?
+            .0;
         self.clear_route_error(Route::WalletConnect);
-        input.update(cx, |input, cx| input.set_value("", window, cx));
         self.owner
             .event_bus()
             .publish(crate::events::DomainEventKind::WalletConnectChanged {
@@ -2088,6 +2126,135 @@ impl WalletWindow {
             });
         })
         .detach();
+        cx.notify();
+        Ok(())
+    }
+
+    fn scan_walletconnect_screen(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.walletconnect_scan, WalletConnectScanState::Scanning) {
+            return;
+        }
+        match self.cached_accounts() {
+            Ok([]) => {
+                self.set_route_error(
+                    Route::WalletConnect,
+                    "Create an account before scanning a WalletConnect pairing.",
+                );
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.set_route_error(
+                    Route::WalletConnect,
+                    format!("Could not verify a signing account: {error:#}"),
+                );
+                cx.notify();
+                return;
+            }
+            Ok(_) => {}
+        }
+        if !SystemScreenPicker::supported() {
+            self.set_route_error(
+                Route::WalletConnect,
+                "Screen scanning is not available on this platform.",
+            );
+            cx.notify();
+            return;
+        }
+        self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
+        let generation = self.walletconnect_scan_generation;
+        self.walletconnect_scan = WalletConnectScanState::Scanning;
+        self.clear_route_error(Route::WalletConnect);
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(|| scan_screen(&SystemScreenPicker))
+                .await
+                .context("screen scanning task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                if view.walletconnect_scan_generation != generation
+                    || view.route != Route::WalletConnect
+                {
+                    return;
+                }
+                match result {
+                    Ok(None) => view.walletconnect_scan = WalletConnectScanState::Idle,
+                    Ok(Some(choices)) if choices.is_empty() => {
+                        view.walletconnect_scan = WalletConnectScanState::Idle;
+                        view.set_route_error(
+                            Route::WalletConnect,
+                            "No valid, unexpired WalletConnect QR code was found.",
+                        );
+                    }
+                    Ok(Some(choices)) if choices.len() == 1 => {
+                        let uri = choices.take(0);
+                        view.walletconnect_scan = WalletConnectScanState::Idle;
+                        match uri.and_then(|uri| view.begin_walletconnect_uri(&uri, cx)) {
+                            Ok(()) => view.clear_route_error(Route::WalletConnect),
+                            Err(error) => view.set_route_error(
+                                Route::WalletConnect,
+                                format!("Could not connect: {error:#}"),
+                            ),
+                        }
+                    }
+                    Ok(Some(mut choices)) => {
+                        let previews = choices
+                            .take_previews()
+                            .into_iter()
+                            .map(render_qr_preview)
+                            .collect::<Result<Vec<_>>>();
+                        match previews {
+                            Ok(previews) => {
+                                view.walletconnect_scan =
+                                    WalletConnectScanState::Choices { choices, previews };
+                            }
+                            Err(error) => {
+                                view.walletconnect_scan = WalletConnectScanState::Idle;
+                                view.set_route_error(
+                                    Route::WalletConnect,
+                                    format!("Could not display QR choices: {error:#}"),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        view.walletconnect_scan = WalletConnectScanState::Idle;
+                        view.set_route_error(
+                            Route::WalletConnect,
+                            format!("Could not scan screen: {error:#}"),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn choose_walletconnect_qr(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
+        let state = std::mem::replace(&mut self.walletconnect_scan, WalletConnectScanState::Idle);
+        let WalletConnectScanState::Choices { choices, .. } = state else {
+            return;
+        };
+        match choices
+            .take(index)
+            .and_then(|uri| self.begin_walletconnect_uri(&uri, cx))
+        {
+            Ok(()) => self.clear_route_error(Route::WalletConnect),
+            Err(error) => self.set_route_error(
+                Route::WalletConnect,
+                format!("Could not connect: {error:#}"),
+            ),
+        }
+        cx.notify();
+    }
+
+    fn cancel_walletconnect_scan(&mut self, cx: &mut Context<Self>) {
+        self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
+        self.walletconnect_scan = WalletConnectScanState::Idle;
         cx.notify();
     }
 
@@ -2169,7 +2336,8 @@ impl WalletWindow {
         self.review_flow = ReviewFlowState::Ready;
         self.activate_next_queued_review();
         if self.active_review.is_some() {
-            self.route = self.active_review_route();
+            let route = self.active_review_route();
+            self.set_route(route);
         }
     }
 
@@ -4191,7 +4359,8 @@ impl WalletWindow {
         }
         self.activate_next_queued_review();
         if self.active_review.is_some() {
-            self.route = self.active_review_route();
+            let route = self.active_review_route();
+            self.set_route(route);
         }
         cx.notify();
     }
@@ -4214,11 +4383,19 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn set_route(&mut self, route: Route) {
+        if route != Route::WalletConnect {
+            self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
+            self.walletconnect_scan = WalletConnectScanState::Idle;
+        }
+        self.route = route;
+    }
+
     fn navigate_route(&mut self, route: Route, cx: &mut Context<Self>) {
         if self.legal_gate {
             return;
         }
-        self.route = route;
+        self.set_route(route);
         self.route_scroll_handle
             .set_offset(gpui::point(px(0.0), px(0.0)));
         self.command_palette = false;
@@ -4461,7 +4638,7 @@ impl WalletWindow {
                                     .label("Open Policies")
                                     .primary()
                                     .on_click(cx.listener(|view, _, _, cx| {
-                                        view.route = Route::Policies;
+                                        view.set_route(Route::Policies);
                                         cx.notify();
                                     })),
                                 ),
@@ -4491,7 +4668,7 @@ impl WalletWindow {
                                     .label("Open Networks")
                                     .primary()
                                     .on_click(cx.listener(|view, _, _, cx| {
-                                        view.route = Route::Networks;
+                                        view.set_route(Route::Networks);
                                         cx.notify();
                                     })),
                                 ),
@@ -4518,7 +4695,7 @@ impl WalletWindow {
                                     .label("Open Tokens")
                                     .primary()
                                     .on_click(cx.listener(|view, _, _, cx| {
-                                        view.route = Route::Tokens;
+                                        view.set_route(Route::Tokens);
                                         cx.notify();
                                     })),
                             ),
@@ -5649,7 +5826,7 @@ impl WalletWindow {
                             .label("Go to Accounts")
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
-                                view.route = Route::Accounts;
+                                view.set_route(Route::Accounts);
                                 cx.notify();
                             })),
                     ),
@@ -5882,6 +6059,8 @@ impl WalletWindow {
             Err(error) => Some(format!("Signing accounts unavailable: {error:#}")),
             Ok(_) => None,
         };
+        let account_unavailable = account_error.is_some();
+        let scan_running = matches!(self.walletconnect_scan, WalletConnectScanState::Scanning);
         let mut panel = div()
             .p_4()
             .rounded_lg()
@@ -5895,20 +6074,96 @@ impl WalletWindow {
             panel = panel.child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(Input::new(input).flex_1())
                     .child(
                         Button::new("connect-walletconnect")
                             .label("Connect")
                             .primary()
-                            .disabled(account_error.is_some())
+                            .disabled(account_unavailable)
                             .on_click(cx.listener(|view, _, window, cx| {
                                 view.connect_walletconnect(window, cx);
                             })),
-                    ),
+                    )
+                    .when(SystemScreenPicker::supported(), |row| {
+                        row.child(
+                            Button::new("scan-walletconnect")
+                                .label(if scan_running {
+                                    "Waiting for selection…"
+                                } else {
+                                    "Scan Screen"
+                                })
+                                .disabled(account_unavailable || scan_running)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.scan_walletconnect_screen(cx);
+                                })),
+                        )
+                    }),
             );
             if let Some(error) = account_error {
                 panel = panel.child(div().text_sm().text_color(cx.theme().danger).child(error));
+            }
+        }
+        match &self.walletconnect_scan {
+            WalletConnectScanState::Idle => {}
+            WalletConnectScanState::Scanning => {
+                panel = panel.child(
+                    h_flex()
+                        .gap_2()
+                        .child(Spinner::new())
+                        .child("Choose a screen area or window in the macOS picker."),
+                );
+            }
+            WalletConnectScanState::Choices { previews, .. } => {
+                let mut choices = div()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child("Several WalletConnect codes were found. Choose one to connect.")
+                    .child(
+                        Button::new("cancel-walletconnect-scan")
+                            .label("Cancel")
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.cancel_walletconnect_scan(cx);
+                            })),
+                    );
+                let mut previews_row = div().flex().flex_wrap().gap_3();
+                for (index, preview) in previews.iter().enumerate() {
+                    previews_row =
+                        previews_row.child(
+                            div()
+                                .p_2()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    img(preview.clone())
+                                        .w(px(160.0))
+                                        .h(px(160.0))
+                                        .object_fit(ObjectFit::Contain),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "choose-walletconnect-qr-{index}"
+                                    )))
+                                    .label(format!("Use QR {}", index + 1))
+                                    .primary()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.choose_walletconnect_qr(index, cx);
+                                    })),
+                                ),
+                        );
+                }
+                choices = choices.child(previews_row);
+                panel = panel.child(choices);
             }
         }
         if self.walletconnect_sessions.is_empty() {
@@ -6433,7 +6688,7 @@ impl WalletWindow {
                             .label("Go to Accounts")
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
-                                view.route = Route::Accounts;
+                                view.set_route(Route::Accounts);
                                 cx.notify();
                             })),
                     ),
@@ -8013,7 +8268,8 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 while let Some(prompt) = review_prompts.recv().await {
                     review_view.update(cx, |view, cx| {
                         view.receive_transaction_prompt(prompt);
-                        view.route = view.active_review_route();
+                        let route = view.active_review_route();
+                        view.set_route(route);
                         cx.notify();
                     });
                     let _ = cx.update(|cx| show_wallet_window(cx, &review_view, &review_window));
@@ -8026,7 +8282,8 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 while let Some(prompt) = walletconnect_prompts.recv().await {
                     walletconnect_review_view.update(cx, |view, cx| {
                         view.receive_walletconnect_prompt(prompt);
-                        view.route = view.active_review_route();
+                        let route = view.active_review_route();
+                        view.set_route(route);
                         cx.notify();
                     });
                     let _ = cx.update(|cx| {
@@ -8060,7 +8317,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 crate::events::DomainEventKind::OAuthAuthorizationRequested { .. }
                             ) {
                                 event_view.update(cx, |view, cx| {
-                                    view.route = Route::Settings;
+                                    view.set_route(Route::Settings);
                                     cx.notify();
                                 });
                                 let _ = cx.update(|cx| {
@@ -8197,7 +8454,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             }
                             TrayCommand::OpenRoute(route) => {
                                 tray_view.update(cx, |view, cx| {
-                                    view.route = route;
+                                    view.set_route(route);
                                     cx.notify();
                                 });
                                 let _ = cx
@@ -8205,7 +8462,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             }
                             TrayCommand::ConnectDapp => {
                                 tray_view.update(cx, |view, cx| {
-                                    view.route = Route::WalletConnect;
+                                    view.set_route(Route::WalletConnect);
                                     cx.notify();
                                 });
                                 let _ = cx
@@ -8213,7 +8470,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             }
                             TrayCommand::ReinstallAgents => {
                                 tray_view.update(cx, |view, cx| {
-                                    view.route = Route::Settings;
+                                    view.set_route(Route::Settings);
                                     view.reinstall_detected_agents_from_menu(cx);
                                 });
                                 let _ = cx
@@ -8221,7 +8478,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             }
                             TrayCommand::CheckForUpdates => {
                                 tray_view.update(cx, |view, cx| {
-                                    view.route = Route::Updates;
+                                    view.set_route(Route::Updates);
                                     view.check_for_updates(cx);
                                     cx.notify();
                                 });
@@ -8267,11 +8524,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     notification_view.update(cx, |view, cx| {
                         match route {
                             NotificationRoute::Review(request_id) => {
-                                view.route = Route::Reviews;
+                                view.set_route(Route::Reviews);
                                 view.selected_record = Some(request_id);
                             }
                             NotificationRoute::Activity(request_id) => {
-                                view.route = Route::Activity;
+                                view.set_route(Route::Activity);
                                 view.selected_record = Some(request_id);
                             }
                         }

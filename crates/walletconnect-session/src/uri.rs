@@ -16,6 +16,7 @@ use super::crypto::SymKey;
 use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, Utc};
 use url::Url;
+use zeroize::Zeroizing;
 
 /// The only relay protocol this wallet speaks.
 pub const RELAY_PROTOCOL_IRN: &str = "irn";
@@ -86,10 +87,10 @@ impl PairingUri {
             }
         }
 
-        let sym_key = sym_key.context(
+        let sym_key = Zeroizing::new(sym_key.context(
             "the pairing URI carries no symKey, so there is no key to encrypt the session with. \
              The URI was probably truncated when it was copied.",
-        )?;
+        )?);
         let sym_key = SymKey::from_hex(&sym_key)?;
 
         let relay_protocol = relay_protocol.unwrap_or_else(|| RELAY_PROTOCOL_IRN.to_owned());
