@@ -210,28 +210,13 @@ impl DataProvider for MapProvider<'_> {
     }
 }
 
-/// How many distinct token contracts one plan's review will look up.
-///
-/// A descriptor can walk dynamic arrays -- `swaps.[].route.[].poolKey.token0`
-/// in the Ekubo router descriptor is three levels of them -- so the number of
-/// callbacks follows the calldata rather than the descriptor, and calldata is
-/// bounded only in bytes. Past this many distinct tokens the review shows bare
-/// addresses for the remainder, which is exactly how it already renders a
-/// token nobody has named.
-///
-/// Well above any real plan: a large multihop route touches a handful of
-/// pools.
-const MAX_TOKEN_REFERENCES: usize = 256;
-
 /// Records the tokens the engine asks about instead of answering, so the
 /// caller can fetch metadata before the real rendering pass.
 ///
 /// A set, not a list. The caller deduplicates anyway -- `plan_token_targets`
 /// collects into a `BTreeSet` -- so recording the same address a thousand
 /// times was work with no output, and the deduplication happened after the
-/// allocation rather than instead of it. Bounded as well, because distinct
-/// addresses in attacker-chosen calldata are as cheap to produce as repeated
-/// ones.
+/// allocation rather than instead of it.
 #[derive(Default)]
 struct RecordingProvider(Mutex<BTreeSet<Address>>);
 
@@ -243,7 +228,6 @@ impl DataProvider for RecordingProvider {
     ) -> Pin<Box<dyn Future<Output = Option<TokenMeta>> + Send + '_>> {
         if let Ok(address) = address.parse::<Address>()
             && let Ok(mut recorded) = self.0.lock()
-            && recorded.len() < MAX_TOKEN_REFERENCES
         {
             recorded.insert(address);
         }

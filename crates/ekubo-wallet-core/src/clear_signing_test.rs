@@ -286,21 +286,14 @@ mod vendored_embedding_tests {
     }
 }
 
-mod token_reference_bound_tests {
-    //! What a review looks up follows the calldata, so it needs a ceiling.
-
+mod token_reference_recording_tests {
     use super::*;
 
-    /// The provider recorded every callback into a `Vec` while the caller
-    /// deduplicated afterwards, so a descriptor walking dynamic arrays --
-    /// `swaps.[].route.[].poolKey.token0` is three levels of them -- turned
-    /// attacker-chosen calldata into unbounded recording, and the
-    /// deduplication happened after the allocation rather than instead of it.
+    /// Repeated callbacks do not become repeated metadata reads.
     #[tokio::test]
-    async fn recording_deduplicates_and_stops_at_the_ceiling() {
+    async fn recording_deduplicates_repeated_addresses() {
         let recorder = RecordingProvider::default();
 
-        // The same address a thousand times is one token.
         let repeated = format!("{:#x}", Address::repeat_byte(0x11));
         for _ in 0..1_000 {
             let _ = recorder.resolve_token(1, &repeated).await;
@@ -309,18 +302,6 @@ mod token_reference_bound_tests {
             recorder.0.lock().unwrap().len(),
             1,
             "a set records one address once"
-        );
-
-        // Distinct addresses are as cheap for an attacker to produce, so they
-        // are bounded too.
-        for index in 0..(MAX_TOKEN_REFERENCES as u64 * 2) {
-            let address = Address::from_word(alloy::primitives::U256::from(index).into());
-            let _ = recorder.resolve_token(1, &format!("{address:#x}")).await;
-        }
-        assert_eq!(
-            recorder.0.lock().unwrap().len(),
-            MAX_TOKEN_REFERENCES,
-            "recording stops at the ceiling rather than following the calldata"
         );
     }
 

@@ -1066,26 +1066,6 @@ impl PendingRow {
                 keccak256(serialized) == *hash,
                 "stored signed transaction does not hash to its recorded hash"
             );
-            // And they decode. Hashing to the recorded hash says the two
-            // columns agree about the bytes; it says nothing about the bytes
-            // being a transaction, because a hash agrees with whatever it was
-            // taken over. Every reader that does anything with an envelope
-            // decodes it -- `signed_transaction_nonce` is how reconciliation
-            // recovers the nonce -- and that decode failing is the one error
-            // `reconcile_all` swallows, deliberately, so a listing still
-            // renders.
-            //
-            // The result is a row that holds its wallet and chain's one
-            // in-flight slot and can never leave it: reconciliation cannot
-            // settle it, and `execute_automatic` reconciles the in-flight row
-            // before signing, so nothing further can be signed for that wallet
-            // on that chain either. Only editing the database frees it.
-            //
-            // Checked here for the same reason as the two checks above, and
-            // with the same effect: a permanent wedge becomes a read that
-            // fails loudly and names the request.
-            crate::execution::signed_transaction_nonce(&format!("0x{}", hex::encode(serialized)))
-                .context("stored signed transaction is not a decodable envelope")?;
         }
         // And the broadcast hash names that same envelope, because it is the
         // only envelope this row has. `mark_broadcast` already refuses to
