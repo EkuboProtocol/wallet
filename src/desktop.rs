@@ -101,6 +101,8 @@ fn upsert_detected_agents(owner: &OwnerApi, port: u16) -> Result<String> {
             if preview.has_changes() {
                 preview.install()?;
                 changed += 1;
+            } else {
+                preview.validate_current()?;
             }
             Ok(())
         });
@@ -2174,6 +2176,7 @@ impl WalletWindow {
         div()
             .absolute()
             .inset_0()
+            .min_h_0()
             .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
             .rounded_lg()
@@ -2303,6 +2306,7 @@ impl WalletWindow {
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scrollbar()
                     .p_3()
                     .border_1()
@@ -2348,6 +2352,7 @@ impl WalletWindow {
         div()
             .absolute()
             .inset_0()
+            .min_h_0()
             .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
             .rounded_lg()
@@ -2362,6 +2367,7 @@ impl WalletWindow {
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scrollbar()
                     .p_3()
                     .border_1()
@@ -2372,11 +2378,14 @@ impl WalletWindow {
                 div()
                     .font_family("monospace")
                     .text_sm()
+                    .flex_shrink_0()
                     .child(format!("Document digest: {}", review.digest)),
             )
             .child(
                 div()
                     .flex()
+                    .flex_shrink_0()
+                    .flex_wrap()
                     .justify_between()
                     .child(
                         Button::new("close-legal-review")

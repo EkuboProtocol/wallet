@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempfile::NamedTempFile;
-use toml_edit::{DocumentMut, InlineTable, Item, Value as TomlValue, value};
+use toml_edit::{DocumentMut, InlineTable, Item, Table, Value as TomlValue, value};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const LOCAL_SERVER_NAME: &str = "ekubo-wallet";
@@ -31,6 +31,14 @@ pub struct ConfigPreview {
     before: String,
     after: String,
     diff: String,
+    #[zeroize(skip)]
+    validation: ConfigValidation,
+}
+
+#[derive(Clone, Copy)]
+enum ConfigValidation {
+    Installed { kind: AgentKind, companion: bool },
+    Removed { kind: AgentKind, companion: bool },
 }
 
 impl ConfigPreview {
@@ -42,6 +50,19 @@ impl ConfigPreview {
     #[must_use]
     pub fn has_changes(&self) -> bool {
         self.before != self.after
+    }
+
+    /// Verify that an unchanged file still contains the complete authenticated
+    /// Streamable HTTP server shape.
+    pub fn validate_current(&self) -> Result<()> {
+        let installed = fs::read_to_string(&self.path)
+            .context("failed to read installed agent configuration")?;
+        ensure!(
+            installed == self.after,
+            "installed agent configuration changed before validation"
+        );
+        validate_document(&self.path, &installed)?;
+        validate_server_shape(&installed, self.validation)
     }
 
     /// Conceal a bearer token in the human-facing diff while retaining it in
@@ -77,7 +98,8 @@ impl ConfigPreview {
                     installed == self.after,
                     "installed agent configuration changed during validation"
                 );
-                validate_document(&self.path, &installed)
+                validate_document(&self.path, &installed)?;
+                validate_server_shape(&installed, self.validation)
             });
         if let Err(error) = validation {
             if let Some(backup) = &backup {
@@ -194,6 +216,10 @@ impl AgentAdapter {
             before,
             after,
             diff,
+            validation: ConfigValidation::Installed {
+                kind: self.kind,
+                companion: install_companion,
+            },
         })
     }
 
@@ -213,6 +239,10 @@ impl AgentAdapter {
             before,
             after,
             diff,
+            validation: ConfigValidation::Removed {
+                kind: self.kind,
+                companion: remove_companion,
+            },
         })
     }
 }
@@ -235,13 +265,40 @@ fn merge_codex(before: &str, url: &str, token: &str, companion: bool) -> Result<
             .parse::<DocumentMut>()
             .context("Codex config is not valid TOML")?
     };
-    document["mcp_servers"][LOCAL_SERVER_NAME]["url"] = value(url);
+    let servers = document
+        .as_table_mut()
+        .entry("mcp_servers")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .context("Codex mcp_servers configuration must be a table")?;
+    let local = servers
+        .entry(LOCAL_SERVER_NAME)
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_mut()
+        .context("Codex MCP server configuration must be a table")?;
+    for legacy_key in [
+        "command",
+        "args",
+        "env",
+        "env_vars",
+        "cwd",
+        "experimental_environment",
+        "bearer_token_env_var",
+        "env_http_headers",
+    ] {
+        local.remove(legacy_key);
+    }
+    local["url"] = value(url);
     let mut headers = InlineTable::new();
     headers.insert("Authorization", TomlValue::from(format!("Bearer {token}")));
-    document["mcp_servers"][LOCAL_SERVER_NAME]["http_headers"] =
-        Item::Value(TomlValue::InlineTable(headers));
+    local["http_headers"] = Item::Value(TomlValue::InlineTable(headers));
     if companion {
-        document["mcp_servers"][COMPANION_SERVER_NAME]["url"] = value(COMPANION_SERVER_URL);
+        let remote = servers
+            .entry(COMPANION_SERVER_NAME)
+            .or_insert_with(|| Item::Table(Table::new()))
+            .as_table_mut()
+            .context("Codex companion MCP configuration must be a table")?;
+        remote["url"] = value(COMPANION_SERVER_URL);
     }
     Ok(document.to_string())
 }
@@ -344,6 +401,150 @@ fn validate_document(path: &Path, contents: &str) -> Result<()> {
     } else {
         serde_json::from_str::<Value>(contents)?;
     }
+    Ok(())
+}
+
+fn validate_server_shape(contents: &str, validation: ConfigValidation) -> Result<()> {
+    let (kind, companion, installed) = match validation {
+        ConfigValidation::Installed { kind, companion } => (kind, companion, true),
+        ConfigValidation::Removed { kind, companion } => (kind, companion, false),
+    };
+    match kind {
+        AgentKind::Codex => validate_codex_shape(contents, installed, companion),
+        AgentKind::ClaudeCode | AgentKind::GeminiCli | AgentKind::Cursor | AgentKind::Opencode => {
+            validate_json_shape(contents, kind, installed, companion)
+        }
+        AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
+    }
+}
+
+fn validate_codex_shape(contents: &str, installed: bool, companion: bool) -> Result<()> {
+    let document = contents
+        .parse::<DocumentMut>()
+        .context("Codex config is not valid TOML")?;
+    let servers = document.get("mcp_servers").and_then(Item::as_table);
+    let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
+    if !installed {
+        ensure!(local.is_none(), "local MCP server was not removed");
+        if companion {
+            ensure!(
+                servers
+                    .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
+                    .is_none(),
+                "companion MCP server was not removed"
+            );
+        }
+        return Ok(());
+    }
+
+    let local = local.context("local MCP server is missing")?;
+    ensure!(
+        local.get("command").is_none(),
+        "local MCP server still uses stdio"
+    );
+    let url = local
+        .get("url")
+        .and_then(Item::as_str)
+        .context("local MCP server has no HTTP URL")?;
+    validate_loopback_url(url)?;
+    let authorization = local
+        .get("http_headers")
+        .and_then(Item::as_inline_table)
+        .and_then(|headers| headers.get("Authorization"))
+        .and_then(TomlValue::as_str)
+        .context("local MCP server has no static Authorization header")?;
+    validate_authorization(authorization)?;
+    if companion {
+        ensure!(
+            document["mcp_servers"][COMPANION_SERVER_NAME]["url"].as_str()
+                == Some(COMPANION_SERVER_URL),
+            "companion MCP server URL is missing"
+        );
+    }
+    Ok(())
+}
+
+fn validate_json_shape(
+    contents: &str,
+    kind: AgentKind,
+    installed: bool,
+    companion: bool,
+) -> Result<()> {
+    let document: Value =
+        serde_json::from_str(contents).context("agent config is not valid JSON")?;
+    let root = if kind == AgentKind::Opencode {
+        "mcp"
+    } else {
+        "mcpServers"
+    };
+    let servers = document.get(root).and_then(Value::as_object);
+    let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
+    if !installed {
+        ensure!(local.is_none(), "local MCP server was not removed");
+        if companion {
+            ensure!(
+                servers
+                    .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
+                    .is_none(),
+                "companion MCP server was not removed"
+            );
+        }
+        return Ok(());
+    }
+
+    let local = local.context("local MCP server is missing")?;
+    ensure!(
+        local.get("command").is_none(),
+        "local MCP server still uses stdio"
+    );
+    let url_key = if kind == AgentKind::GeminiCli {
+        "httpUrl"
+    } else {
+        "url"
+    };
+    let url = local
+        .get(url_key)
+        .and_then(Value::as_str)
+        .context("local MCP server has no HTTP URL")?;
+    validate_loopback_url(url)?;
+    let authorization = local
+        .get("headers")
+        .and_then(Value::as_object)
+        .and_then(|headers| headers.get("Authorization"))
+        .and_then(Value::as_str)
+        .context("local MCP server has no static Authorization header")?;
+    validate_authorization(authorization)?;
+    if companion {
+        ensure!(
+            document[root][COMPANION_SERVER_NAME][url_key].as_str() == Some(COMPANION_SERVER_URL),
+            "companion MCP server URL is missing"
+        );
+    }
+    Ok(())
+}
+
+fn validate_loopback_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url).context("local MCP server URL is invalid")?;
+    ensure!(
+        parsed.scheme() == "http"
+            && parsed.host_str() == Some("127.0.0.1")
+            && parsed.port().is_some()
+            && parsed.path() == "/mcp"
+            && parsed.query().is_none()
+            && parsed.fragment().is_none(),
+        "local MCP server URL is not the expected loopback endpoint"
+    );
+    Ok(())
+}
+
+fn validate_authorization(value: &str) -> Result<()> {
+    let token = value
+        .strip_prefix("Bearer ")
+        .context("local MCP Authorization header is not a bearer token")?;
+    ensure!(
+        token.len() == 43 && token.bytes().all(is_base64url),
+        "local MCP Authorization header does not contain a 256-bit token"
+    );
     Ok(())
 }
 

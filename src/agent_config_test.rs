@@ -25,6 +25,26 @@ fn codex_uses_documented_static_http_headers_and_preserves_unknowns() {
 }
 
 #[test]
+fn codex_upsert_replaces_legacy_stdio_transport() {
+    let output = merge_codex(
+        "[mcp_servers.ekubo-wallet]\ncommand = \"wallet\"\nargs = [\"serve\"]\n\n",
+        "http://127.0.0.1:50000/mcp",
+        TOKEN,
+        false,
+    )
+    .unwrap();
+    let parsed = output.parse::<DocumentMut>().unwrap();
+    let local = &parsed["mcp_servers"][LOCAL_SERVER_NAME];
+    assert!(local.get("command").is_none());
+    assert!(local.get("args").is_none());
+    assert_eq!(local["url"].as_str(), Some("http://127.0.0.1:50000/mcp"));
+    assert_eq!(
+        local["http_headers"]["Authorization"].as_str(),
+        Some("Bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    );
+}
+
+#[test]
 fn every_json_shape_preserves_unrelated_servers() {
     for (root, shape) in [
         ("mcpServers", JsonShape::Url),
@@ -64,6 +84,10 @@ fn a_failed_install_restores_the_timestamped_backup() {
         before: "{\"keep\":true}\n".into(),
         after: "{".into(),
         diff: "redacted test diff".into(),
+        validation: ConfigValidation::Installed {
+            kind: AgentKind::Cursor,
+            companion: false,
+        },
     };
     assert!(preview.install().is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), "{\"keep\":true}\n");
@@ -82,6 +106,10 @@ fn repair_diffs_can_hide_a_token_without_changing_installed_bytes() {
         before: String::new(),
         after: format!("Bearer {TOKEN}"),
         diff: format!("+Bearer {TOKEN}"),
+        validation: ConfigValidation::Installed {
+            kind: AgentKind::Cursor,
+            companion: false,
+        },
     };
     preview.redact_diff_secret(TOKEN);
     assert_eq!(preview.exact_diff(), "+Bearer <redacted-token>");
@@ -95,6 +123,33 @@ fn automatic_upserts_skip_files_that_are_already_exact() {
         before: "same".into(),
         after: "same".into(),
         diff: String::new(),
+        validation: ConfigValidation::Installed {
+            kind: AgentKind::Cursor,
+            companion: false,
+        },
     };
     assert!(!preview.has_changes());
+}
+
+#[test]
+fn install_rejects_a_parseable_config_without_authentication_and_rolls_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mcp.json");
+    let before = "{\"keep\":true}\n";
+    fs::write(&path, before).unwrap();
+    let preview = ConfigPreview {
+        path: path.clone(),
+        before: before.into(),
+        after: format!(
+            "{{\"mcpServers\":{{\"{LOCAL_SERVER_NAME}\":{{\"type\":\"http\",\"url\":\"http://127.0.0.1:50000/mcp\"}}}}}}\n"
+        ),
+        diff: "redacted test diff".into(),
+        validation: ConfigValidation::Installed {
+            kind: AgentKind::Cursor,
+            companion: false,
+        },
+    };
+    let error = preview.install().unwrap_err();
+    assert!(error.to_string().contains("validation failed"), "{error:#}");
+    assert_eq!(fs::read_to_string(path).unwrap(), before);
 }
