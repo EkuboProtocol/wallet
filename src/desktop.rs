@@ -439,6 +439,13 @@ pub struct WalletWindow {
     network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
+    policy_chain_input: Option<Entity<InputState>>,
+    policy_chain_label_input: Option<Entity<InputState>>,
+    policy_chain_max_calls_input: Option<Entity<InputState>>,
+    policy_chain_native_values_input: Option<Entity<InputState>>,
+    policy_chain_original_key: Option<String>,
+    policy_chain_native_value_mode: GuidedNativeValueMode,
+    policy_chain_errors: GuidedPolicyChainErrors,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
     token_proposal_busy: bool,
@@ -629,6 +636,38 @@ struct PolicyEditor {
     current_policy: Option<WalletPolicy>,
     proposal: Option<PolicyProposal>,
     validation: Option<std::result::Result<PolicyDraftReview, SharedString>>,
+    mode: PolicyEditorMode,
+    guided_policy: std::result::Result<WalletPolicy, SharedString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyEditorMode {
+    Guided,
+    Advanced,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuidedNativeValueMode {
+    None,
+    Any,
+    Exact,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct GuidedPolicyChainErrors {
+    chain: Option<String>,
+    label: Option<String>,
+    max_calls: Option<String>,
+    native_values: Option<String>,
+    form: Option<String>,
+}
+
+struct GuidedPolicyChainDraft {
+    chain: String,
+    label: String,
+    max_calls: String,
+    native_value_mode: GuidedNativeValueMode,
+    native_values: String,
 }
 
 struct PendingAgentInstall {
@@ -1462,6 +1501,163 @@ fn review_policy_draft(
     })
 }
 
+fn update_guided_policy_chain(
+    document: &str,
+    original_key: Option<&str>,
+    draft: &GuidedPolicyChainDraft,
+) -> std::result::Result<(String, WalletPolicy), GuidedPolicyChainErrors> {
+    let mut errors = GuidedPolicyChainErrors::default();
+    let chain = draft.chain.trim();
+    let canonical_chain = if chain == "*" {
+        Some("*".to_owned())
+    } else {
+        match chain.parse::<u64>() {
+            Ok(value) if value > 0 && value.to_string() == chain => Some(chain.to_owned()),
+            _ => {
+                errors.chain =
+                    Some("Enter * or a positive decimal chain ID with no leading zeroes.".into());
+                None
+            }
+        }
+    };
+    let label = draft.label.trim();
+    if !label.is_empty()
+        && (label.chars().count() > 160
+            || ekubo_wallet_core::sanitize::stripped_capped(label, 160) != label)
+    {
+        errors.label = Some(
+            "Use at most 160 visible characters with no control or bidirectional characters."
+                .into(),
+        );
+    }
+    let max_calls = if let Ok(value @ 1..=4096) = draft.max_calls.trim().parse::<u32>() {
+        Some(value)
+    } else {
+        errors.max_calls = Some("Enter a whole number from 1 through 4096.".into());
+        None
+    };
+    let native_value = match draft.native_value_mode {
+        GuidedNativeValueMode::None => Some(serde_json::json!({ "eq": "0" })),
+        GuidedNativeValueMode::Any => Some(serde_json::Value::String("any_value".into())),
+        GuidedNativeValueMode::Exact => {
+            let values = draft
+                .native_values
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<BTreeSet<_>>();
+            if values.is_empty()
+                || values
+                    .iter()
+                    .any(|value| !value.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                errors.native_values = Some(
+                    "Enter one or more non-negative decimal wei values, separated by commas."
+                        .into(),
+                );
+                None
+            } else {
+                let values = values.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                Some(if values.len() == 1 {
+                    serde_json::json!({ "eq": values[0] })
+                } else {
+                    serde_json::json!({ "in": values })
+                })
+            }
+        }
+    };
+    if errors != GuidedPolicyChainErrors::default() {
+        return Err(errors);
+    }
+
+    let mut value: serde_json::Value = match serde_json::from_str(document) {
+        Ok(value) => value,
+        Err(error) => {
+            errors.form = Some(format!(
+                "The advanced document is not valid JSON. Fix it before using the guided editor: {error}"
+            ));
+            return Err(errors);
+        }
+    };
+    let Some(chains) = value
+        .as_object_mut()
+        .and_then(|root| root.get_mut("chains"))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        errors.form = Some("The policy document has no `chains` object.".into());
+        return Err(errors);
+    };
+    let chain_key = canonical_chain.expect("validated above");
+    if original_key != Some(chain_key.as_str()) && chains.contains_key(&chain_key) {
+        errors.chain =
+            Some("That chain already has a policy entry. Edit the existing entry.".into());
+        return Err(errors);
+    }
+    let mut chain_value = match original_key {
+        Some(key) => {
+            if let Some(value) = chains.remove(key) {
+                value
+            } else {
+                errors.form = Some("The chain entry changed while it was being edited.".into());
+                return Err(errors);
+            }
+        }
+        None => serde_json::json!({ "rules": [] }),
+    };
+    let Some(chain_object) = chain_value.as_object_mut() else {
+        errors.form = Some("The selected chain entry is not an object.".into());
+        return Err(errors);
+    };
+    if label.is_empty() {
+        chain_object.remove("label");
+    } else {
+        chain_object.insert("label".into(), serde_json::Value::String(label.to_owned()));
+    }
+    chain_object.insert(
+        "max_calls_per_batch".into(),
+        serde_json::Value::Number(max_calls.expect("validated above").into()),
+    );
+    chain_object.insert(
+        "native_value".into(),
+        native_value.expect("validated above"),
+    );
+    chain_object
+        .entry("rules")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    chains.insert(chain_key, chain_value);
+
+    match WalletPolicy::parse(value) {
+        Ok(policy) => match serde_json::to_string_pretty(&policy) {
+            Ok(document) => Ok((document, policy)),
+            Err(error) => {
+                errors.form = Some(format!("Could not serialize the policy: {error:#}"));
+                Err(errors)
+            }
+        },
+        Err(error) => {
+            errors.form = Some(format!("The resulting policy is invalid: {error:#}"));
+            Err(errors)
+        }
+    }
+}
+
+fn remove_guided_policy_chain(document: &str, chain: &str) -> Result<(String, WalletPolicy)> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(document).context("policy document is not valid JSON")?;
+    let chains = value
+        .as_object_mut()
+        .and_then(|root| root.get_mut("chains"))
+        .and_then(serde_json::Value::as_object_mut)
+        .context("policy document has no `chains` object")?;
+    ensure!(
+        chains.remove(chain).is_some(),
+        "the selected chain entry no longer exists"
+    );
+    let policy = WalletPolicy::parse(value)?;
+    let document = serde_json::to_string_pretty(&policy)?;
+    Ok((document, policy))
+}
+
 impl WalletWindow {
     fn new(
         owner: OwnerApi,
@@ -1553,6 +1749,13 @@ impl WalletWindow {
             network_proposal_error: None,
             policy_json_input: None,
             policy_editor: None,
+            policy_chain_input: None,
+            policy_chain_label_input: None,
+            policy_chain_max_calls_input: None,
+            policy_chain_native_values_input: None,
+            policy_chain_original_key: None,
+            policy_chain_native_value_mode: GuidedNativeValueMode::None,
+            policy_chain_errors: GuidedPolicyChainErrors::default(),
             policy_installing: false,
             policy_action_error: None,
             token_proposal_busy: false,
@@ -1676,6 +1879,30 @@ impl WalletWindow {
                     .code_editor("json")
                     .rows(20)
                     .placeholder("Select an account to inspect and edit its policy")
+            }));
+        }
+        if self.policy_chain_input.is_none() {
+            self.policy_chain_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Chain ID, or * for every chain")
+            }));
+        }
+        if self.policy_chain_label_input.is_none() {
+            self.policy_chain_label_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("What this chain policy is for")
+            }));
+        }
+        if self.policy_chain_max_calls_input.is_none() {
+            self.policy_chain_max_calls_input = Some(cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Maximum calls per batch")
+                    .default_value("1")
+            }));
+        }
+        if self.policy_chain_native_values_input.is_none() {
+            self.policy_chain_native_values_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder(
+                    "Comma-separated exact wei values, for example 0, 1000000000000000000",
+                )
             }));
         }
     }
@@ -2540,10 +2767,15 @@ impl WalletWindow {
                         self.policy_editor = Some(PolicyEditor {
                             wallet_id: wallet_id.to_owned(),
                             source_revision,
+                            guided_policy: Ok(current_policy
+                                .clone()
+                                .unwrap_or_else(WalletPolicy::require_approval_for_everything)),
                             current_policy,
                             proposal: None,
                             validation: None,
+                            mode: PolicyEditorMode::Guided,
                         });
+                        self.reset_guided_policy_chain_form(window, cx);
                         self.policy_action_error = None;
                         self.policy_editor_anchor.scroll_to(window, cx);
                     }
@@ -2592,8 +2824,11 @@ impl WalletWindow {
                             source_revision: Some(proposal.source_revision),
                             current_policy,
                             proposal: Some(proposal),
+                            guided_policy: Ok(review.policy.clone()),
                             validation: Some(Ok(review)),
+                            mode: PolicyEditorMode::Advanced,
                         });
+                        self.reset_guided_policy_chain_form(window, cx);
                         self.policy_action_error = None;
                     }
                     Err(error) => {
@@ -2631,6 +2866,202 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn set_policy_editor_mode(&mut self, mode: PolicyEditorMode, cx: &mut Context<Self>) {
+        let Some(editor) = self.policy_editor.as_mut() else {
+            return;
+        };
+        if mode == PolicyEditorMode::Guided
+            && let Some(input) = self.policy_json_input.as_ref()
+        {
+            editor.guided_policy = serde_json::from_str(input.read(cx).value().as_ref())
+                .context("policy document is not valid JSON")
+                .and_then(WalletPolicy::parse)
+                .map_err(|error| format!("Guided editor unavailable: {error:#}").into());
+        }
+        editor.mode = mode;
+        cx.notify();
+    }
+
+    fn reset_guided_policy_chain_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for input in [
+            self.policy_chain_input.as_ref(),
+            self.policy_chain_label_input.as_ref(),
+            self.policy_chain_native_values_input.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        if let Some(input) = self.policy_chain_max_calls_input.as_ref() {
+            input.update(cx, |input, cx| input.set_value("1", window, cx));
+        }
+        self.policy_chain_original_key = None;
+        self.policy_chain_native_value_mode = GuidedNativeValueMode::None;
+        self.policy_chain_errors = GuidedPolicyChainErrors::default();
+        cx.notify();
+    }
+
+    fn edit_guided_policy_chain(
+        &mut self,
+        chain_key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Ok(policy)) = self
+            .policy_editor
+            .as_ref()
+            .map(|editor| &editor.guided_policy)
+        else {
+            return;
+        };
+        let Some(chain) = policy.chains.get(chain_key) else {
+            self.policy_chain_errors.form =
+                Some("The selected chain entry no longer exists.".into());
+            cx.notify();
+            return;
+        };
+        let native = serde_json::to_value(&chain.native_value);
+        let (native_mode, native_values) = match native {
+            Ok(serde_json::Value::String(value)) if value == "any_value" => {
+                (GuidedNativeValueMode::Any, String::new())
+            }
+            Ok(serde_json::Value::Object(object)) if object.len() == 1 => {
+                if let Some(serde_json::Value::String(value)) = object.get("eq")
+                    && value == "0"
+                {
+                    (GuidedNativeValueMode::None, String::new())
+                } else if let Some(serde_json::Value::String(value)) = object.get("eq") {
+                    (GuidedNativeValueMode::Exact, value.clone())
+                } else if let Some(serde_json::Value::Array(values)) = object.get("in") {
+                    let values = values
+                        .iter()
+                        .map(|value| value.as_str())
+                        .collect::<Option<Vec<_>>>();
+                    let Some(values) = values else {
+                        self.policy_chain_errors.form = Some(
+                            "This native-value predicate needs the Advanced JSON editor.".into(),
+                        );
+                        cx.notify();
+                        return;
+                    };
+                    (GuidedNativeValueMode::Exact, values.join(", "))
+                } else {
+                    self.policy_chain_errors.form =
+                        Some("This native-value predicate needs the Advanced JSON editor.".into());
+                    cx.notify();
+                    return;
+                }
+            }
+            Ok(_) | Err(_) => {
+                self.policy_chain_errors.form =
+                    Some("This native-value predicate needs the Advanced JSON editor.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let values = [
+            (self.policy_chain_input.as_ref(), chain_key.to_owned()),
+            (
+                self.policy_chain_label_input.as_ref(),
+                chain.label.clone().unwrap_or_default(),
+            ),
+            (
+                self.policy_chain_max_calls_input.as_ref(),
+                chain.max_calls_per_batch.to_string(),
+            ),
+            (
+                self.policy_chain_native_values_input.as_ref(),
+                native_values,
+            ),
+        ];
+        for (input, value) in values {
+            if let Some(input) = input {
+                input.update(cx, |input, cx| input.set_value(value, window, cx));
+            }
+        }
+        self.policy_chain_original_key = Some(chain_key.to_owned());
+        self.policy_chain_native_value_mode = native_mode;
+        self.policy_chain_errors = GuidedPolicyChainErrors::default();
+        if let Some(input) = self.policy_chain_input.as_ref() {
+            input.update(cx, |input, cx| {
+                input.set_selected_range(0..input.value().len(), cx);
+                input.focus(window, cx);
+            });
+        }
+        self.policy_editor_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    fn save_guided_policy_chain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let inputs = (
+            self.policy_chain_input.as_ref(),
+            self.policy_chain_label_input.as_ref(),
+            self.policy_chain_max_calls_input.as_ref(),
+            self.policy_chain_native_values_input.as_ref(),
+            self.policy_json_input.as_ref(),
+        );
+        let (Some(chain), Some(label), Some(max_calls), Some(native_values), Some(document_input)) =
+            inputs
+        else {
+            return;
+        };
+        let draft = GuidedPolicyChainDraft {
+            chain: chain.read(cx).value().to_string(),
+            label: label.read(cx).value().to_string(),
+            max_calls: max_calls.read(cx).value().to_string(),
+            native_value_mode: self.policy_chain_native_value_mode,
+            native_values: native_values.read(cx).value().to_string(),
+        };
+        let result = update_guided_policy_chain(
+            document_input.read(cx).value().as_ref(),
+            self.policy_chain_original_key.as_deref(),
+            &draft,
+        );
+        match result {
+            Ok((document, policy)) => {
+                document_input.update(cx, |input, cx| input.set_value(document, window, cx));
+                if let Some(editor) = self.policy_editor.as_mut() {
+                    editor.guided_policy = Ok(policy);
+                    editor.validation = None;
+                }
+                self.policy_action_error = None;
+                self.reset_guided_policy_chain_form(window, cx);
+            }
+            Err(errors) => self.policy_chain_errors = errors,
+        }
+        cx.notify();
+    }
+
+    fn remove_guided_policy_chain(
+        &mut self,
+        chain_key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.policy_json_input.as_ref() else {
+            return;
+        };
+        match remove_guided_policy_chain(input.read(cx).value().as_ref(), chain_key) {
+            Ok((document, policy)) => {
+                input.update(cx, |input, cx| input.set_value(document, window, cx));
+                if let Some(editor) = self.policy_editor.as_mut() {
+                    editor.guided_policy = Ok(policy);
+                    editor.validation = None;
+                }
+                self.policy_action_error = None;
+                if self.policy_chain_original_key.as_deref() == Some(chain_key) {
+                    self.reset_guided_policy_chain_form(window, cx);
+                }
+            }
+            Err(error) => {
+                self.policy_action_error =
+                    Some(format!("Could not remove chain from draft: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
     fn reset_policy_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(editor), Some(input)) =
             (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
@@ -2641,7 +3072,9 @@ impl WalletWindow {
             Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
+                editor.guided_policy = Ok(WalletPolicy::require_approval_for_everything());
                 self.policy_action_error = None;
+                self.reset_guided_policy_chain_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
@@ -2669,6 +3102,7 @@ impl WalletWindow {
                 input.update(cx, |input, cx| {
                     input.set_value(review.document.clone(), window, cx);
                 });
+                editor.guided_policy = Ok(review.policy.clone());
                 self.policy_action_error = None;
                 Ok(review)
             }
@@ -5670,6 +6104,174 @@ impl WalletWindow {
         }
     }
 
+    fn render_guided_policy_chain_form(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut form = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .font_semibold()
+                    .child(if self.policy_chain_original_key.is_some() {
+                        "Edit chain policy"
+                    } else {
+                        "Add chain policy"
+                    }),
+            );
+        if let Some(input) = self.policy_chain_input.as_ref() {
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child("Chain")
+                    .child(Input::new(input))
+                    .when_some(self.policy_chain_errors.chain.clone(), |field, error| {
+                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    }),
+            );
+        }
+        if let Some(input) = self.policy_chain_label_input.as_ref() {
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child("Description (optional)")
+                    .child(Input::new(input))
+                    .when_some(self.policy_chain_errors.label.clone(), |field, error| {
+                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    }),
+            );
+        }
+        if let Some(input) = self.policy_chain_max_calls_input.as_ref() {
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child("Maximum calls in one atomic batch")
+                    .child(Input::new(input))
+                    .when_some(
+                        self.policy_chain_errors.max_calls.clone(),
+                        |field, error| {
+                            field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        },
+                    ),
+            );
+        }
+        form = form
+            .child("Native value guard")
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("policy-native-none")
+                            .label("No native value")
+                            .when(
+                                self.policy_chain_native_value_mode
+                                    == GuidedNativeValueMode::None,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_chain_native_value_mode =
+                                    GuidedNativeValueMode::None;
+                                view.policy_chain_errors.native_values = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("policy-native-any")
+                            .label("Any native value")
+                            .when(
+                                self.policy_chain_native_value_mode
+                                    == GuidedNativeValueMode::Any,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_chain_native_value_mode = GuidedNativeValueMode::Any;
+                                view.policy_chain_errors.native_values = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("policy-native-exact")
+                            .label("Exact wei values")
+                            .when(
+                                self.policy_chain_native_value_mode
+                                    == GuidedNativeValueMode::Exact,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_chain_native_value_mode =
+                                    GuidedNativeValueMode::Exact;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("This is a guard, not a grant: a rule must still allow the call before it can sign automatically."),
+            );
+        if self.policy_chain_native_value_mode == GuidedNativeValueMode::Exact
+            && let Some(input) = self.policy_chain_native_values_input.as_ref()
+        {
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child("Allowed values in wei")
+                    .child(Input::new(input))
+                    .when_some(
+                        self.policy_chain_errors.native_values.clone(),
+                        |field, error| {
+                            field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        },
+                    ),
+            );
+        }
+        form = form
+            .when_some(self.policy_chain_errors.form.clone(), |form, error| {
+                form.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            })
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("save-guided-policy-chain")
+                            .label(if self.policy_chain_original_key.is_some() {
+                                "Save chain draft"
+                            } else {
+                                "Add chain draft"
+                            })
+                            .primary()
+                            .disabled(self.policy_installing)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.save_guided_policy_chain(window, cx);
+                            })),
+                    )
+                    .when(self.policy_chain_original_key.is_some(), |actions| {
+                        actions.child(
+                            Button::new("cancel-guided-policy-chain")
+                                .label("Cancel edit")
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.reset_guided_policy_chain_form(window, cx);
+                                })),
+                        )
+                    }),
+            );
+        form
+    }
+
     fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div()
             .h_full()
@@ -5883,7 +6485,7 @@ impl WalletWindow {
             || "No installed policy · signing disabled".to_owned(),
             |revision| format!("Installed revision {revision}"),
         );
-        let editor_panel = div()
+        let mut editor_panel = div()
             .id("policy-json-editor")
             .anchor_scroll(Some(self.policy_editor_anchor.clone()))
             .flex_1()
@@ -5907,11 +6509,30 @@ impl WalletWindow {
                     .child(revision),
             )
             .child(
-                div()
-                    .id("policy-json-editor-input")
-                    .flex_1()
-                    .min_h(px(320.0))
-                    .child(Input::new(input).w_full().h_full()),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("policy-guided-mode")
+                            .label("Guided")
+                            .when(
+                                editor.mode == PolicyEditorMode::Guided,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.set_policy_editor_mode(PolicyEditorMode::Guided, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("policy-advanced-mode")
+                            .label("Advanced JSON")
+                            .when(
+                                editor.mode == PolicyEditorMode::Advanced,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.set_policy_editor_mode(PolicyEditorMode::Advanced, cx);
+                            })),
+                    ),
             )
             .when_some(
                 editor
@@ -5921,42 +6542,180 @@ impl WalletWindow {
                 |panel, error| {
                     panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
                 },
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        Button::new("reset-policy-draft")
-                            .label("Reset to review everything")
-                            .disabled(self.policy_installing)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.reset_policy_editor(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("validate-policy-draft")
-                            .label("Validate and preview diff")
-                            .disabled(self.policy_installing)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.validate_policy_editor(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("install-policy-draft")
-                            .label(if self.policy_installing {
-                                "Authenticating…"
-                            } else {
-                                "Install policy"
-                            })
-                            .primary()
-                            .disabled(self.policy_installing || !reviewed_exact_document)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.install_policy_editor(cx);
-                            })),
-                    ),
             );
+        match editor.mode {
+            PolicyEditorMode::Advanced => {
+                editor_panel = editor_panel.child(
+                    div()
+                        .id("policy-json-editor-input")
+                        .flex_1()
+                        .min_h(px(320.0))
+                        .child(Input::new(input).w_full().h_full()),
+                );
+            }
+            PolicyEditorMode::Guided => match &editor.guided_policy {
+                Err(error) => {
+                    editor_panel = editor_panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(error.clone()),
+                    );
+                }
+                Ok(policy) => {
+                    let mut chain_cards = div().flex().flex_col().gap_3();
+                    for (chain_key, chain) in &policy.chains {
+                        let edit_key = chain_key.clone();
+                        let remove_key = chain_key.clone();
+                        let mut rules = div().flex().flex_col().gap_1();
+                        if chain.rules.is_empty() {
+                            rules = rules.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("No automatic allow or hard-deny rules; calls queue for review."),
+                            );
+                        } else {
+                            for rule in &chain.rules {
+                                rules = rules.child(
+                                    div()
+                                        .font_family("monospace")
+                                        .text_sm()
+                                        .child(rule.describe()),
+                                );
+                            }
+                        }
+                        chain_cards = chain_cards.child(
+                            div()
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(div().font_semibold().child(
+                                                    if chain_key == "*" {
+                                                        "Every otherwise-unconfigured chain"
+                                                            .to_owned()
+                                                    } else {
+                                                        format!("Chain {chain_key}")
+                                                    },
+                                                ))
+                                                .when_some(chain.label.clone(), |column, label| {
+                                                    column.child(
+                                                        div()
+                                                            .text_sm()
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(label),
+                                                    )
+                                                }),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "edit-policy-chain-{chain_key}"
+                                                    )))
+                                                    .label("Edit")
+                                                    .on_click(cx.listener(
+                                                        move |view, _, window, cx| {
+                                                            view.edit_guided_policy_chain(
+                                                                &edit_key, window, cx,
+                                                            );
+                                                        },
+                                                    )),
+                                                )
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "remove-policy-chain-{chain_key}"
+                                                    )))
+                                                    .label("Remove")
+                                                    .danger()
+                                                    .on_click(cx.listener(
+                                                        move |view, _, window, cx| {
+                                                            view.remove_guided_policy_chain(
+                                                                &remove_key,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                                ),
+                                        ),
+                                )
+                                .child(format!(
+                                    "Maximum {} call(s) per batch · native value {}",
+                                    chain.max_calls_per_batch,
+                                    chain.native_value.describe()
+                                ))
+                                .child(rules),
+                        );
+                    }
+                    if policy.chains.is_empty() {
+                        chain_cards = chain_cards.child(
+                            div()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No chains are configured; every request requires review."),
+                        );
+                    }
+                    editor_panel = editor_panel
+                        .child(self.render_guided_policy_chain_form(cx))
+                        .child(
+                            GroupBox::new()
+                                .id("guided-policy-chains")
+                                .outline()
+                                .title("Chain policies")
+                                .child(chain_cards),
+                        );
+                }
+            },
+        }
+        editor_panel = editor_panel.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    Button::new("reset-policy-draft")
+                        .label("Reset to review everything")
+                        .disabled(self.policy_installing)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.reset_policy_editor(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("validate-policy-draft")
+                        .label("Validate and preview diff")
+                        .disabled(self.policy_installing)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.validate_policy_editor(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("install-policy-draft")
+                        .label(if self.policy_installing {
+                            "Authenticating…"
+                        } else {
+                            "Install policy"
+                        })
+                        .primary()
+                        .disabled(self.policy_installing || !reviewed_exact_document)
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.install_policy_editor(cx);
+                        })),
+                ),
+        );
         content = content.child(editor_panel);
 
         match editor.validation.as_ref() {

@@ -45,6 +45,93 @@ fn portfolio_amounts_preserve_every_significant_digit() {
     );
 }
 
+fn guided_chain_draft(
+    chain: &str,
+    native_value_mode: GuidedNativeValueMode,
+    native_values: &str,
+) -> GuidedPolicyChainDraft {
+    GuidedPolicyChainDraft {
+        chain: chain.into(),
+        label: "Owner-managed chain permissions".into(),
+        max_calls: "4".into(),
+        native_value_mode,
+        native_values: native_values.into(),
+    }
+}
+
+#[test]
+fn guided_policy_chain_crud_preserves_rules_and_canonicalizes_the_document() {
+    let document = r#"{
+        "version": 1,
+        "chains": {
+            "1": {
+                "label": "Old label",
+                "max_calls_per_batch": 2,
+                "native_value": { "eq": "0" },
+                "rules": [{
+                    "effect": "deny",
+                    "label": "Never call this address",
+                    "to": { "eq": "0x1111111111111111111111111111111111111111" }
+                }]
+            }
+        }
+    }"#;
+    let draft = guided_chain_draft(
+        "8453",
+        GuidedNativeValueMode::Exact,
+        "1000000000000000000, 0, 0",
+    );
+    let (document, policy) = update_guided_policy_chain(document, Some("1"), &draft).unwrap();
+
+    assert!(!policy.chains.contains_key("1"));
+    let chain = policy.chains.get("8453").unwrap();
+    assert_eq!(chain.max_calls_per_batch, 4);
+    assert_eq!(chain.rules.len(), 1);
+    assert_eq!(
+        chain.rules[0].label.as_deref(),
+        Some("Never call this address")
+    );
+    assert!(document.contains("1000000000000000000"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&document).unwrap()["version"],
+        1
+    );
+
+    let (document, policy) = remove_guided_policy_chain(&document, "8453").unwrap();
+    assert!(policy.chains.is_empty());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&document).unwrap()["chains"],
+        serde_json::json!({})
+    );
+}
+
+#[test]
+fn guided_policy_chain_errors_are_attached_to_the_failing_fields() {
+    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
+    let mut draft = guided_chain_draft("01", GuidedNativeValueMode::Exact, "one ether");
+    draft.max_calls = "5000".into();
+    draft.label = "\u{202e}misleading".into();
+
+    let errors = update_guided_policy_chain(&document, None, &draft).unwrap_err();
+    assert!(errors.chain.is_some());
+    assert!(errors.label.is_some());
+    assert!(errors.max_calls.is_some());
+    assert!(errors.native_values.is_some());
+    assert!(errors.form.is_none());
+}
+
+#[test]
+fn guided_policy_chain_add_refuses_to_overwrite_an_existing_chain() {
+    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
+    let draft = guided_chain_draft("*", GuidedNativeValueMode::None, "");
+
+    let errors = update_guided_policy_chain(&document, None, &draft).unwrap_err();
+    assert_eq!(
+        errors.chain.as_deref(),
+        Some("That chain already has a policy entry. Edit the existing entry.")
+    );
+}
+
 #[test]
 fn tray_artwork_tracks_both_system_appearance_families() {
     assert!(!dark_appearance(WindowAppearance::Light));
