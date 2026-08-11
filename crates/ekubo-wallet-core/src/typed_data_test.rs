@@ -196,6 +196,77 @@ fn lifecycle_persists_exact_payload_and_signature() {
 }
 
 #[test]
+fn recent_activity_lists_every_status_with_limits_and_wallet_filters() {
+    let (_directory, mut store) = store();
+    let mut first_payload = permit_payload();
+    first_payload["message"]["nonce"] = json!("1");
+    let mut second_payload = permit_payload();
+    second_payload["message"]["nonce"] = json!("2");
+    let mut third_payload = permit_payload();
+    third_payload["message"]["nonce"] = json!("3");
+    let mut other_payload = permit_payload();
+    other_payload["message"]["nonce"] = json!("4");
+    let (_, chain_id, first_digest) = parse_typed_data(&first_payload).unwrap();
+    let (_, _, second_digest) = parse_typed_data(&second_payload).unwrap();
+    let (_, _, third_digest) = parse_typed_data(&third_payload).unwrap();
+    let (_, _, other_digest) = parse_typed_data(&other_payload).unwrap();
+    let signed = store
+        .create("primary", chain_id, &first_payload, first_digest, None)
+        .unwrap();
+    let rejected = store
+        .create("primary", chain_id, &second_payload, second_digest, None)
+        .unwrap();
+    let awaiting = store
+        .create("primary", chain_id, &third_payload, third_digest, None)
+        .unwrap();
+    let other = store
+        .create("secondary", chain_id, &other_payload, other_digest, None)
+        .unwrap();
+
+    store
+        .store_signature(
+            signed.request_id,
+            "primary",
+            first_digest,
+            &format!("0x{}", "11".repeat(65)),
+        )
+        .unwrap();
+    store.reject(rejected.request_id).unwrap();
+    for (request_id, created_at) in [
+        (signed.request_id, 1_000_i64),
+        (rejected.request_id, 2_000),
+        (awaiting.request_id, 3_000),
+        (other.request_id, 4_000),
+    ] {
+        store
+            .database
+            .connection
+            .execute(
+                "UPDATE pending_typed_data SET created_at = ?2 WHERE request_id = ?1",
+                params![request_id, created_at],
+            )
+            .unwrap();
+    }
+
+    let primary = store.list(Some("primary"), 3).unwrap();
+    assert_eq!(
+        primary
+            .iter()
+            .map(|request| (request.request_id, request.status))
+            .collect::<Vec<_>>(),
+        vec![
+            (awaiting.request_id, TypedDataStatus::AwaitingApproval),
+            (rejected.request_id, TypedDataStatus::Rejected),
+            (signed.request_id, TypedDataStatus::Signed),
+        ]
+    );
+    assert_eq!(store.list(None, 1).unwrap()[0].request_id, other.request_id);
+    assert!(store.list(Some("not a wallet id"), 10).is_err());
+    assert!(store.list(None, 0).is_err());
+    assert!(store.list(None, 1_001).is_err());
+}
+
+#[test]
 fn recognizes_erc2612_permits_only_for_the_signing_wallet() {
     let payload = permit_payload();
     let (typed, _, _) = parse_typed_data(&payload).unwrap();

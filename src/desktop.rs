@@ -2,8 +2,8 @@ use crate::{
     BUILD_VERSION,
     agent_config::{AgentAdapter, ConfigPreview},
     authority::{
-        ApplicationAuthority, ExportLease, OwnerApi, OwnerPortfolioSnapshot, OwnerReviewQueues,
-        PRIVATE_KEY_REVEAL_DURATION,
+        ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioSnapshot,
+        OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
     },
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     http_server::{MCP_REQUEST_LIMIT_BYTES, McpHttpServer},
@@ -26,9 +26,11 @@ use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::AgentKind;
 use ekubo_wallet_core::human_presence::OwnerAuthorization;
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
+use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::pending::PendingStatus;
 use ekubo_wallet_core::policy_store::PolicyProposal;
 use ekubo_wallet_core::token_store::{StoredToken, TokenProposal};
+use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, QuitMode, Render,
     ScrollHandle, SharedString, Subscription, Task, Window, WindowAppearance, WindowBounds,
@@ -3576,6 +3578,238 @@ impl WalletWindow {
         content
     }
 
+    fn render_activity_detail(
+        &self,
+        record: &OwnerActivityRecord,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let request_id = record.request_id();
+        let header = |title: &'static str, status: String| {
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_4()
+                .child(
+                    div()
+                        .font_semibold()
+                        .child(format!("{title} · {status} · {request_id}")),
+                )
+                .child(
+                    Button::new(SharedString::from(format!(
+                        "close-activity-detail-{request_id}"
+                    )))
+                    .label("Close")
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.selected_record = None;
+                        cx.notify();
+                    })),
+                )
+        };
+        match record {
+            OwnerActivityRecord::Transaction(item) => {
+                let exact_plan = serde_json::to_string_pretty(&item.execution_plan)
+                    .unwrap_or_else(|_| "Exact execution plan could not be rendered.".into());
+                let mut detail = GroupBox::new()
+                    .id(SharedString::from(format!("activity-detail-{request_id}")))
+                    .outline()
+                    .title("Transaction details")
+                    .child(header("Transaction", format!("{:?}", item.status)))
+                    .child(format!("Account: {}", item.wallet_id))
+                    .child(format!(
+                        "Network: {} · chain {}",
+                        item.network_name, item.chain_id
+                    ))
+                    .child(format!(
+                        "Created: {} · updated: {}",
+                        item.created_at, item.updated_at
+                    ))
+                    .child(format!("Policy revision: {}", item.policy_revision))
+                    .child(
+                        div()
+                            .child("Plan digest")
+                            .child(div().font_family("monospace").child(item.digest.clone())),
+                    );
+                if let Some(source) = item.plan_source.as_ref() {
+                    detail = detail.child(format!("Plan source: {source}"));
+                }
+                if let Some(review_digest) = item.review_digest.as_ref() {
+                    detail = detail.child(
+                        div()
+                            .child("Review digest")
+                            .child(div().font_family("monospace").child(review_digest.clone())),
+                    );
+                }
+                for (label, value) in [
+                    ("Signed hash", item.signed_transaction_hash.as_ref()),
+                    ("Broadcast hash", item.broadcast_transaction_hash.as_ref()),
+                    ("Block", item.block_number.as_ref()),
+                ] {
+                    if let Some(value) = value {
+                        detail = detail.child(
+                            div()
+                                .child(label)
+                                .child(div().font_family("monospace").child(value.clone())),
+                        );
+                    }
+                }
+                if let Some(fee) = item.mined_fee.as_ref() {
+                    detail = detail.child(format!(
+                        "Mined fee: {} wei · {} gas at {} wei/gas",
+                        fee.transaction_fee_wei, fee.gas_used, fee.effective_gas_price
+                    ));
+                }
+                if !item.cancel_transaction_hashes.is_empty() {
+                    detail = detail
+                        .child(div().font_semibold().child("Cancellation attempts"))
+                        .children(
+                            item.cancel_transaction_hashes
+                                .iter()
+                                .cloned()
+                                .map(|hash| div().font_family("monospace").text_sm().child(hash)),
+                        );
+                }
+                detail
+                    .child(
+                        div().child("Exact execution plan").child(
+                            div()
+                                .max_h(px(360.0))
+                                .overflow_y_scrollbar()
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .font_family("monospace")
+                                .text_sm()
+                                .whitespace_normal()
+                                .child(exact_plan),
+                        ),
+                    )
+                    .into_any_element()
+            }
+            OwnerActivityRecord::Message(item) => {
+                let document = self.owner.message_review_document(request_id);
+                let mut detail = GroupBox::new()
+                    .id(SharedString::from(format!("activity-detail-{request_id}")))
+                    .outline()
+                    .title("Message signature details")
+                    .child(header("Message signature", format!("{:?}", item.status)))
+                    .child(format!("Account: {}", item.wallet_id))
+                    .child(format!(
+                        "Chain context: {}",
+                        item.chain_id.as_deref().unwrap_or("Not specified")
+                    ))
+                    .child(format!(
+                        "Requester: {}",
+                        item.requester.as_deref().unwrap_or("Unknown requester")
+                    ))
+                    .child(format!(
+                        "Created: {} · updated: {}",
+                        item.created_at, item.updated_at
+                    ))
+                    .child(
+                        div()
+                            .child("Digest")
+                            .child(div().font_family("monospace").child(item.digest.clone())),
+                    );
+                if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
+                    detail = detail.child(format!("Decision recorded: {decided_at}"));
+                }
+                if let Some(signature) = item.signature.as_ref() {
+                    detail = detail.child(
+                        div()
+                            .child("Signature")
+                            .child(div().font_family("monospace").child(signature.clone())),
+                    );
+                }
+                match document {
+                    Ok(document) => {
+                        detail =
+                            detail.children(document.exact_payloads.into_iter().map(|payload| {
+                                div()
+                                    .max_h(px(360.0))
+                                    .overflow_y_scrollbar()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .font_family("monospace")
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .child(payload)
+                            }));
+                    }
+                    Err(error) => {
+                        detail = detail.child(
+                            div()
+                                .text_color(cx.theme().danger)
+                                .child(format!("Exact payload unavailable: {error:#}")),
+                        );
+                    }
+                }
+                detail.into_any_element()
+            }
+            OwnerActivityRecord::TypedData(item) => {
+                let document = self.owner.typed_data_review_document(request_id);
+                let mut detail = GroupBox::new()
+                    .id(SharedString::from(format!("activity-detail-{request_id}")))
+                    .outline()
+                    .title("Typed-data signature details")
+                    .child(header("Typed-data signature", format!("{:?}", item.status)))
+                    .child(format!("Account: {}", item.wallet_id))
+                    .child(format!("Chain: {}", item.chain_id))
+                    .child(format!(
+                        "Requester: {}",
+                        item.requester.as_deref().unwrap_or("Unknown requester")
+                    ))
+                    .child(format!(
+                        "Created: {} · updated: {}",
+                        item.created_at, item.updated_at
+                    ))
+                    .child(
+                        div()
+                            .child("Digest")
+                            .child(div().font_family("monospace").child(item.digest.clone())),
+                    );
+                if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
+                    detail = detail.child(format!("Decision recorded: {decided_at}"));
+                }
+                if let Some(signature) = item.signature.as_ref() {
+                    detail = detail.child(
+                        div()
+                            .child("Signature")
+                            .child(div().font_family("monospace").child(signature.clone())),
+                    );
+                }
+                match document {
+                    Ok(document) => {
+                        detail =
+                            detail.children(document.exact_payloads.into_iter().map(|payload| {
+                                div()
+                                    .max_h(px(360.0))
+                                    .overflow_y_scrollbar()
+                                    .p_3()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .font_family("monospace")
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .child(payload)
+                            }));
+                    }
+                    Err(error) => {
+                        detail = detail.child(
+                            div()
+                                .text_color(cx.theme().danger)
+                                .child(format!("Exact payload unavailable: {error:#}")),
+                        );
+                    }
+                }
+                detail.into_any_element()
+            }
+        }
+    }
+
     fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
@@ -3585,135 +3819,28 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3();
-        let items = match self.owner.transactions(None, 200) {
+        let items = match self.owner.activity(None, 200) {
             Ok(items) => items,
             Err(error) => return panel.child(format!("Activity unavailable: {error:#}")),
         };
         let selected = self
             .selected_record
-            .and_then(|request_id| items.iter().find(|item| item.request_id == request_id))
-            .cloned();
+            .and_then(|request_id| items.iter().find(|item| item.request_id() == request_id));
         let mut panel = panel;
         if let Some(item) = selected {
-            let exact_plan = serde_json::to_string_pretty(&item.execution_plan)
-                .unwrap_or_else(|_| "Exact execution plan could not be rendered.".into());
-            let close_id = item.request_id;
-            let mut detail = GroupBox::new()
-                .id(SharedString::from(format!(
-                    "activity-detail-{}",
-                    item.request_id
-                )))
-                .outline()
-                .title("Transaction details")
-                .child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .gap_4()
-                        .child(
-                            div()
-                                .font_semibold()
-                                .child(format!("{:?} · {}", item.status, item.request_id)),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "close-activity-detail-{close_id}"
-                            )))
-                            .label("Close")
-                            .on_click(cx.listener(
-                                |view, _, _, cx| {
-                                    view.selected_record = None;
-                                    cx.notify();
-                                },
-                            )),
-                        ),
-                )
-                .child(format!("Account: {}", item.wallet_id))
-                .child(format!(
-                    "Network: {} · chain {}",
-                    item.network_name, item.chain_id
-                ))
-                .child(format!(
-                    "Created: {} · updated: {}",
-                    item.created_at, item.updated_at
-                ))
-                .child(format!("Policy revision: {}", item.policy_revision))
-                .child(
-                    div()
-                        .child("Plan digest")
-                        .child(div().font_family("monospace").child(item.digest.clone())),
-                );
-            if let Some(source) = item.plan_source.as_ref() {
-                detail = detail.child(format!("Plan source: {source}"));
-            }
-            if let Some(review_digest) = item.review_digest.as_ref() {
-                detail = detail.child(
-                    div()
-                        .child("Review digest")
-                        .child(div().font_family("monospace").child(review_digest.clone())),
-                );
-            }
-            for (label, value) in [
-                ("Signed hash", item.signed_transaction_hash.as_ref()),
-                ("Broadcast hash", item.broadcast_transaction_hash.as_ref()),
-                ("Block", item.block_number.as_ref()),
-            ] {
-                if let Some(value) = value {
-                    detail = detail.child(
-                        div()
-                            .child(label)
-                            .child(div().font_family("monospace").child(value.clone())),
-                    );
-                }
-            }
-            if let Some(fee) = item.mined_fee.as_ref() {
-                detail = detail.child(format!(
-                    "Mined fee: {} wei · {} gas at {} wei/gas",
-                    fee.transaction_fee_wei, fee.gas_used, fee.effective_gas_price
-                ));
-            }
-            if !item.cancel_transaction_hashes.is_empty() {
-                detail = detail
-                    .child(div().font_semibold().child("Cancellation attempts"))
-                    .children(
-                        item.cancel_transaction_hashes
-                            .iter()
-                            .cloned()
-                            .map(|hash| div().font_family("monospace").text_sm().child(hash)),
-                    );
-            }
-            detail = detail.child(
-                div().child("Exact execution plan").child(
-                    div()
-                        .max_h(px(360.0))
-                        .overflow_y_scrollbar()
-                        .p_3()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .font_family("monospace")
-                        .text_sm()
-                        .whitespace_normal()
-                        .child(exact_plan),
-                ),
-            );
-            panel = panel.child(detail);
+            panel = panel.child(self.render_activity_detail(item, cx));
         }
         if items.is_empty() {
             return panel.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No transaction activity yet."),
+                    .child("No wallet activity yet."),
             );
         }
-        panel.children(items.into_iter().map(|item| {
-            let request_id = item.request_id;
-            let status = item.status;
-            let busy = self.activity_busy.contains(&request_id);
+        panel.children(items.into_iter().map(|record| {
+            let request_id = record.request_id();
             let selected = self.selected_record == Some(request_id);
-            let actions = transaction_actions(item.status);
-            let feedback = self.activity_feedback.get(&request_id).cloned();
-            div()
+            let base = div()
                 .p_3()
                 .rounded_lg()
                 .border_1()
@@ -3724,8 +3851,127 @@ impl WalletWindow {
                 })
                 .flex()
                 .flex_col()
-                .gap_2()
-                .child(
+                .gap_2();
+            match record {
+                OwnerActivityRecord::Transaction(item) => {
+                    let status = item.status;
+                    let busy = self.activity_busy.contains(&request_id);
+                    let actions = transaction_actions(item.status);
+                    let feedback = self.activity_feedback.get(&request_id).cloned();
+                    base.child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(format!(
+                                        "{:?} · transaction · {} · {}",
+                                        item.status, item.wallet_id, item.network_name
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .font_family("monospace")
+                                            .truncate()
+                                            .child(request_id.to_string()),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "inspect-transaction-{request_id}"
+                                        )))
+                                        .label("Inspect")
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                view.selected_record = Some(request_id);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .when(actions.refresh, |buttons| {
+                                        buttons.child(
+                                            Button::new(SharedString::from(format!(
+                                                "refresh-transaction-{request_id}"
+                                            )))
+                                            .label(if busy { "Working…" } else { "Refresh" })
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.refresh_transaction(request_id, cx);
+                                            })),
+                                        )
+                                    })
+                                    .when(actions.send, |buttons| {
+                                        buttons.child(
+                                            Button::new(SharedString::from(format!(
+                                                "rebroadcast-transaction-{request_id}"
+                                            )))
+                                            .label(if status == PendingStatus::Signed {
+                                                "Send signed bytes"
+                                            } else {
+                                                "Rebroadcast"
+                                            })
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.rebroadcast_transaction(request_id, cx);
+                                            })),
+                                        )
+                                    })
+                                    .when(actions.cancel, |buttons| {
+                                        buttons.child(
+                                            Button::new(SharedString::from(format!(
+                                                "cancel-transaction-{request_id}"
+                                            )))
+                                            .label(if status == PendingStatus::Cancelling {
+                                                "Retry cancellation"
+                                            } else {
+                                                "Cancel transaction"
+                                            })
+                                            .danger()
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.confirm_transaction_cancellation(
+                                                    request_id, window, cx,
+                                                );
+                                            })),
+                                        )
+                                    })
+                                    .when(actions.discard, |buttons| {
+                                        buttons.child(
+                                            Button::new(SharedString::from(format!(
+                                                "discard-{request_id}"
+                                            )))
+                                            .label("Discard unsent signature")
+                                            .danger()
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.discard_unsent_transaction(request_id, cx);
+                                            })),
+                                        )
+                                    }),
+                            ),
+                    )
+                    .when_some(feedback, |row, feedback| {
+                        row.child(
+                            div()
+                                .text_sm()
+                                .text_color(if feedback.error {
+                                    cx.theme().danger
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(feedback.message),
+                        )
+                    })
+                }
+                OwnerActivityRecord::Message(item) => base.child(
                     h_flex()
                         .w_full()
                         .justify_between()
@@ -3735,8 +3981,8 @@ impl WalletWindow {
                                 .flex_1()
                                 .min_w_0()
                                 .child(format!(
-                                    "{:?} · {} · {}",
-                                    item.status, item.wallet_id, item.network_name
+                                    "{:?} · message signature · {}",
+                                    item.status, item.wallet_id
                                 ))
                                 .child(
                                     div()
@@ -3749,11 +3995,10 @@ impl WalletWindow {
                         )
                         .child(
                             h_flex()
-                                .flex_wrap()
                                 .gap_2()
                                 .child(
                                     Button::new(SharedString::from(format!(
-                                        "inspect-transaction-{request_id}"
+                                        "inspect-message-{request_id}"
                                     )))
                                     .label("Inspect")
                                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -3761,88 +4006,73 @@ impl WalletWindow {
                                         cx.notify();
                                     })),
                                 )
-                                .when(actions.refresh, |buttons| {
+                                .when(item.status == MessageStatus::AwaitingApproval, |buttons| {
                                     buttons.child(
                                         Button::new(SharedString::from(format!(
-                                            "refresh-transaction-{request_id}"
+                                            "review-message-activity-{request_id}"
                                         )))
-                                        .label(if busy { "Working…" } else { "Refresh" })
-                                        .disabled(busy)
+                                        .label("Review")
                                         .on_click(
                                             cx.listener(move |view, _, _, cx| {
-                                                view.refresh_transaction(request_id, cx);
-                                            }),
-                                        ),
-                                    )
-                                })
-                                .when(actions.send, |buttons| {
-                                    buttons.child(
-                                        Button::new(SharedString::from(format!(
-                                            "rebroadcast-transaction-{request_id}"
-                                        )))
-                                        .label(if status == PendingStatus::Signed {
-                                            "Send signed bytes"
-                                        } else {
-                                            "Rebroadcast"
-                                        })
-                                        .disabled(busy)
-                                        .on_click(
-                                            cx.listener(move |view, _, _, cx| {
-                                                view.rebroadcast_transaction(request_id, cx);
-                                            }),
-                                        ),
-                                    )
-                                })
-                                .when(actions.cancel, |buttons| {
-                                    buttons.child(
-                                        Button::new(SharedString::from(format!(
-                                            "cancel-transaction-{request_id}"
-                                        )))
-                                        .label(if status == PendingStatus::Cancelling {
-                                            "Retry cancellation"
-                                        } else {
-                                            "Cancel transaction"
-                                        })
-                                        .danger()
-                                        .disabled(busy)
-                                        .on_click(
-                                            cx.listener(move |view, _, window, cx| {
-                                                view.confirm_transaction_cancellation(
-                                                    request_id, window, cx,
-                                                );
-                                            }),
-                                        ),
-                                    )
-                                })
-                                .when(actions.discard, |buttons| {
-                                    buttons.child(
-                                        Button::new(SharedString::from(format!(
-                                            "discard-{request_id}"
-                                        )))
-                                        .label("Discard unsent signature")
-                                        .danger()
-                                        .disabled(busy)
-                                        .on_click(
-                                            cx.listener(move |view, _, _, cx| {
-                                                view.discard_unsent_transaction(request_id, cx);
+                                                view.begin_message_review(request_id, cx);
                                             }),
                                         ),
                                     )
                                 }),
                         ),
-                )
-                .when_some(feedback, |row, feedback| {
-                    row.child(
-                        div()
-                            .text_sm()
-                            .text_color(if feedback.error {
-                                cx.theme().danger
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(feedback.message),
-                    )
-                })
+                ),
+                OwnerActivityRecord::TypedData(item) => base.child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .gap_4()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(format!(
+                                    "{:?} · typed-data signature · {} · chain {}",
+                                    item.status, item.wallet_id, item.chain_id
+                                ))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .font_family("monospace")
+                                        .truncate()
+                                        .child(request_id.to_string()),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "inspect-typed-data-{request_id}"
+                                    )))
+                                    .label("Inspect")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.selected_record = Some(request_id);
+                                        cx.notify();
+                                    })),
+                                )
+                                .when(
+                                    item.status == TypedDataStatus::AwaitingApproval,
+                                    |buttons| {
+                                        buttons.child(
+                                            Button::new(SharedString::from(format!(
+                                                "review-typed-data-activity-{request_id}"
+                                            )))
+                                            .label("Review")
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.begin_typed_data_review(request_id, cx);
+                                            })),
+                                        )
+                                    },
+                                ),
+                        ),
+                ),
+            }
         }))
     }
 

@@ -175,6 +175,32 @@ impl SignatureQueue {
             .query_map([wallet_id], |row| row.get::<_, Uuid>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// IDs of recent requests in every lifecycle state, newest first.
+    pub fn list_ids(
+        &self,
+        connection: &Connection,
+        wallet_id: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<Uuid>> {
+        if let Some(wallet_id) = wallet_id {
+            crate::config::validate_wallet_id(wallet_id)?;
+        }
+        ensure!(
+            (1..=1_000).contains(&limit),
+            "limit must be between 1 and 1000"
+        );
+        let mut statement = connection.prepare(&format!(
+            "SELECT request_id FROM {} WHERE (?1 IS NULL OR wallet_id = ?1) \
+             ORDER BY created_at DESC, request_id DESC LIMIT ?2",
+            self.table
+        ))?;
+        Ok(statement
+            .query_map(params![wallet_id, i64::from(limit)], |row| {
+                row.get::<_, Uuid>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }
 
 /// Split one stored decision into the two moments the API reports.

@@ -697,6 +697,14 @@ impl TypedDataStore {
             .collect()
     }
 
+    pub fn list(&self, wallet_id: Option<&str>, limit: u16) -> Result<Vec<PendingTypedData>> {
+        QUEUE
+            .list_ids(&self.database.connection, wallet_id, limit)?
+            .into_iter()
+            .map(|id| self.get(id))
+            .collect()
+    }
+
     /// Read one request. The `approval_required` and `policy_revision` columns
     /// are deliberately not selected: they exist only for rows a previous
     /// version signed automatically, and nothing signs typed data without a

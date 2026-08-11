@@ -626,6 +626,14 @@ impl MessageStore {
             .collect()
     }
 
+    pub fn list(&self, wallet_id: Option<&str>, limit: u16) -> Result<Vec<PendingMessage>> {
+        QUEUE
+            .list_ids(&self.database.connection, wallet_id, limit)?
+            .into_iter()
+            .map(|id| self.get(id))
+            .collect()
+    }
+
     fn read(&self, request_id: Uuid) -> Result<PendingMessage> {
         let row = self
             .database

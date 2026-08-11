@@ -348,6 +348,65 @@ fn lifecycle_persists_exact_bytes_and_signature() {
 }
 
 #[test]
+fn recent_activity_lists_every_status_with_limits_and_wallet_filters() {
+    let (_directory, mut store) = store();
+    let signed = store
+        .create("primary", None, b"first", MessageEncoding::Text, None)
+        .unwrap();
+    let rejected = store
+        .create("primary", None, b"second", MessageEncoding::Text, None)
+        .unwrap();
+    let awaiting = store
+        .create("primary", None, b"third", MessageEncoding::Text, None)
+        .unwrap();
+    let other = store
+        .create("secondary", None, b"other", MessageEncoding::Text, None)
+        .unwrap();
+
+    store
+        .store_signature(
+            signed.request_id,
+            "primary",
+            message_digest(b"first"),
+            &format!("0x{}", "11".repeat(65)),
+        )
+        .unwrap();
+    store.reject(rejected.request_id).unwrap();
+    for (request_id, created_at) in [
+        (signed.request_id, 1_000_i64),
+        (rejected.request_id, 2_000),
+        (awaiting.request_id, 3_000),
+        (other.request_id, 4_000),
+    ] {
+        store
+            .database
+            .connection
+            .execute(
+                "UPDATE pending_messages SET created_at = ?2 WHERE request_id = ?1",
+                params![request_id, created_at],
+            )
+            .unwrap();
+    }
+
+    let primary = store.list(Some("primary"), 3).unwrap();
+    assert_eq!(
+        primary
+            .iter()
+            .map(|request| (request.request_id, request.status))
+            .collect::<Vec<_>>(),
+        vec![
+            (awaiting.request_id, MessageStatus::AwaitingApproval),
+            (rejected.request_id, MessageStatus::Rejected),
+            (signed.request_id, MessageStatus::Signed),
+        ]
+    );
+    assert_eq!(store.list(None, 1).unwrap()[0].request_id, other.request_id);
+    assert!(store.list(Some("not a wallet id"), 10).is_err());
+    assert!(store.list(None, 0).is_err());
+    assert!(store.list(None, 1_001).is_err());
+}
+
+#[test]
 fn chainless_requests_deduplicate_and_stay_distinct_from_chained_ones() {
     let (_directory, mut store) = store();
     let message = b"gm".to_vec();

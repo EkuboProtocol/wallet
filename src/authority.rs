@@ -6,6 +6,7 @@ use crate::{
 };
 use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, Utc};
 use ekubo_wallet_core::{
     approval::{ApprovalKind, ApprovalRequest, ReviewDocument, ReviewPresenter},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
@@ -76,6 +77,34 @@ pub struct OwnerTokenListImport {
 pub struct OwnerTransactionAction {
     pub record: PendingTransaction,
     pub broadcast: Option<BroadcastResult>,
+}
+
+/// One durable owner-visible activity record. Signature requests remain in
+/// the audit trail after approval or rejection just like transactions do.
+#[derive(Clone, Debug)]
+pub enum OwnerActivityRecord {
+    Transaction(Box<PendingTransaction>),
+    Message(PendingMessage),
+    TypedData(PendingTypedData),
+}
+
+impl OwnerActivityRecord {
+    #[must_use]
+    pub const fn request_id(&self) -> Uuid {
+        match self {
+            Self::Transaction(record) => record.request_id,
+            Self::Message(record) => record.request_id,
+            Self::TypedData(record) => record.request_id,
+        }
+    }
+
+    fn created_at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Transaction(record) => record.created_at,
+            Self::Message(record) => record.created_at,
+            Self::TypedData(record) => record.created_at,
+        }
+    }
 }
 
 /// The restricted capability cloned into authenticated MCP sessions.
@@ -534,6 +563,46 @@ impl OwnerApi {
         limit: u16,
     ) -> Result<Vec<PendingTransaction>> {
         PendingStore::production(self.config.data_dir())?.list(wallet_id, limit)
+    }
+
+    /// Recent transactions and human-reviewed signatures, interleaved by the
+    /// moment they were queued. Every source is read from the encrypted owner
+    /// database and terminal signature decisions remain visible.
+    pub fn activity(
+        &self,
+        wallet_id: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<OwnerActivityRecord>> {
+        ensure!(
+            (1..=1_000).contains(&limit),
+            "limit must be between 1 and 1000"
+        );
+        let mut records = self
+            .transactions(wallet_id, limit)?
+            .into_iter()
+            .map(Box::new)
+            .map(OwnerActivityRecord::Transaction)
+            .collect::<Vec<_>>();
+        records.extend(
+            MessageStore::production(self.config.data_dir())?
+                .list(wallet_id, limit)?
+                .into_iter()
+                .map(OwnerActivityRecord::Message),
+        );
+        records.extend(
+            TypedDataStore::production(self.config.data_dir())?
+                .list(wallet_id, limit)?
+                .into_iter()
+                .map(OwnerActivityRecord::TypedData),
+        );
+        records.sort_by(|left, right| {
+            right
+                .created_at()
+                .cmp(&left.created_at())
+                .then_with(|| right.request_id().cmp(&left.request_id()))
+        });
+        records.truncate(usize::from(limit));
+        Ok(records)
     }
 
     pub fn transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
