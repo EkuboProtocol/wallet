@@ -1,11 +1,12 @@
 use crate::{
+    chain_client::ChainClient,
     config::{NetworkConfig, WalletMetadata},
     core::{
         execution_plan::ExecutionPlan,
         policy::{PolicyOutcome, denial_reasons, policy_outcome},
     },
     custody::{KeyStore, load_matching_signer},
-    rpc::{rpc_error, transaction_receipt},
+    rpc::transaction_receipt_through,
     simulation::{CANONICAL_CALIBUR, ExecutionMode, PlannedCall, SimulationResult, planned_call},
 };
 use alloy::{
@@ -16,7 +17,6 @@ use alloy::{
     eips::{eip2718::Decodable2718, eip2930::AccessList, eip7702::Authorization},
     network::TxSignerSync,
     primitives::{B256, TxKind, U256, keccak256},
-    providers::Provider,
     signers::{SignerSync, local::PrivateKeySigner},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -249,17 +249,16 @@ pub async fn prepare_execution(
     validate_preflight(wallet, network, plan, simulation, overrides)?;
     let planned = planned_call(plan, wallet.address);
     let gas_limit = signing_gas_limit(network, simulation)?;
-    let prepared = crate::rpc::try_endpoints(network, |provider| async move {
+    let prepared = crate::rpc::try_clients(network, |client| async move {
         let prepared = tokio::time::timeout(RPC_TIMEOUT, async {
             tokio::try_join!(
-                provider.get_chain_id(),
-                provider.get_transaction_count(wallet.address).pending(),
-                provider.estimate_eip1559_fees(),
+                client.chain_id(),
+                client.transaction_count(wallet.address, alloy::eips::BlockId::pending()),
+                client.estimate_eip1559_fees(),
             )
         })
         .await
-        .context("transaction preparation RPC timed out")?
-        .map_err(|error| rpc_error(&error))?;
+        .context("transaction preparation RPC timed out")??;
         ensure!(
             prepared.0 == network.chain_id,
             "RPC reports chain {}, not {}",
@@ -333,11 +332,13 @@ async fn delegation_at_send(
         // the combination outright.
         return Ok(false);
     }
-    let code = crate::rpc::try_endpoints(network, |provider| async move {
-        tokio::time::timeout(RPC_TIMEOUT, provider.get_code_at(wallet.address))
-            .await
-            .context("delegation recheck RPC timed out")?
-            .map_err(|error| rpc_error(&error))
+    let code = crate::rpc::try_clients(network, |client| async move {
+        tokio::time::timeout(
+            RPC_TIMEOUT,
+            client.code(wallet.address, alloy::eips::BlockId::latest()),
+        )
+        .await
+        .context("delegation recheck RPC timed out")?
     })
     .await?;
     authorization_for_send(
@@ -976,64 +977,61 @@ pub async fn sign_cancellation<K: KeyStore + ?Sized>(
     };
     // The ceiling check lives inside the closure, so an endpoint whose numbers
     // do not survive it is an endpoint that failed and the next one is tried.
-    // It used to run after `try_endpoints` returned, which made an inflated
+    // It used to run after failover returned, which made an inflated
     // estimate or a shrunken block limit fatal to the whole call rather than
     // to the endpoint that gave it — and the ordered strategy asks the same
     // endpoint first every time, so the answer never changed. A cancellation
     // is what an owner reaches for when a transaction they want stopped is
     // still live, which is the worst moment to have one endpoint decide the
     // envelope cannot be built.
-    let (_chain_id, market, gas_limit) =
-        crate::rpc::try_endpoints(network, |provider| async move {
-            let estimate_request = alloy::rpc::types::TransactionRequest::default()
-                .from(wallet.address)
-                .to(wallet.address)
-                .value(U256::ZERO);
-            let (chain_id, market, estimated_gas, head) =
-                tokio::time::timeout(RPC_TIMEOUT, async {
-                    tokio::try_join!(
-                        provider.get_chain_id(),
-                        provider.estimate_eip1559_fees(),
-                        provider.estimate_gas(estimate_request),
-                        provider.get_block(alloy::eips::BlockId::latest()),
-                    )
-                })
-                .await
-                .context("cancellation preparation RPC timed out")?
-                .map_err(|error| rpc_error(&error))?;
-            ensure!(
-                chain_id == network.chain_id,
-                "RPC reports chain {chain_id}, not {}",
-                network.chain_id
-            );
-            // Read from the same endpoint and in the same breath as the
-            // estimate it bounds, so an endpoint cannot answer one of the two
-            // and have the other come from somewhere it does not control.
-            let block_maximum = head
-                .context("cancellation preparation could not read the chain head")?
-                .header
-                .gas_limit;
-            // The same ceiling `signing_gas_limit` computes, and for the same
-            // reason. This bound used to exist only when the network carried a
-            // configured maximum, which most shipped profiles do not — so on
-            // an ordinary network an endpoint's `estimate_gas` was the whole
-            // of what decided the signed gas limit. A cancellation cannot be
-            // simulated, so an endpoint that returns an absurd estimate
-            // produces an envelope every honest peer rejects while spending
-            // one of the eight attempts this wallet will ever make.
-            let maximum = usable_gas_ceiling(network, block_maximum)?;
-            ensure!(
-                estimated_gas <= maximum,
-                "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas \
-                 limit {maximum}"
-            );
-            Ok((
-                chain_id,
-                market,
-                cancellation_gas_limit(estimated_gas, maximum),
-            ))
+    let (_chain_id, market, gas_limit) = crate::rpc::try_clients(network, |client| async move {
+        let estimate_request = alloy::rpc::types::TransactionRequest::default()
+            .from(wallet.address)
+            .to(wallet.address)
+            .value(U256::ZERO);
+        let (chain_id, market, estimated_gas, head) = tokio::time::timeout(RPC_TIMEOUT, async {
+            tokio::try_join!(
+                client.chain_id(),
+                client.estimate_eip1559_fees(),
+                client.estimate_gas(estimate_request),
+                client.block_by_number(alloy::eips::BlockNumberOrTag::Latest),
+            )
         })
-        .await?;
+        .await
+        .context("cancellation preparation RPC timed out")??;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        // Read from the same endpoint and in the same breath as the
+        // estimate it bounds, so an endpoint cannot answer one of the two
+        // and have the other come from somewhere it does not control.
+        let block_maximum = head
+            .context("cancellation preparation could not read the chain head")?
+            .header
+            .gas_limit;
+        // The same ceiling `signing_gas_limit` computes, and for the same
+        // reason. This bound used to exist only when the network carried a
+        // configured maximum, which most shipped profiles do not — so on
+        // an ordinary network an endpoint's `estimate_gas` was the whole
+        // of what decided the signed gas limit. A cancellation cannot be
+        // simulated, so an endpoint that returns an absurd estimate
+        // produces an envelope every honest peer rejects while spending
+        // one of the eight attempts this wallet will ever make.
+        let maximum = usable_gas_ceiling(network, block_maximum)?;
+        ensure!(
+            estimated_gas <= maximum,
+            "estimated cancellation gas {estimated_gas} exceeds the maximum usable gas \
+                 limit {maximum}"
+        );
+        Ok((
+            chain_id,
+            market,
+            cancellation_gas_limit(estimated_gas, maximum),
+        ))
+    })
+    .await?;
     let (max_fee_per_gas, max_priority_fee_per_gas) = cancellation_fees(
         &incumbents,
         market.max_fee_per_gas,
@@ -1124,9 +1122,8 @@ async fn send_exact_bytes(
     network: &NetworkConfig,
 ) -> Result<BroadcastResult> {
     let mut first_failure = None;
-    for endpoint in &network.rpc_urls {
-        let provider = crate::rpc::provider_for(endpoint);
-        let outcome = match send_exact_bytes_through(signed, network, &provider).await {
+    for client in crate::rpc::clients_for(network) {
+        let outcome = match send_exact_bytes_through(signed, network, client.as_ref()).await {
             Ok(outcome) => outcome,
             Err(error) => {
                 if first_failure.is_none() {
@@ -1153,14 +1150,14 @@ async fn send_exact_bytes(
 async fn send_exact_bytes_through(
     signed: &SignedExecution,
     network: &NetworkConfig,
-    provider: &alloy::providers::DynProvider,
+    client: &dyn ChainClient,
 ) -> Result<BroadcastResult> {
-    crate::rpc::ensure_serving_chain(provider, network.chain_id).await?;
-    if let Ok(Some(receipt)) = transaction_receipt(network, &signed.transaction_hash).await {
+    crate::rpc::ensure_serving_chain(client, network.chain_id).await?;
+    let hash = B256::from_str(&signed.transaction_hash).context("invalid transaction hash")?;
+    if let Ok(Some(receipt)) = transaction_receipt_through(client, network.chain_id, hash).await {
         return Ok(receipt_result(&signed.transaction_hash, receipt));
     }
-    let hash = B256::from_str(&signed.transaction_hash).context("invalid transaction hash")?;
-    let known = tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash))
+    let known = tokio::time::timeout(RPC_TIMEOUT, client.transaction_by_hash(hash))
         .await
         .ok()
         .and_then(std::result::Result::ok)
@@ -1169,17 +1166,17 @@ async fn send_exact_bytes_through(
     if !known {
         let bytes = decode_serialized(&signed.serialized_transaction)?;
         let failure =
-            match tokio::time::timeout(RPC_TIMEOUT, provider.send_raw_transaction(&bytes)).await {
-                Ok(Ok(pending)) if pending.tx_hash() == &hash => None,
+            match tokio::time::timeout(RPC_TIMEOUT, client.send_transaction(bytes.into())).await {
+                Ok(Ok(returned_hash)) if returned_hash == hash => None,
                 Ok(Ok(_)) => Some("RPC returned an unexpected transaction hash".to_owned()),
                 Ok(Err(error)) => Some(error.to_string()),
                 Err(_) => Some("transaction submission RPC timed out".to_owned()),
             };
         if let Some(failure) = failure {
-            return Ok(reconcile_failed_send(signed, network, provider, hash, failure).await);
+            return Ok(reconcile_failed_send(signed, network, client, hash, failure).await);
         }
     }
-    if let Ok(Some(receipt)) = transaction_receipt(network, &signed.transaction_hash).await {
+    if let Ok(Some(receipt)) = transaction_receipt_through(client, network.chain_id, hash).await {
         return Ok(receipt_result(&signed.transaction_hash, receipt));
     }
     Ok(BroadcastResult {
@@ -1204,26 +1201,25 @@ async fn send_exact_bytes_through(
 /// Reporting that as a broadcast failure is worse than useless: the natural
 /// response to one is to prepare and submit a replacement, which risks
 /// executing twice something that already executed once.
-async fn reconcile_failed_send<P: Provider>(
+async fn reconcile_failed_send(
     signed: &SignedExecution,
     network: &NetworkConfig,
-    provider: &P,
+    client: &dyn ChainClient,
     hash: B256,
     failure: String,
 ) -> BroadcastResult {
-    let receipt = transaction_receipt(network, &signed.transaction_hash)
+    let receipt = transaction_receipt_through(client, network.chain_id, hash)
         .await
         .ok()
         .flatten();
     // `Ok(Ok(None))` is the node answering that it does not hold the
     // transaction. A timeout or a transport error is the node not answering,
     // and the two used to arrive here as the same `false`.
-    let accepted =
-        match tokio::time::timeout(RPC_TIMEOUT, provider.get_transaction_by_hash(hash)).await {
-            Ok(Ok(Some(_))) => Presence::Held,
-            Ok(Ok(None)) => Presence::Absent,
-            Ok(Err(_)) | Err(_) => Presence::Unobserved,
-        };
+    let accepted = match tokio::time::timeout(RPC_TIMEOUT, client.transaction_by_hash(hash)).await {
+        Ok(Ok(Some(_))) => Presence::Held,
+        Ok(Ok(None)) => Presence::Absent,
+        Ok(Err(_)) | Err(_) => Presence::Unobserved,
+    };
     send_failure_outcome(&signed.transaction_hash, receipt, accepted, failure)
 }
 

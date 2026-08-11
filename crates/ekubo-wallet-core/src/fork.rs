@@ -28,7 +28,6 @@
 use crate::{
     config::NetworkConfig,
     core::execution_plan::ExecutionPlan,
-    rpc::rpc_error,
     simulation::{
         ExecutionMode, PlannedCall, delegation_override, effective_gas_limit, planned_call,
         planned_request, simulation_slot,
@@ -39,7 +38,6 @@ use alloy::{
     eips::BlockNumberOrTag,
     network::primitives::BlockResponse,
     primitives::{Address, B256, U256},
-    providers::Provider,
     rpc::types::{
         TransactionRequest,
         simulate::{SimCallResult, SimulatePayload},
@@ -400,16 +398,15 @@ pub struct ForkReadOutcome {
 /// Read the pinned parent a new fork should use, verifying the RPC's chain
 /// before anything is stored.
 pub async fn pin_parent_block(network: &NetworkConfig) -> Result<ForkParent> {
-    let block = crate::rpc::try_endpoints(network, |provider| async move {
+    let block = crate::rpc::try_clients(network, |client| async move {
         let (chain_id, block) = tokio::time::timeout(FORK_RPC_TIMEOUT, async {
             tokio::try_join!(
-                provider.get_chain_id(),
-                provider.get_block_by_number(BlockNumberOrTag::Latest),
+                client.chain_id(),
+                client.block_by_number(BlockNumberOrTag::Latest),
             )
         })
         .await
-        .context("fork parent-block RPC timed out")?
-        .map_err(|error| rpc_error(&error))?;
+        .context("fork parent-block RPC timed out")??;
         ensure!(
             chain_id == network.chain_id,
             "RPC reports chain {chain_id}, not {}",
@@ -474,16 +471,15 @@ pub async fn execute_reads(
         validation: false,
         return_full_transactions: false,
     };
-    let simulated = crate::rpc::try_endpoints(network, |provider| {
+    let simulated = crate::rpc::try_clients(network, |client| {
         let payload = &payload;
         async move {
             tokio::time::timeout(
                 FORK_RPC_TIMEOUT,
-                provider.simulate(payload).number(preface.parent.number),
+                client.simulate_v1(payload.clone(), Some(preface.parent.number)),
             )
             .await
             .context("fork eth_simulateV1 request timed out")?
-            .map_err(|error| rpc_error(&error))
         }
     })
     .await?;

@@ -1,24 +1,27 @@
 use crate::{
+    chain_client::{ChainClient, SharedChainClient},
     config::{NetworkConfig, WalletMetadata},
     fork::{ForkContext, ForkPreface, native_balance},
     simulation::CANONICAL_CALIBUR,
 };
 use alloy::{
-    eips::BlockId,
+    eips::{BlockId, BlockNumberOrTag},
     primitives::{Address, B256, Bytes},
     providers::{DynProvider, Provider, ProviderBuilder},
+    rpc::types::{TransactionRequest, simulate::SimulatePayload},
 };
 use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::str::FromStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Providers pooled per endpoint URL, the same way [`crate::plan_fetch`]
+/// RPC clients pooled per endpoint URL, the same way [`crate::plan_fetch`]
 /// pools its reference-fetch clients. Bounded and evicted oldest-first so a
 /// configuration with the maximum 192 networks of 8 RPC URLs each — or a
 /// sequence of proposed networks a dapp keeps changing — cannot grow this
@@ -26,13 +29,101 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 /// `rpc_test.rs` registers against this same process-wide pool over a test
 /// run, so an unrelated test's endpoints do not evict this test's own before
 /// it reads them back.
-static ENDPOINT_PROVIDERS: OnceLock<Mutex<Vec<(url::Url, DynProvider)>>> = OnceLock::new();
-const MAX_POOLED_PROVIDERS: usize = 128;
+type PooledRpcClient = (url::Url, SharedChainClient);
 
-/// A provider for one configured endpoint.
+static RPC_CLIENTS: OnceLock<Mutex<Vec<PooledRpcClient>>> = OnceLock::new();
+const MAX_POOLED_CLIENTS: usize = 128;
+
+struct RpcChainClient {
+    provider: DynProvider,
+}
+
+#[async_trait]
+impl ChainClient for RpcChainClient {
+    async fn chain_id(&self) -> Result<u64> {
+        rpc_result(self.provider.get_chain_id().await)
+    }
+
+    async fn block_number(&self) -> Result<u64> {
+        rpc_result(self.provider.get_block_number().await)
+    }
+
+    async fn block_by_number(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> Result<Option<alloy::rpc::types::Block>> {
+        rpc_result(self.provider.get_block_by_number(block).await)
+    }
+
+    async fn balance(&self, address: Address, block: BlockId) -> Result<alloy::primitives::U256> {
+        rpc_result(self.provider.get_balance(address).block_id(block).await)
+    }
+
+    async fn transaction_count(&self, address: Address, block: BlockId) -> Result<u64> {
+        rpc_result(
+            self.provider
+                .get_transaction_count(address)
+                .block_id(block)
+                .await,
+        )
+    }
+
+    async fn code(&self, address: Address, block: BlockId) -> Result<Bytes> {
+        rpc_result(self.provider.get_code_at(address).block_id(block).await)
+    }
+
+    async fn call(&self, request: TransactionRequest, block: BlockId) -> Result<Bytes> {
+        rpc_result(self.provider.call(request).block(block).await)
+    }
+
+    async fn simulate_v1(
+        &self,
+        payload: SimulatePayload,
+        block_number: Option<u64>,
+    ) -> Result<Vec<alloy::rpc::types::simulate::SimulatedBlock>> {
+        let request = self.provider.simulate(&payload);
+        rpc_result(match block_number {
+            Some(number) => request.number(number).await,
+            None => request.await,
+        })
+    }
+
+    async fn estimate_eip1559_fees(&self) -> Result<alloy::eips::eip1559::Eip1559Estimation> {
+        rpc_result(self.provider.estimate_eip1559_fees().await)
+    }
+
+    async fn estimate_gas(&self, request: TransactionRequest) -> Result<u64> {
+        rpc_result(self.provider.estimate_gas(request).await)
+    }
+
+    async fn transaction_receipt(
+        &self,
+        hash: B256,
+    ) -> Result<Option<alloy::rpc::types::TransactionReceipt>> {
+        rpc_result(self.provider.get_transaction_receipt(hash).await)
+    }
+
+    async fn transaction_by_hash(
+        &self,
+        hash: B256,
+    ) -> Result<Option<alloy::rpc::types::Transaction>> {
+        rpc_result(self.provider.get_transaction_by_hash(hash).await)
+    }
+
+    async fn send_transaction(&self, bytes: Bytes) -> Result<B256> {
+        rpc_result(self.provider.send_raw_transaction(&bytes).await)
+            .map(|pending| *pending.tx_hash())
+    }
+}
+
+fn rpc_result<T, E: std::fmt::Display>(result: std::result::Result<T, E>) -> Result<T> {
+    result.map_err(|error| rpc_error(&error))
+}
+
+/// A chain client backed by one configured RPC endpoint.
 ///
-/// Type-erased because failover hands the same closure a different provider
-/// per attempt, and the builder's own type names the filler stack rather than
+/// Type-erased because failover hands the same closure a different client per
+/// attempt, and the RPC adapter's own type names the filler stack rather than
 /// anything a caller cares about. Pooled by endpoint: every read in this
 /// module goes through this function, including the once-a-second poll
 /// `wallet_wait_for_execution` runs while a caller waits on confirmation, so
@@ -41,8 +132,8 @@ const MAX_POOLED_PROVIDERS: usize = 128;
 /// handshake, and a new TLS handshake for an `https` endpoint, instead of
 /// reusing one already open to the same endpoint.
 #[must_use]
-pub fn provider_for(endpoint: &url::Url) -> DynProvider {
-    let pool = ENDPOINT_PROVIDERS.get_or_init(|| Mutex::new(Vec::new()));
+fn client_for(endpoint: &url::Url) -> SharedChainClient {
+    let pool = RPC_CLIENTS.get_or_init(|| Mutex::new(Vec::new()));
     let mut entries = pool.lock().expect("endpoint provider pool lock");
     if let Some(position) = entries
         .iter()
@@ -50,17 +141,19 @@ pub fn provider_for(endpoint: &url::Url) -> DynProvider {
     {
         return entries[position].1.clone();
     }
-    let provider = ProviderBuilder::new()
-        .connect_http(endpoint.clone())
-        .erased();
-    if entries.len() >= MAX_POOLED_PROVIDERS {
+    let client: SharedChainClient = Arc::new(RpcChainClient {
+        provider: ProviderBuilder::new()
+            .connect_http(endpoint.clone())
+            .erased(),
+    });
+    if entries.len() >= MAX_POOLED_CLIENTS {
         entries.remove(0);
     }
-    entries.push((endpoint.clone(), provider.clone()));
-    provider
+    entries.push((endpoint.clone(), client.clone()));
+    client
 }
 
-/// Run one read against the network's endpoints, in configured order, until
+/// Run one read against the network's clients, in the selected order, until
 /// one of them answers.
 ///
 /// This is the whole failover mechanism, and it is deliberately per-request
@@ -79,14 +172,14 @@ pub fn provider_for(endpoint: &url::Url) -> DynProvider {
 /// answers, the error names every one that was tried and what it said, because
 /// "RPC request failed" about an unnamed member of a list of eight is not a
 /// diagnosis anyone can act on.
-pub async fn try_endpoints<T, F, Fut>(network: &NetworkConfig, operation: F) -> Result<T>
+pub async fn try_clients<T, F, Fut>(network: &NetworkConfig, operation: F) -> Result<T>
 where
-    F: Fn(DynProvider) -> Fut,
+    F: Fn(SharedChainClient) -> Fut,
     Fut: Future<Output = Result<T>>,
 {
     let mut failures = Vec::new();
     for endpoint in endpoint_order(network) {
-        match operation(provider_for(endpoint)).await {
+        match operation(client_for(endpoint)).await {
             Ok(value) => return Ok(value),
             Err(error) => failures.push((endpoint, error)),
         }
@@ -94,10 +187,23 @@ where
     Err(all_endpoints_failed(network, &failures))
 }
 
+/// The clients to attempt for one coherent operation, already arranged by
+/// the network's ordered or random policy.
+///
+/// Keeping this here means simulation and submission never inspect URLs or
+/// reimplement selection. A future non-RPC factory can supply the same client
+/// objects without changing either operation.
+pub fn clients_for(network: &NetworkConfig) -> Vec<SharedChainClient> {
+    endpoint_order(network)
+        .into_iter()
+        .map(client_for)
+        .collect()
+}
+
 /// The order this request should visit the endpoints in.
 ///
 /// Configured order, unless the network asks for a fresh random order.
-pub(crate) fn endpoint_order(network: &NetworkConfig) -> Vec<&url::Url> {
+fn endpoint_order(network: &NetworkConfig) -> Vec<&url::Url> {
     let mut order: Vec<&url::Url> = network.rpc_urls.iter().collect();
     if network.rpc_strategy.shuffles() {
         shuffle(&mut order);
@@ -140,14 +246,14 @@ pub(crate) fn all_endpoints_failed(
     anyhow::anyhow!(message)
 }
 
-/// Confirm a provider is serving the chain the network claims, and fail in a
+/// Confirm a client is serving the chain the network claims, and fail in a
 /// way failover understands.
 ///
 /// Checked on every endpoint rather than once for the network: the list is
 /// several independent services, and one of them being pointed at the wrong
 /// chain must disqualify that endpoint instead of the request.
-pub async fn ensure_serving_chain(provider: &DynProvider, expected: u64) -> Result<()> {
-    let observed = with_timeout(provider.get_chain_id()).await?;
+pub async fn ensure_serving_chain(client: &dyn ChainClient, expected: u64) -> Result<()> {
+    let observed = with_timeout(client.chain_id()).await?;
     ensure!(
         observed == expected,
         "RPC reports chain {observed}, not {expected}"
@@ -224,8 +330,8 @@ impl ReceiptStatus {
 }
 
 pub async fn verify_chain_id(network: &NetworkConfig) -> Result<()> {
-    try_endpoints(network, |provider| async move {
-        ensure_serving_chain(&provider, network.chain_id).await
+    try_clients(network, |client| async move {
+        ensure_serving_chain(client.as_ref(), network.chain_id).await
     })
     .await
 }
@@ -238,22 +344,21 @@ pub async fn wallet_status(
     if let Some(preface) = fork {
         return fork_wallet_status(wallet, network, preface).await;
     }
-    let (chain_id, balance, transaction_count, code) =
-        try_endpoints(network, |provider| async move {
-            let (chain_id, balance, transaction_count, code) = tokio::try_join!(
-                with_timeout(provider.get_chain_id()),
-                with_timeout(async { provider.get_balance(wallet.address).await }),
-                with_timeout(async { provider.get_transaction_count(wallet.address).await }),
-                with_timeout(async { provider.get_code_at(wallet.address).await }),
-            )?;
-            ensure!(
-                chain_id == network.chain_id,
-                "RPC reports chain {chain_id}, not {}",
-                network.chain_id
-            );
-            Ok((chain_id, balance, transaction_count, code))
-        })
-        .await?;
+    let (chain_id, balance, transaction_count, code) = try_clients(network, |client| async move {
+        let (chain_id, balance, transaction_count, code) = tokio::try_join!(
+            with_timeout(client.chain_id()),
+            with_timeout(client.balance(wallet.address, BlockId::latest())),
+            with_timeout(client.transaction_count(wallet.address, BlockId::latest())),
+            with_timeout(client.code(wallet.address, BlockId::latest())),
+        )?;
+        ensure!(
+            chain_id == network.chain_id,
+            "RPC reports chain {chain_id}, not {}",
+            network.chain_id
+        );
+        Ok((chain_id, balance, transaction_count, code))
+    })
+    .await?;
     Ok(WalletStatus {
         wallet_id: wallet.id.clone(),
         address: format!("{:#x}", wallet.address),
@@ -286,16 +391,11 @@ async fn fork_wallet_status(
         "fork belongs to a different wallet"
     );
     let pinned = BlockId::number(preface.parent.number);
-    let (chain_id, transaction_count, code) = try_endpoints(network, |provider| async move {
+    let (chain_id, transaction_count, code) = try_clients(network, |client| async move {
         let (chain_id, transaction_count, code) = tokio::try_join!(
-            with_timeout(provider.get_chain_id()),
-            with_timeout(async {
-                provider
-                    .get_transaction_count(wallet.address)
-                    .block_id(pinned)
-                    .await
-            }),
-            with_timeout(async { provider.get_code_at(wallet.address).block_id(pinned).await }),
+            with_timeout(client.chain_id()),
+            with_timeout(client.transaction_count(wallet.address, pinned)),
+            with_timeout(client.code(wallet.address, pinned)),
         )?;
         ensure!(
             chain_id == network.chain_id,
@@ -354,53 +454,62 @@ pub async fn transaction_receipt(
     transaction_hash: &str,
 ) -> Result<Option<ReceiptStatus>> {
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
-    try_endpoints(network, |provider| async move {
-        let (chain_id, receipt) = tokio::try_join!(
-            with_timeout(provider.get_chain_id()),
-            with_timeout(provider.get_transaction_receipt(hash)),
-        )?;
-        ensure!(
-            chain_id == network.chain_id,
-            "RPC reports chain {chain_id}, not {}",
-            network.chain_id
-        );
-        // Inside the closure, so an unusable receipt is this endpoint failing
-        // rather than the whole lookup failing on its word.
-        receipt
-            .map(|receipt| {
-                // The receipt has to be the receipt for the hash that was
-                // asked about. Nothing else here establishes that: the request
-                // names a hash, and the response is taken as the answer to it
-                // on the endpoint's word alone.
-                //
-                // Every terminal settlement in the wallet runs through this
-                // one function. `observe` treats any receipt as `Mined`,
-                // `reconcile_cancelling` finalizes the original or marks the
-                // request cancelled from one, and none of those states is ever
-                // reconciled again — leaving them releases the wallet's
-                // in-flight slot for that chain. So an endpoint returning some
-                // unrelated transaction's receipt settles a still-live
-                // envelope as confirmed, reverted, or cancelled, and the real
-                // one goes on to mine with the wallet no longer watching it.
-                ensure!(
-                    receipt.transaction_hash == hash,
-                    "RPC returned a receipt for {:#x} rather than the requested {hash:#x}",
-                    receipt.transaction_hash
-                );
-                let block_number = receipt
-                    .block_number
-                    .context("RPC returned a receipt without a block number")?;
-                storable_receipt_fields(block_number, receipt.gas_used)?;
-                Ok(ReceiptStatus {
-                    succeeded: receipt.status(),
-                    block_number,
-                    gas_used: receipt.gas_used,
-                    effective_gas_price: receipt.effective_gas_price,
-                })
-            })
-            .transpose()
+    try_clients(network, |client| async move {
+        transaction_receipt_through(client.as_ref(), network.chain_id, hash).await
     })
     .await
+}
+
+/// Read and validate a receipt without changing clients midway through a
+/// send-and-reconcile attempt.
+pub(crate) async fn transaction_receipt_through(
+    client: &dyn ChainClient,
+    expected_chain_id: u64,
+    hash: B256,
+) -> Result<Option<ReceiptStatus>> {
+    let (chain_id, receipt) = tokio::try_join!(
+        with_timeout(client.chain_id()),
+        with_timeout(client.transaction_receipt(hash)),
+    )?;
+    ensure!(
+        chain_id == expected_chain_id,
+        "RPC reports chain {chain_id}, not {expected_chain_id}"
+    );
+    // Inside the closure, so an unusable receipt is this endpoint failing
+    // rather than the whole lookup failing on its word.
+    receipt
+        .map(|receipt| {
+            // The receipt has to be the receipt for the hash that was
+            // asked about. Nothing else here establishes that: the request
+            // names a hash, and the response is taken as the answer to it
+            // on the endpoint's word alone.
+            //
+            // Every terminal settlement in the wallet runs through this
+            // one function. `observe` treats any receipt as `Mined`,
+            // `reconcile_cancelling` finalizes the original or marks the
+            // request cancelled from one, and none of those states is ever
+            // reconciled again — leaving them releases the wallet's
+            // in-flight slot for that chain. So an endpoint returning some
+            // unrelated transaction's receipt settles a still-live
+            // envelope as confirmed, reverted, or cancelled, and the real
+            // one goes on to mine with the wallet no longer watching it.
+            ensure!(
+                receipt.transaction_hash == hash,
+                "RPC returned a receipt for {:#x} rather than the requested {hash:#x}",
+                receipt.transaction_hash
+            );
+            let block_number = receipt
+                .block_number
+                .context("RPC returned a receipt without a block number")?;
+            storable_receipt_fields(block_number, receipt.gas_used)?;
+            Ok(ReceiptStatus {
+                succeeded: receipt.status(),
+                block_number,
+                gas_used: receipt.gas_used,
+                effective_gas_price: receipt.effective_gas_price,
+            })
+        })
+        .transpose()
 }
 
 /// One receipt log, reduced to the fields transfer decoding needs.
@@ -431,10 +540,10 @@ pub async fn transaction_receipt_details(
     transaction_hash: &str,
 ) -> Result<Option<ReceiptDetails>> {
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
-    let receipt = try_endpoints(network, |provider| async move {
+    let receipt = try_clients(network, |client| async move {
         let (chain_id, receipt) = tokio::try_join!(
-            with_timeout(provider.get_chain_id()),
-            with_timeout(provider.get_transaction_receipt(hash)),
+            with_timeout(client.chain_id()),
+            with_timeout(client.transaction_receipt(hash)),
         )?;
         ensure!(
             chain_id == network.chain_id,
@@ -492,16 +601,11 @@ pub async fn native_balances_around_block(
     let parent = block_number
         .checked_sub(1)
         .context("the genesis block has no parent state to diff against")?;
-    try_endpoints(network, |provider| async move {
+    try_clients(network, |client| async move {
         let (chain_id, before, after) = tokio::try_join!(
-            with_timeout(provider.get_chain_id()),
-            with_timeout(async { provider.get_balance(address).block_id(parent.into()).await }),
-            with_timeout(async {
-                provider
-                    .get_balance(address)
-                    .block_id(block_number.into())
-                    .await
-            }),
+            with_timeout(client.chain_id()),
+            with_timeout(client.balance(address, parent.into())),
+            with_timeout(client.balance(address, block_number.into())),
         )?;
         ensure!(
             chain_id == network.chain_id,
@@ -515,10 +619,10 @@ pub async fn native_balances_around_block(
 
 /// The chain head height, used to count confirmations for a mined receipt.
 pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
-    try_endpoints(network, |provider| async move {
+    try_clients(network, |client| async move {
         let (chain_id, block_number) = tokio::try_join!(
-            with_timeout(provider.get_chain_id()),
-            with_timeout(provider.get_block_number()),
+            with_timeout(client.chain_id()),
+            with_timeout(client.block_number()),
         )?;
         ensure!(
             chain_id == network.chain_id,
@@ -535,10 +639,10 @@ pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
 /// replacement detection must only trust nonces consumed by mined blocks,
 /// because a competing mempool transaction at the same nonce has not won yet.
 pub async fn mined_transaction_count(network: &NetworkConfig, address: Address) -> Result<u64> {
-    try_endpoints(network, |provider| async move {
+    try_clients(network, |client| async move {
         let (chain_id, count) = tokio::try_join!(
-            with_timeout(provider.get_chain_id()),
-            with_timeout(async { provider.get_transaction_count(address).latest().await }),
+            with_timeout(client.chain_id()),
+            with_timeout(client.transaction_count(address, BlockId::latest())),
         )?;
         ensure!(
             chain_id == network.chain_id,
@@ -556,10 +660,10 @@ pub async fn mined_transaction_count(network: &NetworkConfig, address: Address) 
 /// transaction when the hash is unknown.
 pub async fn transaction_known(network: &NetworkConfig, transaction_hash: &str) -> Result<bool> {
     let hash = B256::from_str(transaction_hash).context("invalid transaction hash")?;
-    try_endpoints(network, |provider| async move {
+    try_clients(network, |client| async move {
         let (chain_id, transaction) = tokio::try_join!(
-            with_timeout(provider.get_chain_id()),
-            with_timeout(provider.get_transaction_by_hash(hash)),
+            with_timeout(client.chain_id()),
+            with_timeout(client.transaction_by_hash(hash)),
         )?;
         ensure!(
             chain_id == network.chain_id,
@@ -571,14 +675,10 @@ pub async fn transaction_known(network: &NetworkConfig, transaction_hash: &str) 
     .await
 }
 
-async fn with_timeout<T, E>(future: impl Future<Output = std::result::Result<T, E>>) -> Result<T>
-where
-    E: std::fmt::Display,
-{
+async fn with_timeout<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
     tokio::time::timeout(RPC_TIMEOUT, future)
         .await
         .context("RPC request timed out")?
-        .map_err(|error| rpc_error(&error))
 }
 
 /// One shared spelling for a failed RPC request. The error passes through

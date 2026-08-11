@@ -9,7 +9,8 @@ one profile per chain ID so MCP calls remain unambiguous.
 ## Several endpoints per network
 
 A network carries a **list** of RPC endpoints rather than one, and every read
-walks that list in order until one answers. That is the difference between a
+walks that list according to its `ordered` or `random` strategy until one
+answers. That is the difference between a
 wallet that stops working when a public endpoint rate-limits it and one that
 does not: simulation gates signing, so a single refused request used to mean
 nothing could be signed on that chain until the endpoint recovered.
@@ -50,6 +51,13 @@ block, not that the endpoint's view of the chain is true. `random` spreads
 traffic and makes it less predictable which operator sees a request; it does
 not verify one operator against another. Use a backend with its own verification
 model if that distinction matters.
+
+Inside the security kernel, URLs and Alloy providers stop at the RPC adapter.
+Simulation, nonce selection, submission, receipts, and chain reads depend on a
+small typed `ChainClient` interface instead. The RPC adapter is the backend
+configured by this binary today; the boundary also permits a stateful or
+independently verified backend without teaching signing code about its
+transport.
 
 Set the strategy alongside any other network field in `network add`, the
 interactive `network edit` form, or an agent's `wallet_propose_network` (which

@@ -17,6 +17,7 @@
 
 use crate::{
     abi_decoder::decode_abi_error,
+    chain_client::ChainClient,
     config::{NetworkConfig, WalletMetadata},
     core::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
@@ -36,7 +37,6 @@ use alloy::{
     eips::{BlockId, BlockNumberOrTag},
     network::primitives::BlockResponse,
     primitives::{Address, B256, Bytes, U256, address, keccak256},
-    providers::Provider,
     rpc::types::{
         Log, TransactionInput, TransactionRequest,
         simulate::{SimBlock, SimCallResult, SimulatePayload},
@@ -304,13 +304,12 @@ pub async fn simulate_execution(
     // chain, and asking seven more endpoints returns the same answer more
     // slowly.
     let mut last = None;
-    let endpoints = crate::rpc::endpoint_order(network);
-    let mut remaining = endpoints.len();
-    for endpoint in endpoints {
+    let clients = crate::rpc::clients_for(network);
+    let mut remaining = clients.len();
+    for client in clients {
         remaining -= 1;
-        let provider = crate::rpc::provider_for(endpoint);
         let result = simulate_execution_through(
-            &provider,
+            client.as_ref(),
             wallet,
             network,
             plan,
@@ -336,7 +335,7 @@ pub async fn simulate_execution(
 }
 
 async fn simulate_execution_through(
-    provider: &alloy::providers::DynProvider,
+    client: &dyn ChainClient,
     wallet: &WalletMetadata,
     network: &NetworkConfig,
     plan: &ExecutionPlan,
@@ -347,7 +346,7 @@ async fn simulate_execution_through(
     let planned = planned_call(plan, wallet.address);
     let fork_calls: &[PlannedCall] = fork.map_or(&[], |preface| preface.calls.as_slice());
     let setup = tokio::time::timeout(RPC_SETUP_TIMEOUT, async {
-        let chain_id = provider.get_chain_id().await?;
+        let chain_id = client.chain_id().await?;
         // A fork already pinned its parent when it was created, and that
         // header can no longer change, so replay never re-reads it. A fresh
         // simulation reads the head from the endpoint that will run it; if
@@ -355,17 +354,13 @@ async fn simulate_execution_through(
         // own head.
         let block = match fork {
             Some(_) => None,
-            None => {
-                provider
-                    .get_block_by_number(BlockNumberOrTag::Latest)
-                    .await?
-            }
+            None => client.block_by_number(BlockNumberOrTag::Latest).await?,
         };
-        Ok::<_, alloy::transports::TransportError>((chain_id, block))
+        Ok::<_, anyhow::Error>((chain_id, block))
     })
     .await
     .context("simulation RPC setup timed out")
-    .and_then(|result| result.map_err(anyhow::Error::from));
+    .and_then(std::convert::identity);
     let (chain_id, parent) = match setup {
         Ok((chain_id, block)) => {
             let parent = match (fork, block) {
@@ -426,13 +421,13 @@ async fn simulate_execution_through(
     let block_id = BlockId::number(block_number);
     let pinned = tokio::time::timeout(RPC_SETUP_TIMEOUT, async {
         tokio::try_join!(
-            provider.get_code_at(wallet.address).block_id(block_id),
-            provider.get_balance(wallet.address).block_id(block_id),
+            client.code(wallet.address, block_id),
+            client.balance(wallet.address, block_id),
         )
     })
     .await
     .context("pinned simulation setup RPC timed out")
-    .and_then(|result| result.map_err(anyhow::Error::from));
+    .and_then(std::convert::identity);
     let (wallet_code, native_before) = match pinned {
         Ok(values) => values,
         Err(error) => {
@@ -457,13 +452,11 @@ async fn simulate_execution_through(
     let mut needs_override = false;
     let mut replaces = None;
     if batch_present {
-        let implementation_code = tokio::time::timeout(
-            RPC_SETUP_TIMEOUT,
-            provider.get_code_at(CANONICAL_CALIBUR).block_id(block_id),
-        )
-        .await
-        .context("Calibur-code RPC request timed out")
-        .and_then(|result| result.map_err(anyhow::Error::from));
+        let implementation_code =
+            tokio::time::timeout(RPC_SETUP_TIMEOUT, client.code(CANONICAL_CALIBUR, block_id))
+                .await
+                .context("Calibur-code RPC request timed out")
+                .and_then(std::convert::identity);
         let implementation_code = match implementation_code {
             Ok(code) => code,
             Err(error) => {
@@ -551,18 +544,21 @@ async fn simulate_execution_through(
     );
     let response = tokio::time::timeout(SIMULATION_TIMEOUT, async {
         let pre_balance_blocks = match &pre_balance_payload {
-            Some(payload) => Some(provider.simulate(payload).number(block_number).await?),
+            Some(payload) => Some(
+                client
+                    .simulate_v1(payload.clone(), Some(block_number))
+                    .await?,
+            ),
             None => None,
         };
-        let execution_blocks = provider
-            .simulate(&execution_payload)
-            .number(block_number)
+        let execution_blocks = client
+            .simulate_v1(execution_payload.clone(), Some(block_number))
             .await?;
-        Ok::<_, alloy::transports::TransportError>((pre_balance_blocks, execution_blocks))
+        Ok::<_, anyhow::Error>((pre_balance_blocks, execution_blocks))
     })
     .await
     .context("eth_simulateV1 request timed out")
-    .and_then(|result| result.map_err(anyhow::Error::from));
+    .and_then(std::convert::identity);
     let (pre_balance_blocks, blocks) = match response {
         Ok(blocks) => blocks,
         Err(error) => {

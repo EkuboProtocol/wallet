@@ -28,7 +28,6 @@
 
 use alloy::{
     primitives::{Address, U256, address},
-    providers::Provider,
     rpc::types::simulate::{SimBlock, SimulatePayload},
     sol,
     sol_types::SolCall,
@@ -433,9 +432,14 @@ struct Capabilities {
 }
 
 async fn capabilities(network: &NetworkConfig) -> Capabilities {
-    let provider = ekubo_wallet_core::rpc::provider_for(network.primary_rpc_url());
+    let client = ekubo_wallet_core::rpc::clients_for(network)
+        .into_iter()
+        .next()
+        .expect("shipped networks have an RPC client");
     let calibur = retrying("calibur code", || async {
-        Ok(provider.get_code_at(CANONICAL_CALIBUR).await?)
+        client
+            .code(CANONICAL_CALIBUR, alloy::eips::BlockId::latest())
+            .await
     })
     .await;
     let payload = SimulatePayload {
@@ -444,7 +448,7 @@ async fn capabilities(network: &NetworkConfig) -> Capabilities {
         validation: false,
         return_full_transactions: false,
     };
-    let simulate = match provider.simulate(&payload).await {
+    let simulate = match client.simulate_v1(payload, None).await {
         Ok(_) => true,
         Err(error) => {
             let text = error.to_string().to_ascii_lowercase();

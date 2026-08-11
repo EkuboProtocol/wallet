@@ -29,6 +29,7 @@
 //! token.
 
 use crate::{
+    chain_client::ChainClient,
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, execute_reads},
     policy_store::PolicyStore,
@@ -38,7 +39,6 @@ use alloy::{
     eips::BlockId,
     network::TransactionBuilder,
     primitives::{Address, U256, address},
-    providers::Provider,
     rpc::types::TransactionRequest,
     sol,
     sol_types::SolCall,
@@ -1035,7 +1035,7 @@ async fn fetch_nonzero_balances(
     tokens: &[Address],
     fork: Option<&ForkPreface>,
 ) -> Result<NonzeroBalances> {
-    crate::rpc::try_endpoints(network, |provider| async move {
+    crate::rpc::try_clients(network, |client| async move {
         // Every attempt re-verifies the chain, which is the rule the rest of
         // the failover paths keep and this one did not. Nothing further down
         // would have caught it: Multicall3 and the lens are deployed at the
@@ -1045,8 +1045,8 @@ async fn fetch_nonzero_balances(
         // fallback pointed at another EVM chain answered, and the result was
         // labelled with the configured network's name, chain ID, and a block
         // number from a chain nobody asked about.
-        crate::rpc::ensure_serving_chain(&provider, network.chain_id).await?;
-        nonzero_balances_through(network, &provider, owner, tokens, fork).await
+        crate::rpc::ensure_serving_chain(client.as_ref(), network.chain_id).await?;
+        nonzero_balances_through(network, client.as_ref(), owner, tokens, fork).await
     })
     .await
 }
@@ -1060,7 +1060,7 @@ async fn fetch_nonzero_balances(
 /// one wallet.
 async fn nonzero_balances_through(
     network: &NetworkConfig,
-    provider: &alloy::providers::DynProvider,
+    client: &dyn ChainClient,
     owner: Address,
     tokens: &[Address],
     fork: Option<&ForkPreface>,
@@ -1086,7 +1086,7 @@ async fn nonzero_balances_through(
             }
             .abi_encode(),
         ));
-        let results = aggregate(network, provider, calls, fork, pinned).await?;
+        let results = aggregate(network, client, calls, fork, pinned).await?;
         let mut results = results.into_iter();
         if index == 0 {
             let block = results.next().context("missing block number result")?;
@@ -1153,7 +1153,7 @@ async fn nonzero_balances_through(
                     }
                 })
                 .collect();
-            let results = aggregate(network, provider, calls, fork, pinned).await?;
+            let results = aggregate(network, client, calls, fork, pinned).await?;
             ensure!(
                 results.len() == chunk.len(),
                 "Multicall3 returned an unexpected result count"
@@ -1203,9 +1203,9 @@ fn call(target: Address, data: Vec<u8>) -> TokenCall3 {
 /// block number and every later batch is sent against it, so the number
 /// reported beside the balances is the number they were all read at. A fork
 /// read ignores it: `execute_reads` is already pinned to the fork's parent.
-async fn aggregate<P: Provider>(
+async fn aggregate(
     network: &NetworkConfig,
-    provider: &P,
+    client: &dyn ChainClient,
     calls: Vec<TokenCall3>,
     fork: Option<&ForkPreface>,
     block: Option<BlockId>,
@@ -1227,15 +1227,12 @@ async fn aggregate<P: Provider>(
         return aggregate3Call::abi_decode_returns(&result.return_data)
             .context("Multicall3 returned undecodable data");
     }
-    let pending = provider.call(request);
-    let pending = match block {
-        Some(block) => pending.block(block),
-        None => pending,
-    };
-    let bytes = tokio::time::timeout(RPC_TIMEOUT, pending)
-        .await
-        .context("Multicall3 request timed out")?
-        .map_err(|error| crate::rpc::rpc_error(&error).context("Multicall3 request failed"))?;
+    let bytes = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client.call(request, block.unwrap_or_else(BlockId::latest)),
+    )
+    .await
+    .context("Multicall3 request timed out")??;
     aggregate3Call::abi_decode_returns(&bytes).context("Multicall3 returned undecodable data")
 }
 

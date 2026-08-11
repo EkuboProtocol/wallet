@@ -79,7 +79,7 @@ fn stub_endpoint(chain_id: u64, block_number: u64) -> (Url, std::thread::JoinHan
 
 /// Like [`stub_endpoint`], but never closes the connection and counts how
 /// many distinct ones it accepts — proof, not assumption, that
-/// [`super::provider_for`] pools a connection per endpoint instead of dialing
+/// the RPC client pool reuses a connection per endpoint instead of dialing
 /// fresh on every call. Requests are answered one `read` at a time rather
 /// than framed by `Content-Length`, matching [`stub_endpoint`]'s own
 /// simplification: the `eth_chainId`/`eth_blockNumber` bodies this module
@@ -225,7 +225,7 @@ async fn a_successful_endpoint_ends_the_search() {
     assert_eq!(latest_block_number(&network).await.unwrap(), 100);
 }
 
-/// [`provider_for`] pools one provider per endpoint precisely so that
+/// The RPC adapter pools one client per endpoint precisely so that
 /// separate top-level reads — separate polls of
 /// `wallet_wait_for_execution`'s once-a-second confirmation loop, in
 /// production — reuse already-open connections instead of paying a fresh TCP
@@ -234,7 +234,7 @@ async fn a_successful_endpoint_ends_the_search() {
 /// `tokio::try_join!`, both against a pool that starts empty), which is the
 /// floor this test can prove against: without pooling, each of the five
 /// calls below would open its own two, for ten in total — proven by running
-/// this same assertion against the unpooled `provider_for` first and
+/// this same assertion against an unpooled client first and
 /// watching it fail with `left: 10`. With pooling, the second call onward
 /// finds both connections already idle in the pool, so the count stays at
 /// two for all five reads instead of growing with every one of them.

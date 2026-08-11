@@ -14,6 +14,7 @@ pub mod abi_decoder;
 pub mod address_book;
 pub mod approval;
 pub mod approval_summary;
+pub mod chain_client;
 pub mod clear_signing;
 pub mod config;
 pub mod core;

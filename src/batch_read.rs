@@ -5,19 +5,19 @@ use crate::{
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, MAX_FORK_READ_CALLS, execute_reads},
     plan_fetch::{ArtifactReference, ArtifactType, FetchPolicy, fetch_reference},
-    rpc::{MULTICALL3_ADDRESS, rpc_error},
+    rpc::MULTICALL3_ADDRESS,
 };
 use alloy::{
     consensus::BlockHeader,
     eips::{BlockId, BlockNumberOrTag},
     network::{TransactionBuilder, primitives::BlockResponse},
     primitives::{Address, Bytes},
-    providers::Provider,
     rpc::types::TransactionRequest,
     sol,
     sol_types::SolCall,
 };
 use anyhow::{Context, Result, ensure};
+use ekubo_wallet_core::chain_client::ChainClient;
 use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -325,9 +325,11 @@ pub async fn batch_eth_call(
     if let Some(preface) = fork {
         return fork_batch_eth_call(network, input, &calls, requested_caller, preface).await;
     }
-    ekubo_wallet_core::rpc::try_endpoints(network, |provider| {
+    ekubo_wallet_core::rpc::try_clients(network, |client| {
         let calls = &calls;
-        async move { batch_eth_call_through(network, input, calls, requested_caller, &provider).await }
+        async move {
+            batch_eth_call_through(network, input, calls, requested_caller, client.as_ref()).await
+        }
     })
     .await
 }
@@ -343,18 +345,17 @@ async fn batch_eth_call_through(
     input: &BatchEthCallInput,
     calls: &[NormalizedCall],
     requested_caller: Option<Address>,
-    provider: &alloy::providers::DynProvider,
+    client: &dyn ChainClient,
 ) -> Result<BatchEthCallOutput> {
     let setup = tokio::time::timeout(RPC_TIMEOUT, async {
         let (chain_id, block) = tokio::try_join!(
-            provider.get_chain_id(),
-            resolve_block(provider, &input.block_parameter),
+            client.chain_id(),
+            resolve_block(client, &input.block_parameter),
         )?;
-        Ok::<_, alloy::transports::TransportError>((chain_id, block))
+        Ok::<_, anyhow::Error>((chain_id, block))
     })
     .await
-    .context("batch read RPC setup timed out")?
-    .map_err(|error| rpc_error(&error))?;
+    .context("batch read RPC setup timed out")??;
     ensure!(
         setup.0 == network.chain_id,
         "RPC reports chain {}, not {}",
@@ -364,7 +365,7 @@ async fn batch_eth_call_through(
     let block = setup.1;
 
     if requested_caller.is_none()
-        && let Some(results) = try_multicall(provider, calls, block.call_id).await
+        && let Some(results) = try_multicall(client, calls, block.call_id).await
     {
         return Ok(BatchEthCallOutput {
             network: network.name.clone(),
@@ -403,11 +404,8 @@ async fn batch_eth_call_through(
                         .with_from(caller)
                         .with_to(call.to)
                         .with_input(call.data.clone());
-                    match tokio::time::timeout(
-                        RPC_TIMEOUT,
-                        provider.call(request).block(block.call_id),
-                    )
-                    .await
+                    match tokio::time::timeout(RPC_TIMEOUT, client.call(request, block.call_id))
+                        .await
                     {
                         // Fetched concurrently, decoded afterwards: the
                         // decode budget is one allowance for the whole
@@ -574,10 +572,7 @@ async fn fork_batch_eth_call(
     })
 }
 
-async fn resolve_block<P: Provider>(
-    provider: &P,
-    block_parameter: &str,
-) -> std::result::Result<ResolvedBlock, alloy::transports::TransportError> {
+async fn resolve_block(client: &dyn ChainClient, block_parameter: &str) -> Result<ResolvedBlock> {
     if let Some(quantity) = block_parameter.strip_prefix("0x") {
         let number = u64::from_str_radix(quantity, 16).expect("validated block quantity");
         return Ok(ResolvedBlock {
@@ -594,37 +589,37 @@ async fn resolve_block<P: Provider>(
         _ => unreachable!("validated block parameter"),
     };
     if tag == BlockNumberOrTag::Latest {
-        let number = provider.get_block_number().await?;
+        let number = client.block_number().await?;
         return Ok(ResolvedBlock {
             number,
             call_id: BlockId::number(number),
         });
     }
-    let block = provider.get_block_by_number(tag).await?;
+    let block = client.block_by_number(tag).await?;
     if tag == BlockNumberOrTag::Pending {
         let number = if let Some(block) = block {
             block.header().number()
         } else {
-            provider.get_block_number().await?
+            client.block_number().await?
         };
         return Ok(ResolvedBlock {
             number,
             call_id: BlockId::pending(),
         });
     }
-    let number = block.map(|block| block.header().number()).ok_or_else(|| {
-        alloy::transports::TransportErrorKind::custom_str(&format!(
-            "eth_call block tag {block_parameter} did not resolve to a block"
-        ))
-    })?;
+    let number = block
+        .map(|block| block.header().number())
+        .with_context(|| {
+            format!("eth_call block tag {block_parameter} did not resolve to a block")
+        })?;
     Ok(ResolvedBlock {
         number,
         call_id: BlockId::number(number),
     })
 }
 
-async fn try_multicall<P: Provider>(
-    provider: &P,
+async fn try_multicall(
+    client: &dyn ChainClient,
     calls: &[NormalizedCall],
     block_id: BlockId,
 ) -> Option<Vec<BatchCallResult>> {
@@ -642,7 +637,7 @@ async fn try_multicall<P: Provider>(
     let request = TransactionRequest::default()
         .with_to(MULTICALL3_ADDRESS)
         .with_input(encoded);
-    let response = tokio::time::timeout(RPC_TIMEOUT, provider.call(request).block(block_id))
+    let response = tokio::time::timeout(RPC_TIMEOUT, client.call(request, block_id))
         .await
         .ok()?
         .ok()?;
