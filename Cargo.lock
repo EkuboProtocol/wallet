@@ -3229,6 +3229,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui_macos",
  "gpui_platform",
  "gpui_tokio",

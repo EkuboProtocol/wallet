@@ -571,7 +571,11 @@ impl OwnerApi {
     }
 
     pub fn remove_token(&self, chain_id: u64, address: Address) -> Result<bool> {
-        TokenStore::production(self.config.data_dir())?.remove(chain_id, address)
+        let removed = TokenStore::production(self.config.data_dir())?.remove(chain_id, address)?;
+        if removed {
+            self.events.publish(DomainEventKind::ConfigurationChanged);
+        }
+        Ok(removed)
     }
 
     pub fn address_book(
@@ -595,7 +599,10 @@ impl OwnerApi {
                 alias: alias.to_owned(),
             })
             .await?;
-        AddressBookStore::production(self.config.data_dir())?.upsert(chain_id, alias, address, note)
+        let saved = AddressBookStore::production(self.config.data_dir())?
+            .upsert(chain_id, alias, address, note)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(saved)
     }
 
     pub async fn remove_address(&self, chain_id: u64, alias: &str) -> Result<AddressBookEntry> {
@@ -604,7 +611,10 @@ impl OwnerApi {
                 alias: alias.to_owned(),
             })
             .await?;
-        AddressBookStore::production(self.config.data_dir())?.remove(chain_id, alias)
+        let removed =
+            AddressBookStore::production(self.config.data_dir())?.remove(chain_id, alias)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(removed)
     }
 
     pub fn legal_status(&self) -> Result<LegalStatus> {

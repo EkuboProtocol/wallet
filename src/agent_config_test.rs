@@ -87,3 +87,14 @@ fn repair_diffs_can_hide_a_token_without_changing_installed_bytes() {
     assert_eq!(preview.exact_diff(), "+Bearer <redacted-token>");
     assert_eq!(preview.after, format!("Bearer {TOKEN}"));
 }
+
+#[test]
+fn automatic_upserts_skip_files_that_are_already_exact() {
+    let preview = ConfigPreview {
+        path: PathBuf::from("mcp.json"),
+        before: "same".into(),
+        after: "same".into(),
+        diff: String::new(),
+    };
+    assert!(!preview.has_changes());
+}

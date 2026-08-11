@@ -39,6 +39,11 @@ impl ConfigPreview {
         &self.diff
     }
 
+    #[must_use]
+    pub fn has_changes(&self) -> bool {
+        self.before != self.after
+    }
+
     /// Conceal a bearer token in the human-facing diff while retaining it in
     /// the in-memory document that will be atomically installed.
     pub fn redact_diff_secret(&mut self, secret: &str) {

@@ -20,15 +20,15 @@ use ekubo_wallet_core::approval::ReviewDecision;
 use ekubo_wallet_core::core::policy::WalletPolicy;
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::AgentKind;
-use ekubo_wallet_core::legal::LegalDocument;
+use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::pending::PendingStatus;
 use gpui::{
-    App, ClipboardItem, Context, Entity, KeyBinding, QuitMode, Render, SharedString, Window,
-    WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*, px,
-    size,
+    App, ClipboardItem, Context, Entity, KeyBinding, MouseButton, QuitMode, Render, SharedString,
+    Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, prelude::*,
+    px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Root, StyledExt,
+    ActiveTheme, Disableable, IconName, Root, StyledExt,
     button::{Button, ButtonVariants},
     input::{Input, InputState},
     scroll::ScrollableElement,
@@ -51,6 +51,79 @@ struct DesktopRuntime {
 }
 
 impl gpui::Global for DesktopRuntime {}
+
+fn next_required_legal(status: &LegalStatus) -> Option<LegalDocument> {
+    if !status.terms_of_service.accepted {
+        Some(LegalDocument::TermsOfService)
+    } else if !status.privacy_policy.accepted {
+        Some(LegalDocument::PrivacyPolicy)
+    } else {
+        None
+    }
+}
+
+fn upsert_detected_agents(owner: &OwnerApi, port: u16) -> Result<String> {
+    let clients = owner.clients()?;
+    let mut detected = 0_usize;
+    let mut changed = 0_usize;
+    let mut failures = Vec::new();
+    for adapter in AgentAdapter::supported()?
+        .into_iter()
+        .filter(AgentAdapter::detected)
+    {
+        detected += 1;
+        let existing = clients
+            .iter()
+            .rev()
+            .find(|client| client.agent_kind == adapter.kind && client.revoked_at.is_none());
+        let install_companion = existing
+            .and_then(|client| client.registration.as_ref())
+            .and_then(|registration| registration["install_companion"].as_bool())
+            .unwrap_or(true);
+        let mut created_client = None;
+        let token = if let Some(client) = existing {
+            owner.repair_client_token(client.id)
+        } else {
+            let registration = serde_json::json!({
+                "config_path": adapter.config_path,
+                "install_companion": install_companion,
+            });
+            owner
+                .register_client(adapter.display_name, adapter.kind, Some(&registration))
+                .map(|registered| {
+                    created_client = Some(registered.client.id);
+                    registered.token
+                })
+        };
+        let result = token.and_then(|token| {
+            let token = zeroize::Zeroizing::new(token.expose_base64url());
+            let preview = adapter.preview_install(port, &token, install_companion)?;
+            if preview.has_changes() {
+                preview.install()?;
+                changed += 1;
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            if let Some(client_id) = created_client {
+                let _ = owner.remove_client(client_id);
+            }
+            failures.push(format!("{}: {error:#}", adapter.display_name));
+        }
+    }
+    ensure!(
+        failures.is_empty(),
+        "some detected agent configurations could not be updated: {}",
+        failures.join("; ")
+    );
+    if detected == 0 {
+        Ok("No supported agent installations were detected.".into())
+    } else {
+        Ok(format!(
+            "MCP server is installed for {detected} detected agent(s); {changed} configuration file(s) changed."
+        ))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -88,7 +161,7 @@ impl Route {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Overview => "Overview",
+            Self::Overview => "Portfolio",
             Self::Reviews => "Reviews",
             Self::Activity => "Activity",
             Self::Accounts => "Accounts",
@@ -101,6 +174,24 @@ impl Route {
             Self::Settings => "Settings",
             Self::Legal => "Legal & Version",
             Self::Updates => "Updates",
+        }
+    }
+
+    const fn icon(self) -> IconName {
+        match self {
+            Self::Overview => IconName::LayoutDashboard,
+            Self::Reviews => IconName::Inbox,
+            Self::Activity => IconName::Frame,
+            Self::Accounts => IconName::User,
+            Self::Policies => IconName::Inspector,
+            Self::Networks => IconName::Network,
+            Self::Tokens => IconName::Star,
+            Self::AddressBook => IconName::BookOpen,
+            Self::Agents => IconName::Bot,
+            Self::WalletConnect => IconName::Globe,
+            Self::Settings => IconName::Settings,
+            Self::Legal => IconName::Info,
+            Self::Updates => IconName::ArrowDown,
         }
     }
 }
@@ -118,10 +209,16 @@ pub struct WalletWindow {
     private_key_input: Option<Entity<InputState>>,
     account_export: Option<AccountExport>,
     legal_review: Option<LegalReview>,
+    legal_gate: bool,
     operation_status: Option<SharedString>,
+    nav_collapsed: bool,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
+    address_chain_input: Option<Entity<InputState>>,
+    address_alias_input: Option<Entity<InputState>>,
+    address_value_input: Option<Entity<InputState>>,
+    address_note_input: Option<Entity<InputState>>,
 }
 
 struct LegalReview {
@@ -147,9 +244,6 @@ struct PendingAgentInstall {
 
 #[derive(Clone, Copy)]
 enum AgentConfigCompletion {
-    Register {
-        client_id: uuid::Uuid,
-    },
     Repair,
     Rotate {
         previous_client_id: uuid::Uuid,
@@ -164,8 +258,7 @@ impl Drop for PendingAgentInstall {
     fn drop(&mut self) {
         if !self.committed {
             match self.completion {
-                AgentConfigCompletion::Register { client_id }
-                | AgentConfigCompletion::Rotate {
+                AgentConfigCompletion::Rotate {
                     replacement_client_id: client_id,
                     ..
                 } => {
@@ -211,7 +304,7 @@ impl WalletWindow {
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
     ) -> Self {
-        Self {
+        let mut window = Self {
             owner,
             review_presenter,
             route: Route::Overview,
@@ -224,11 +317,19 @@ impl WalletWindow {
             private_key_input: None,
             account_export: None,
             legal_review: None,
+            legal_gate: false,
             operation_status: None,
+            nav_collapsed: true,
             walletconnect,
             walletconnect_presenter,
             walletconnect_uri_input: None,
-        }
+            address_chain_input: None,
+            address_alias_input: None,
+            address_value_input: None,
+            address_note_input: None,
+        };
+        window.open_next_required_legal();
+        window
     }
 
     fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -247,6 +348,17 @@ impl WalletWindow {
         if self.walletconnect_uri_input.is_none() {
             self.walletconnect_uri_input =
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("wc: pairing URI")));
+        }
+        if self.address_chain_input.is_none() {
+            self.address_chain_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("Decimal chain ID")));
+            self.address_alias_input = Some(
+                cx.new(|cx| InputState::new(window, cx).placeholder("Alias, for example alice")),
+            );
+            self.address_value_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("0x address")));
+            self.address_note_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("Optional note")));
         }
     }
 
@@ -502,6 +614,23 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn open_next_required_legal(&mut self) {
+        let document = match self.owner.legal_status() {
+            Ok(status) => next_required_legal(&status),
+            Err(_) => Some(LegalDocument::TermsOfService),
+        };
+        self.legal_gate = document.is_some();
+        self.legal_review = document.map(|document| {
+            let (text, digest) = self.owner.legal_document(document);
+            LegalReview {
+                document,
+                text,
+                digest,
+                viewed: false,
+            }
+        });
+    }
+
     fn mark_legal_viewed(&mut self, cx: &mut Context<Self>) {
         if let Some(review) = self.legal_review.as_mut() {
             review.viewed = true;
@@ -522,8 +651,35 @@ impl WalletWindow {
                 Err(error) => format!("Could not accept document: {error:#}").into(),
             },
         );
-        self.legal_review = None;
+        self.open_next_required_legal();
+        if !self.legal_gate
+            && let Ok(Some(port)) = self.owner.mcp_port()
+        {
+            self.reinstall_detected_agents(port, cx);
+        }
         cx.notify();
+    }
+
+    fn reinstall_detected_agents(&mut self, port: u16, cx: &mut Context<Self>) {
+        self.operation_status = Some(match upsert_detected_agents(&self.owner, port) {
+            Ok(summary) => summary.into(),
+            Err(error) => format!("Could not reinstall MCP server: {error:#}").into(),
+        });
+        cx.notify();
+    }
+
+    fn reinstall_detected_agents_from_menu(&mut self, cx: &mut Context<Self>) {
+        match self.owner.mcp_port() {
+            Ok(Some(port)) => self.reinstall_detected_agents(port, cx),
+            Ok(None) => {
+                self.operation_status = Some("MCP is still selecting its loopback port.".into());
+                cx.notify();
+            }
+            Err(error) => {
+                self.operation_status = Some(format!("Could not read MCP port: {error:#}").into());
+                cx.notify();
+            }
+        }
     }
 
     fn discard_unsent_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
@@ -542,61 +698,95 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn prepare_agent_install(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
-        if self.pending_agent_install.is_some() {
-            self.operation_status = Some("Finish the current agent installation first.".into());
-            cx.notify();
+    fn remove_token(
+        &mut self,
+        chain_id: u64,
+        address: alloy::primitives::Address,
+        cx: &mut Context<Self>,
+    ) {
+        self.operation_status = Some(match self.owner.remove_token(chain_id, address) {
+            Ok(true) => "Removed token metadata.".into(),
+            Ok(false) => "Token metadata was already absent.".into(),
+            Err(error) => format!("Could not remove token: {error:#}").into(),
+        });
+        cx.notify();
+    }
+
+    fn save_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(chain), Some(alias), Some(address), Some(note)) = (
+            self.address_chain_input.as_ref(),
+            self.address_alias_input.as_ref(),
+            self.address_value_input.as_ref(),
+            self.address_note_input.as_ref(),
+        ) else {
             return;
+        };
+        let chain_id = chain.read(cx).value().trim().parse::<u64>();
+        let alias_value = alias.read(cx).value().trim().to_owned();
+        let address_value = address
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<alloy::primitives::Address>();
+        let note_value = note.read(cx).value().trim().to_owned();
+        let (chain_id, address_value) = match (chain_id, address_value) {
+            (Ok(chain_id), Ok(address)) => (chain_id, address),
+            (Err(error), _) => {
+                self.operation_status = Some(format!("Invalid chain ID: {error}").into());
+                cx.notify();
+                return;
+            }
+            (_, Err(error)) => {
+                self.operation_status = Some(format!("Invalid address: {error}").into());
+                cx.notify();
+                return;
+            }
+        };
+        for input in [Some(alias), Some(address), Some(note)]
+            .into_iter()
+            .flatten()
+        {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
         }
-        let result = (|| -> Result<PendingAgentInstall> {
-            let adapter = AgentAdapter::supported()?
-                .into_iter()
-                .find(|adapter| adapter.kind == kind)
-                .context("the selected agent is not supported")?;
-            ensure!(
-                adapter.detected(),
-                "the selected agent is no longer detected"
-            );
-            let port = self
-                .owner
-                .mcp_port()?
-                .context("the MCP server has not selected its loopback port yet")?;
-            let registration = serde_json::json!({
-                "config_path": adapter.config_path,
-                "install_companion": true,
+        let owner = self.owner.clone();
+        cx.spawn(async move |view, cx| {
+            let result = owner
+                .save_address(
+                    chain_id,
+                    &alias_value,
+                    address_value,
+                    (!note_value.is_empty()).then_some(note_value.as_str()),
+                )
+                .await;
+            let _ = view.update(cx, |view, cx| {
+                view.operation_status = Some(match result {
+                    Ok(entry) => format!(
+                        "Saved {} as {} on chain {}.",
+                        entry.address, entry.alias, entry.chain_id
+                    )
+                    .into(),
+                    Err(error) => format!("Could not save address: {error:#}").into(),
+                });
+                cx.notify();
             });
-            let registered = self.owner.register_client(
-                adapter.display_name,
-                adapter.kind,
-                Some(&registration),
-            )?;
-            let client_id = registered.client.id;
-            let token = registered.token.expose_base64url();
-            let preview = match adapter.preview_install(port, &token, true) {
-                Ok(preview) => preview,
-                Err(error) => {
-                    let _ = self.owner.remove_client(client_id);
-                    return Err(error);
-                }
-            };
-            Ok(PendingAgentInstall {
-                display_name: adapter.display_name.to_owned(),
-                preview: Some(preview),
-                owner: self.owner.clone(),
-                completion: AgentConfigCompletion::Register { client_id },
-                committed: false,
-            })
-        })();
-        match result {
-            Ok(pending) => {
-                self.pending_agent_install = Some(pending);
-                self.operation_status = None;
-            }
-            Err(error) => {
-                self.operation_status =
-                    Some(format!("Could not prepare agent installation: {error:#}").into());
-            }
-        }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn remove_address(&mut self, chain_id: u64, alias: String, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        cx.spawn(async move |view, cx| {
+            let result = owner.remove_address(chain_id, &alias).await;
+            let _ = view.update(cx, |view, cx| {
+                view.operation_status = Some(match result {
+                    Ok(_) => format!("Removed {alias} from chain {chain_id}.").into(),
+                    Err(error) => format!("Could not remove address: {error:#}").into(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -734,9 +924,7 @@ impl WalletWindow {
             Ok(backup) => {
                 pending.committed = true;
                 let database_result = match pending.completion {
-                    AgentConfigCompletion::Register { .. } | AgentConfigCompletion::Repair => {
-                        Ok(())
-                    }
+                    AgentConfigCompletion::Repair => Ok(()),
                     AgentConfigCompletion::Rotate {
                         previous_client_id, ..
                     }
@@ -926,7 +1114,10 @@ impl WalletWindow {
                 self.active_review = None;
                 self.operation_status = Some("Review closed. The request remains pending.".into());
             }
-            (GuiReviewCommand::Close, Some(ActiveReviewCompletion::AccountRemoval { .. })) => {
+            (
+                GuiReviewCommand::Close | GuiReviewCommand::Reject,
+                Some(ActiveReviewCompletion::AccountRemoval { .. }),
+            ) => {
                 self.active_review = None;
                 self.operation_status = Some("Account removal cancelled.".into());
             }
@@ -983,10 +1174,6 @@ impl WalletWindow {
                     });
                 })
                 .detach();
-            }
-            (GuiReviewCommand::Reject, Some(ActiveReviewCompletion::AccountRemoval { .. })) => {
-                self.active_review = None;
-                self.operation_status = Some("Account removal cancelled.".into());
             }
             (
                 GuiReviewCommand::Approve,
@@ -1054,13 +1241,18 @@ impl WalletWindow {
     }
 
     fn toggle_palette(&mut self, _: &OpenCommandPalette, _: &mut Window, cx: &mut Context<Self>) {
+        if self.legal_gate {
+            return;
+        }
         self.command_palette = !self.command_palette;
         cx.notify();
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapsed = self.nav_collapsed;
         let mut sidebar = div()
-            .w(px(184.0))
+            .w(if collapsed { px(60.0) } else { px(196.0) })
+            .flex_shrink_0()
             .h_full()
             .flex()
             .flex_col()
@@ -1068,12 +1260,41 @@ impl WalletWindow {
             .p_3()
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(div().text_lg().font_semibold().mb_3().child("Ekubo Wallet"));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .mb_3()
+                    .when(!collapsed, |header| {
+                        header.child(div().text_lg().font_semibold().child("Ekubo Wallet"))
+                    })
+                    .child(
+                        Button::new("toggle-navigation")
+                            .icon(if collapsed {
+                                IconName::PanelLeftOpen
+                            } else {
+                                IconName::PanelLeftClose
+                            })
+                            .tooltip(if collapsed {
+                                "Expand navigation"
+                            } else {
+                                "Collapse navigation"
+                            })
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.nav_collapsed = !view.nav_collapsed;
+                                cx.notify();
+                            })),
+                    ),
+            );
         for route in Route::ALL {
             let selected = route == self.route;
             sidebar = sidebar.child(
                 Button::new(SharedString::from(format!("route-{route:?}")))
-                    .label(route.label())
+                    .icon(route.icon())
+                    .tooltip(route.label())
+                    .when(!collapsed, |button| button.label(route.label()))
+                    .disabled(self.legal_gate)
                     .when(selected, ButtonVariants::primary)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.route = route;
@@ -1082,7 +1303,18 @@ impl WalletWindow {
                     })),
             );
         }
-        sidebar
+        sidebar.child(
+            div().mt_auto().child(
+                Button::new("reinstall-all-agents")
+                    .icon(IconName::Redo2)
+                    .tooltip("Reinstall MCP server for every detected agent")
+                    .when(!collapsed, |button| button.label("Reinstall MCP server"))
+                    .disabled(self.legal_gate)
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.reinstall_detected_agents_from_menu(cx);
+                    })),
+            ),
+        )
     }
 
     fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1227,10 +1459,9 @@ impl WalletWindow {
         let mut detected = 0;
         for adapter in adapters.into_iter().filter(AgentAdapter::detected) {
             detected += 1;
-            let kind = adapter.kind;
             let installed = clients
                 .iter()
-                .any(|client| client.agent_kind == kind && client.revoked_at.is_none());
+                .any(|client| client.agent_kind == adapter.kind && client.revoked_at.is_none());
             panel = panel.child(
                 div()
                     .py_2()
@@ -1248,12 +1479,14 @@ impl WalletWindow {
                         ),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("install-agent-{kind:?}")))
-                            .label(if installed { "Installed" } else { "Install" })
-                            .disabled(installed || self.pending_agent_install.is_some())
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.prepare_agent_install(kind, cx);
-                            })),
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if installed {
+                                "Automatically managed"
+                            } else {
+                                "Will install after legal acceptance"
+                            }),
                     ),
             );
         }
@@ -1514,6 +1747,93 @@ impl WalletWindow {
         }))
     }
 
+    fn render_address_book(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut panel = div()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().font_semibold().child("Add or update an address"));
+        if let (Some(chain), Some(alias), Some(address), Some(note)) = (
+            self.address_chain_input.as_ref(),
+            self.address_alias_input.as_ref(),
+            self.address_value_input.as_ref(),
+            self.address_note_input.as_ref(),
+        ) {
+            panel = panel
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Input::new(chain).flex_1())
+                        .child(Input::new(alias).flex_1()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Input::new(address).flex_1())
+                        .child(Input::new(note).flex_1())
+                        .child(
+                            Button::new("save-address")
+                                .label("Authenticate & save")
+                                .primary()
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.save_address(window, cx);
+                                })),
+                        ),
+                );
+        }
+        panel = panel.child(div().mt_3().font_semibold().child("Saved addresses"));
+        match self.owner.address_book(None, 500, 0) {
+            Ok(items) if items.is_empty() => panel.child("No saved addresses."),
+            Ok(items) => panel.children(items.into_iter().map(|item| {
+                let chain_id = item.chain_id.parse::<u64>().ok();
+                let alias = item.alias.clone();
+                div()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .child(format!(
+                                "{} · chain {} · {}",
+                                item.alias, item.chain_id, item.address
+                            ))
+                            .when_some(item.note, |row, note| {
+                                row.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(note),
+                                )
+                            }),
+                    )
+                    .when_some(chain_id, |row, chain_id| {
+                        row.child(
+                            Button::new(SharedString::from(format!(
+                                "remove-address-{chain_id}-{alias}"
+                            )))
+                            .label("Remove")
+                            .danger()
+                            .on_click(cx.listener(
+                                move |view, _, _, cx| {
+                                    view.remove_address(chain_id, alias.clone(), cx);
+                                },
+                            )),
+                        )
+                    })
+            })),
+            Err(error) => panel.child(format!("Address book unavailable: {error:#}")),
+        }
+    }
+
     fn route_panel(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
@@ -1606,42 +1926,41 @@ impl WalletWindow {
                 })),
                 Err(error) => panel.child(format!("Networks unavailable: {error:#}")),
             },
-            Route::Tokens => match self.owner.tokens(None, 500, 0) {
-                Ok(items) => panel.children(items.into_iter().map(|item| {
-                    div()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(format!(
-                            "{} · chain {} · {}",
-                            item.symbol.as_deref().unwrap_or("Unnamed token"),
-                            item.chain_id,
-                            item.address
-                        ))
-                })),
-                Err(error) => panel.child(format!("Tokens unavailable: {error:#}")),
-            },
-            Route::AddressBook => match self.owner.address_book(None, 500, 0) {
-                Ok(items) => panel.children(items.into_iter().map(|item| {
-                    div()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(format!(
-                            "{} · chain {} · {}",
-                            item.alias, item.chain_id, item.address
-                        ))
-                        .when_some(item.note, |row, note| {
-                            row.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(note),
-                            )
-                        })
-                })),
-                Err(error) => panel.child(format!("Address book unavailable: {error:#}")),
-            },
+            Route::Tokens => {
+                match self.owner.tokens(None, 500, 0) {
+                    Ok(items) => panel.children(items.into_iter().map(|item| {
+                        let chain_id = item.chain_id.parse::<u64>().ok();
+                        let address = item.address.parse::<alloy::primitives::Address>().ok();
+                        div()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(format!(
+                                "{} · chain {} · {}",
+                                item.symbol.as_deref().unwrap_or("Unnamed token"),
+                                item.chain_id,
+                                item.address
+                            ))
+                            .when_some(chain_id.zip(address), |row, (chain_id, address)| {
+                                row.child(
+                                    Button::new(SharedString::from(format!(
+                                        "remove-token-{chain_id}-{address}"
+                                    )))
+                                    .label("Remove")
+                                    .danger()
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.remove_token(chain_id, address, cx);
+                                    })),
+                                )
+                            })
+                    })),
+                    Err(error) => panel.child(format!("Tokens unavailable: {error:#}")),
+                }
+            }
+            Route::AddressBook => self.render_address_book(cx),
             Route::Agents => {
                 match self.owner.clients() {
                     Ok(items) => panel.children(items.into_iter().map(|item| {
@@ -1854,7 +2173,8 @@ impl WalletWindow {
 
         div()
             .absolute()
-            .inset_4()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
             .rounded_lg()
             .border_1()
@@ -1963,7 +2283,8 @@ impl WalletWindow {
         };
         div()
             .absolute()
-            .inset_4()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
             .rounded_lg()
             .border_1()
@@ -2026,7 +2347,8 @@ impl WalletWindow {
         let informational = review.document == LegalDocument::ThirdPartyLicenses;
         div()
             .absolute()
-            .inset_4()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
             .rounded_lg()
             .border_1()
@@ -2059,9 +2381,12 @@ impl WalletWindow {
                     .child(
                         Button::new("close-legal-review")
                             .label("Close")
+                            .disabled(self.legal_gate)
                             .on_click(cx.listener(|view, _, _, cx| {
-                                view.legal_review = None;
-                                cx.notify();
+                                if !view.legal_gate {
+                                    view.legal_review = None;
+                                    cx.notify();
+                                }
                             })),
                     )
                     .child(
@@ -2171,11 +2496,13 @@ impl WalletWindow {
     fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .p_5()
             .flex()
             .flex_col()
             .gap_4()
+            .overflow_y_scrollbar()
             .child(
                 div()
                     .flex()
@@ -2282,12 +2609,17 @@ fn show_wallet_window(
         view.account_id_input = None;
         view.private_key_input = None;
         view.walletconnect_uri_input = None;
+        view.address_chain_input = None;
+        view.address_alias_input = None;
+        view.address_value_input = None;
+        view.address_note_input = None;
         cx.notify();
     });
     let root_view = wallet_view.clone();
     let window_handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(960.0), px(650.0)), cx)),
+            window_min_size: Some(size(px(720.0), px(520.0))),
             ..Default::default()
         },
         |window, cx| {
@@ -2320,299 +2652,312 @@ pub fn run_desktop() -> Result<()> {
     let (review_presenter, mut review_prompts) = GuiReviewPresenter::channel();
     let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
 
-    gpui_platform::application().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        gpui_tokio::init(cx);
-        cx.set_quit_mode(QuitMode::Explicit);
-        let tray = Rc::new(RefCell::new(
-            PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
-        ));
-        let initial_agents = owner.clients().map_or(0, |clients| clients.len());
-        if let Some(tray) = tray.borrow_mut().as_mut() {
-            tray.update(&TraySnapshot {
-                pending_reviews: 0,
-                mcp_online: false,
-                connected_agents: initial_agents,
-                walletconnect_sessions: 0,
-            });
-        }
-        cx.set_global(DesktopRuntime {
-            _instance: instance,
-            _server: server_slot.clone(),
-            _walletconnect: walletconnect.clone(),
-            _tray: tray.clone(),
-        });
-        cx.bind_keys([
-            KeyBinding::new("cmd-k", OpenCommandPalette, Some("Wallet")),
-            KeyBinding::new("ctrl-k", OpenCommandPalette, Some("Wallet")),
-            #[cfg(target_os = "macos")]
-            KeyBinding::new("cmd-q", Quit, None),
-            #[cfg(not(target_os = "macos"))]
-            KeyBinding::new("ctrl-q", Quit, None),
-        ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
-        let shutdown_server = server_slot.clone();
-        let shutdown_walletconnect = walletconnect.clone();
-        let tokio = gpui_tokio::Tokio::handle(cx);
-        cx.on_app_quit(move |_| {
-            if let Ok(mut sessions) = shutdown_walletconnect.lock() {
-                sessions.disconnect_all();
+    gpui_platform::application()
+        .with_assets(gpui_component_assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            gpui_tokio::init(cx);
+            cx.set_quit_mode(QuitMode::Explicit);
+            let tray = Rc::new(RefCell::new(
+                PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
+            ));
+            let initial_agents = owner.clients().map_or(0, |clients| clients.len());
+            if let Some(tray) = tray.borrow_mut().as_mut() {
+                tray.update(&TraySnapshot {
+                    pending_reviews: 0,
+                    mcp_online: false,
+                    connected_agents: initial_agents,
+                    walletconnect_sessions: 0,
+                });
             }
-            let server = shutdown_server
+            cx.set_global(DesktopRuntime {
+                _instance: instance,
+                _server: server_slot.clone(),
+                _walletconnect: walletconnect.clone(),
+                _tray: tray.clone(),
+            });
+            cx.bind_keys([
+                KeyBinding::new("cmd-k", OpenCommandPalette, Some("Wallet")),
+                KeyBinding::new("ctrl-k", OpenCommandPalette, Some("Wallet")),
+                #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-q", Quit, None),
+                #[cfg(not(target_os = "macos"))]
+                KeyBinding::new("ctrl-q", Quit, None),
+            ]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
+            let shutdown_server = server_slot.clone();
+            let shutdown_walletconnect = walletconnect.clone();
+            let tokio = gpui_tokio::Tokio::handle(cx);
+            cx.on_app_quit(move |_| {
+                if let Ok(mut sessions) = shutdown_walletconnect.lock() {
+                    sessions.disconnect_all();
+                }
+                let server = shutdown_server
+                    .lock()
+                    .ok()
+                    .and_then(|mut server| server.take());
+                let tokio = tokio.clone();
+                async move {
+                    if let Some(server) = server {
+                        let _ = tokio.spawn(server.stop()).await;
+                    }
+                }
+            })
+            .detach();
+
+            let wallet_view = cx.new(|_| {
+                WalletWindow::new(
+                    owner.clone(),
+                    review_presenter.clone(),
+                    walletconnect.clone(),
+                    walletconnect_presenter.clone(),
+                )
+            });
+            let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
+            show_wallet_window(cx, &wallet_view, &window_slot)
+                .expect("failed to open the wallet window");
+            let review_view = wallet_view.clone();
+            let review_window = window_slot.clone();
+            cx.spawn(async move |cx| {
+                while let Some(prompt) = review_prompts.recv().await {
+                    review_view.update(cx, |view, cx| {
+                        view.install_review_prompt(prompt);
+                        view.route = Route::Reviews;
+                        cx.notify();
+                    });
+                    let _ = cx.update(|cx| show_wallet_window(cx, &review_view, &review_window));
+                }
+            })
+            .detach();
+            let walletconnect_review_view = wallet_view.clone();
+            let walletconnect_review_window = window_slot.clone();
+            cx.spawn(async move |cx| {
+                while let Some(prompt) = walletconnect_prompts.recv().await {
+                    walletconnect_review_view.update(cx, |view, cx| {
+                        view.install_walletconnect_prompt(prompt);
+                        view.route = Route::WalletConnect;
+                        cx.notify();
+                    });
+                    let _ = cx.update(|cx| {
+                        show_wallet_window(
+                            cx,
+                            &walletconnect_review_view,
+                            &walletconnect_review_window,
+                        )
+                    });
+                }
+            })
+            .detach();
+            let mut view_events = events.subscribe();
+            let event_view = wallet_view.clone();
+            let event_owner = owner.clone();
+            let event_tray = tray.clone();
+            let event_walletconnect = walletconnect.clone();
+            cx.spawn(async move |cx| {
+                let mut mcp_online = false;
+                loop {
+                    let changed = match view_events.recv().await {
+                        Ok(event) => {
+                            if let crate::events::DomainEventKind::McpStatusChanged { online } =
+                                event.kind
+                            {
+                                mcp_online = online;
+                            }
+                            true
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+                    };
+                    if changed {
+                        let pending_reviews = event_owner.reviews(None).map_or(0, |queues| {
+                            queues.transactions.len()
+                                + queues.typed_data.len()
+                                + queues.messages.len()
+                        });
+                        let connected_agents =
+                            event_owner.clients().map_or(0, |clients| clients.len());
+                        let walletconnect_sessions = event_walletconnect
+                            .lock()
+                            .map_or(0, |sessions| sessions.sessions().len());
+                        if let Some(tray) = event_tray.borrow_mut().as_mut() {
+                            tray.update(&TraySnapshot {
+                                pending_reviews,
+                                mcp_online,
+                                connected_agents,
+                                walletconnect_sessions,
+                            });
+                        }
+                        event_view.update(cx, |_, cx| cx.notify());
+                    } else {
+                        break;
+                    }
+                }
+            })
+            .detach();
+            let tray_events = tray.clone();
+            let tray_window = window_slot.clone();
+            let tray_view = wallet_view.clone();
+            cx.spawn(async move |cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
+                    let dark_mode = cx.update(|cx| dark_appearance(cx.window_appearance()));
+                    if let Some(tray) = tray_events.borrow_mut().as_mut() {
+                        tray.set_dark_mode(dark_mode);
+                    }
+                    let commands = tray_events
+                        .borrow_mut()
+                        .as_mut()
+                        .map_or_else(Vec::new, TrayService::drain_commands);
+                    for command in commands {
+                        match command {
+                            TrayCommand::OpenWallet => {
+                                let _ = cx
+                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                            }
+                            TrayCommand::OpenRoute(route) => {
+                                tray_view.update(cx, |view, cx| {
+                                    view.route = route;
+                                    cx.notify();
+                                });
+                                let _ = cx
+                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                            }
+                            TrayCommand::ConnectDapp => {
+                                tray_view.update(cx, |view, cx| {
+                                    view.route = Route::WalletConnect;
+                                    cx.notify();
+                                });
+                                let _ = cx
+                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                            }
+                            TrayCommand::CheckForUpdates => {
+                                tray_view.update(cx, |view, cx| {
+                                    view.route = Route::Updates;
+                                    cx.notify();
+                                });
+                                let _ = cx
+                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                            }
+                            TrayCommand::Quit => {
+                                cx.update(|cx| cx.quit());
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+            .detach();
+
+            let detailed_previews = clients
                 .lock()
                 .ok()
-                .and_then(|mut server| server.take());
-            let tokio = tokio.clone();
-            async move {
-                if let Some(server) = server {
-                    let _ = tokio.spawn(server.stop()).await;
-                }
-            }
-        })
-        .detach();
-
-        let wallet_view = cx.new(|_| {
-            WalletWindow::new(
-                owner.clone(),
-                review_presenter.clone(),
-                walletconnect.clone(),
-                walletconnect_presenter.clone(),
-            )
-        });
-        let window_slot: WalletWindowSlot = Rc::new(RefCell::new(None));
-        show_wallet_window(cx, &wallet_view, &window_slot)
-            .expect("failed to open the wallet window");
-        let review_view = wallet_view.clone();
-        let review_window = window_slot.clone();
-        cx.spawn(async move |cx| {
-            while let Some(prompt) = review_prompts.recv().await {
-                review_view.update(cx, |view, cx| {
-                    view.install_review_prompt(prompt);
-                    view.route = Route::Reviews;
-                    cx.notify();
-                });
-                let _ = cx.update(|cx| show_wallet_window(cx, &review_view, &review_window));
-            }
-        })
-        .detach();
-        let walletconnect_review_view = wallet_view.clone();
-        let walletconnect_review_window = window_slot.clone();
-        cx.spawn(async move |cx| {
-            while let Some(prompt) = walletconnect_prompts.recv().await {
-                walletconnect_review_view.update(cx, |view, cx| {
-                    view.install_walletconnect_prompt(prompt);
-                    view.route = Route::WalletConnect;
-                    cx.notify();
-                });
-                let _ = cx.update(|cx| {
-                    show_wallet_window(cx, &walletconnect_review_view, &walletconnect_review_window)
-                });
-            }
-        })
-        .detach();
-        let mut view_events = events.subscribe();
-        let event_view = wallet_view.clone();
-        let event_owner = owner.clone();
-        let event_tray = tray.clone();
-        let event_walletconnect = walletconnect.clone();
-        cx.spawn(async move |cx| {
-            let mut mcp_online = false;
-            loop {
-                let changed = match view_events.recv().await {
-                    Ok(event) => {
-                        if let crate::events::DomainEventKind::McpStatusChanged { online } =
-                            event.kind
-                        {
-                            mcp_online = online;
+                .and_then(|store| store.setting::<bool>("notification_detailed_previews").ok())
+                .flatten()
+                .unwrap_or(false);
+            let preferences = NotificationPreferences { detailed_previews };
+            let (notification_clicks, mut clicked_notifications) =
+                tokio::sync::mpsc::unbounded_channel();
+            let notification_service = PlatformNotificationService::new(notification_clicks);
+            let mut domain_events = events.subscribe();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                loop {
+                    match domain_events.recv().await {
+                        Ok(event) => {
+                            if let Some(notification) = notification_for(&event, preferences) {
+                                notification_service.show(notification);
+                            }
                         }
-                        true
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
-                };
-                if changed {
-                    let pending_reviews = event_owner.reviews(None).map_or(0, |queues| {
-                        queues.transactions.len() + queues.typed_data.len() + queues.messages.len()
+                }
+            })
+            .detach();
+
+            let notification_window = window_slot.clone();
+            let notification_view = wallet_view.clone();
+            cx.spawn(async move |cx| {
+                while let Some(route) = clicked_notifications.recv().await {
+                    notification_view.update(cx, |view, cx| {
+                        match route {
+                            NotificationRoute::Review(request_id) => {
+                                view.route = Route::Reviews;
+                                view.selected_record = Some(request_id);
+                            }
+                            NotificationRoute::Activity(request_id) => {
+                                view.route = Route::Activity;
+                                view.selected_record = Some(request_id);
+                            }
+                        }
+                        cx.notify();
                     });
-                    let connected_agents = event_owner.clients().map_or(0, |clients| clients.len());
-                    let walletconnect_sessions = event_walletconnect
-                        .lock()
-                        .map_or(0, |sessions| sessions.sessions().len());
-                    if let Some(tray) = event_tray.borrow_mut().as_mut() {
+                    let _ = cx.update(|cx| {
+                        show_wallet_window(cx, &notification_view, &notification_window)
+                    });
+                }
+            })
+            .detach();
+
+            let activation_window = window_slot;
+            let activation_view = wallet_view.clone();
+            cx.spawn(async move |cx| {
+                let mut receiver = activation_rx;
+                loop {
+                    let receive_task = gpui_tokio::Tokio::spawn(cx, async move {
+                        tokio::task::spawn_blocking(move || {
+                            let result = receiver.recv();
+                            (receiver, result)
+                        })
+                        .await
+                    })
+                    .await;
+                    let Ok(Ok((next, Ok(())))) = receive_task else {
+                        break;
+                    };
+                    receiver = next;
+                    let _ = cx
+                        .update(|cx| show_wallet_window(cx, &activation_view, &activation_window));
+                }
+            })
+            .detach();
+
+            let slot = server_slot.clone();
+            let status_tray = tray.clone();
+            let server_events = events.clone();
+            let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                McpHttpServer::start(owner, agent, clients, server_events).await
+            });
+            cx.spawn(async move |cx| match server_task.await {
+                Ok(server) => {
+                    let address = server.address;
+                    if let Ok(mut guard) = slot.lock() {
+                        *guard = Some(server);
+                    }
+                    if let Some(tray) = status_tray.borrow_mut().as_mut() {
                         tray.update(&TraySnapshot {
-                            pending_reviews,
-                            mcp_online,
-                            connected_agents,
-                            walletconnect_sessions,
+                            pending_reviews: 0,
+                            mcp_online: true,
+                            connected_agents: initial_agents,
+                            walletconnect_sessions: 0,
                         });
                     }
-                    event_view.update(cx, |_, cx| cx.notify());
-                } else {
-                    break;
-                }
-            }
-        })
-        .detach();
-        let tray_events = tray.clone();
-        let tray_window = window_slot.clone();
-        let tray_view = wallet_view.clone();
-        cx.spawn(async move |cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(100))
-                    .await;
-                let dark_mode = cx.update(|cx| dark_appearance(cx.window_appearance()));
-                if let Some(tray) = tray_events.borrow_mut().as_mut() {
-                    tray.set_dark_mode(dark_mode);
-                }
-                let commands = tray_events
-                    .borrow_mut()
-                    .as_mut()
-                    .map_or_else(Vec::new, TrayService::drain_commands);
-                for command in commands {
-                    match command {
-                        TrayCommand::OpenWallet => {
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                    wallet_view.update(cx, |view, cx| {
+                        view.mcp_status = format!("MCP online at {address}/mcp").into();
+                        if !view.legal_gate {
+                            view.reinstall_detected_agents(address.port(), cx);
                         }
-                        TrayCommand::OpenRoute(route) => {
-                            tray_view.update(cx, |view, cx| {
-                                view.route = route;
-                                cx.notify();
-                            });
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                        }
-                        TrayCommand::ConnectDapp => {
-                            tray_view.update(cx, |view, cx| {
-                                view.route = Route::WalletConnect;
-                                cx.notify();
-                            });
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                        }
-                        TrayCommand::CheckForUpdates => {
-                            tray_view.update(cx, |view, cx| {
-                                view.route = Route::Updates;
-                                cx.notify();
-                            });
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                        }
-                        TrayCommand::Quit => {
-                            cx.update(|cx| cx.quit());
-                            return;
-                        }
-                    }
-                }
-            }
-        })
-        .detach();
-
-        let detailed_previews = clients
-            .lock()
-            .ok()
-            .and_then(|store| store.setting::<bool>("notification_detailed_previews").ok())
-            .flatten()
-            .unwrap_or(false);
-        let preferences = NotificationPreferences { detailed_previews };
-        let (notification_clicks, mut clicked_notifications) =
-            tokio::sync::mpsc::unbounded_channel();
-        let notification_service = PlatformNotificationService::new(notification_clicks);
-        let mut domain_events = events.subscribe();
-        gpui_tokio::Tokio::spawn(cx, async move {
-            loop {
-                match domain_events.recv().await {
-                    Ok(event) => {
-                        if let Some(notification) = notification_for(&event, preferences) {
-                            notification_service.show(notification);
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
-        .detach();
-
-        let notification_window = window_slot.clone();
-        let notification_view = wallet_view.clone();
-        cx.spawn(async move |cx| {
-            while let Some(route) = clicked_notifications.recv().await {
-                notification_view.update(cx, |view, cx| {
-                    match route {
-                        NotificationRoute::Review(request_id) => {
-                            view.route = Route::Reviews;
-                            view.selected_record = Some(request_id);
-                        }
-                        NotificationRoute::Activity(request_id) => {
-                            view.route = Route::Activity;
-                            view.selected_record = Some(request_id);
-                        }
-                    }
-                    cx.notify();
-                });
-                let _ = cx
-                    .update(|cx| show_wallet_window(cx, &notification_view, &notification_window));
-            }
-        })
-        .detach();
-
-        let activation_window = window_slot;
-        let activation_view = wallet_view.clone();
-        cx.spawn(async move |cx| {
-            let mut receiver = activation_rx;
-            loop {
-                let receive_task = gpui_tokio::Tokio::spawn(cx, async move {
-                    tokio::task::spawn_blocking(move || {
-                        let result = receiver.recv();
-                        (receiver, result)
-                    })
-                    .await
-                })
-                .await;
-                let Ok(Ok((next, Ok(())))) = receive_task else {
-                    break;
-                };
-                receiver = next;
-                let _ =
-                    cx.update(|cx| show_wallet_window(cx, &activation_view, &activation_window));
-            }
-        })
-        .detach();
-
-        let slot = server_slot.clone();
-        let status_tray = tray.clone();
-        let server_events = events.clone();
-        let server_task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            McpHttpServer::start(owner, agent, clients, server_events).await
-        });
-        cx.spawn(async move |cx| match server_task.await {
-            Ok(server) => {
-                let address = server.address;
-                if let Ok(mut guard) = slot.lock() {
-                    *guard = Some(server);
-                }
-                if let Some(tray) = status_tray.borrow_mut().as_mut() {
-                    tray.update(&TraySnapshot {
-                        pending_reviews: 0,
-                        mcp_online: true,
-                        connected_agents: initial_agents,
-                        walletconnect_sessions: 0,
+                        cx.notify();
                     });
                 }
-                wallet_view.update(cx, |view, cx| {
-                    view.mcp_status = format!("MCP online at {address}/mcp").into();
+                Err(error) => wallet_view.update(cx, |view, cx| {
+                    view.mcp_status = format!("MCP offline: {error:#}").into();
                     cx.notify();
-                });
-            }
-            Err(error) => wallet_view.update(cx, |view, cx| {
-                view.mcp_status = format!("MCP offline: {error:#}").into();
-                cx.notify();
-            }),
-        })
-        .detach();
-    });
+                }),
+            })
+            .detach();
+        });
     Ok(())
 }
 
