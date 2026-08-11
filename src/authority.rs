@@ -22,9 +22,11 @@ use ekubo_wallet_core::{
         ApprovalOutcome, approve_transaction, sign_reviewed_message, sign_reviewed_typed_data,
     },
     pending::{PendingStore, PendingTransaction},
+    plan_fetch::{FetchPolicy, fetch_token_list_url},
     policy_store::{PolicyProposal, PolicyStore, StoredPolicy},
     token_store::{
-        MAX_PORTFOLIO_TOKENS, Portfolio, StoredToken, TokenProposal, TokenStore, read_portfolio,
+        MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
+        TokenProposal, TokenStore, read_portfolio,
     },
     typed_data::{PendingTypedData, TypedDataStore, parse_typed_data},
 };
@@ -52,6 +54,19 @@ pub struct OwnerPortfolioNetwork {
 #[derive(Clone, Debug)]
 pub struct OwnerPortfolioSnapshot {
     pub accounts: Vec<OwnerPortfolioAccount>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnerTokenListImport {
+    pub source: String,
+    pub host: String,
+    pub declared_version: Option<String>,
+    pub declared_timestamp: Option<String>,
+    pub chains_selected: Vec<u64>,
+    pub skipped_non_evm: usize,
+    pub skipped_other_chain: usize,
+    pub summary: ProposalSummary,
+    pub proposals: Vec<TokenProposal>,
 }
 
 /// The restricted capability cloned into authenticated MCP sessions.
@@ -793,12 +808,80 @@ impl OwnerApi {
         TokenStore::production(self.config.data_dir())?.search(query, chain_id, limit)
     }
 
-    pub fn remove_token(&self, chain_id: u64, address: Address) -> Result<bool> {
-        let removed = TokenStore::production(self.config.data_dir())?.remove(chain_id, address)?;
+    pub async fn remove_token(&self, chain_id: u64, address: Address) -> Result<bool> {
+        self.config.network_by_chain_id(&chain_id.to_string())?;
+        let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
+        let removed = TokenStore::production(self.config.data_dir())?.remove_authorized(
+            chain_id,
+            address,
+            &authorization,
+        )?;
         if removed {
             self.events.publish(DomainEventKind::ConfigurationChanged);
         }
         Ok(removed)
+    }
+
+    pub async fn import_token_list_for_review(
+        &self,
+        url: &str,
+        requested_chain_ids: &[u64],
+    ) -> Result<OwnerTokenListImport> {
+        let chains_selected = self.enabled_token_import_chains(requested_chain_ids)?;
+        let (parsed, host) =
+            fetch_token_list_url(url, &chains_selected, FetchPolicy::production()).await?;
+        let source_kind = ProposalSource::Served {
+            host: &host,
+            declared: parsed.declared_name.as_deref(),
+        };
+        let source = source_kind.label();
+        let mut store = TokenStore::production(self.config.data_dir())?;
+        let summary = store.propose(&parsed.tokens, &source_kind)?;
+        let proposals = store
+            .proposals()?
+            .into_iter()
+            .filter(|proposal| proposal.source == source)
+            .collect();
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(OwnerTokenListImport {
+            source,
+            host,
+            declared_version: parsed.declared_version,
+            declared_timestamp: parsed.declared_timestamp,
+            chains_selected,
+            skipped_non_evm: parsed.skipped_non_evm,
+            skipped_other_chain: parsed.skipped_other_chain,
+            summary,
+            proposals,
+        })
+    }
+
+    fn enabled_token_import_chains(&self, requested: &[u64]) -> Result<Vec<u64>> {
+        let mut chain_ids = if requested.is_empty() {
+            self.config
+                .load()?
+                .networks
+                .into_iter()
+                .filter(|network| !network.disabled)
+                .map(|network| network.chain_id)
+                .collect::<Vec<_>>()
+        } else {
+            requested
+                .iter()
+                .map(|chain_id| {
+                    self.config
+                        .network_by_chain_id(&chain_id.to_string())
+                        .map(|network| network.chain_id)
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        chain_ids.sort_unstable();
+        chain_ids.dedup();
+        ensure!(
+            !chain_ids.is_empty(),
+            "enable at least one network before importing a token list"
+        );
+        Ok(chain_ids)
     }
 
     pub fn token_proposals(&self) -> Result<Vec<TokenProposal>> {
@@ -811,13 +894,9 @@ impl OwnerApi {
             self.config
                 .network_by_chain_id(&proposal.token.chain_id.to_string())?;
         }
-        PlatformHumanPresence
-            .confirm(&PresenceRequest::ConfirmTokenNames {
-                count: proposals.len(),
-            })
-            .await?;
-        let inserted =
-            TokenStore::production(self.config.data_dir())?.consume_proposals(proposals)?;
+        let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
+        let inserted = TokenStore::production(self.config.data_dir())?
+            .consume_proposals_authorized(proposals, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(inserted)
     }

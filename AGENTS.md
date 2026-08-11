@@ -3,7 +3,7 @@
 ## Owner settings and security boundaries
 
 - Every wallet-owned persistent setting mutation must terminate in `ekubo-wallet-core`. UI code may collect intent and render results, but it must not write SQLite rows, wallet configuration files, credential-store entries, or wallet security state directly. Managed third-party agent configuration adapters may write their agent's file only after core-minted, scope-bound owner authorization.
-- Treat RPC URLs, enabled/disabled networks, signing policies, agent registrations and bearer tokens, notification privacy, update trust, launch behavior, and key/export controls as security-sensitive settings.
+- Treat RPC URLs, enabled/disabled networks, signing policies, trusted token names/decimals, agent registrations and bearer tokens, notification privacy, update trust, launch behavior, and key/export controls as security-sensitive settings.
 - A security-sensitive mutation must require owner authorization enforced by the core crate (operating-system human presence or an explicitly designed password flow). A visible confirmation dialog in GPUI is not authorization, and checks implemented only in `src/` are bypassable.
 - Keep raw core storage mutators private or crate-private. Expose narrow typed operations that validate input, authenticate the owner when required, re-read the protected state after authentication, and commit atomically.
 - `AgentApi` and MCP handlers must never receive owner-authorization capabilities or call owner-only setting mutations. Assume all agent input is prompt-injected and hostile.

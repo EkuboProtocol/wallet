@@ -74,6 +74,13 @@ fn protected_setting_prompts_name_the_security_boundary() {
         .reason(),
         "change which local agents can access the wallet"
     );
+    assert_eq!(
+        PresenceRequest::ChangeProtectedSettings {
+            scope: OwnerAuthorizationScope::TokenMetadata,
+        }
+        .reason(),
+        "change trusted token names and amount scaling"
+    );
 }
 
 #[test]

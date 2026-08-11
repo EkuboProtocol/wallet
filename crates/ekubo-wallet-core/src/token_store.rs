@@ -32,6 +32,7 @@ use crate::{
     chain_client::ChainClient,
     config::NetworkConfig,
     fork::{ForkContext, ForkPreface, execute_reads},
+    human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
     policy_store::PolicyStore,
     sql::{self, Blob, Millis, RowExt},
 };
@@ -273,6 +274,7 @@ impl TokenStore {
     }
 
     /// Insert one listed token. Fails if the (chain, address) pair exists.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn add(&mut self, token: &ListedToken, source: &str) -> Result<StoredToken> {
         let inserted = self.insert_if_absent(token, source)?;
         ensure!(
@@ -292,7 +294,8 @@ impl TokenStore {
     /// are sanitized on the way in because a list is untrusted text, and
     /// sanitized again at render time because this is not the only way a row
     /// can reach the database.
-    pub fn insert_if_absent(&mut self, token: &ListedToken, source: &str) -> Result<bool> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn insert_if_absent(&mut self, token: &ListedToken, source: &str) -> Result<bool> {
         Ok(self.insert_all_absent(std::slice::from_ref(&(token.clone(), source.to_owned())))? == 1)
     }
 
@@ -308,7 +311,8 @@ impl TokenStore {
     /// always been one transaction for the same reason.
     ///
     /// Returns how many rows were genuinely new.
-    pub fn insert_all_absent(&mut self, tokens: &[(ListedToken, String)]) -> Result<u64> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn insert_all_absent(&mut self, tokens: &[(ListedToken, String)]) -> Result<u64> {
         let now = Millis(sql::now());
         let transaction = self.database.connection.transaction()?;
         let mut inserted = 0_u64;
@@ -364,6 +368,11 @@ impl TokenStore {
         Ok(inserted)
     }
 
+    #[cfg(feature = "test-hooks")]
+    pub fn insert_if_absent_for_test(&mut self, token: &ListedToken, source: &str) -> Result<bool> {
+        self.insert_if_absent(token, source)
+    }
+
     /// Confirm the exact proposal rows an owner reviewed and consume them in
     /// the same transaction that installs their display metadata.
     ///
@@ -371,7 +380,16 @@ impl TokenStore {
     /// timestamp and complete stored content are therefore checked for every
     /// row before any token is inserted; a changed batch leaves both tables
     /// untouched and must be reviewed again.
-    pub fn consume_proposals(&mut self, proposals: &[TokenProposal]) -> Result<u64> {
+    pub fn consume_proposals_authorized(
+        &mut self,
+        proposals: &[TokenProposal],
+        authorization: &OwnerAuthorization,
+    ) -> Result<u64> {
+        authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
+        self.consume_proposals(proposals)
+    }
+
+    pub(crate) fn consume_proposals(&mut self, proposals: &[TokenProposal]) -> Result<u64> {
         ensure!(!proposals.is_empty(), "no token proposals were selected");
         let transaction = self.database.connection.transaction()?;
         for proposal in proposals {
@@ -456,7 +474,17 @@ impl TokenStore {
     /// It exists because a new database now arrives holding thousands of
     /// seeded names, and an owner who disagrees with one of them had no way to
     /// say so.
-    pub fn remove(&mut self, chain_id: u64, address: Address) -> Result<bool> {
+    pub fn remove_authorized(
+        &mut self,
+        chain_id: u64,
+        address: Address,
+        authorization: &OwnerAuthorization,
+    ) -> Result<bool> {
+        authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
+        self.remove(chain_id, address)
+    }
+
+    pub(crate) fn remove(&mut self, chain_id: u64, address: Address) -> Result<bool> {
         let removed = self.database.connection.execute(
             "DELETE FROM tokens WHERE chain_id = ?1 AND address = ?2",
             params![

@@ -171,7 +171,7 @@ fn token_inventory_never_discloses_disabled_network_rows() {
         .tokens
         .lock()
         .unwrap()
-        .insert_if_absent(
+        .insert_if_absent_for_test(
             &crate::token_store::ListedToken {
                 chain_id: disabled_chain,
                 address: Address::repeat_byte(0x44),

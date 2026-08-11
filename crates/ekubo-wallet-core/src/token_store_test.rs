@@ -559,6 +559,28 @@ fn confirming_token_proposals_installs_and_consumes_the_exact_reviewed_rows() {
 }
 
 #[test]
+fn confirmed_token_mutations_require_token_metadata_authorization() {
+    let (_directory, mut store) = store();
+    let address = Address::repeat_byte(0x42);
+    store.add(&usdc(1, address), "owner list").unwrap();
+
+    let wrong = crate::human_presence::OwnerAuthorization::for_test(
+        crate::human_presence::OwnerAuthorizationScope::NetworkSettings,
+    );
+    assert!(store.remove_authorized(1, address, &wrong).is_err());
+    assert!(store.get(1, address).unwrap().is_some());
+
+    let token_authorization = crate::human_presence::OwnerAuthorization::for_test(
+        crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
+    );
+    assert!(
+        store
+            .remove_authorized(1, address, &token_authorization)
+            .unwrap()
+    );
+}
+
+#[test]
 fn confirming_a_replaced_token_proposal_is_atomic_and_fails_closed() {
     let (_directory, mut store) = store();
     let first_address = Address::repeat_byte(0x11);

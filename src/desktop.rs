@@ -50,7 +50,7 @@ use gpui_component::{
 };
 use std::{
     cell::RefCell,
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     rc::Rc,
     sync::{
         Arc, Mutex,
@@ -128,6 +128,27 @@ fn format_asset_balance(
     };
     let amount = ekubo_wallet_core::approval_summary::format_fixed_point(raw, decimals);
     symbol.map_or(amount.clone(), |symbol| format!("{amount} {symbol}"))
+}
+
+fn token_list_url_draft(value: &str) -> Result<String> {
+    let value = value.trim();
+    ensure!(!value.is_empty(), "enter the published token-list URL");
+    let parsed = url::Url::parse(value).context("token-list URL is not valid")?;
+    ensure!(parsed.scheme() == "https", "token-list URL must use https");
+    ensure!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "token-list URL must not carry credentials"
+    );
+    ensure!(
+        parsed.fragment().is_none(),
+        "token-list URL must not carry a fragment"
+    );
+    ensure!(
+        parsed.port().is_none(),
+        "token-list URL must use the default https port"
+    );
+    ensure!(parsed.host().is_some(), "token-list URL has no host");
+    Ok(value.to_owned())
 }
 
 async fn upsert_detected_agents(owner: &OwnerApi, port: u16) -> Result<String> {
@@ -312,6 +333,10 @@ pub struct WalletWindow {
     command_palette_subscription: Option<Subscription>,
     token_list: Option<Entity<ListState<TokenListDelegate>>>,
     token_proposal_list: Option<Entity<ListState<TokenProposalListDelegate>>>,
+    token_list_url_input: Option<Entity<InputState>>,
+    token_import_state: TokenImportState,
+    token_import_error: Option<SharedString>,
+    token_import_status: Option<SharedString>,
     token_list_generation: u64,
     mcp_status: SharedString,
     selected_record: Option<uuid::Uuid>,
@@ -322,6 +347,9 @@ pub struct WalletWindow {
     agent_reinstall: AgentReinstallState,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
+    account_id_error: Option<SharedString>,
+    private_key_error: Option<SharedString>,
+    account_status: Option<SharedString>,
     account_export: Option<AccountExport>,
     legal_review: Option<LegalReview>,
     legal_gate: bool,
@@ -360,6 +388,12 @@ enum AgentReinstallState {
 enum ReviewFlowState {
     Ready,
     Busy,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenImportState {
+    Idle,
+    Fetching,
 }
 
 // Document mode, layout readiness, deferred scroll measurement, and whether
@@ -520,7 +554,14 @@ struct TokenListDelegate {
     query: String,
     loading: bool,
     error: Option<SharedString>,
-    status: Option<SharedString>,
+    status: Option<TokenListStatus>,
+    removing: BTreeSet<(u64, alloy::primitives::Address)>,
+}
+
+#[derive(Clone)]
+enum TokenListStatus {
+    Message(SharedString),
+    Error(SharedString),
 }
 
 struct TokenProposalListDelegate {
@@ -566,6 +607,7 @@ impl TokenListDelegate {
             loading: true,
             error: None,
             status: None,
+            removing: BTreeSet::new(),
         }
     }
 
@@ -752,6 +794,9 @@ impl ListDelegate for TokenListDelegate {
         let address = token.address.parse::<alloy::primitives::Address>().ok();
         let owner = self.owner.clone();
         let state = cx.entity().downgrade();
+        let removing = chain_id
+            .zip(address)
+            .is_some_and(|identity| self.removing.contains(&identity));
         let row_id = format!("token-{}-{}", token.chain_id, token.address);
         Some(
             ListItem::new(SharedString::from(row_id)).child(
@@ -779,37 +824,61 @@ impl ListDelegate for TokenListDelegate {
                     )
                     .child(
                         Button::new(("remove-token", index.row))
-                            .label("Remove")
+                            .label(if removing {
+                                "Authenticating…"
+                            } else {
+                                "Remove"
+                            })
                             .danger()
-                            .disabled(chain_id.zip(address).is_none())
+                            .disabled(chain_id.zip(address).is_none() || removing)
                             .on_click(move |_, _, cx| {
                                 let Some((chain_id, address)) = chain_id.zip(address) else {
                                     return;
                                 };
-                                let result = owner.remove_token(chain_id, address);
                                 let _ = state.update(cx, |list, cx| {
-                                    let delegate = list.delegate_mut();
-                                    let succeeded = result.is_ok();
-                                    delegate.status = Some(match result {
-                                        Ok(true) => "Removed token metadata.".into(),
-                                        Ok(false) => "Token metadata was already absent.".into(),
-                                        Err(error) => {
-                                            format!("Could not remove token: {error:#}").into()
-                                        }
-                                    });
-                                    if succeeded {
-                                        delegate.all_tokens.retain(|item| {
-                                            !(item.chain_id.parse::<u64>().ok() == Some(chain_id)
-                                                && item
-                                                    .address
-                                                    .parse::<alloy::primitives::Address>()
-                                                    .ok()
-                                                    == Some(address))
-                                        });
-                                        delegate.apply_filters();
-                                    }
+                                    list.delegate_mut().removing.insert((chain_id, address));
                                     cx.notify();
                                 });
+                                let owner = owner.clone();
+                                let state = state.clone();
+                                let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                                    owner.remove_token(chain_id, address).await
+                                });
+                                cx.spawn(async move |cx| {
+                                    let result = task.await;
+                                    let _ = state.update(cx, |list, cx| {
+                                        let delegate = list.delegate_mut();
+                                        delegate.removing.remove(&(chain_id, address));
+                                        match result {
+                                            Ok(removed) => {
+                                                delegate.status =
+                                                    Some(TokenListStatus::Message(if removed {
+                                                        "Removed token metadata.".into()
+                                                    } else {
+                                                        "Token metadata was already absent.".into()
+                                                    }));
+                                                delegate.all_tokens.retain(|item| {
+                                                    !(item.chain_id.parse::<u64>().ok()
+                                                        == Some(chain_id)
+                                                        && item
+                                                            .address
+                                                            .parse::<alloy::primitives::Address>()
+                                                            .ok()
+                                                            == Some(address))
+                                                });
+                                                delegate.apply_filters();
+                                            }
+                                            Err(error) => {
+                                                delegate.status = Some(TokenListStatus::Error(
+                                                    format!("Could not remove token: {error:#}")
+                                                        .into(),
+                                                ));
+                                            }
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
                             }),
                     ),
             ),
@@ -981,6 +1050,10 @@ impl WalletWindow {
             command_palette_subscription: None,
             token_list: None,
             token_proposal_list: None,
+            token_list_url_input: None,
+            token_import_state: TokenImportState::Idle,
+            token_import_error: None,
+            token_import_status: None,
             token_list_generation: 0,
             mcp_status: "MCP starting…".into(),
             selected_record: None,
@@ -991,6 +1064,9 @@ impl WalletWindow {
             agent_reinstall: AgentReinstallState::Idle,
             account_id_input: None,
             private_key_input: None,
+            account_id_error: None,
+            private_key_error: None,
+            account_status: None,
             account_export: None,
             legal_review: None,
             legal_gate: false,
@@ -1053,6 +1129,11 @@ impl WalletWindow {
         if self.token_proposal_list.is_none() {
             self.token_proposal_list = Some(cx.new(|cx| {
                 ListState::new(TokenProposalListDelegate::new(), window, cx).selectable(false)
+            }));
+        }
+        if self.token_list_url_input.is_none() {
+            self.token_list_url_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("https://tokens.example.org/tokens.json")
             }));
         }
         if self.account_id_input.is_none() {
@@ -1272,13 +1353,21 @@ impl WalletWindow {
             return;
         };
         let wallet_id = input.read(cx).value().trim().to_owned();
+        self.account_id_error = None;
+        self.private_key_error = None;
+        self.account_status = None;
+        if let Err(error) = ekubo_wallet_core::config::validate_wallet_id(&wallet_id) {
+            self.account_id_error = Some(format!("{error:#}").into());
+            cx.notify();
+            return;
+        }
         match self
             .owner
             .create_account(&wallet_id, &WalletPolicy::require_approval_for_everything())
         {
             Ok(account) => {
                 input.update(cx, |input, cx| input.set_value("", window, cx));
-                self.operation_status = Some(
+                self.account_status = Some(
                     format!(
                         "Created account {} at {:#x}. Every transaction requires review.",
                         account.id, account.address
@@ -1287,7 +1376,7 @@ impl WalletWindow {
                 );
             }
             Err(error) => {
-                self.operation_status = Some(format!("Could not create account: {error:#}").into());
+                self.account_id_error = Some(format!("Could not create account: {error:#}").into());
             }
         }
         cx.notify();
@@ -1301,17 +1390,35 @@ impl WalletWindow {
             return;
         };
         let wallet_id = id_input.read(cx).value().trim().to_owned();
+        self.account_id_error = None;
+        self.private_key_error = None;
+        self.account_status = None;
+        if let Err(error) = ekubo_wallet_core::config::validate_wallet_id(&wallet_id) {
+            self.account_id_error = Some(format!("{error:#}").into());
+            cx.notify();
+            return;
+        }
         let secret = zeroize::Zeroizing::new(key_input.read(cx).value().trim().to_owned());
         key_input.update(cx, |input, cx| input.set_value("", window, cx));
-        let result = PrivateKeyMaterial::from_hex(&secret)
-            .and_then(|key| self.owner.import_account(&wallet_id, key));
-        self.operation_status = Some(match result {
+        let key = match PrivateKeyMaterial::from_hex(&secret) {
+            Ok(key) => key,
+            Err(error) => {
+                self.private_key_error = Some(format!("{error:#}").into());
+                cx.notify();
+                return;
+            }
+        };
+        match self.owner.import_account(&wallet_id, key) {
             Ok(account) => {
                 id_input.update(cx, |input, cx| input.set_value("", window, cx));
-                format!("Imported account {} at {:#x}.", account.id, account.address).into()
+                self.account_status = Some(
+                    format!("Imported account {} at {:#x}.", account.id, account.address).into(),
+                );
             }
-            Err(error) => format!("Could not import account: {error:#}").into(),
-        });
+            Err(error) => {
+                self.account_id_error = Some(format!("Could not import account: {error:#}").into());
+            }
+        }
         cx.notify();
     }
 
@@ -2031,6 +2138,93 @@ impl WalletWindow {
             list.delegate_mut().replace(source, proposals);
             cx.notify();
         });
+        cx.notify();
+    }
+
+    fn import_token_list_for_review(&mut self, cx: &mut Context<Self>) {
+        if self.token_import_state == TokenImportState::Fetching {
+            return;
+        }
+        let Some(input) = self.token_list_url_input.as_ref() else {
+            return;
+        };
+        let url = match token_list_url_draft(input.read(cx).value().as_ref()) {
+            Ok(url) => url,
+            Err(error) => {
+                self.token_import_error = Some(format!("{error:#}").into());
+                self.token_import_status = None;
+                cx.notify();
+                return;
+            }
+        };
+        let requested_chains = self
+            .token_list
+            .as_ref()
+            .and_then(|list| list.read(cx).delegate().chain_filter)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let owner = self.owner.clone();
+        let proposal_list = self.token_proposal_list.clone();
+        self.token_import_state = TokenImportState::Fetching;
+        self.token_import_error = None;
+        self.token_import_status = None;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner
+                .import_token_list_for_review(&url, &requested_chains)
+                .await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            if let Ok(imported) = &result
+                && !imported.proposals.is_empty()
+                && let Some(list) = proposal_list
+            {
+                let source = imported.source.clone();
+                let proposals = imported.proposals.clone();
+                list.update(cx, |list, cx| {
+                    list.delegate_mut().replace(source, proposals);
+                    cx.notify();
+                });
+            }
+            let _ = view.update(cx, |view, cx| {
+                view.token_import_state = TokenImportState::Idle;
+                match result {
+                    Ok(imported) => {
+                        view.token_import_error = None;
+                        let revision = imported
+                            .declared_version
+                            .as_deref()
+                            .map_or_else(|| "version not declared".to_owned(), |version| {
+                                format!("version {version}")
+                            });
+                        let timestamp = imported
+                            .declared_timestamp
+                            .as_deref()
+                            .map_or_else(|| "timestamp not declared".to_owned(), |timestamp| {
+                                format!("timestamp {timestamp}")
+                            });
+                        view.token_import_status = Some(
+                            format!(
+                                "Fetched {} from {} ({revision}; {timestamp}) for {} enabled network(s): {} awaiting review, {} already confirmed, {} skipped.",
+                                imported.source,
+                                imported.host,
+                                imported.chains_selected.len(),
+                                imported.summary.pending,
+                                imported.summary.already_confirmed,
+                                imported.skipped_non_evm + imported.skipped_other_chain,
+                            )
+                            .into(),
+                        );
+                    }
+                    Err(error) => {
+                        view.token_import_error = Some(format!("{error:#}").into());
+                        view.token_import_status = None;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -3399,36 +3593,52 @@ impl WalletWindow {
             .gap_2()
             .child(div().font_semibold().child("Create account"));
         if let Some(input) = &self.account_id_input {
-            panel = panel.child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(input)))
-                    .child(
-                        Button::new("create-account")
-                            .label("Create")
-                            .primary()
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.create_account(window, cx);
-                            })),
-                    ),
-            );
+            panel = panel
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(input)))
+                        .child(
+                            Button::new("create-account")
+                                .label("Create")
+                                .primary()
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.create_account(window, cx);
+                                })),
+                        ),
+                )
+                .when_some(self.account_id_error.clone(), |panel, error| {
+                    panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                });
         }
         if let Some(input) = &self.private_key_input {
-            panel = panel.child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(Input::new(input).mask_toggle().flex_1())
-                    .child(
-                        Button::new("import-account")
-                            .label("Import private key")
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.import_account(window, cx);
-                            })),
-                    ),
-            );
+            panel = panel
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(Input::new(input).mask_toggle().flex_1())
+                        .child(
+                            Button::new("import-account")
+                                .label("Import private key")
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.import_account(window, cx);
+                                })),
+                        ),
+                )
+                .when_some(self.private_key_error.clone(), |panel, error| {
+                    panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                });
         }
+        panel = panel.when_some(self.account_status.clone(), |panel, status| {
+            panel.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(status),
+            )
+        });
         panel = panel.child(
             div()
                 .mt_3()
@@ -4441,6 +4651,7 @@ impl WalletWindow {
         let active_chain = delegate.chain_filter;
         let visible = delegate.visible_tokens.len();
         let total = delegate.all_tokens.len();
+        let token_status = delegate.status.clone();
         let networks = self.owner.networks().unwrap_or_default();
         let (selected_source, selected_count, viewed_to_end) = {
             let delegate = proposal_list.read(cx).delegate();
@@ -4452,6 +4663,65 @@ impl WalletWindow {
         };
 
         let mut content = div().flex().flex_col().flex_1().min_h(px(320.0)).gap_3();
+        if let Some(input) = self.token_list_url_input.as_ref() {
+            let selection = active_chain.map_or_else(
+                || "all enabled networks".to_owned(),
+                |chain_id| format!("chain {chain_id}"),
+            );
+            content = content.child(
+                GroupBox::new()
+                    .id("owner-token-list-import")
+                    .outline()
+                    .title("Import published token list")
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "Fetch a public HTTPS token-list JSON for {selection}. Nothing is trusted until you inspect and accept the exact resulting list below."
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(div().flex_1().min_w_0().child(Input::new(input)))
+                            .child(
+                                Button::new("import-owner-token-list")
+                                    .label(
+                                        if self.token_import_state == TokenImportState::Fetching {
+                                            "Fetching…"
+                                        } else {
+                                            "Fetch for review"
+                                        },
+                                    )
+                                    .primary()
+                                    .disabled(
+                                        self.token_import_state == TokenImportState::Fetching,
+                                    )
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.import_token_list_for_review(cx);
+                                    })),
+                            ),
+                    )
+                    .when_some(self.token_import_error.clone(), |group, error| {
+                        group.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().danger)
+                                .child(error),
+                        )
+                    })
+                    .when_some(self.token_import_status.clone(), |group, status| {
+                        group.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(status),
+                        )
+                    }),
+            );
+        }
         match self.owner.token_proposals() {
             Ok(proposals) if !proposals.is_empty() => {
                 let mut grouped = std::collections::BTreeMap::<String, Vec<TokenProposal>>::new();
@@ -4610,6 +4880,17 @@ impl WalletWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("Showing {visible} of {total} token(s)")),
             )
+            .when_some(token_status, |content, status| match status {
+                TokenListStatus::Message(message) => content.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(message),
+                ),
+                TokenListStatus::Error(error) => {
+                    content.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                }
+            })
             .child(
                 List::new(list)
                     .search_placeholder("Search token name, symbol, or address")

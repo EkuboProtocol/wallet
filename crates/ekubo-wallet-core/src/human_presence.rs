@@ -10,6 +10,7 @@ pub enum OwnerAuthorizationScope {
     AgentAccess,
     NetworkSettings,
     NotificationPrivacy,
+    TokenMetadata,
 }
 
 /// Short-lived, scope-bound proof minted only after platform authentication.
@@ -140,6 +141,9 @@ impl PresenceRequest {
                 }
                 OwnerAuthorizationScope::NotificationPrivacy => {
                     "change whether notifications reveal wallet activity".into()
+                }
+                OwnerAuthorizationScope::TokenMetadata => {
+                    "change trusted token names and amount scaling".into()
                 }
             },
         }

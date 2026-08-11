@@ -95,3 +95,35 @@ fn policy_revision_revalidation_handles_initial_and_replacement_writes() {
     assert!(ensure_optional_revision(Some(1), None).is_err());
     assert!(ensure_optional_revision(Some(2), Some(3)).is_err());
 }
+
+#[test]
+fn owner_token_imports_select_only_enabled_networks() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.db");
+    let desktop = DesktopStore::open(&database, &DatabaseKey::new([17; 32])).unwrap();
+    let owner = OwnerApi {
+        config: ConfigStore::open(directory.path(), DatabaseKey::new([17; 32])),
+        desktop: Arc::new(Mutex::new(desktop)),
+        events: EventBus::default(),
+    };
+    let snapshot = owner.snapshot().unwrap();
+    let mut expected = snapshot
+        .networks
+        .iter()
+        .filter(|network| !network.disabled)
+        .map(|network| network.chain_id)
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+
+    assert_eq!(owner.enabled_token_import_chains(&[]).unwrap(), expected);
+    let disabled = snapshot
+        .networks
+        .iter()
+        .find(|network| network.disabled)
+        .expect("defaults include disabled networks");
+    assert!(
+        owner
+            .enabled_token_import_chains(&[disabled.chain_id])
+            .is_err()
+    );
+}

@@ -104,6 +104,23 @@ fn token_inventory_reads_every_page_instead_of_stopping_at_ten_thousand() {
 }
 
 #[test]
+fn token_list_import_field_rejects_unsafe_urls_before_fetching() {
+    assert_eq!(
+        token_list_url_draft("  https://tokens.example.org/list.json  ").unwrap(),
+        "https://tokens.example.org/list.json"
+    );
+    for invalid in [
+        "",
+        "http://tokens.example.org/list.json",
+        "https://owner:secret@tokens.example.org/list.json",
+        "https://tokens.example.org:8443/list.json",
+        "https://tokens.example.org/list.json#other",
+    ] {
+        assert!(token_list_url_draft(invalid).is_err(), "accepted {invalid}");
+    }
+}
+
+#[test]
 fn legal_gate_requires_both_current_owner_documents_in_order() {
     use ekubo_wallet_core::legal::DocumentStatus;
 
