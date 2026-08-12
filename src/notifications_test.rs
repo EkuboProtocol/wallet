@@ -35,6 +35,48 @@ fn every_transaction_lifecycle_stage_has_a_lock_screen_safe_notification() {
     }
 }
 
+#[test]
+fn proposed_transactions_route_to_review_and_lifecycle_updates_route_to_activity() {
+    let request_id = Uuid::new_v4();
+    for (stage, expected_route) in [
+        (
+            TransactionStage::Proposed,
+            NotificationRoute::Review(request_id),
+        ),
+        (
+            TransactionStage::Signed,
+            NotificationRoute::Activity(request_id),
+        ),
+        (
+            TransactionStage::Broadcast,
+            NotificationRoute::Activity(request_id),
+        ),
+        (
+            TransactionStage::Confirmed,
+            NotificationRoute::Activity(request_id),
+        ),
+        (
+            TransactionStage::Reverted,
+            NotificationRoute::Activity(request_id),
+        ),
+        (
+            TransactionStage::Replaced,
+            NotificationRoute::Activity(request_id),
+        ),
+        (
+            TransactionStage::Cancelled,
+            NotificationRoute::Activity(request_id),
+        ),
+    ] {
+        let event = DomainEvent {
+            occurred_at: Utc::now(),
+            kind: DomainEventKind::Transaction { request_id, stage },
+        };
+        let notification = notification_for(&event, NotificationPreferences::default()).unwrap();
+        assert_eq!(notification.route, expected_route);
+    }
+}
+
 fn request_id(event: &DomainEvent) -> Uuid {
     match &event.kind {
         DomainEventKind::Transaction { request_id, .. } => *request_id,

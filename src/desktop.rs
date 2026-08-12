@@ -6772,6 +6772,24 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn open_notification(&mut self, route: NotificationRoute, cx: &mut Context<Self>) {
+        self.command_palette = false;
+        match route {
+            NotificationRoute::Review(request_id) => {
+                self.set_route(Route::Reviews);
+                self.selected_record = None;
+                if self.active_review.is_none() && !self.review_flow.is_in_progress() {
+                    self.begin_transaction_review(request_id, cx);
+                }
+            }
+            NotificationRoute::Activity(request_id) => {
+                self.set_route(Route::Activity);
+                self.selected_record = Some(request_id);
+            }
+        }
+        cx.notify();
+    }
+
     fn decide_review(&mut self, generation: u64, decision: ReviewDecision, cx: &mut Context<Self>) {
         let Some(active) = self.active_review.as_mut() else {
             return;
@@ -11827,7 +11845,8 @@ impl WalletWindow {
         div()
             .absolute()
             .inset_0()
-            .on_mouse_down(MouseButton::Left, |_, _, _| {})
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .p_4()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -11864,6 +11883,7 @@ impl WalletWindow {
                         app_button("cancel-agent-install")
                             .label("Cancel")
                             .on_click(cx.listener(|view, _, _, cx| {
+                                cx.stop_propagation();
                                 view.cancel_agent_install(cx);
                             })),
                     )
@@ -12960,17 +12980,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             cx.spawn(async move |cx| {
                 while let Some(route) = clicked_notifications.recv().await {
                     notification_view.update(cx, |view, cx| {
-                        match route {
-                            NotificationRoute::Review(request_id) => {
-                                view.set_route(Route::Reviews);
-                                view.selected_record = Some(request_id);
-                            }
-                            NotificationRoute::Activity(request_id) => {
-                                view.set_route(Route::Activity);
-                                view.selected_record = Some(request_id);
-                            }
-                        }
-                        cx.notify();
+                        view.open_notification(route, cx);
                     });
                     let _ = cx.update(|cx| {
                         show_wallet_window(cx, &notification_view, &notification_window)
