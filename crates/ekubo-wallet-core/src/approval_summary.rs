@@ -320,12 +320,20 @@ pub fn render_balance_changes(
         let incoming = &change.incoming_transfers;
         let outgoing = &change.outgoing_transfers;
         if incoming != "0" || outgoing != "0" {
+            let incoming_display = parse_signed(incoming).map_or_else(
+                || format!("+{incoming} base units"),
+                |amount| format_signed_amount(&amount, display.decimals, display.symbol.as_deref()),
+            );
+            let outgoing_display = parse_signed(&format!("-{outgoing}")).map_or_else(
+                || format!("-{outgoing} base units"),
+                |amount| format_signed_amount(&amount, display.decimals, display.symbol.as_deref()),
+            );
             // A continuation of the entry above (empty label), so the delta
             // stays a short, sign-toned figure and the gross flows read as
             // their own detail line.
             lines.push((
                 String::new(),
-                format!("standard Transfer events: +{incoming} in, -{outgoing} out"),
+                format!("standard Transfer events: {incoming_display} in, {outgoing_display} out"),
             ));
         }
     }

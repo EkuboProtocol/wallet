@@ -3,14 +3,7 @@
 //!
 //! # Where the endpoints come from, and what that is worth
 //!
-//! Earlier releases shipped one endpoint per network, each chosen because the
-//! chain or its operator published it for wallet use. That provenance was the
-//! whole argument for trusting it — and it bought less than it appeared to,
-//! because a single published endpoint is still one shared, rate-limited
-//! service, and when it refused a request the wallet could not simulate, and
-//! therefore could not sign, at all.
-//!
-//! This registry is aggregated instead: the candidates come from chainlist.org
+//! This registry is aggregated: the candidates come from chainlist.org
 //! — the ethereum-lists registry plus `DefiLlama`'s curated extras — and are
 //! then *measured*. `contrib/rpc-probe` asks every candidate for the exact
 //! requests this wallet makes, including an `eth_simulateV1` pinned to a
@@ -33,6 +26,9 @@
 //! # Defaults and the rest
 //!
 //! [`default_networks`] is the small set a fresh configuration starts with.
+//! Each installed default uses only the registry's highest-ranked compatible
+//! endpoint. The complete registry retains its measured fallbacks for owners
+//! who choose to add them.
 //! [`known_networks`] is everything — every chain in the registry — and backs
 //! `network add`, so configuring a chain the wallet did not default to is a
 //! chain ID rather than a research project.
@@ -201,6 +197,7 @@ pub fn default_networks() -> Vec<NetworkConfig> {
         .filter(|profile| profile.is_default)
         .map(|profile| {
             let mut network = profile.config.clone();
+            network.rpc_urls.truncate(1);
             network.disabled = !matches!(
                 network.name.as_str(),
                 "ethereum" | "base" | "arbitrum" | "robinhood"

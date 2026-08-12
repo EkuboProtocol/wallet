@@ -106,6 +106,31 @@ fn only_the_four_primary_defaults_start_enabled() {
 }
 
 #[test]
+fn each_fresh_default_uses_exactly_the_highest_ranked_endpoint() {
+    for network in default_networks() {
+        let profile = known_network(network.chain_id).expect("default is in the registry");
+        assert_eq!(
+            network.rpc_urls.len(),
+            1,
+            "{} has multiple defaults",
+            network.name
+        );
+        assert_eq!(network.rpc_urls[0], profile.config.rpc_urls[0]);
+    }
+}
+
+#[test]
+fn every_fresh_default_has_a_block_explorer() {
+    for network in default_networks() {
+        assert!(
+            network.block_explorer_url.is_some(),
+            "{} has no block explorer",
+            network.name
+        );
+    }
+}
+
+#[test]
 fn defaults_are_mainnets_drawn_from_the_registry() {
     for profile in known_networks().iter().filter(|profile| profile.is_default) {
         assert!(

@@ -461,48 +461,62 @@ impl ConfigStore {
     /// Enable or disable one network after core-verified owner authorization.
     pub fn set_network_disabled(
         &self,
-        identifier: &str,
+        reviewed: &NetworkConfig,
         disabled: bool,
         authorization: &OwnerAuthorization,
     ) -> Result<NetworkConfig> {
         authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
-        let mut network = self
-            .load()?
-            .networks
-            .into_iter()
-            .find(|network| {
-                network.name == identifier
-                    || network.aliases.iter().any(|alias| alias == identifier)
-            })
-            .with_context(|| format!("unknown network {identifier}"))?;
-        network.disabled = disabled;
-        let updated = network.clone();
-        self.update(|config| replace_configured_network(&mut config.networks, network))?;
-        Ok(updated)
+        self.update(|config| {
+            let network = config
+                .networks
+                .iter_mut()
+                .find(|network| network.chain_id == reviewed.chain_id)
+                .with_context(|| {
+                    format!(
+                        "network {} (chain {}) no longer exists",
+                        reviewed.name, reviewed.chain_id
+                    )
+                })?;
+            ensure!(
+                *network == *reviewed,
+                "network {} changed while the enable setting was being authenticated; review the current settings",
+                reviewed.name
+            );
+            network.disabled = disabled;
+            Ok(network.clone())
+        })
     }
 
     /// Delete a disabled network after core-verified owner authorization.
     pub fn remove_network(
         &self,
-        identifier: &str,
+        reviewed: &NetworkConfig,
         authorization: &OwnerAuthorization,
     ) -> Result<NetworkConfig> {
         authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
-        let network = self
-            .load()?
-            .networks
-            .into_iter()
-            .find(|network| {
-                network.name == identifier
-                    || network.aliases.iter().any(|alias| alias == identifier)
-            })
-            .with_context(|| format!("unknown network {identifier}"))?;
         ensure!(
-            network.disabled,
+            reviewed.disabled,
             "disable network {} before deleting it",
-            network.name
+            reviewed.name
         );
-        self.update(|config| remove_configured_network(&mut config.networks, identifier))
+        self.update(|config| {
+            let index = config
+                .networks
+                .iter()
+                .position(|network| network.chain_id == reviewed.chain_id)
+                .with_context(|| {
+                    format!(
+                        "network {} (chain {}) no longer exists",
+                        reviewed.name, reviewed.chain_id
+                    )
+                })?;
+            ensure!(
+                config.networks[index] == *reviewed,
+                "network {} changed while removal was being authenticated; review the current settings",
+                reviewed.name
+            );
+            Ok(config.networks.remove(index))
+        })
     }
 
     pub fn wallet(&self, id: &str) -> Result<WalletMetadata> {

@@ -10,7 +10,6 @@ pub enum OwnerAuthorizationScope {
     AgentAccess,
     NetworkSettings,
     NotificationPrivacy,
-    SoftwareUpdate,
     TokenMetadata,
 }
 
@@ -47,14 +46,6 @@ impl OwnerAuthorization {
             granted_at: Instant::now(),
         }
     }
-}
-
-/// Validate the narrow authorization immediately before the desktop stages a
-/// verified application package for installation during graceful shutdown.
-pub fn require_software_update_authorization(
-    authorization: &OwnerAuthorization,
-) -> Result<(), HumanPresenceError> {
-    authorization.require(OwnerAuthorizationScope::SoftwareUpdate)
 }
 
 /// Authenticate the owner for one narrow class of security-sensitive changes.
@@ -217,9 +208,6 @@ impl PresenceRequest {
                 }
                 OwnerAuthorizationScope::NotificationPrivacy => {
                     "change whether notifications reveal wallet activity".into()
-                }
-                OwnerAuthorizationScope::SoftwareUpdate => {
-                    "install a verified Ekubo Wallet software update".into()
                 }
                 OwnerAuthorizationScope::TokenMetadata => {
                     "change trusted token names and amount scaling".into()

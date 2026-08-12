@@ -20,7 +20,6 @@ use ekubo_wallet_core::{
     human_presence::{
         HumanPresence as _, OwnerAuthorization, OwnerAuthorizationScope, PlatformHumanPresence,
         PresenceRequest, authorize_oauth_client, authorize_owner,
-        require_software_update_authorization,
     },
     legal::{LegalDocument, LegalStatus, LegalStore, require_current_acceptance},
     message::{MessageStore, PendingMessage, describe_message},
@@ -381,17 +380,6 @@ impl OwnerApi {
         Ok(authorize_owner(OwnerAuthorizationScope::AgentAccess).await?)
     }
 
-    pub async fn authorize_software_update(&self) -> Result<OwnerAuthorization> {
-        Ok(authorize_owner(OwnerAuthorizationScope::SoftwareUpdate).await?)
-    }
-
-    pub fn confirm_software_update_install(
-        &self,
-        authorization: &OwnerAuthorization,
-    ) -> Result<()> {
-        Ok(require_software_update_authorization(authorization)?)
-    }
-
     pub fn detailed_notification_previews(&self) -> Result<bool> {
         self.desktop()?.detailed_notification_previews()
     }
@@ -400,18 +388,6 @@ impl OwnerApi {
         let authorization = authorize_owner(OwnerAuthorizationScope::NotificationPrivacy).await?;
         self.desktop()?
             .set_detailed_notification_previews(enabled, &authorization)?;
-        self.events.publish(DomainEventKind::ConfigurationChanged);
-        Ok(())
-    }
-
-    pub fn automatic_update_checks(&self) -> Result<bool> {
-        self.desktop()?.automatic_update_checks()
-    }
-
-    pub async fn set_automatic_update_checks(&self, enabled: bool) -> Result<()> {
-        let authorization = authorize_owner(OwnerAuthorizationScope::SoftwareUpdate).await?;
-        self.desktop()?
-            .set_automatic_update_checks(enabled, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }
@@ -636,22 +612,22 @@ impl OwnerApi {
         Ok(networks)
     }
 
-    pub async fn remove_network(&self, identifier: &str) -> Result<NetworkConfig> {
+    pub async fn remove_network(&self, reviewed: &NetworkConfig) -> Result<NetworkConfig> {
         let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
-        let removed = self.config.remove_network(identifier, &authorization)?;
+        let removed = self.config.remove_network(reviewed, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(removed)
     }
 
     pub async fn set_network_disabled(
         &self,
-        identifier: &str,
+        reviewed: &NetworkConfig,
         disabled: bool,
     ) -> Result<NetworkConfig> {
         let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
         let updated = self
             .config
-            .set_network_disabled(identifier, disabled, &authorization)?;
+            .set_network_disabled(reviewed, disabled, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(updated)
     }
@@ -1158,7 +1134,7 @@ impl OwnerApi {
         TokenStore::production(self.config.data_dir())?.search(query, chain_id, limit)
     }
 
-    pub async fn upsert_token(&self, token: ListedToken) -> Result<StoredToken> {
+    pub async fn add_token(&self, token: ListedToken) -> Result<StoredToken> {
         ensure!(
             contains_configured_chain(&self.config.load()?, token.chain_id),
             "chain {} is not a configured network",
@@ -1170,7 +1146,7 @@ impl OwnerApi {
             "chain {} was removed during authentication",
             token.chain_id
         );
-        let stored = TokenStore::production(self.config.data_dir())?.upsert_authorized(
+        let stored = TokenStore::production(self.config.data_dir())?.add_authorized(
             &token,
             "Manual entry",
             &authorization,
@@ -1179,7 +1155,49 @@ impl OwnerApi {
         Ok(stored)
     }
 
-    pub async fn remove_token(&self, chain_id: u64, address: Address) -> Result<bool> {
+    pub async fn replace_token(
+        &self,
+        reviewed: &StoredToken,
+        replacement: ListedToken,
+    ) -> Result<StoredToken> {
+        let reviewed_chain_id = reviewed
+            .chain_id
+            .parse::<u64>()
+            .context("stored token has an invalid chain ID")?;
+        let reviewed_address = reviewed
+            .address
+            .parse::<Address>()
+            .context("stored token has an invalid address")?;
+        ensure!(
+            (replacement.chain_id, replacement.address) == (reviewed_chain_id, reviewed_address),
+            "a token's chain ID and address cannot change while it is edited"
+        );
+        ensure!(
+            contains_configured_chain(&self.config.load()?, replacement.chain_id),
+            "chain {} is not a configured network",
+            replacement.chain_id
+        );
+        let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
+        ensure!(
+            contains_configured_chain(&self.config.load()?, replacement.chain_id),
+            "chain {} was removed during authentication",
+            replacement.chain_id
+        );
+        let stored = TokenStore::production(self.config.data_dir())?.replace_authorized(
+            reviewed,
+            &replacement,
+            "Manual entry",
+            &authorization,
+        )?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(stored)
+    }
+
+    pub async fn remove_token(&self, reviewed: &StoredToken) -> Result<()> {
+        let chain_id = reviewed
+            .chain_id
+            .parse::<u64>()
+            .context("stored token has an invalid chain ID")?;
         ensure!(
             contains_configured_chain(&self.config.load()?, chain_id),
             "chain {chain_id} is not a configured network"
@@ -1189,15 +1207,10 @@ impl OwnerApi {
             contains_configured_chain(&self.config.load()?, chain_id),
             "chain {chain_id} was removed during authentication"
         );
-        let removed = TokenStore::production(self.config.data_dir())?.remove_authorized(
-            chain_id,
-            address,
-            &authorization,
-        )?;
-        if removed {
-            self.events.publish(DomainEventKind::ConfigurationChanged);
-        }
-        Ok(removed)
+        TokenStore::production(self.config.data_dir())?
+            .remove_authorized(reviewed, &authorization)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
     }
 
     pub async fn import_token_list_for_review(

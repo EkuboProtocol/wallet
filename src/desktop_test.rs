@@ -30,14 +30,20 @@ fn review_sections_put_simulated_effects_before_actions_and_fees() {
 }
 
 #[test]
-fn exact_payload_must_be_opened_before_review_can_finish() {
-    let request = ApprovalRequest::new(ApprovalKind::Transaction, "Review", "Summary");
-    let document = ReviewDocument::from_request(request.clone(), vec!["0x1234".into()]);
-    assert!(!review_exact_data_available(&document, false));
-    assert!(review_exact_data_available(&document, true));
-
-    let document = ReviewDocument::from_request(request, Vec::new());
-    assert!(review_exact_data_available(&document, false));
+fn recognized_balance_effects_separate_the_symbol_from_the_exact_address() {
+    let address = "0x1111111111111111111111111111111111111111";
+    assert_eq!(
+        balance_effect_asset(&format!("USDC ({address})")),
+        ("USDC".into(), Some(address.into()))
+    );
+    assert_eq!(
+        balance_effect_asset(&format!("{address} (unlisted token)")),
+        ("Unlisted token".into(), Some(address.into()))
+    );
+    assert_eq!(
+        balance_effect_asset("ETH (native)"),
+        ("ETH".into(), Some("Native asset".into()))
+    );
 }
 
 #[test]
@@ -140,7 +146,7 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
         display_name: "Owner Chain".into(),
         aliases: "owner, owner_test".into(),
         chain_id: "9999991".into(),
-        rpc_urls: "https://rpc-one.example\nhttps://rpc-two.example".into(),
+        rpc_urls: "https://rpc-one.example,\nhttps://rpc-two.example".into(),
         max_gas_limit: "30000000".into(),
         max_fee_per_gas: "100000000000".into(),
         native_currency_name: "Ether".into(),
@@ -161,6 +167,29 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
     assert_eq!(network.rpc_strategy, RpcStrategy::Random);
     assert!(network.disabled);
     assert_eq!(network.native_currency.unwrap().symbol, "ETH");
+}
+
+#[test]
+fn network_rpc_editor_displays_explicit_commas_and_round_trips_them() {
+    let urls = vec![
+        "https://rpc-one.example".parse().unwrap(),
+        "https://rpc-two.example".parse().unwrap(),
+    ];
+    let displayed = rpc_urls_for_editor(&urls);
+    assert_eq!(
+        displayed,
+        "https://rpc-one.example/,\nhttps://rpc-two.example/"
+    );
+
+    let draft = NetworkEditorDraft {
+        name: "comma-chain".into(),
+        chain_id: "9001".into(),
+        rpc_urls: displayed,
+        ..NetworkEditorDraft::default()
+    };
+    let (parsed, errors) = parse_network_editor_draft(&draft, false, RpcStrategy::Ordered);
+    assert_eq!(errors, NetworkEditorErrors::default());
+    assert_eq!(parsed.unwrap().rpc_urls, urls);
 }
 
 #[test]
@@ -528,22 +557,39 @@ fn token_search_ranks_exact_symbols_before_longer_prefix_matches() {
 }
 
 #[test]
-fn legal_markdown_is_split_without_changing_content_or_splitting_fences() {
-    let long_paragraph = "x".repeat(LEGAL_SECTION_TARGET_BYTES);
+fn legal_markdown_rows_are_fixed_width_semantic_and_contained() {
+    let long_paragraph = "x".repeat(LEGAL_WRAP_COLUMNS * 3);
     let source = format!(
-        "# Terms\n\nIntro\n\n## Details\n\n```text\n# not a heading\n{long_paragraph}\n```\n\nTail\n"
+        "# Terms\n\nIntro split\nacross lines.\n\n- A bullet\n\n```text\n# not a heading\n{long_paragraph}\n```\n\nTail\n"
     );
-    let sections = legal_markdown_sections(&source);
+    let rows = legal_markdown_rows(&source);
 
-    assert_eq!(
-        sections
-            .iter()
-            .map(AsRef::<str>::as_ref)
-            .collect::<String>(),
-        source
+    assert!(
+        rows.iter()
+            .all(|row| row.text.chars().count() <= LEGAL_WRAP_COLUMNS)
     );
-    assert_eq!(sections.len(), 3);
-    assert!(sections[1].contains("# not a heading"));
+    assert_eq!(rows[0].kind, LegalRowKind::Heading);
+    assert!(
+        rows.iter()
+            .any(|row| row.text == "Intro split across lines.")
+    );
+    assert!(rows.iter().any(|row| row.text == "• A bullet"));
+    assert!(
+        rows.iter()
+            .any(|row| row.kind == LegalRowKind::Code && row.text == "# not a heading")
+    );
+    assert!(!rows.iter().any(|row| row.text.contains("```")));
+}
+
+#[test]
+fn explorer_transaction_links_use_the_configured_chain_url() {
+    let mut network = crate::config::default_networks().remove(0);
+    network.chain_id = 7;
+    network.block_explorer_url = Some("https://explorer.example/base".parse().unwrap());
+    assert_eq!(
+        block_explorer_transaction_url(&[network], 7, "0xabc").as_deref(),
+        Some("https://explorer.example/base/tx/0xabc")
+    );
 }
 
 fn relative_luminance(rgb: u32) -> f64 {
@@ -637,6 +683,21 @@ fn only_disabled_networks_offer_permanent_removal() {
 }
 
 #[test]
+fn restoring_network_defaults_preserves_disabled_state_and_one_endpoint() {
+    let mut reviewed = crate::config::default_networks().remove(0);
+    reviewed.disabled = true;
+    let mut preset = reviewed.clone();
+    preset.disabled = false;
+    preset
+        .rpc_urls
+        .push("https://fallback.example".parse().unwrap());
+
+    let restored = restored_network_configuration(&reviewed, preset);
+    assert!(restored.disabled);
+    assert_eq!(restored.rpc_urls.len(), 1);
+}
+
+#[test]
 fn networks_stay_sorted_by_numeric_chain_id_when_enabled_state_changes() {
     let mut networks = ekubo_wallet_core::networks::default_networks();
     for network in &mut networks {
@@ -654,12 +715,21 @@ fn networks_stay_sorted_by_numeric_chain_id_when_enabled_state_changes() {
 
 #[test]
 fn token_removal_confirmation_is_bound_to_the_exact_row() {
-    let first = (1, alloy::primitives::Address::repeat_byte(0x11));
-    let second = (1, alloy::primitives::Address::repeat_byte(0x22));
+    let first = StoredToken {
+        chain_id: "1".to_owned(),
+        address: alloy::primitives::Address::repeat_byte(0x11).to_checksum(None),
+        symbol: Some("USDC".to_owned()),
+        name: Some("USD Coin".to_owned()),
+        decimals: Some(6),
+        source: "Manual entry".to_owned(),
+        added_at: chrono::DateTime::UNIX_EPOCH,
+    };
+    let mut second = first.clone();
+    second.symbol = Some("CHANGED".to_owned());
 
-    assert!(token_removal_is_confirmed(Some(first), first));
-    assert!(!token_removal_is_confirmed(Some(first), second));
-    assert!(!token_removal_is_confirmed(None, first));
+    assert!(token_removal_is_confirmed(Some(&first), &first));
+    assert!(!token_removal_is_confirmed(Some(&first), &second));
+    assert!(!token_removal_is_confirmed(None, &first));
 }
 
 #[test]
@@ -813,12 +883,37 @@ fn accepted_legal_documents_reopen_read_only() {
     };
     assert!(!legal_review_requires_acceptance(
         LegalDocument::TermsOfService,
-        &status
+        Some(&status)
     ));
     assert!(!legal_review_requires_acceptance(
         LegalDocument::PrivacyPolicy,
-        &status
+        Some(&status)
     ));
+}
+
+#[test]
+fn owner_legal_documents_fail_closed_when_status_is_unavailable() {
+    assert!(legal_review_requires_acceptance(
+        LegalDocument::TermsOfService,
+        None
+    ));
+    assert!(legal_review_requires_acceptance(
+        LegalDocument::PrivacyPolicy,
+        None
+    ));
+    assert!(!legal_review_requires_acceptance(
+        LegalDocument::ThirdPartyLicenses,
+        None
+    ));
+}
+
+#[test]
+fn legal_acceptance_waits_until_the_final_virtual_row_has_rendered() {
+    let handle = UniformListScrollHandle::new();
+    let end_rendered = AtomicBool::new(false);
+    assert!(!legal_list_reached_end(&handle, &end_rendered));
+    end_rendered.store(true, Ordering::Release);
+    assert!(legal_list_reached_end(&handle, &end_rendered));
 }
 
 #[test]

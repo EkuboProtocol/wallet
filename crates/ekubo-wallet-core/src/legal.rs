@@ -7,11 +7,8 @@
 //! binds the exact document text by digest, so shipping a materially changed
 //! document automatically requires re-acceptance.
 //!
-//! The privacy policy's list of default network endpoints is generated from
-//! the same [`crate::config::default_networks`] catalog the wallet actually
-//! uses, so the disclosed endpoints cannot drift from a release's real
-//! defaults; changing a default RPC changes the document digest and forces
-//! re-acceptance.
+//! The privacy policy describes owner-controlled RPC configuration without
+//! embedding a volatile endpoint catalog in the legal document.
 //!
 //! Acceptance records live in the authenticated encrypted database, not in a
 //! plain file, so an agent with filesystem access cannot forge acceptance.
@@ -26,7 +23,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Write as _, path::Path};
+use std::path::Path;
 
 /// Shipped attribution document for third-party dependencies. Regenerate with
 /// `contrib/generate-third-party-licenses.py`; CI fails when it is stale or a
@@ -140,7 +137,7 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 3 — Effective 2026-08-08
+Version 4 — Effective 2026-08-11
 
 This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
 separately from the terms of service.
@@ -154,7 +151,7 @@ no data from your use of this software.
 ## 2. Requests to RPC endpoints
 
 To read chain state and to simulate and broadcast transactions, the wallet
-sends network requests to the RPC endpoint configured for each network. Those
+sends network requests to the RPC endpoints configured for each network. Those
 requests can include your wallet addresses, transaction calldata, balances
 queries, and signed transactions. RPC operators are independent third
 parties: they can observe your IP address and the contents of every request,
@@ -166,24 +163,26 @@ Apart from these RPC endpoints, the referenced-artifact fetches described in
 section 4, the WalletConnect relay described in section 5, and the release
 check described in section 6, this software makes no network requests. If you
 add or replace a network, requests for that network go to the endpoints you
-configure. Each release keeps the complete built-in network configuration
-below current with its actual defaults. This includes disabled networks,
-names and aliases, endpoint ordering and failover strategy, transaction safety
-limits, native currency metadata, and reference URLs. A disabled network sends
-no RPC requests until you enable it.
+configure. The complete network configuration, including RPC URLs, is
+owner-controlled and stored in the encrypted local database. A fresh
+installation starts with bundled settings that you can inspect and replace in
+Networks. A disabled network sends no RPC requests until you enable it.
 
 Enabled networks can list several endpoints run by unrelated operators. The
 wallet uses the configured strategy and can move to another endpoint when one
 fails, so over time your requests for a network may reach any configured
-endpoint. To send your traffic to one operator only, keep one endpoint in the
-Networks screen.
+endpoint. Ordered strategy tries endpoints from top to bottom. Random strategy
+shuffles them for each request before trying them. To send your traffic to one
+operator only, keep one endpoint in the Networks screen.
 
-## 3. Complete default network configuration in this release
+## 3. Owner-controlled network configuration
 
-```json
-";
+The wallet does not treat a bundled or owner-configured RPC response as a
+security policy. RPC configuration can nevertheless affect balances and
+simulation results shown for review, so only owner-authorized core operations
+can add, edit, enable, disable, restore, or remove a network. Agents cannot
+change these settings through the MCP interface.
 
-const PRIVACY_POLICY_CLOSING: &str = "
 ## 4. Execution plans fetched by reference
 
 The transactions this wallet simulates and signs are built elsewhere. A
@@ -260,8 +259,7 @@ your installation. The request carries a user agent naming this software and
 its version, which every copy of a given release shares.
 
 The check runs when you open or refresh the Updates screen and when an agent
-calls the `wallet_check_for_updates` tool. Automatic checks follow the updater
-preference stored in the application. The release-listing answer used by the
+calls the `wallet_check_for_updates` tool. The release-listing answer used by the
 read-only MCP tool is cached in your wallet data directory for a day.
 Setting `EKUBO_WALLET_SKIP_UPDATE_CHECK=1` disables the check entirely, and
 nothing else about the software changes when you do.
@@ -271,9 +269,9 @@ observe your IP address and the time of the request, and may log or retain
 that under its own policy. The developer receives nothing from this check and
 operates no service involved in it.
 
-An update is never installed silently. The Updates screen shows its version
-and notes, verifies its dedicated update signature, and requires your explicit
-confirmation before stopping services and launching the native installation.
+The application has no self-update capability. The Updates screen reports the
+latest published version and opens the wallet's GitHub Releases page in your
+browser; downloading and installing a release is outside this application.
 
 ## 7. Data exposed through agents and tooling
 
@@ -303,23 +301,16 @@ holds nothing about you and is never sent anywhere.
 
 ## 9. Acknowledgment
 
-Acknowledgment is recorded locally against the exact text of this document,
-including the endpoint list above. A release that changes the default
-endpoints, or anything else disclosed here, changes this document and
-requires a fresh acknowledgment before signing resumes.
+Acknowledgment is recorded locally against the exact text of this document. A
+release that materially changes these privacy disclosures requires a fresh
+acknowledgment before signing resumes. Ordinary changes to bundled or
+owner-configured RPC endpoints do not rewrite this policy.
 ";
 
-/// The complete privacy policy, with the complete default network catalog
-/// generated from the same typed values the wallet installs.
+/// The complete privacy policy.
 #[must_use]
 pub fn privacy_policy() -> String {
-    let mut text = String::from(PRIVACY_POLICY_PREAMBLE);
-    let defaults = crate::config::default_networks();
-    let json = serde_json::to_string_pretty(&defaults)
-        .expect("the statically typed default network catalog must serialize");
-    let _ = writeln!(text, "{json}\n```");
-    text.push_str(PRIVACY_POLICY_CLOSING);
-    text
+    PRIVACY_POLICY_PREAMBLE.to_owned()
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]

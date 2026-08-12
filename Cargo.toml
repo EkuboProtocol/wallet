@@ -37,7 +37,6 @@ async-trait = "0.1.89"
 axum = "0.8.6"
 base64 = "0.23.0"
 chrono = { version = "0.4.42", features = ["serde"] }
-cargo-packager-updater = "=0.2.3"
 directories = "6.0.0"
 fs2 = "0.4.3"
 futures = "0.3.31"
@@ -48,7 +47,6 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 gpui_tokio = { git = "https://github.com/zed-industries/zed" }
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-minisign-verify = "0.2.5"
 num-bigint = "0.5.1"
 notify-rust = "4.18.0"
 rand = "0.10.0"

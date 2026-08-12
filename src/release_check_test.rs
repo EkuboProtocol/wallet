@@ -87,7 +87,7 @@ fn a_repository_override_is_owner_and_name_only() {
 }
 
 #[tokio::test]
-async fn an_available_update_points_to_the_desktop_updater() {
+async fn an_available_update_points_to_github_without_self_update_instructions() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let check = check_at(
         directory.path(),
@@ -102,10 +102,11 @@ async fn an_available_update_points_to_the_desktop_updater() {
     assert_eq!(check.source, CheckSource::Network);
     assert_eq!(
         check.release_url.as_deref(),
-        Some("https://github.com/EkuboProtocol/wallet/releases/tag/v1.5.0")
+        Some("https://github.com/EkuboProtocol/wallet/releases/latest")
     );
     assert!(check.instruction.contains("Updates"));
-    assert!(check.instruction.contains("Never download or install"));
+    assert!(check.instruction.contains("latest GitHub release"));
+    assert!(check.instruction.contains("cannot download or install"));
     assert!(check.notice().is_some());
 }
 
@@ -246,11 +247,11 @@ async fn a_cache_from_another_repository_is_not_reused() {
     assert_eq!(elsewhere.latest_version.as_deref(), Some("v1.5.0"));
     assert_eq!(
         elsewhere.release_url.as_deref(),
-        Some("https://github.com/someone/fork/releases/tag/v1.5.0")
+        Some("https://github.com/someone/fork/releases/latest")
     );
     assert_eq!(
         elsewhere.release_url.as_deref(),
-        Some("https://github.com/someone/fork/releases/tag/v1.5.0")
+        Some("https://github.com/someone/fork/releases/latest")
     );
 }
 

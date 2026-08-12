@@ -21,17 +21,17 @@ fn documents_have_stable_nonempty_digests() {
 }
 
 #[test]
-fn privacy_policy_embeds_the_complete_default_network_catalog() {
+fn privacy_policy_describes_owner_control_without_embedding_endpoints() {
     let policy = privacy_policy();
-    let json = policy
-        .split_once("```json\n")
-        .and_then(|(_, rest)| rest.split_once("\n```"))
-        .map(|(json, _)| json)
-        .expect("privacy policy should contain a JSON network catalog");
-    let documented: Vec<crate::config::NetworkConfig> = serde_json::from_str(json).unwrap();
-    assert_eq!(documented, crate::config::default_networks());
-    assert!(documented.iter().any(|network| network.disabled));
+    assert!(!policy.contains("```json"));
+    for network in crate::config::default_networks() {
+        for endpoint in network.rpc_urls {
+            assert!(!policy.contains(endpoint.as_str()));
+        }
+    }
     assert!(policy.contains("Apart from these RPC endpoints"));
+    assert!(policy.contains("Ordered strategy tries endpoints from top to bottom"));
+    assert!(policy.contains("Random strategy\nshuffles them for each request"));
     assert!(policy.contains("stored in that encrypted database"));
 }
 
@@ -78,9 +78,8 @@ fn privacy_policy_discloses_the_release_check() {
     assert!(policy.contains("EKUBO_WALLET_SKIP_UPDATE_CHECK=1"));
     // What triggers it, because "when you run a command" is the difference
     // between this and the background telemetry section 1 promises is absent.
-    assert!(policy.contains("Automatic checks follow the updater"));
-    assert!(policy.contains("An update is never installed silently."));
-    assert!(policy.contains("requires your explicit\nconfirmation"));
+    assert!(policy.contains("The application has no self-update capability."));
+    assert!(policy.contains("GitHub Releases page"));
     // Section 4's exhaustive claim has to account for it too, not just
     // section 2's.
     assert!(policy.contains(

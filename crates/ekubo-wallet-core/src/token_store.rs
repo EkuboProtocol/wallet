@@ -246,6 +246,49 @@ pub enum ProposalSource<'a> {
 /// the prefix leads so capping the length cannot remove it.
 const CLAIMED_PREFIX: &str = "an agent's own list: ";
 
+struct NormalizedOwnerToken {
+    chain_id: i64,
+    symbol: String,
+    name: Option<String>,
+    source: String,
+}
+
+fn normalize_owner_token(token: &ListedToken, source: &str) -> Result<NormalizedOwnerToken> {
+    ensure!(token.chain_id > 0, "chain ID must be positive");
+    let symbol = sanitize(&token.symbol);
+    ensure!(
+        !symbol.is_empty(),
+        "token {} on chain {} has an empty symbol once sanitized",
+        token.address.to_checksum(None),
+        token.chain_id
+    );
+    let source = sanitize(source);
+    ensure!(!source.is_empty(), "token source must not be empty");
+    Ok(NormalizedOwnerToken {
+        chain_id: i64::try_from(token.chain_id).context("chain ID out of range")?,
+        symbol,
+        name: token
+            .name
+            .as_deref()
+            .map(sanitize)
+            .filter(|name| !name.is_empty()),
+        source,
+    })
+}
+
+fn stored_token_identity(token: &StoredToken) -> Result<(u64, Address)> {
+    Ok((
+        token
+            .chain_id
+            .parse()
+            .context("stored token has an invalid chain ID")?,
+        token
+            .address
+            .parse()
+            .context("stored token has an invalid address")?,
+    ))
+}
+
 impl ProposalSource<'_> {
     /// The exact string a review groups under.
     #[must_use]
@@ -389,65 +432,107 @@ impl TokenStore {
         self.consume_proposals(proposals)
     }
 
-    /// Add or replace the owner-authored display metadata for one token.
+    /// Add genuinely new owner-authored display metadata for one token.
     ///
-    /// Token metadata is not consulted by policy enforcement, but it names
-    /// and scales values on the approval screen. It therefore remains an
-    /// owner-only, human-present mutation even though it cannot authorize a
-    /// transaction by itself. The existing `added_at` value is deliberately
-    /// preserved when metadata is corrected.
-    pub fn upsert_authorized(
+    /// Create is deliberately not an upsert. A token-list confirmation or a
+    /// second owner window may install the same identity while native
+    /// authentication is open; the stale Add form must report that conflict
+    /// instead of overwriting the row the owner never reviewed.
+    pub fn add_authorized(
         &mut self,
         token: &ListedToken,
         source: &str,
         authorization: &OwnerAuthorization,
     ) -> Result<StoredToken> {
         authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
-        ensure!(token.chain_id > 0, "chain ID must be positive");
-        let symbol = sanitize(&token.symbol);
-        ensure!(
-            !symbol.is_empty(),
-            "token {} on chain {} has an empty symbol once sanitized",
-            token.address.to_checksum(None),
-            token.chain_id
-        );
-        let source = sanitize(source);
-        ensure!(!source.is_empty(), "token source must not be empty");
-        let name = token
-            .name
-            .as_deref()
-            .map(sanitize)
-            .filter(|name| !name.is_empty());
-        let chain_id = i64::try_from(token.chain_id).context("chain ID out of range")?;
+        let fields = normalize_owner_token(token, source)?;
         let now = Millis(sql::now());
         let transaction = self.database.connection.transaction()?;
-        transaction.execute(
+        let inserted = transaction.execute(
             "INSERT INTO tokens(chain_id, address, symbol, name, decimals, source, added_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(chain_id, address) DO UPDATE SET
-               symbol = excluded.symbol,
-               name = excluded.name,
-               decimals = excluded.decimals,
-               source = excluded.source",
+             ON CONFLICT(chain_id, address) DO NOTHING",
             params![
-                chain_id,
+                fields.chain_id,
                 Blob(token.address),
-                symbol,
-                name,
+                fields.symbol,
+                fields.name,
                 token.decimals,
-                source,
+                fields.source,
                 now,
             ],
         )?;
+        ensure!(
+            inserted == 1,
+            "token {} on chain {} was added while authentication was open; review the current row",
+            token.address.to_checksum(None),
+            token.chain_id
+        );
         // Once the owner has supplied exact metadata there is no remaining
         // proposal for this identity to review, regardless of its generation.
         transaction.execute(
             "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
-            params![chain_id, Blob(token.address)],
+            params![fields.chain_id, Blob(token.address)],
         )?;
         transaction.commit()?;
         self.get(token.chain_id, token.address)?
-            .context("upserted token missing")
+            .context("inserted token missing")
+    }
+
+    /// Replace only the exact token row the owner opened in the editor.
+    ///
+    /// Token metadata names and scales values on approval screens. It cannot
+    /// grant permission, but silently overwriting a newer symbol or decimals
+    /// after authentication would still misrepresent the transaction being
+    /// reviewed. The complete stored row is therefore the optimistic revision.
+    pub fn replace_authorized(
+        &mut self,
+        reviewed: &StoredToken,
+        replacement: &ListedToken,
+        source: &str,
+        authorization: &OwnerAuthorization,
+    ) -> Result<StoredToken> {
+        authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
+        let (reviewed_chain_id, reviewed_address) = stored_token_identity(reviewed)?;
+        ensure!(
+            (replacement.chain_id, replacement.address) == (reviewed_chain_id, reviewed_address),
+            "a token's chain ID and address cannot change while it is edited"
+        );
+        let fields = normalize_owner_token(replacement, source)?;
+        let transaction = self.database.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE tokens
+             SET symbol = ?8, name = ?9, decimals = ?10, source = ?11
+             WHERE chain_id = ?1 AND address = ?2
+               AND symbol IS ?3 AND name IS ?4 AND decimals IS ?5
+               AND source = ?6 AND added_at = ?7",
+            params![
+                fields.chain_id,
+                Blob(replacement.address),
+                reviewed.symbol,
+                reviewed.name,
+                reviewed.decimals,
+                reviewed.source,
+                Millis(reviewed.added_at),
+                fields.symbol,
+                fields.name,
+                replacement.decimals,
+                fields.source,
+            ],
+        )?;
+        ensure!(
+            changed == 1,
+            "token {} on chain {} changed while it was being edited; review the current metadata",
+            replacement.address.to_checksum(None),
+            replacement.chain_id
+        );
+        transaction.execute(
+            "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
+            params![fields.chain_id, Blob(replacement.address)],
+        )?;
+        transaction.commit()?;
+        self.get(replacement.chain_id, replacement.address)?
+            .context("updated token missing")
     }
 
     pub(crate) fn consume_proposals(&mut self, proposals: &[TokenProposal]) -> Result<u64> {
@@ -537,14 +622,36 @@ impl TokenStore {
     /// say so.
     pub fn remove_authorized(
         &mut self,
-        chain_id: u64,
-        address: Address,
+        reviewed: &StoredToken,
         authorization: &OwnerAuthorization,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
-        self.remove(chain_id, address)
+        let (chain_id, address) = stored_token_identity(reviewed)?;
+        let removed = self.database.connection.execute(
+            "DELETE FROM tokens
+             WHERE chain_id = ?1 AND address = ?2
+               AND symbol IS ?3 AND name IS ?4 AND decimals IS ?5
+               AND source = ?6 AND added_at = ?7",
+            params![
+                i64::try_from(chain_id).context("chain ID out of range")?,
+                Blob(address),
+                reviewed.symbol,
+                reviewed.name,
+                reviewed.decimals,
+                reviewed.source,
+                Millis(reviewed.added_at),
+            ],
+        )?;
+        ensure!(
+            removed == 1,
+            "token {} on chain {} changed while removal was being authenticated; review the current metadata",
+            address.to_checksum(None),
+            chain_id
+        );
+        Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn remove(&mut self, chain_id: u64, address: Address) -> Result<bool> {
         let removed = self.database.connection.execute(
             "DELETE FROM tokens WHERE chain_id = ?1 AND address = ?2",

@@ -83,10 +83,16 @@ fn network_mutations_require_network_scoped_owner_authorization() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
     let before = store.load().unwrap();
+    let ethereum = before
+        .networks
+        .iter()
+        .find(|network| network.name == "ethereum")
+        .unwrap()
+        .clone();
     let wrong_scope = OwnerAuthorization::for_test(OwnerAuthorizationScope::NotificationPrivacy);
     assert!(
         store
-            .set_network_disabled("ethereum", true, &wrong_scope)
+            .set_network_disabled(&ethereum, true, &wrong_scope)
             .is_err()
     );
     assert_eq!(store.load().unwrap(), before);
@@ -94,7 +100,7 @@ fn network_mutations_require_network_scoped_owner_authorization() {
     let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
     assert!(
         store
-            .set_network_disabled("ethereum", true, &authorized)
+            .set_network_disabled(&ethereum, true, &authorized)
             .unwrap()
             .disabled
     );
@@ -105,8 +111,15 @@ fn network_deletion_requires_an_owner_authorized_disable_first() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
     let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    let ethereum = store
+        .load()
+        .unwrap()
+        .networks
+        .into_iter()
+        .find(|network| network.name == "ethereum")
+        .unwrap();
 
-    assert!(store.remove_network("ethereum", &authorized).is_err());
+    assert!(store.remove_network(&ethereum, &authorized).is_err());
     assert!(
         store
             .load()
@@ -116,10 +129,10 @@ fn network_deletion_requires_an_owner_authorized_disable_first() {
             .any(|network| network.name == "ethereum" && !network.disabled)
     );
 
-    store
-        .set_network_disabled("ethereum", true, &authorized)
+    let disabled = store
+        .set_network_disabled(&ethereum, true, &authorized)
         .unwrap();
-    let removed = store.remove_network("ethereum", &authorized).unwrap();
+    let removed = store.remove_network(&disabled, &authorized).unwrap();
     assert_eq!(removed.name, "ethereum");
     assert!(
         store
@@ -129,6 +142,60 @@ fn network_deletion_requires_an_owner_authorized_disable_first() {
             .iter()
             .all(|network| network.name != "ethereum")
     );
+}
+
+#[test]
+fn network_toggle_and_delete_refuse_a_stale_reviewed_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path());
+    let authorization = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    let reviewed = store
+        .load()
+        .unwrap()
+        .networks
+        .into_iter()
+        .find(|network| network.name == "ethereum")
+        .unwrap();
+    let mut edited = reviewed.clone();
+    edited.display_name = Some("Owner Ethereum".to_owned());
+    store
+        .replace_network(&reviewed, edited.clone(), &authorization)
+        .unwrap();
+
+    assert!(
+        store
+            .set_network_disabled(&reviewed, true, &authorization)
+            .unwrap_err()
+            .to_string()
+            .contains("changed while the enable setting was being authenticated")
+    );
+    assert_eq!(
+        store
+            .load()
+            .unwrap()
+            .networks
+            .into_iter()
+            .find(|network| network.chain_id == edited.chain_id),
+        Some(edited.clone())
+    );
+
+    let disabled = store
+        .set_network_disabled(&edited, true, &authorization)
+        .unwrap();
+    let mut changed_disabled = disabled.clone();
+    changed_disabled.rpc_strategy = RpcStrategy::Random;
+    store
+        .replace_network(&disabled, changed_disabled.clone(), &authorization)
+        .unwrap();
+
+    assert!(
+        store
+            .remove_network(&disabled, &authorization)
+            .unwrap_err()
+            .to_string()
+            .contains("changed while removal was being authenticated")
+    );
+    assert!(store.load().unwrap().networks.contains(&changed_disabled));
 }
 
 #[test]

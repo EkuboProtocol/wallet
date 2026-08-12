@@ -1,9 +1,9 @@
 //! Whether a newer signed desktop release exists.
 //!
 //! This module only answers "am I behind?" for the Updates screen and the
-//! read-only `wallet_check_for_updates` MCP tool. Download, signature
-//! verification, owner confirmation, and installation live in the desktop
-//! updater. The release tag is validated before it enters a URL. Every
+//! read-only `wallet_check_for_updates` MCP tool. The application only reports
+//! the published version and links to GitHub; it cannot download or install an
+//! update. The release tag is validated before it enters a URL. Every
 //! failure here — offline, rate limited, malformed JSON, an unwritable cache —
 //! resolves to "no update known" rather than an error, because nothing that
 //! depends on this answer should fail when the answer is merely unavailable.
@@ -52,7 +52,7 @@ pub enum CheckSource {
     Unavailable,
 }
 
-/// The complete answer, shaped so the desktop updater and the MCP tool read
+/// The complete answer, shaped so the desktop and the MCP tool read
 /// the same fields.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReleaseCheck {
@@ -63,7 +63,7 @@ pub struct ReleaseCheck {
     /// True only when both versions parsed and the published one is newer.
     /// An unknown answer is never reported as an update.
     pub update_available: bool,
-    /// The release page for `latest_version`.
+    /// The repository's stable latest-release page.
     pub release_url: Option<String>,
     /// When `latest_version` was learned — now, or when the cache was written.
     pub checked_at: Option<DateTime<Utc>>,
@@ -99,7 +99,7 @@ the wallet. Do not retry, and do not tell the user to upgrade."
             return None;
         }
         Some(format!(
-            "Ekubo Wallet {latest} is available; you are running {}. Open Updates to review the signed package.",
+            "Ekubo Wallet {latest} is available; you are running {}. Open Updates to visit the latest GitHub release.",
             self.installed_version
         ))
     }
@@ -345,9 +345,9 @@ where
         return ReleaseCheck::unknown(installed_version, source);
     };
 
-    let release_url = format!("https://github.com/{repository}/releases/tag/{tag}");
+    let release_url = format!("https://github.com/{repository}/releases/latest");
     let instruction = if update_available {
-        "A newer signed desktop release is published. Tell the user to open Updates in Ekubo Wallet to review its version, notes, signature verification, and native package installation. Never download or install it on the user's behalf."
+        "A newer desktop release is published. Tell the user to open Updates in Ekubo Wallet and follow the link to the latest GitHub release. The wallet cannot download or install it."
             .to_string()
     } else {
         "This build is the latest published release. Say so if asked; there is nothing to do."

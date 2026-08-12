@@ -310,19 +310,6 @@ fn protected_desktop_settings_reject_the_wrong_authorization_scope() {
     );
     assert!(
         store
-            .set_automatic_update_checks(false, &wrong_scope)
-            .is_err()
-    );
-    assert!(store.automatic_update_checks().unwrap());
-    store
-        .set_automatic_update_checks(
-            false,
-            &OwnerAuthorization::for_test(OwnerAuthorizationScope::SoftwareUpdate),
-        )
-        .unwrap();
-    assert!(!store.automatic_update_checks().unwrap());
-    assert!(
-        store
             .issue_authorization_code(
                 client.id,
                 REDIRECT,

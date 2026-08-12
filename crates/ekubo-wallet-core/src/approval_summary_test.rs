@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::core::execution_plan::{DecimalU256, ExecutionStepKind, PlannedTransaction};
+use crate::simulation::TokenBalanceChange;
 
 fn step(step_number: u32, to: Address, data: Vec<u8>) -> ExecutionStep {
     ExecutionStep {
@@ -669,6 +670,30 @@ fn a_real_outflow_survives_a_flood_of_forged_transfer_logs() {
         rendered.contains("not shown"),
         "the truncation notice must still appear: {rendered}"
     );
+}
+
+#[test]
+fn recognized_transfer_event_totals_use_token_decimals_and_symbol() {
+    let token = Address::repeat_byte(0xaa);
+    let mut simulation = simulation_with_native_delta("0");
+    simulation.balance_changes.as_mut().unwrap().tokens.insert(
+        format!("{token:#x}"),
+        TokenBalanceChange {
+            before: Some("1000000".into()),
+            after: Some("2000000".into()),
+            delta: Some("1000000".into()),
+            incoming_transfers: "1000000".into(),
+            outgoing_transfers: "0".into(),
+        },
+    );
+    let lines = render_balance_changes(
+        &simulation,
+        &crate::config::default_networks().remove(0),
+        &usdc_metadata(token),
+    );
+    assert!(lines.iter().any(|(label, value)| {
+        label.is_empty() && value.contains("+1 USDC (+1000000 base units) in")
+    }));
 }
 
 #[test]

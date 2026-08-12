@@ -562,39 +562,53 @@ fn confirming_token_proposals_installs_and_consumes_the_exact_reviewed_rows() {
 fn confirmed_token_mutations_require_token_metadata_authorization() {
     let (_directory, mut store) = store();
     let address = Address::repeat_byte(0x42);
-    store.add(&usdc(1, address), "owner list").unwrap();
+    let reviewed = store.add(&usdc(1, address), "owner list").unwrap();
 
     let wrong = crate::human_presence::OwnerAuthorization::for_test(
         crate::human_presence::OwnerAuthorizationScope::NetworkSettings,
     );
-    assert!(store.remove_authorized(1, address, &wrong).is_err());
+    assert!(store.remove_authorized(&reviewed, &wrong).is_err());
     assert!(store.get(1, address).unwrap().is_some());
 
     let token_authorization = crate::human_presence::OwnerAuthorization::for_test(
         crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
     );
-    assert!(
-        store
-            .remove_authorized(1, address, &token_authorization)
-            .unwrap()
-    );
+    store
+        .remove_authorized(&reviewed, &token_authorization)
+        .unwrap();
 }
 
 #[test]
-fn owner_authorized_token_upsert_replaces_metadata_and_consumes_proposals() {
+fn owner_authorized_token_create_never_overwrites_an_existing_row() {
+    let (_directory, mut store) = store();
+    let address = Address::repeat_byte(0x42);
+    let authorization = crate::human_presence::OwnerAuthorization::for_test(
+        crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
+    );
+    let original = store
+        .add_authorized(&usdc(1, address), "Manual entry", &authorization)
+        .unwrap();
+    let conflict = ListedToken {
+        symbol: "IMPOSTOR".to_owned(),
+        ..usdc(1, address)
+    };
+
+    assert!(
+        store
+            .add_authorized(&conflict, "Manual entry", &authorization)
+            .unwrap_err()
+            .to_string()
+            .contains("was added while authentication was open")
+    );
+    assert_eq!(store.get(1, address).unwrap(), Some(original));
+}
+
+#[test]
+fn owner_authorized_token_replace_is_exact_and_preserves_creation_time() {
     let (_directory, mut store) = store();
     let address = Address::repeat_byte(0x42);
     let original = usdc(1, address);
     let inserted = store.add(&original, "original list").unwrap();
-    store
-        .propose(
-            &[ListedToken {
-                symbol: "OLD".to_owned(),
-                ..original.clone()
-            }],
-            &ProposalSource::Claimed("pending correction"),
-        )
-        .unwrap();
 
     let replacement = ListedToken {
         chain_id: 1,
@@ -608,7 +622,7 @@ fn owner_authorized_token_upsert_replaces_metadata_and_consumes_proposals() {
     );
     assert!(
         store
-            .upsert_authorized(&replacement, "Manual entry", &wrong)
+            .replace_authorized(&inserted, &replacement, "Manual entry", &wrong)
             .is_err()
     );
 
@@ -616,18 +630,40 @@ fn owner_authorized_token_upsert_replaces_metadata_and_consumes_proposals() {
         crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
     );
     let updated = store
-        .upsert_authorized(&replacement, "Manual entry", &token_authorization)
+        .replace_authorized(
+            &inserted,
+            &replacement,
+            "Manual entry",
+            &token_authorization,
+        )
         .unwrap();
     assert_eq!(updated.symbol.as_deref(), Some("USDC"));
     assert_eq!(updated.name.as_deref(), Some("USD Coin"));
     assert_eq!(updated.decimals, Some(8));
     assert_eq!(updated.source, "Manual entry");
     assert_eq!(updated.added_at, inserted.added_at);
-    assert!(store.proposals().unwrap().is_empty());
+
+    let second_replacement = ListedToken {
+        symbol: "STALE".to_owned(),
+        ..replacement
+    };
+    assert!(
+        store
+            .replace_authorized(
+                &inserted,
+                &second_replacement,
+                "Manual entry",
+                &token_authorization,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("changed while it was being edited")
+    );
+    assert_eq!(store.get(1, address).unwrap(), Some(updated));
 }
 
 #[test]
-fn owner_authorized_token_upsert_rejects_an_empty_sanitized_symbol() {
+fn owner_authorized_token_create_rejects_an_empty_sanitized_symbol() {
     let (_directory, mut store) = store();
     let authorization = crate::human_presence::OwnerAuthorization::for_test(
         crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
@@ -642,10 +678,42 @@ fn owner_authorized_token_upsert_rejects_an_empty_sanitized_symbol() {
 
     assert!(
         store
-            .upsert_authorized(&token, "Manual entry", &authorization)
+            .add_authorized(&token, "Manual entry", &authorization)
             .is_err()
     );
     assert!(store.get(token.chain_id, token.address).unwrap().is_none());
+}
+
+#[test]
+fn owner_authorized_token_removal_refuses_a_row_changed_after_review() {
+    let (_directory, mut store) = store();
+    let address = Address::repeat_byte(0x42);
+    let reviewed = store.add(&usdc(1, address), "original list").unwrap();
+    let authorization = crate::human_presence::OwnerAuthorization::for_test(
+        crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
+    );
+    let changed = store
+        .replace_authorized(
+            &reviewed,
+            &ListedToken {
+                symbol: "USDC.e".to_owned(),
+                ..usdc(1, address)
+            },
+            "Manual entry",
+            &authorization,
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .remove_authorized(&reviewed, &authorization)
+            .unwrap_err()
+            .to_string()
+            .contains("changed while removal was being authenticated")
+    );
+    assert_eq!(store.get(1, address).unwrap(), Some(changed.clone()));
+    store.remove_authorized(&changed, &authorization).unwrap();
+    assert!(store.get(1, address).unwrap().is_none());
 }
 
 #[test]

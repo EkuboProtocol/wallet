@@ -243,19 +243,6 @@ impl DesktopStore {
         self.set_setting("notification_detailed_previews", &enabled)
     }
 
-    pub fn automatic_update_checks(&self) -> Result<bool> {
-        Ok(self.setting("automatic_update_checks")?.unwrap_or(true))
-    }
-
-    pub fn set_automatic_update_checks(
-        &mut self,
-        enabled: bool,
-        authorization: &OwnerAuthorization,
-    ) -> Result<()> {
-        authorization.require(OwnerAuthorizationScope::SoftwareUpdate)?;
-        self.set_setting("automatic_update_checks", &enabled)
-    }
-
     pub fn appearance_preference(&self) -> Result<AppearancePreference> {
         Ok(self.setting("appearance_preference")?.unwrap_or_default())
     }

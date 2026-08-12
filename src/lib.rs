@@ -20,7 +20,6 @@ pub mod release_check;
 pub mod review;
 pub mod single_instance;
 pub mod tray;
-pub mod updater;
 pub mod walletconnect;
 mod walletconnect_handler;
 

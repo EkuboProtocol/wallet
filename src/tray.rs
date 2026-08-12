@@ -58,7 +58,7 @@ impl PlatformTray {
         let agents = MenuItem::with_id(AGENTS_ID, "MCP starting…", true, None);
         let reinstall_agents =
             MenuItem::with_id(REINSTALL_AGENTS_ID, "Reinstall MCP Server", true, None);
-        let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
+        let updates = MenuItem::with_id(UPDATES_ID, "View Latest Release…", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Settings…", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit Ekubo Wallet", true, None);
         let separator_one = PredefinedMenuItem::separator();

@@ -11,10 +11,10 @@ use crate::{
         NotificationPreferences, NotificationRoute, NotificationService as _,
         PlatformNotificationService, initialize_platform_notifications, notification_for,
     },
+    release_check::ReleaseCheck,
     review::ReviewState,
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
-    updater::{UpdateSummary, VerifiedUpdate},
     walletconnect::{
         ProposalCommand, ProposalPresenter, ProposalPrompt, QrChoices, QrPreview, SessionSummary,
         SystemScreenPicker, WalletConnectManager, run_session, scan_screen,
@@ -37,15 +37,14 @@ use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, ObjectFit, QuitMode,
-    Render, RenderImage, ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, WeakEntity,
-    Window, WindowAppearance, WindowBounds, WindowHandle, WindowOptions, actions, div, img,
-    prelude::*, px, size, uniform_list,
+    Render, RenderImage, ScrollAnchor, ScrollHandle, SharedString, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle,
+    WindowOptions, actions, div, img, prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
     ActiveTheme, Colorize, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root,
     Selectable, Sizable, StyledExt, Theme, ThemeMode, ThemeTokens, WindowExt as _,
     alert::Alert,
-    badge::Badge,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     group_box::{GroupBox, GroupBoxVariants as _},
@@ -55,7 +54,6 @@ use gpui_component::{
     scroll::ScrollableElement,
     spinner::Spinner,
     switch::Switch,
-    text::{TextView, TextViewState},
 };
 use std::{
     borrow::Cow,
@@ -77,6 +75,7 @@ const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
 const REPOSITORY_URL: &str = "https://github.com/EkuboProtocol/wallet";
+const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases/latest";
 
 fn application_license_url() -> String {
     if BUILD_COMMIT.is_empty() {
@@ -119,7 +118,6 @@ struct DesktopRuntime {
     _server: Arc<Mutex<Option<McpHttpServer>>>,
     _walletconnect: Arc<Mutex<crate::walletconnect::WalletConnectManager>>,
     _tray: Rc<RefCell<Option<PlatformTray>>>,
-    _pending_software_update: Arc<Mutex<Option<PendingSoftwareUpdate>>>,
 }
 
 impl gpui::Global for DesktopRuntime {}
@@ -141,13 +139,13 @@ fn legal_requires_acceptance(document: LegalDocument) -> bool {
     )
 }
 
-fn legal_review_requires_acceptance(document: LegalDocument, status: &LegalStatus) -> bool {
+fn legal_review_requires_acceptance(document: LegalDocument, status: Option<&LegalStatus>) -> bool {
     legal_requires_acceptance(document)
-        && match document {
+        && status.is_none_or(|status| match document {
             LegalDocument::TermsOfService => !status.terms_of_service.accepted,
             LegalDocument::PrivacyPolicy => !status.privacy_policy.accepted,
             LegalDocument::ThirdPartyLicenses => false,
-        }
+        })
 }
 
 fn settings_section(title: &'static str, content: impl IntoElement) -> gpui::Div {
@@ -463,7 +461,7 @@ pub struct WalletWindow {
     token_name_input: Option<Entity<InputState>>,
     token_decimals_input: Option<Entity<InputState>>,
     token_editor_open: bool,
-    token_editor_identity: Option<(u64, alloy::primitives::Address)>,
+    token_editor_original: Option<StoredToken>,
     token_editor_errors: TokenEditorErrors,
     token_editor_busy: bool,
     token_import_state: TokenImportState,
@@ -494,9 +492,7 @@ pub struct WalletWindow {
     route_errors: BTreeMap<Route, SharedString>,
     detailed_notification_previews: Arc<AtomicBool>,
     appearance_preference: AppearancePreference,
-    automatic_update_checks: bool,
     notification_preference_busy: bool,
-    update_preference_busy: bool,
     portfolio: PortfolioState,
     portfolio_generation: u64,
     portfolio_chain_id: Option<u64>,
@@ -543,7 +539,7 @@ pub struct WalletWindow {
     network_action_busy: BTreeSet<String>,
     network_action_errors: BTreeMap<String, SharedString>,
     expanded_networks: BTreeSet<String>,
-    pending_network_removal: Option<String>,
+    pending_network_removal: Option<NetworkConfig>,
     network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
@@ -572,8 +568,7 @@ pub struct WalletWindow {
     policy_action_error: Option<SharedString>,
     token_proposal_busy: bool,
     network_proposal_busy: bool,
-    update_state: SoftwareUpdateState,
-    pending_software_update: Arc<Mutex<Option<PendingSoftwareUpdate>>>,
+    release_state: ReleaseDisplayState,
 }
 
 #[derive(Clone)]
@@ -643,31 +638,10 @@ fn cache_result<T>(result: Result<T>) -> std::result::Result<T, SharedString> {
     result.map_err(|error| format!("{error:#}").into())
 }
 
-struct PendingSoftwareUpdate {
-    update: VerifiedUpdate,
-    bytes: Vec<u8>,
-}
-
-enum SoftwareUpdateState {
+enum ReleaseDisplayState {
     Idle,
     Checking,
-    Current,
-    Available {
-        update: VerifiedUpdate,
-        summary: UpdateSummary,
-    },
-    Downloading {
-        summary: UpdateSummary,
-        received: u64,
-        total: Option<u64>,
-    },
-    Ready {
-        update: VerifiedUpdate,
-        summary: UpdateSummary,
-        bytes: Vec<u8>,
-    },
-    Authorizing,
-    Installing,
+    Ready(ReleaseCheck),
     Failed(SharedString),
 }
 
@@ -758,13 +732,27 @@ fn render_embedded_png(bytes: &[u8]) -> Result<Arc<RenderImage>> {
 struct LegalReview {
     document: LegalDocument,
     digest: String,
-    sections: Arc<[SharedString]>,
-    parsed_sections: Option<Arc<[Entity<TextViewState>]>>,
-    list_state: gpui::ListState,
+    rows: Arc<[LegalDisplayRow]>,
+    scroll_handle: UniformListScrollHandle,
+    end_rendered: Arc<AtomicBool>,
     acceptance_required: bool,
     scroll_check_scheduled: bool,
     viewed_to_end: bool,
     error: Option<SharedString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegalRowKind {
+    Heading,
+    Body,
+    Code,
+    Blank,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LegalDisplayRow {
+    text: SharedString,
+    kind: LegalRowKind,
 }
 
 struct AccountExport {
@@ -881,7 +869,6 @@ struct ActiveReview {
     simulation: Option<ekubo_wallet_core::simulation::SimulationResult>,
     completion: Option<ActiveReviewCompletion>,
     awaiting_refresh: bool,
-    exact_payloads_expanded: bool,
     scroll_handle: ScrollHandle,
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
@@ -962,7 +949,7 @@ struct TokenListDelegate {
     error: Option<SharedString>,
     action_errors: BTreeMap<(u64, alloy::primitives::Address), SharedString>,
     selected: Option<IndexPath>,
-    pending_removal: Option<(u64, alloy::primitives::Address)>,
+    pending_removal: Option<StoredToken>,
     removing: BTreeSet<(u64, alloy::primitives::Address)>,
     network_names: BTreeMap<u64, SharedString>,
 }
@@ -1023,7 +1010,7 @@ fn render_activity_row(
     cx: &mut App,
 ) -> gpui::Div {
     let request_id = record.request_id();
-    let base = div().h(px(116.0)).pb_2();
+    let base = div().h(px(152.0)).pb_2();
     let card = match record {
         OwnerActivityRecord::Transaction(item) => {
             let status = item.status;
@@ -1035,6 +1022,7 @@ fn render_activity_row(
             let discard_editor = editor;
             h_flex()
                 .w_full()
+                .flex_wrap()
                 .justify_between()
                 .gap_4()
                 .child(
@@ -1146,6 +1134,7 @@ fn render_activity_row(
             let review_editor = editor;
             h_flex()
                 .w_full()
+                .flex_wrap()
                 .justify_between()
                 .gap_4()
                 .child(
@@ -1201,6 +1190,7 @@ fn render_activity_row(
             let review_editor = editor;
             h_flex()
                 .w_full()
+                .flex_wrap()
                 .justify_between()
                 .gap_4()
                 .child(
@@ -1364,6 +1354,13 @@ impl TokenListDelegate {
         self.loading = false;
         match result {
             Ok(tokens) => {
+                if self
+                    .pending_removal
+                    .as_ref()
+                    .is_some_and(|reviewed| !tokens.contains(reviewed))
+                {
+                    self.pending_removal = None;
+                }
                 self.all_tokens = tokens;
                 self.error = None;
                 self.apply_filters();
@@ -1541,69 +1538,157 @@ fn validate_token_text(
     Some(value.to_owned())
 }
 
-// Keep each rich-text item small enough that parsing and laying out the visible
-// overdraw never monopolizes a frame. The list supplies an up-front height hint
-// for every item, so virtualizing these chunks does not start with a zero-height
-// scrollbar which grows as the user reads.
-const LEGAL_SECTION_TARGET_BYTES: usize = 768;
-const LEGAL_SECTION_HEIGHT_HINT: gpui::Pixels = px(180.0);
+// One exact-height row gives `uniform_list` the complete scroll extent on its
+// first layout. At the minimum window width 64 Suisse characters fit beside
+// the navigation rail; longer words (including URLs) are hard-wrapped so no
+// legal text can escape its viewport.
+const LEGAL_WRAP_COLUMNS: usize = 64;
+const LEGAL_ROW_HEIGHT: gpui::Pixels = px(25.0);
 
-fn legal_markdown_sections(text: &str) -> Arc<[SharedString]> {
-    let mut sections = Vec::new();
-    let mut section = String::new();
-    let mut fence = None;
-
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let heading = fence.is_none()
-            && trimmed
-                .strip_prefix('#')
-                .is_some_and(|rest| rest.starts_with('#') || rest.starts_with(' '));
-        if heading && !section.trim().is_empty() {
-            sections.push(SharedString::from(std::mem::take(&mut section)));
+fn push_wrapped_legal_rows(
+    rows: &mut Vec<LegalDisplayRow>,
+    text: &str,
+    kind: LegalRowKind,
+    first_prefix: &str,
+    continuation_prefix: &str,
+) {
+    let mut line = first_prefix.to_owned();
+    let mut line_len = line.chars().count();
+    let mut prefix_len = line_len;
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        let separator = usize::from(line_len > prefix_len);
+        if line_len + separator + word_len <= LEGAL_WRAP_COLUMNS {
+            if separator == 1 {
+                line.push(' ');
+                line_len += 1;
+            }
+            line.push_str(word);
+            line_len += word_len;
+            continue;
         }
-
-        section.push_str(line);
-        let marker = if trimmed.starts_with("```") {
-            Some('`')
-        } else if trimmed.starts_with("~~~") {
-            Some('~')
-        } else {
-            None
-        };
-        if let Some(marker) = marker {
-            fence = if fence == Some(marker) {
-                None
-            } else if fence.is_none() {
-                Some(marker)
-            } else {
-                fence
-            };
+        if line_len > prefix_len {
+            rows.push(LegalDisplayRow {
+                text: line.into(),
+                kind,
+            });
+            line = continuation_prefix.to_owned();
+            line_len = line.chars().count();
+            prefix_len = line_len;
         }
-
-        if fence.is_none() && section.len() >= LEGAL_SECTION_TARGET_BYTES && line.trim().is_empty()
-        {
-            sections.push(SharedString::from(std::mem::take(&mut section)));
+        for character in word.chars() {
+            if line_len == LEGAL_WRAP_COLUMNS {
+                rows.push(LegalDisplayRow {
+                    text: line.into(),
+                    kind,
+                });
+                line = continuation_prefix.to_owned();
+                line_len = line.chars().count();
+                prefix_len = line_len;
+            }
+            line.push(character);
+            line_len += 1;
         }
     }
-    if !section.is_empty() || sections.is_empty() {
-        sections.push(SharedString::from(section));
+    if line_len > prefix_len || rows.is_empty() {
+        rows.push(LegalDisplayRow {
+            text: line.into(),
+            kind,
+        });
     }
-    sections.into()
 }
 
-fn legal_list_reached_end(state: &gpui::ListState) -> bool {
-    state.item_count() == 0 || state.is_scrolled_to_end() == Some(true)
+fn legal_markdown_rows(text: &str) -> Arc<[LegalDisplayRow]> {
+    let mut rows = Vec::new();
+    let mut paragraph = String::new();
+    let mut in_code = false;
+    let flush_paragraph = |rows: &mut Vec<LegalDisplayRow>, paragraph: &mut String| {
+        if !paragraph.is_empty() {
+            push_wrapped_legal_rows(rows, paragraph, LegalRowKind::Body, "", "");
+            paragraph.clear();
+        }
+    };
+    for source_line in text.lines() {
+        let line = source_line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            flush_paragraph(&mut rows, &mut paragraph);
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            push_wrapped_legal_rows(&mut rows, source_line, LegalRowKind::Code, "", "");
+        } else if line.is_empty() {
+            flush_paragraph(&mut rows, &mut paragraph);
+            if rows
+                .last()
+                .is_some_and(|row| row.kind != LegalRowKind::Blank)
+            {
+                rows.push(LegalDisplayRow {
+                    text: "".into(),
+                    kind: LegalRowKind::Blank,
+                });
+            }
+        } else if let Some(heading) = line.strip_prefix('#') {
+            flush_paragraph(&mut rows, &mut paragraph);
+            let heading = heading.trim_start_matches('#').trim();
+            push_wrapped_legal_rows(&mut rows, heading, LegalRowKind::Heading, "", "");
+        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            flush_paragraph(&mut rows, &mut paragraph);
+            push_wrapped_legal_rows(&mut rows, item, LegalRowKind::Body, "• ", "  ");
+        } else {
+            if !paragraph.is_empty() {
+                paragraph.push(' ');
+            }
+            paragraph.push_str(line);
+        }
+    }
+    flush_paragraph(&mut rows, &mut paragraph);
+    while rows
+        .last()
+        .is_some_and(|row| row.kind == LegalRowKind::Blank)
+    {
+        rows.pop();
+    }
+    rows.into()
+}
+
+fn legal_list_reached_end(state: &UniformListScrollHandle, end_rendered: &AtomicBool) -> bool {
+    end_rendered.load(Ordering::Acquire) || state.is_scrolled_to_end() == Some(true)
 }
 
 fn network_can_be_removed(network: &NetworkConfig) -> bool {
     network.disabled
 }
 
+fn restored_network_configuration(
+    reviewed: &NetworkConfig,
+    mut preset: NetworkConfig,
+) -> NetworkConfig {
+    preset.disabled = reviewed.disabled;
+    preset.rpc_urls.truncate(1);
+    preset
+}
+
 fn networks_for_display(networks: &[NetworkConfig]) -> Vec<&NetworkConfig> {
     let mut networks = networks.iter().collect::<Vec<_>>();
     networks.sort_by_key(|network| (network.chain_id, network.name.as_str()));
     networks
+}
+
+fn block_explorer_transaction_url(
+    networks: &[NetworkConfig],
+    chain_id: u64,
+    transaction_hash: &str,
+) -> Option<String> {
+    let base = networks
+        .iter()
+        .find(|network| network.chain_id == chain_id)?
+        .block_explorer_url
+        .as_ref()?;
+    let mut url = base.clone();
+    let root = url.path().trim_end_matches('/');
+    url.set_path(&format!("{root}/tx/{transaction_hash}"));
+    Some(url.into())
 }
 
 fn network_preset_match_rank(profile: &NetworkProfile, query: &str) -> Option<(usize, usize)> {
@@ -1748,6 +1833,7 @@ fn parse_network_editor_draft(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
+        let value = value.strip_suffix(',').unwrap_or(value).trim_end();
         match value.parse::<url::Url>() {
             Ok(url)
                 if matches!(url.scheme(), "http" | "https")
@@ -1758,7 +1844,7 @@ fn parse_network_editor_draft(
             }
             _ => {
                 errors.rpc_urls = Some(
-                    "Enter one valid http:// or https:// RPC URL per line, without embedded credentials."
+                    "Enter one valid http:// or https:// RPC URL per line, with a comma after every line except the last and no embedded credentials."
                         .into(),
                 );
                 break;
@@ -1770,7 +1856,7 @@ fn parse_network_editor_draft(
         || rpc_urls.iter().collect::<BTreeSet<_>>().len() != rpc_urls.len()
     {
         errors.rpc_urls = Some(format!(
-            "Enter 1–{} unique RPC URLs, one per line.",
+            "Enter 1–{} unique RPC URLs, one per line and comma-separated.",
             ekubo_wallet_core::config::MAX_NETWORK_RPC_URLS
         ));
     }
@@ -1914,11 +2000,15 @@ fn replace_input_value(
     }
 }
 
-fn token_removal_is_confirmed(
-    pending: Option<(u64, alloy::primitives::Address)>,
-    identity: (u64, alloy::primitives::Address),
-) -> bool {
-    pending == Some(identity)
+fn rpc_urls_for_editor(urls: &[url::Url]) -> String {
+    urls.iter()
+        .map(url::Url::as_str)
+        .collect::<Vec<_>>()
+        .join(",\n")
+}
+
+fn token_removal_is_confirmed(pending: Option<&StoredToken>, row: &StoredToken) -> bool {
+    pending == Some(row)
 }
 
 const TOKEN_INVENTORY_PAGE_SIZE: usize = 10_000;
@@ -1972,8 +2062,22 @@ fn review_sections_for_display(document: &ReviewDocument) -> Vec<&ApprovalSectio
     sections
 }
 
-fn review_exact_data_available(document: &ReviewDocument, expanded: bool) -> bool {
-    document.exact_payloads.is_empty() || expanded
+fn balance_effect_asset(label: &str) -> (String, Option<String>) {
+    if let Some(address) = label.strip_suffix(" (unlisted token)")
+        && address.starts_with("0x")
+    {
+        return ("Unlisted token".into(), Some(address.into()));
+    }
+    if let Some(symbol) = label.strip_suffix(" (native)") {
+        return (symbol.into(), Some("Native asset".into()));
+    }
+    if let Some((symbol, address)) = label.rsplit_once(" (")
+        && let Some(address) = address.strip_suffix(')')
+        && address.starts_with("0x")
+    {
+        return (symbol.into(), Some(address.into()));
+    }
+    (label.into(), None)
 }
 
 impl RouteListDelegate {
@@ -2081,17 +2185,17 @@ impl ListDelegate for TokenListDelegate {
         let state = cx.entity().downgrade();
         let editor = self.editor.clone();
         let edit_token = token.clone();
+        let removal_token = token.clone();
+        let begin_removal_token = token.clone();
         let removing = chain_id
             .zip(address)
             .is_some_and(|identity| self.removing.contains(&identity));
-        let pending_removal = chain_id
-            .zip(address)
-            .is_some_and(|identity| self.pending_removal == Some(identity));
+        let pending_removal = token_removal_is_confirmed(self.pending_removal.as_ref(), &token);
         let action_error = chain_id
             .zip(address)
             .and_then(|identity| self.action_errors.get(&identity).cloned());
         let row_id = format!("token-{}-{}", token.chain_id, token.address);
-        let mut actions = h_flex().gap_2();
+        let mut actions = div().flex().flex_col().flex_none().gap_1();
         if pending_removal {
             let confirm_state = state.clone();
             let owner = self.owner.clone();
@@ -2109,28 +2213,29 @@ impl ListDelegate for TokenListDelegate {
                             let Some((chain_id, address)) = chain_id.zip(address) else {
                                 return;
                             };
-                            let should_remove = confirm_state
+                            let reviewed = confirm_state
                                 .update(cx, |list, cx| {
                                     let delegate = list.delegate_mut();
                                     if !token_removal_is_confirmed(
-                                        delegate.pending_removal,
-                                        (chain_id, address),
+                                        delegate.pending_removal.as_ref(),
+                                        &removal_token,
                                     ) {
-                                        return false;
+                                        return None;
                                     }
                                     delegate.action_errors.remove(&(chain_id, address));
                                     delegate.removing.insert((chain_id, address));
                                     cx.notify();
-                                    true
+                                    Some(removal_token.clone())
                                 })
-                                .unwrap_or(false);
-                            if !should_remove {
+                                .ok()
+                                .flatten();
+                            let Some(reviewed) = reviewed else {
                                 return;
-                            }
+                            };
                             let owner = owner.clone();
                             let state = confirm_state.clone();
                             let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                                owner.remove_token(chain_id, address).await
+                                owner.remove_token(&reviewed).await
                             });
                             cx.spawn(async move |cx| {
                                 let result = task.await;
@@ -2183,7 +2288,10 @@ impl ListDelegate for TokenListDelegate {
             actions = actions
                 .child(
                     Button::new(("edit-token", index.row))
-                        .label("Edit")
+                        .icon(IconName::Settings2)
+                        .ghost()
+                        .tooltip("Edit token")
+                        .accessibility_id("Edit token")
                         .disabled(chain_id.zip(address).is_none() || removing)
                         .on_click(move |_, window, cx| {
                             let _ = editor.update(cx, |view, cx| {
@@ -2193,17 +2301,21 @@ impl ListDelegate for TokenListDelegate {
                 )
                 .child(
                     Button::new(("remove-token", index.row))
-                        .label("Remove")
+                        .icon(IconName::Delete)
+                        .ghost()
+                        .tooltip("Delete token")
+                        .accessibility_id("Delete token")
                         .danger()
                         .disabled(chain_id.zip(address).is_none() || removing)
                         .on_click(move |_, _, cx| {
                             let Some(identity) = chain_id.zip(address) else {
                                 return;
                             };
+                            let removal_token = begin_removal_token.clone();
                             let _ = state.update(cx, |list, cx| {
                                 let delegate = list.delegate_mut();
                                 delegate.action_errors.remove(&identity);
-                                delegate.pending_removal = Some(identity);
+                                delegate.pending_removal = Some(removal_token.clone());
                                 cx.notify();
                             });
                         }),
@@ -2221,6 +2333,7 @@ impl ListDelegate for TokenListDelegate {
                         .child(
                             h_flex()
                                 .w_full()
+                                .flex_wrap()
                                 .justify_between()
                                 .gap_4()
                                 .child(
@@ -2918,11 +3031,9 @@ impl WalletWindow {
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
         detailed_notification_previews: Arc<AtomicBool>,
-        pending_software_update: Arc<Mutex<Option<PendingSoftwareUpdate>>>,
         tray: Rc<RefCell<Option<PlatformTray>>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let automatic_update_checks = owner.automatic_update_checks().unwrap_or(true);
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
         let network_presets = Arc::from(owner.network_presets());
         let route_scroll_handle = ScrollHandle::new();
@@ -2957,7 +3068,7 @@ impl WalletWindow {
             token_name_input: None,
             token_decimals_input: None,
             token_editor_open: false,
-            token_editor_identity: None,
+            token_editor_original: None,
             token_editor_errors: TokenEditorErrors::default(),
             token_editor_busy: false,
             token_import_state: TokenImportState::Idle,
@@ -2988,9 +3099,7 @@ impl WalletWindow {
             route_errors: BTreeMap::new(),
             detailed_notification_previews,
             appearance_preference,
-            automatic_update_checks,
             notification_preference_busy: false,
-            update_preference_busy: false,
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
             portfolio_chain_id: None,
@@ -3066,15 +3175,11 @@ impl WalletWindow {
             policy_action_error: None,
             token_proposal_busy: false,
             network_proposal_busy: false,
-            update_state: SoftwareUpdateState::Idle,
-            pending_software_update,
+            release_state: ReleaseDisplayState::Idle,
         };
         window.open_next_required_legal(cx);
         window.reload_detected_agents(cx);
         window.reload_desktop_snapshot(cx);
-        if !window.legal_gate && window.automatic_update_checks {
-            window.check_for_updates(cx);
-        }
         window
     }
 
@@ -3234,7 +3339,7 @@ impl WalletWindow {
             self.network_rpc_urls_input = Some(cx.new(|cx| {
                 InputState::new(window, cx)
                     .rows(5)
-                    .placeholder("One http:// or https:// RPC URL per line")
+                    .placeholder("https://primary.example,\nhttps://fallback.example")
             }));
         }
         if self.network_max_gas_limit_input.is_none() {
@@ -3408,6 +3513,13 @@ impl WalletWindow {
                             });
                         }
                         if let Ok(networks) = &snapshot.networks {
+                            if view
+                                .pending_network_removal
+                                .as_ref()
+                                .is_some_and(|reviewed| !networks.contains(reviewed))
+                            {
+                                view.pending_network_removal = None;
+                            }
                             if let Some(list) = view.token_list.as_ref() {
                                 list.update(cx, |list, cx| {
                                     list.delegate_mut().replace_networks(networks);
@@ -3569,7 +3681,7 @@ impl WalletWindow {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         self.token_editor_open = true;
-        self.token_editor_identity = None;
+        self.token_editor_original = None;
         self.token_editor_errors = TokenEditorErrors::default();
         chain_id.update(cx, |input, cx| input.focus(window, cx));
         self.token_editor_anchor.scroll_to(window, cx);
@@ -3630,7 +3742,7 @@ impl WalletWindow {
             );
         });
         self.token_editor_open = true;
-        self.token_editor_identity = Some((chain_id, address));
+        self.token_editor_original = Some(token.clone());
         self.token_editor_errors = TokenEditorErrors::default();
         self.token_editor_anchor.scroll_to(window, cx);
         cx.notify();
@@ -3641,7 +3753,7 @@ impl WalletWindow {
             return;
         }
         self.token_editor_open = false;
-        self.token_editor_identity = None;
+        self.token_editor_original = None;
         self.token_editor_errors = TokenEditorErrors::default();
         cx.notify();
     }
@@ -3677,8 +3789,12 @@ impl WalletWindow {
             cx.notify();
             return;
         };
-        if let Some(identity) = self.token_editor_identity
-            && identity != (token.chain_id, token.address)
+        if let Some(original) = self.token_editor_original.as_ref()
+            && let (Ok(original_chain_id), Ok(original_address)) = (
+                original.chain_id.parse::<u64>(),
+                original.address.parse::<alloy::primitives::Address>(),
+            )
+            && (original_chain_id, original_address) != (token.chain_id, token.address)
         {
             errors.chain_id = Some("Chain ID cannot change while editing a token.".to_owned());
             errors.address = Some("Address cannot change while editing a token.".to_owned());
@@ -3708,8 +3824,13 @@ impl WalletWindow {
         self.token_editor_errors = TokenEditorErrors::default();
         self.token_editor_busy = true;
         let owner = self.owner.clone();
-        let task =
-            gpui_tokio::Tokio::spawn_result(cx, async move { owner.upsert_token(token).await });
+        let original = self.token_editor_original.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            match original {
+                Some(original) => owner.replace_token(&original, token).await,
+                None => owner.add_token(token).await,
+            }
+        });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -3717,7 +3838,7 @@ impl WalletWindow {
                 match result {
                     Ok(_) => {
                         view.token_editor_open = false;
-                        view.token_editor_identity = None;
+                        view.token_editor_original = None;
                         view.reload_tokens(cx);
                         view.reload_desktop_snapshot(cx);
                     }
@@ -3857,7 +3978,7 @@ impl WalletWindow {
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
-            let _ = view.update(cx, |view, cx| {
+            let _ = view.update_in(cx, |view, window, cx| {
                 if view.walletconnect_scan_generation != generation
                     || view.route != Route::WalletConnect
                 {
@@ -3875,11 +3996,19 @@ impl WalletWindow {
                     Ok(Some(choices)) if choices.len() == 1 => {
                         let uri = choices.take(0);
                         view.walletconnect_scan = WalletConnectScanState::Idle;
-                        match uri.and_then(|uri| view.begin_walletconnect_uri(&uri, cx)) {
-                            Ok(()) => view.clear_route_error(Route::WalletConnect),
+                        match uri {
+                            Ok(uri) => {
+                                if let Some(input) = view.walletconnect_uri_input.as_ref() {
+                                    input.update(cx, |input, cx| {
+                                        input.set_value(uri.as_str(), window, cx);
+                                        input.focus(window, cx);
+                                    });
+                                }
+                                view.clear_route_error(Route::WalletConnect);
+                            }
                             Err(error) => view.set_route_error(
                                 Route::WalletConnect,
-                                format!("Could not connect: {error:#}"),
+                                format!("Could not read the QR code: {error:#}"),
                             ),
                         }
                     }
@@ -3918,20 +4047,30 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn choose_walletconnect_qr(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn choose_walletconnect_qr(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
         let state = std::mem::replace(&mut self.walletconnect_scan, WalletConnectScanState::Idle);
         let WalletConnectScanState::Choices { choices, .. } = state else {
             return;
         };
-        match choices
-            .take(index)
-            .and_then(|uri| self.begin_walletconnect_uri(&uri, cx))
-        {
-            Ok(()) => self.clear_route_error(Route::WalletConnect),
+        match choices.take(index) {
+            Ok(uri) => {
+                if let Some(input) = self.walletconnect_uri_input.as_ref() {
+                    input.update(cx, |input, cx| {
+                        input.set_value(uri.as_str(), window, cx);
+                        input.focus(window, cx);
+                    });
+                }
+                self.clear_route_error(Route::WalletConnect);
+            }
             Err(error) => self.set_route_error(
                 Route::WalletConnect,
-                format!("Could not connect: {error:#}"),
+                format!("Could not read the QR code: {error:#}"),
             ),
         }
         cx.notify();
@@ -3985,7 +4124,6 @@ impl WalletWindow {
                 response: prompt.response,
             }),
             awaiting_refresh: false,
-            exact_payloads_expanded: false,
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
@@ -4893,7 +5031,6 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::AccountRemoval { wallet_id }),
                     awaiting_refresh: false,
-                    exact_payloads_expanded: false,
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
@@ -4911,10 +5048,8 @@ impl WalletWindow {
 
     fn open_legal_review(&mut self, document: LegalDocument, cx: &mut Context<Self>) {
         let (text, digest) = self.owner.legal_document(document);
-        let acceptance_required = self
-            .owner
-            .legal_status()
-            .is_ok_and(|status| legal_review_requires_acceptance(document, &status));
+        let status = self.owner.legal_status().ok();
+        let acceptance_required = legal_review_requires_acceptance(document, status.as_ref());
         self.legal_review = Some(Self::new_legal_review(
             document,
             &text,
@@ -4930,46 +5065,15 @@ impl WalletWindow {
         text: &str,
         digest: String,
         acceptance_required: bool,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> LegalReview {
-        let sections = legal_markdown_sections(text);
-        // The mandatory documents are short enough to parse once when opened.
-        // Persisting their TextViewState entities removes markdown parsing from
-        // the first scroll through each chunk. The 800+ KiB third-party notice
-        // remains lazy so opening an optional document never parses it all.
-        let parsed_sections = acceptance_required.then(|| {
-            sections
-                .iter()
-                .map(|section| cx.new(|cx| TextViewState::markdown(section.as_ref(), cx)))
-                .collect::<Vec<_>>()
-                .into()
-        });
-        // A uniform hint gives the scrollbar a stable extent on frame one while
-        // allowing GPUI to parse and measure only visible rich-text chunks. Using
-        // `measure_all` here synchronously parsed the entire privacy policy (and
-        // the much larger third-party notice) before the first scroll frame.
-        let list_state = gpui::ListState::new(sections.len(), gpui::ListAlignment::Top, px(720.0))
-            .with_uniform_item_height(LEGAL_SECTION_HEIGHT_HINT);
-        let view = cx.entity().downgrade();
-        let review_digest = digest.clone();
-        list_state.set_scroll_handler(move |event, _, cx| {
-            if event.visible_range.end < event.count {
-                return;
-            }
-            let view = view.clone();
-            let review_digest = review_digest.clone();
-            cx.defer(move |cx| {
-                let _ = view.update(cx, |view, cx| {
-                    view.update_legal_scroll_state(&review_digest, cx);
-                });
-            });
-        });
+        let rows = legal_markdown_rows(text);
         LegalReview {
             document,
             digest,
-            sections,
-            parsed_sections,
-            list_state,
+            rows,
+            scroll_handle: UniformListScrollHandle::new(),
+            end_rendered: Arc::new(AtomicBool::new(false)),
             acceptance_required,
             scroll_check_scheduled: false,
             viewed_to_end: false,
@@ -4993,10 +5097,11 @@ impl WalletWindow {
         let Some(review) = self.legal_review.as_mut() else {
             return;
         };
+        review.scroll_check_scheduled = false;
         if review.acceptance_required
             && review.digest == digest
             && !review.viewed_to_end
-            && legal_list_reached_end(&review.list_state)
+            && legal_list_reached_end(&review.scroll_handle, &review.end_rendered)
         {
             review.viewed_to_end = true;
             cx.notify();
@@ -5007,16 +5112,16 @@ impl WalletWindow {
         let Some(review) = self.legal_review.as_ref() else {
             return;
         };
-        if !review.acceptance_required || !review.viewed_to_end {
+        if !review.acceptance_required
+            || (!review.viewed_to_end
+                && !legal_list_reached_end(&review.scroll_handle, &review.end_rendered))
+        {
             return;
         }
         let document = review.document;
         match self.owner.accept_legal(document, &review.digest) {
             Ok(()) => {
                 self.open_next_required_legal(cx);
-                if !self.legal_gate && self.automatic_update_checks {
-                    self.check_for_updates(cx);
-                }
             }
             Err(error) => {
                 if let Some(review) = self.legal_review.as_mut() {
@@ -5222,7 +5327,10 @@ impl WalletWindow {
         if let Some(input) = self.network_name_input.as_ref() {
             input.update(cx, |input, cx| input.focus(window, cx));
         }
-        self.network_editor_anchor.scroll_to(window, cx);
+        let anchor = self.network_editor_anchor.clone();
+        cx.on_next_frame(window, move |_, window, cx| {
+            anchor.scroll_to(window, cx);
+        });
         cx.notify();
     }
 
@@ -5279,12 +5387,7 @@ impl WalletWindow {
         );
         replace_input_value(
             self.network_rpc_urls_input.as_ref(),
-            network
-                .rpc_urls
-                .iter()
-                .map(url::Url::as_str)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            rpc_urls_for_editor(&network.rpc_urls),
             window,
             cx,
         );
@@ -5371,7 +5474,10 @@ impl WalletWindow {
                 input.focus(window, cx);
             });
         }
-        self.network_editor_anchor.scroll_to(window, cx);
+        let anchor = self.network_editor_anchor.clone();
+        cx.on_next_frame(window, move |_, window, cx| {
+            anchor.scroll_to(window, cx);
+        });
         cx.notify();
     }
 
@@ -5521,6 +5627,9 @@ impl WalletWindow {
             cx.notify();
             return;
         };
+        // Restoring trusted metadata must not silently change whether the
+        // owner allows the network to be used.
+        let preset = restored_network_configuration(&reviewed, preset);
         self.network_action_busy.insert(name.clone());
         self.network_action_errors.remove(&name);
         let owner = self.owner.clone();
@@ -5619,26 +5728,25 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn set_network_disabled(&mut self, name: &str, disabled: bool, cx: &mut Context<Self>) {
-        let selected_network = self.portfolio_chain_id.is_some_and(|chain_id| {
-            self.owner.networks().is_ok_and(|networks| {
-                networks
-                    .iter()
-                    .any(|network| network.chain_id == chain_id && network.name == name)
-            })
-        });
-        let name = name.to_owned();
+    fn set_network_disabled(
+        &mut self,
+        reviewed: NetworkConfig,
+        disabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let selected_network = self.portfolio_chain_id == Some(reviewed.chain_id);
+        let name = reviewed.name.clone();
         if !self.network_action_busy.insert(name.clone()) {
             return;
         }
         self.network_action_errors.remove(&name);
-        if !disabled && self.pending_network_removal.as_deref() == Some(name.as_str()) {
+        if !disabled && self.pending_network_removal.as_ref() == Some(&reviewed) {
             self.pending_network_removal = None;
         }
         let owner = self.owner.clone();
         let action_name = name.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.set_network_disabled(&name, disabled).await
+            owner.set_network_disabled(&reviewed, disabled).await
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
@@ -5662,9 +5770,9 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn begin_network_removal(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.pending_network_removal = Some(name.to_owned());
-        self.network_action_errors.remove(name);
+    fn begin_network_removal(&mut self, reviewed: NetworkConfig, cx: &mut Context<Self>) {
+        self.network_action_errors.remove(&reviewed.name);
+        self.pending_network_removal = Some(reviewed);
         cx.notify();
     }
 
@@ -5673,19 +5781,22 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn confirm_network_removal(&mut self, name: &str, cx: &mut Context<Self>) {
-        if self.pending_network_removal.as_deref() != Some(name) {
+    fn confirm_network_removal(&mut self, reviewed: NetworkConfig, cx: &mut Context<Self>) {
+        if self.pending_network_removal.as_ref() != Some(&reviewed) {
             return;
         }
         let owner = self.owner.clone();
-        let name = name.to_owned();
+        let name = reviewed.name.clone();
         if !self.network_action_busy.insert(name.clone()) {
             return;
         }
         self.network_action_errors.remove(&name);
         let action_name = name.clone();
         let task =
-            gpui_tokio::Tokio::spawn_result(cx, async move { owner.remove_network(&name).await });
+            gpui_tokio::Tokio::spawn_result(
+                cx,
+                async move { owner.remove_network(&reviewed).await },
+            );
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -5962,7 +6073,6 @@ impl WalletWindow {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.activity_busy.remove(&request_id);
-                view.selected_record = Some(request_id);
                 view.activity_feedback.insert(
                     request_id,
                     match result {
@@ -6112,164 +6222,35 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
-        if matches!(
-            self.update_state,
-            SoftwareUpdateState::Checking
-                | SoftwareUpdateState::Downloading { .. }
-                | SoftwareUpdateState::Authorizing
-                | SoftwareUpdateState::Installing
-        ) {
+    fn check_latest_release(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.release_state, ReleaseDisplayState::Checking) {
             return;
         }
-        self.update_state = SoftwareUpdateState::Checking;
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(crate::updater::check_for_update)
-                .await
-                .context("software update check task failed")?
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.update_state = match result {
-                    Ok(Some(update)) => SoftwareUpdateState::Available {
-                        summary: update.summary(),
-                        update,
-                    },
-                    Ok(None) => SoftwareUpdateState::Current,
-                    Err(error) => SoftwareUpdateState::Failed(
-                        format!("Could not check for signed updates: {error:#}").into(),
-                    ),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn download_update(&mut self, cx: &mut Context<Self>) {
-        let state = std::mem::replace(&mut self.update_state, SoftwareUpdateState::Idle);
-        let SoftwareUpdateState::Available { update, summary } = state else {
-            self.update_state = state;
-            return;
-        };
-        self.update_state = SoftwareUpdateState::Downloading {
-            summary: summary.clone(),
-            received: 0,
-            total: None,
-        };
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(move || {
-                let bytes = update.download_verified_with_progress(|chunk, total| {
-                    let _ = progress_tx.send((chunk as u64, total));
-                })?;
-                Ok::<_, anyhow::Error>((update, bytes))
-            })
-            .await
-            .context("software update download task failed")?
-        });
-        cx.spawn(async move |view, cx| {
-            let mut received = 0_u64;
-            while let Some((chunk, total)) = progress_rx.recv().await {
-                received = received.saturating_add(chunk);
-                let _ = view.update(cx, |view, cx| {
-                    if let SoftwareUpdateState::Downloading {
-                        received: current,
-                        total: expected,
-                        ..
-                    } = &mut view.update_state
-                    {
-                        *current = received;
-                        *expected = total;
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.update_state = match result {
-                    Ok((update, bytes)) => SoftwareUpdateState::Ready {
-                        update,
-                        summary,
-                        bytes,
-                    },
-                    Err(error) => SoftwareUpdateState::Failed(
-                        format!("Update download or signature verification failed: {error:#}")
-                            .into(),
-                    ),
-                };
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn install_update(&mut self, cx: &mut Context<Self>) {
-        let state = std::mem::replace(&mut self.update_state, SoftwareUpdateState::Idle);
-        let SoftwareUpdateState::Ready {
-            update,
-            summary,
-            bytes,
-        } = state
-        else {
-            self.update_state = state;
-            return;
-        };
-        self.update_state = SoftwareUpdateState::Authorizing;
-        let owner = self.owner.clone();
-        let pending = self.pending_software_update.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            let authorization = owner.authorize_software_update().await?;
-            owner.confirm_software_update_install(&authorization)?;
-            Ok::<_, anyhow::Error>(())
-        });
-        self.clear_route_error(Route::Settings);
-        cx.spawn(async move |view, cx| match task.await {
-            Ok(()) => {
-                let staged = pending
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("software update slot was poisoned"))
-                    .map(|mut pending| {
-                        *pending = Some(PendingSoftwareUpdate { update, bytes });
-                    });
-                match staged {
-                    Ok(()) => {
-                        let _ = view.update(cx, |view, cx| {
-                            view.update_state = SoftwareUpdateState::Installing;
-                            cx.notify();
-                        });
-                        cx.update(|cx| cx.quit());
-                    }
-                    Err(error) => {
-                        let _ = view.update(cx, |view, cx| {
-                            view.update_state = SoftwareUpdateState::Failed(
-                                format!("Could not stage verified update: {error:#}").into(),
-                            );
-                            cx.notify();
-                        });
-                    }
-                }
-            }
+        let data_dir = match crate::config::ConfigStore::production() {
+            Ok(config) => config.data_dir().to_path_buf(),
             Err(error) => {
-                let _ = view.update(cx, |view, cx| {
-                    view.update_state = SoftwareUpdateState::Ready {
-                        update,
-                        summary,
-                        bytes,
-                    };
-                    view.set_route_error(
-                        Route::Settings,
-                        format!("Update installation was not authorized: {error:#}"),
-                    );
-                    cx.notify();
-                });
+                self.release_state = ReleaseDisplayState::Failed(
+                    format!("Could not locate release-check storage: {error:#}").into(),
+                );
+                cx.notify();
+                return;
             }
+        };
+        self.release_state = ReleaseDisplayState::Checking;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            Ok::<_, anyhow::Error>(crate::release_check::check(&data_dir).await)
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.release_state = match result {
+                    Ok(check) => ReleaseDisplayState::Ready(check),
+                    Err(error) => ReleaseDisplayState::Failed(
+                        format!("Could not check the latest release: {error:#}").into(),
+                    ),
+                };
+                cx.notify();
+            });
         })
         .detach();
         cx.notify();
@@ -6388,7 +6369,6 @@ impl WalletWindow {
                 active.scroll_handle = ScrollHandle::new();
                 active.scroll_check_scheduled = false;
                 active.scroll_layout_ready = false;
-                active.exact_payloads_expanded = false;
             }
             active.simulation = Some(prompt.simulation);
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
@@ -6415,7 +6395,6 @@ impl WalletWindow {
             simulation: Some(prompt.simulation),
             completion: Some(ActiveReviewCompletion::Transaction(prompt.response)),
             awaiting_refresh: false,
-            exact_payloads_expanded: false,
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
@@ -6436,7 +6415,6 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::Message { request_id, digest }),
                     awaiting_refresh: false,
-                    exact_payloads_expanded: false,
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
@@ -6467,7 +6445,6 @@ impl WalletWindow {
                     simulation: None,
                     completion: Some(ActiveReviewCompletion::TypedData { request_id, digest }),
                     awaiting_refresh: false,
-                    exact_payloads_expanded: false,
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
@@ -6530,10 +6507,7 @@ impl WalletWindow {
         let Some(review) = self.active_review.as_mut() else {
             return;
         };
-        let exact_data_available =
-            review_exact_data_available(review.state.document(), review.exact_payloads_expanded);
-        if exact_data_available
-            && review.scroll_layout_ready
+        if review.scroll_layout_ready
             && !review.state.approve_enabled()
             && scroll_reached_end(
                 review.scroll_handle.offset().y,
@@ -6545,21 +6519,6 @@ impl WalletWindow {
                 cx.notify();
             }
         }
-    }
-
-    fn toggle_review_exact_payloads(&mut self, generation: u64, cx: &mut Context<Self>) {
-        let Some(review) = self.active_review.as_mut() else {
-            return;
-        };
-        if review.state.generation() != generation
-            || review.state.document().exact_payloads.is_empty()
-        {
-            return;
-        }
-        review.exact_payloads_expanded = !review.exact_payloads_expanded;
-        review.scroll_check_scheduled = false;
-        review.scroll_layout_ready = false;
-        cx.notify();
     }
 
     fn send_review_command(
@@ -6835,6 +6794,9 @@ impl WalletWindow {
             return;
         }
         self.set_route(route);
+        if route == Route::Settings && matches!(self.release_state, ReleaseDisplayState::Idle) {
+            self.check_latest_release(cx);
+        }
         self.command_palette = false;
         cx.notify();
     }
@@ -6923,40 +6885,6 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn set_automatic_update_checks(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.update_preference_busy {
-            return;
-        }
-        self.update_preference_busy = true;
-        self.clear_route_error(Route::Settings);
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.set_automatic_update_checks(enabled).await
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.update_preference_busy = false;
-                match result {
-                    Ok(()) => {
-                        view.automatic_update_checks = enabled;
-                        view.clear_route_error(Route::Settings);
-                        if enabled && !view.legal_gate {
-                            view.check_for_updates(cx);
-                        }
-                    }
-                    Err(error) => view.set_route_error(
-                        Route::Settings,
-                        format!("Could not save update preference: {error:#}"),
-                    ),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let pending_reviews = self
             .cached_reviews()
@@ -6991,25 +6919,49 @@ impl WalletWindow {
             .tooltip(format!("{}  {}", route.label(), route.shortcut()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
-            }));
+            }))
+            .when(
+                route == Route::Reviews && route == self.route,
+                ButtonVariants::primary,
+            );
             let button = if route == Route::Reviews {
                 let logo = if cx.theme().is_dark() {
                     self.sidebar_logo_dark.clone()
                 } else {
                     self.sidebar_logo_light.clone()
                 };
-                button.child(img(logo).w(px(41.0)).h(px(41.0)))
+                button.child(img(logo).w(px(49.0)).h(px(49.0)))
             } else {
                 button.child(Icon::new(route.icon()).size(px(30.0)))
             };
             if route == Route::Reviews {
-                menu = menu.child(
-                    Badge::new()
-                        .large()
-                        .max(99)
-                        .count(pending_reviews)
-                        .child(button),
-                );
+                let count = if pending_reviews > 99 {
+                    "99+".to_owned()
+                } else {
+                    pending_reviews.to_string()
+                };
+                menu = menu.child(div().relative().child(button).when(
+                    pending_reviews > 0,
+                    |badge| {
+                        badge.child(
+                            div()
+                                .absolute()
+                                .top(px(-4.0))
+                                .right(px(-8.0))
+                                .w(px(30.0))
+                                .h(px(24.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(cx.theme().red)
+                                .text_color(gpui_component::white())
+                                .text_sm()
+                                .font_semibold()
+                                .child(count),
+                        )
+                    },
+                ));
             } else {
                 menu = menu.child(button);
             }
@@ -7030,15 +6982,22 @@ impl WalletWindow {
                     content =
                         content.child(
                             div()
+                                .w_full()
+                                .min_w_0()
+                                .max_w_full()
                                 .p_3()
                                 .border_1()
                                 .rounded_lg()
                                 .border_color(cx.theme().border)
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .justify_between()
+                                .gap_3()
                                 .child(
                                     div()
+                                        .min_w_0()
+                                        .flex_1()
                                         .flex()
                                         .flex_col()
                                         .gap_1()
@@ -7074,17 +7033,22 @@ impl WalletWindow {
                     content =
                         content.child(
                             div()
+                                .w_full()
+                                .min_w_0()
+                                .max_w_full()
                                 .p_3()
                                 .border_1()
                                 .rounded_lg()
                                 .border_color(cx.theme().border)
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .justify_between()
-                                .child(format!(
+                                .gap_3()
+                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
                                     "Typed data · {} · {} · {}",
                                     request.wallet_id, request.chain_id, request_id
-                                ))
+                                )))
                                 .child(
                                     Button::new(SharedString::from(format!(
                                         "review-typed-data-{request_id}"
@@ -7102,14 +7066,22 @@ impl WalletWindow {
                     content =
                         content.child(
                             div()
+                                .w_full()
+                                .min_w_0()
+                                .max_w_full()
                                 .p_3()
                                 .border_1()
                                 .rounded_lg()
                                 .border_color(cx.theme().border)
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .justify_between()
-                                .child(format!("Message · {} · {}", request.wallet_id, request_id))
+                                .gap_3()
+                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
+                                    "Message · {} · {}",
+                                    request.wallet_id, request_id
+                                )))
                                 .child(
                                     Button::new(SharedString::from(format!(
                                         "review-message-{request_id}"
@@ -7127,18 +7099,22 @@ impl WalletWindow {
                     content =
                         content.child(
                             div()
+                                .w_full()
+                                .min_w_0()
+                                .max_w_full()
                                 .p_3()
                                 .border_1()
                                 .rounded_lg()
                                 .border_color(cx.theme().border)
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .justify_between()
                                 .gap_3()
-                                .child(format!(
+                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
                                     "Policy proposal · {wallet_id} · revision {}",
                                     proposal.source_revision
-                                ))
+                                )))
                                 .child(
                                     Button::new(SharedString::from(format!(
                                         "open-policy-proposal-{wallet_id}"
@@ -7157,18 +7133,22 @@ impl WalletWindow {
                     content =
                         content.child(
                             div()
+                                .w_full()
+                                .min_w_0()
+                                .max_w_full()
                                 .p_3()
                                 .border_1()
                                 .rounded_lg()
                                 .border_color(cx.theme().border)
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
                                 .justify_between()
                                 .gap_3()
-                                .child(format!(
+                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
                                     "Network proposal · {} · chain {chain_id}",
                                     proposal.name
-                                ))
+                                )))
                                 .child(
                                     Button::new(SharedString::from(format!(
                                         "open-network-proposal-{chain_id}"
@@ -7187,27 +7167,36 @@ impl WalletWindow {
                     *token_groups.entry(proposal.source.clone()).or_default() += 1;
                 }
                 for (index, (source, count)) in token_groups.into_iter().enumerate() {
-                    content = content.child(
-                        div()
-                            .p_3()
-                            .border_1()
-                            .rounded_lg()
-                            .border_color(cx.theme().border)
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(format!("Token proposal · {source} · {count} name(s)"))
-                            .child(
-                                Button::new(("open-token-proposal", index))
-                                    .label("Open Tokens")
-                                    .primary()
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.set_route(Route::Tokens);
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
+                    content =
+                        content.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .max_w_full()
+                                .p_3()
+                                .border_1()
+                                .rounded_lg()
+                                .border_color(cx.theme().border)
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div().min_w_0().flex_1().whitespace_normal().child(format!(
+                                        "Token proposal · {source} · {count} name(s)"
+                                    )),
+                                )
+                                .child(
+                                    Button::new(("open-token-proposal", index))
+                                        .label("Open Tokens")
+                                        .primary()
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.set_route(Route::Tokens);
+                                            cx.notify();
+                                        })),
+                                ),
+                        );
                 }
                 if total == 0 {
                     content = content.child(
@@ -7219,7 +7208,7 @@ impl WalletWindow {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(div().font_semibold().child("Inbox is clear"))
+                            .child(div().font_semibold().child("No requests waiting"))
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
@@ -7312,6 +7301,23 @@ impl WalletWindow {
                                 .child(div().font_family(MONO_FONT_FAMILY).child(value.clone())),
                         );
                     }
+                }
+                if let Some(hash) = item
+                    .broadcast_transaction_hash
+                    .as_ref()
+                    .or(item.signed_transaction_hash.as_ref())
+                    && let Ok(chain_id) = item.chain_id.parse::<u64>()
+                    && let Ok(networks) = self.cached_networks()
+                    && let Some(explorer_url) =
+                        block_explorer_transaction_url(networks, chain_id, hash)
+                {
+                    detail = detail.child(
+                        Button::new(SharedString::from(format!(
+                            "open-transaction-explorer-{request_id}"
+                        )))
+                        .label("View transaction in block explorer")
+                        .on_click(move |_, _, cx| cx.open_url(&explorer_url)),
+                    );
                 }
                 if let Some(fee) = item.mined_fee.as_ref() {
                     detail = detail.child(format!(
@@ -7554,6 +7560,7 @@ impl WalletWindow {
                         .child(
                             h_flex()
                                 .w_full()
+                                .flex_wrap()
                                 .justify_between()
                                 .gap_4()
                                 .child(
@@ -7647,6 +7654,7 @@ impl WalletWindow {
                                 .child(
                                     h_flex()
                                         .w_full()
+                                        .flex_wrap()
                                         .justify_between()
                                         .gap_4()
                                         .child(
@@ -7787,6 +7795,7 @@ impl WalletWindow {
                     .child(
                         h_flex()
                             .w_full()
+                            .flex_wrap()
                             .justify_between()
                             .gap_4()
                             .child(
@@ -9219,8 +9228,8 @@ impl WalletWindow {
                                     )))
                                     .label(format!("Use QR {}", index + 1))
                                     .primary()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.choose_walletconnect_qr(index, cx);
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.choose_walletconnect_qr(index, window, cx);
                                     })),
                                 ),
                         );
@@ -9390,7 +9399,11 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(div().text_sm().child("RPC URLs in failover order"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child("RPC URLs (one per line, comma-separated)"),
+                    )
                     .child(Input::new(rpc_urls).disabled(busy).h(px(132.0)))
                     .when_some(self.network_editor_errors.rpc_urls.clone(), |field, error| {
                         field.child(div().text_sm().text_color(cx.theme().danger).child(error))
@@ -9421,6 +9434,19 @@ impl WalletWindow {
                                 view.set_network_editor_strategy(RpcStrategy::Random, cx);
                             })),
                     ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(match self.network_editor_rpc_strategy {
+                        RpcStrategy::Ordered => {
+                            "Endpoints are tried from top to bottom; failures continue to the next URL."
+                        }
+                        RpcStrategy::Random => {
+                            "Endpoints are shuffled for each request; failures continue through that shuffled list."
+                        }
+                    }),
             )
             .child(
                 div()
@@ -9909,9 +9935,9 @@ impl WalletWindow {
                     let name = network.name.clone();
                     let edit = network.clone();
                     let details_name = name.clone();
-                    let toggle_name = name.clone();
-                    let remove_name = name.clone();
-                    let confirm_remove_name = name.clone();
+                    let toggle_network = network.clone();
+                    let remove_network = network.clone();
+                    let confirm_remove_network = network.clone();
                     let disabled = network.disabled;
                     let expanded = self.expanded_networks.contains(&name);
                     let busy = self.network_action_busy.contains(&name);
@@ -9921,8 +9947,7 @@ impl WalletWindow {
                         .find(|profile| profile.config.chain_id == network.chain_id)
                         .filter(|profile| profile.config != *network)
                         .map(|_| network.clone());
-                    let confirming_removal =
-                        self.pending_network_removal.as_deref() == Some(name.as_str());
+                    let confirming_removal = self.pending_network_removal.as_ref() == Some(network);
                     let action_error = self.network_action_errors.get(&name).cloned();
                     let exact = serde_json::to_string_pretty(&network)
                         .unwrap_or_else(|error| format!("Could not serialize network: {error:#}"));
@@ -9936,6 +9961,7 @@ impl WalletWindow {
                         .gap_3()
                         .child(
                             h_flex()
+                                .flex_wrap()
                                 .items_start()
                                 .w_full()
                                 .justify_between()
@@ -10035,7 +10061,7 @@ impl WalletWindow {
                                                     .on_click(cx.listener(
                                                         move |view, _, _, cx| {
                                                             view.set_network_disabled(
-                                                                &toggle_name,
+                                                                toggle_network.clone(),
                                                                 !disabled,
                                                                 cx,
                                                             );
@@ -10063,11 +10089,9 @@ impl WalletWindow {
                                         ),
                                 )
                                 .child(
-                                    div()
+                                    h_flex()
                                         .flex_none()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
+                                        .gap_2()
                                         .child(
                                             Button::new(SharedString::from(format!(
                                                 "edit-network-{name}"
@@ -10093,7 +10117,10 @@ impl WalletWindow {
                                                 .danger()
                                                 .disabled(busy || confirming_removal)
                                                 .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.begin_network_removal(&remove_name, cx);
+                                                    view.begin_network_removal(
+                                                        remove_network.clone(),
+                                                        cx,
+                                                    );
                                                 })),
                                             )
                                         }),
@@ -10148,7 +10175,7 @@ impl WalletWindow {
                                                 .on_click(cx.listener(
                                                     move |view, _, _, cx| {
                                                         view.confirm_network_removal(
-                                                            &confirm_remove_name,
+                                                            confirm_remove_network.clone(),
                                                             cx,
                                                         );
                                                     },
@@ -10501,7 +10528,7 @@ impl WalletWindow {
                 self.token_name_input.as_ref(),
                 self.token_decimals_input.as_ref(),
             ) {
-                let editing = self.token_editor_identity.is_some();
+                let editing = self.token_editor_original.is_some();
                 let busy = self.token_editor_busy;
                 content = content.child(
                     div()
@@ -10882,147 +10909,52 @@ impl WalletWindow {
             .flex_col()
             .gap_4()
             .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child("Check automatically at launch")
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Checks signed metadata after legal acceptance. Updates are never downloaded or installed without explicit confirmation."),
-                            ),
-                    )
-                    .child(
-                        Switch::new("automatic-update-checks")
-                            .checked(self.automatic_update_checks)
-                            .disabled(self.update_preference_busy)
-                            .tooltip("Check signed update metadata when the wallet starts")
-                            .on_click(cx.listener(|view, checked, _, cx| {
-                                view.set_automatic_update_checks(*checked, cx);
-                            })),
-                    ),
-            )
-            .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Updates are installed only after their embedded Minisign signature is verified and you explicitly confirm the exact version and release notes."),
-            );
-        panel = match &self.update_state {
-            SoftwareUpdateState::Idle => panel.child(
-                Button::new("check-for-software-update")
-                    .label("Check for updates")
+                    .child("Ekubo Wallet does not download or install updates. Open the latest release in your browser and install it through your operating system."),
+            )
+            .child(
+                Button::new("open-latest-release")
+                    .label("View latest release")
                     .primary()
-                    .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
+                    .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
+            );
+        panel = match &self.release_state {
+            ReleaseDisplayState::Idle => panel.child(
+                Button::new("check-latest-release")
+                    .label("Check latest version")
+                    .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
             ),
-            SoftwareUpdateState::Checking => panel.child(
+            ReleaseDisplayState::Checking => panel.child(
                 h_flex()
                     .gap_2()
                     .child(Spinner::new())
-                    .child("Downloading and verifying signed update metadata…"),
+                    .child("Checking the latest published version…"),
             ),
-            SoftwareUpdateState::Current => panel
-                .child("This is the latest signed release for this platform.")
-                .child(
-                    Button::new("recheck-for-software-update")
-                        .label("Check again")
-                        .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
-                ),
-            SoftwareUpdateState::Available { summary, .. } => {
-                panel = panel
-                    .child(div().text_lg().font_semibold().child(format!(
-                        "Ekubo Wallet {} is available",
-                        summary.version
-                    )))
-                    .when_some(summary.notes.clone(), |panel, notes| {
-                        panel.child(
-                            GroupBox::new()
-                                .id("software-update-release-notes")
-                                .outline()
-                                .title("Release notes")
-                                .child(TextView::markdown("software-update-notes", notes)),
-                        )
-                    })
-                    .when(summary.requires_package_handoff, |panel| {
-                        panel.child("This package is managed by the operating system. After verification, the native package installer will complete the update.")
-                    })
-                    .child(
-                        Button::new("download-software-update")
-                            .label("Download and verify signature")
-                            .primary()
-                            .on_click(cx.listener(|view, _, _, cx| view.download_update(cx))),
-                    );
-                panel
-            }
-            SoftwareUpdateState::Downloading {
-                summary,
-                received,
-                total,
-            } => {
-                let progress = total.map_or_else(
-                    || format!("{} MiB received", received / 1024 / 1024),
-                    |total| {
-                        let percent = if total == 0 {
-                            0
-                        } else {
-                            received.saturating_mul(100).saturating_div(total).min(100)
-                        };
-                        format!(
-                            "{percent}% · {} of {} MiB",
-                            received / 1024 / 1024,
-                            total / 1024 / 1024
-                        )
-                    },
-                );
-                panel.child(
-                    h_flex()
-                        .gap_2()
-                        .child(Spinner::new())
-                        .child(format!(
-                            "Downloading Ekubo Wallet {} and verifying its signature… {progress}",
-                            summary.version
-                        )),
-                )
-            }
-            SoftwareUpdateState::Ready { summary, bytes, .. } => panel
+            ReleaseDisplayState::Ready(check) => panel
                 .child(
                     div()
                         .font_semibold()
-                        .child(format!("Ekubo Wallet {} is verified", summary.version)),
+                        .child(check.latest_version.as_ref().map_or_else(
+                            || "Latest version unavailable".to_owned(),
+                            |version| format!("Latest published version: {version}"),
+                        )),
                 )
-                .child(format!(
-                    "The {} MiB package passed Minisign verification. Installation will gracefully disconnect WalletConnect sessions, stop the MCP server, replace the application, and relaunch.",
-                    bytes.len() / 1024 / 1024
-                ))
+                .when(check.update_available, |panel| {
+                    panel.child("A newer release is available.")
+                })
                 .child(
-                    Button::new("install-software-update")
-                        .label("Authenticate, install, and restart")
-                        .primary()
-                        .on_click(cx.listener(|view, _, _, cx| view.install_update(cx))),
+                    Button::new("recheck-latest-release")
+                        .label("Check again")
+                        .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
-            SoftwareUpdateState::Authorizing => panel.child(
-                h_flex()
-                    .gap_2()
-                    .child(Spinner::new())
-                    .child("Waiting for operating-system authentication…"),
-            ),
-            SoftwareUpdateState::Installing => panel.child(
-                h_flex()
-                    .gap_2()
-                    .child(Spinner::new())
-                    .child("Stopping services and installing the verified update…"),
-            ),
-            SoftwareUpdateState::Failed(error) => panel
+            ReleaseDisplayState::Failed(error) => panel
                 .child(div().text_color(cx.theme().danger).child(error.clone()))
                 .child(
-                    Button::new("retry-software-update")
+                    Button::new("retry-latest-release")
                         .label("Try again")
-                        .on_click(cx.listener(|view, _, _, cx| view.check_for_updates(cx))),
+                        .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
         };
         settings_section(
@@ -11068,29 +11000,44 @@ impl WalletWindow {
             } else {
                 cx.theme().foreground
             };
+            let (asset, exact_asset) = balance_effect_asset(&fact.label);
             return div()
                 .min_w_0()
                 .flex()
                 .flex_wrap()
                 .items_start()
                 .justify_between()
-                .gap_2()
+                .gap_3()
                 .child(
                     div()
                         .min_w_0()
                         .flex_1()
-                        .flex_basis(px(260.0))
-                        .font_semibold()
-                        .child(fact.label.clone()),
+                        .flex_basis(px(210.0))
+                        .flex()
+                        .flex_col()
+                        .child(div().font_semibold().child(asset))
+                        .when_some(exact_asset, |asset, exact| {
+                            asset.child(
+                                div()
+                                    .min_w_0()
+                                    .max_w_full()
+                                    .truncate()
+                                    .font_family(MONO_FONT_FAMILY)
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(exact),
+                            )
+                        }),
                 )
                 .child(
                     div()
                         .min_w_0()
                         .flex_1()
-                        .flex_basis(px(220.0))
+                        .flex_basis(px(240.0))
                         .text_lg()
                         .font_semibold()
                         .text_color(amount_color)
+                        .whitespace_normal()
                         .child(fact.value.clone()),
                 );
         }
@@ -11232,13 +11179,14 @@ impl WalletWindow {
         let generation = active.state.generation();
         let document = active.state.document();
         let exact_data_required = !document.exact_payloads.is_empty();
-        let exact_data_available =
-            review_exact_data_available(document, active.exact_payloads_expanded);
-        let approve_enabled =
-            active.state.approve_enabled() && exact_data_available && !active.awaiting_refresh;
+        let approve_enabled = active.state.approve_enabled() && !active.awaiting_refresh;
         let can_refresh = matches!(
             active.completion,
             Some(ActiveReviewCompletion::Transaction(_))
+        );
+        let walletconnect_connection = matches!(
+            active.completion,
+            Some(ActiveReviewCompletion::WalletConnect { .. })
         );
         let mut review_body = div()
             .w_full()
@@ -11351,44 +11299,25 @@ impl WalletWindow {
                         .flex_col()
                         .gap_2()
                         .child(
-                            h_flex()
-                                .justify_between()
-                                .gap_3()
+                            div()
+                                .min_w_0()
+                                .child(div().font_semibold().child("Exact data"))
                                 .child(
                                     div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .child(div().font_semibold().child("Exact data"))
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
                                         .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(
-                                                    "Required for approval. Compare the complete bytes with the human-readable interpretation above.",
-                                                ),
+                                            "The complete bytes are always part of this review.",
                                         ),
-                                )
-                                .child(
-                                    Button::new(("toggle-review-exact-data", generation))
-                                        .label(if active.exact_payloads_expanded {
-                                            "Hide exact data"
-                                        } else {
-                                            "Review exact data"
-                                        })
-                                        .icon(if active.exact_payloads_expanded {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .on_click(cx.listener(move |view, _, _, cx| {
-                                            view.toggle_review_exact_payloads(generation, cx);
-                                        })),
                                 ),
                         ),
                 )
-                .when(active.exact_payloads_expanded, |body| {
-                    body.children(document.exact_payloads.iter().enumerate().map(
-                        |(index, payload)| {
+                .children(
+                    document
+                        .exact_payloads
+                        .iter()
+                        .enumerate()
+                        .map(|(index, payload)| {
                             div()
                                 .w_full()
                                 .min_w_0()
@@ -11418,9 +11347,8 @@ impl WalletWindow {
                                         .whitespace_normal()
                                         .child(payload.clone()),
                                 )
-                        },
-                    ))
-                });
+                        }),
+                );
         }
         div()
             .absolute()
@@ -11436,35 +11364,23 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(div().font_semibold().child("Security review").when(
-                        !self.queued_reviews.is_empty(),
-                        |title| {
-                            title.child(
-                                div()
-                                    .text_sm()
-                                    .font_normal()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{} additional review(s) waiting",
-                                        self.queued_reviews.len()
-                                    )),
-                            )
-                        },
-                    ))
-                    .child(
-                        Button::new(("review-close", generation))
-                            .label("Close")
-                            .disabled(active.awaiting_refresh)
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.send_review_command(generation, GuiReviewCommand::Close, cx);
-                            })),
-                    ),
-            )
+            .child(div().flex().items_center().child(
+                div().font_semibold().child("Security review").when(
+                    !self.queued_reviews.is_empty(),
+                    |title| {
+                        title.child(
+                            div()
+                                .text_sm()
+                                .font_normal()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "{} additional review(s) waiting",
+                                    self.queued_reviews.len()
+                                )),
+                        )
+                    },
+                ),
+            ))
             .child(
                 div()
                     .id(("review-scroll", generation))
@@ -11506,20 +11422,16 @@ impl WalletWindow {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            if exact_data_required
-                                                && !active.exact_payloads_expanded
-                                            {
-                                                "Review the exact data to enable approval"
-                                            } else {
-                                                "Scroll to the end to enable approval"
-                                            },
-                                        ),
+                                        .child("Scroll to the end to enable approval"),
                                 )
                             })
                             .child(
                                 Button::new(("review-select-reject", generation))
-                                    .label("Reject request")
+                                    .label(if walletconnect_connection {
+                                        "Decline connection"
+                                    } else {
+                                        "Reject request"
+                                    })
                                     .danger()
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.decide_review(generation, ReviewDecision::Reject, cx);
@@ -11527,7 +11439,11 @@ impl WalletWindow {
                             )
                             .child(
                                 Button::new(("review-select-approve", generation))
-                                    .label("Authenticate & approve")
+                                    .label(if walletconnect_connection {
+                                        "Authenticate & connect"
+                                    } else {
+                                        "Authenticate & approve"
+                                    })
                                     .primary()
                                     .disabled(!approve_enabled)
                                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -11604,27 +11520,52 @@ impl WalletWindow {
         let Some(review) = &self.legal_review else {
             return div().into_any_element();
         };
-        let sections = review.sections.clone();
-        let parsed_sections = review.parsed_sections.clone();
+        let rows = review.rows.clone();
+        let row_count = rows.len();
+        let end_rendered = review.end_rendered.clone();
+        let viewed_to_end = review.viewed_to_end
+            || legal_list_reached_end(&review.scroll_handle, &review.end_rendered);
         let document_title = review.document.title();
-        let document = gpui::list(review.list_state.clone(), move |index, _, _| {
-            let text = parsed_sections.as_ref().map_or_else(
-                || {
-                    TextView::markdown(
-                        SharedString::from(format!("legal-markdown-{document_title}-{index}")),
-                        sections[index].clone(),
-                    )
-                },
-                |states| TextView::new(&states[index]),
-            );
-            div()
-                .w_full()
-                .pr_3()
-                .pb_3()
-                .child(text.w_full().selectable(true))
-                .into_any_element()
-        })
-        .size_full();
+        let document = uniform_list(
+            SharedString::from(format!("legal-document-{document_title}")),
+            row_count,
+            move |visible_range, _, cx| {
+                if visible_range.end >= row_count {
+                    end_rendered.store(true, Ordering::Release);
+                }
+                visible_range
+                    .map(|index| {
+                        let row = &rows[index];
+                        let line = div()
+                            .h(LEGAL_ROW_HEIGHT)
+                            .w_full()
+                            .min_w_0()
+                            .max_w_full()
+                            .flex_none()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .when(row.kind == LegalRowKind::Heading, |line| {
+                                line.text_lg()
+                                    .font_semibold()
+                                    .text_color(cx.theme().foreground)
+                            })
+                            .when(row.kind == LegalRowKind::Body, |line| {
+                                line.text_color(cx.theme().foreground)
+                            })
+                            .when(row.kind == LegalRowKind::Code, |line| {
+                                line.px_1()
+                                    .font_family(MONO_FONT_FAMILY)
+                                    .bg(cx.theme().muted)
+                                    .text_color(cx.theme().muted_foreground)
+                            })
+                            .child(row.text.clone());
+                        line.into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .size_full()
+        .track_scroll(&review.scroll_handle);
         div()
             .absolute()
             .inset_0()
@@ -11648,7 +11589,18 @@ impl WalletWindow {
                     .p_3()
                     .border_1()
                     .border_color(cx.theme().border)
-                    .vertical_scrollbar(&review.list_state)
+                    .vertical_scrollbar(&review.scroll_handle)
+                    .on_scroll_wheel(cx.listener(|view, _, window, cx| {
+                        let digest = view
+                            .legal_review
+                            .as_ref()
+                            .map(|review| review.digest.clone());
+                        if let Some(digest) = digest {
+                            cx.defer_in(window, move |view, _, cx| {
+                                view.update_legal_scroll_state(&digest, cx);
+                            });
+                        }
+                    }))
                     .child(document),
             )
             .when_some(review.error.clone(), |panel, error| {
@@ -11665,7 +11617,7 @@ impl WalletWindow {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(if review.viewed_to_end {
+                                .child(if viewed_to_end {
                                     "Document read to end"
                                 } else {
                                     "Scroll to the end to accept"
@@ -11675,7 +11627,7 @@ impl WalletWindow {
                             Button::new("accept-legal")
                                 .label("Accept")
                                 .primary()
-                                .disabled(!review.viewed_to_end)
+                                .disabled(!viewed_to_end)
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.accept_legal(cx);
                                 })),
@@ -12144,7 +12096,7 @@ fn show_wallet_window(
         view.token_name_input = None;
         view.token_decimals_input = None;
         view.token_editor_open = false;
-        view.token_editor_identity = None;
+        view.token_editor_original = None;
         view.token_list_generation = view.token_list_generation.wrapping_add(1);
         view.account_id_input = None;
         view.private_key_input = None;
@@ -12224,7 +12176,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let events = authority.events();
     let server_slot = Arc::new(Mutex::new(None::<McpHttpServer>));
     let instance_slot = Arc::new(Mutex::new(Some(instance)));
-    let pending_software_update = Arc::new(Mutex::new(None::<PendingSoftwareUpdate>));
     let walletconnect = Arc::new(Mutex::new(
         crate::walletconnect::WalletConnectManager::default(),
     ));
@@ -12266,7 +12217,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 _server: server_slot.clone(),
                 _walletconnect: walletconnect.clone(),
                 _tray: tray.clone(),
-                _pending_software_update: pending_software_update.clone(),
             });
             let mut key_bindings = vec![
                 KeyBinding::new("cmd-k", OpenCommandPalette, None),
@@ -12277,9 +12227,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 #[cfg(not(target_os = "macos"))]
                 KeyBinding::new("ctrl-q", Quit, None),
             ];
-            key_bindings.extend(Route::ALL.into_iter().map(|route| {
-                KeyBinding::new(route.key_binding(), NavigateRoute { route }, None)
-            }));
+            key_bindings.extend(
+                Route::ALL.into_iter().map(|route| {
+                    KeyBinding::new(route.key_binding(), NavigateRoute { route }, None)
+                }),
+            );
             key_bindings.push(KeyBinding::new(
                 SETTINGS_ALTERNATE_KEY_BINDING,
                 NavigateRoute {
@@ -12291,8 +12243,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             cx.on_action(|_: &Quit, cx| cx.quit());
             let shutdown_server = server_slot.clone();
             let shutdown_walletconnect = walletconnect.clone();
-            let shutdown_update = pending_software_update.clone();
-            let shutdown_instance = instance_slot.clone();
             let tokio = gpui_tokio::Tokio::handle(cx);
             cx.on_app_quit(move |_| {
                 if let Ok(mut sessions) = shutdown_walletconnect.lock() {
@@ -12303,38 +12253,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     .ok()
                     .and_then(|mut server| server.take());
                 let tokio = tokio.clone();
-                let shutdown_update = shutdown_update.clone();
-                let shutdown_instance = shutdown_instance.clone();
                 async move {
                     if let Some(server) = server {
                         let _ = tokio.spawn(server.stop()).await;
-                    }
-                    let pending = shutdown_update
-                        .lock()
-                        .ok()
-                        .and_then(|mut pending| pending.take());
-                    if let Some(pending) = pending {
-                        match tokio
-                            .spawn_blocking(move || pending.update.install(pending.bytes))
-                            .await
-                        {
-                            Ok(Ok(())) => {
-                                let instance = shutdown_instance
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut instance| instance.take());
-                                drop(instance);
-                                if let Err(error) = crate::updater::relaunch() {
-                                    tracing::error!(%error, "verified update installed but relaunch failed");
-                                }
-                            }
-                            Ok(Err(error)) => {
-                                tracing::error!(%error, "verified software update installation failed");
-                            }
-                            Err(error) => {
-                                tracing::error!(%error, "verified software update installation task failed");
-                            }
-                        }
                     }
                 }
             })
@@ -12347,7 +12268,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     walletconnect.clone(),
                     walletconnect_presenter.clone(),
                     detailed_notification_previews.clone(),
-                    pending_software_update.clone(),
                     tray.clone(),
                     cx,
                 )
@@ -12484,9 +12404,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                     event_view.update(cx, |view, cx| {
                                         view.set_route_error(
                                             Route::Settings,
-                                            format!(
-                                                "Could not enable launch at login: {error:#}"
-                                            ),
+                                            format!("Could not enable launch at login: {error:#}"),
                                         );
                                         cx.notify();
                                     });
@@ -12506,9 +12424,9 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                     .lock()
                                     .map_or_else(|_| Vec::new(), |manager| manager.sessions());
                                 (
-                                    owner.reviews(None).map_or(0, |queues| {
-                                        review_queue_decision_count(&queues)
-                                    }),
+                                    owner
+                                        .reviews(None)
+                                        .map_or(0, |queues| review_queue_decision_count(&queues)),
                                     owner.clients().map_or(0, |clients| clients.len()),
                                     sessions,
                                 )
@@ -12549,47 +12467,47 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             cx.spawn(async move |cx| {
                 while let Some(command) = tray_command_rx.recv().await {
                     match command {
-                            TrayCommand::OpenWallet => {
-                                let _ = cx
-                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                            }
-                            TrayCommand::OpenRoute(route) => {
-                                tray_view.update(cx, |view, cx| {
-                                    view.set_route(route);
-                                    cx.notify();
-                                });
-                                let _ = cx
-                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                            }
-                            TrayCommand::ConnectDapp => {
-                                tray_view.update(cx, |view, cx| {
-                                    view.set_route(Route::WalletConnect);
-                                    cx.notify();
-                                });
-                                let _ = cx
-                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                            }
-                            TrayCommand::ReinstallAgents => {
-                                tray_view.update(cx, |view, cx| {
-                                    view.set_route(Route::Settings);
-                                    view.reinstall_detected_agents_from_menu(cx);
-                                });
-                                let _ = cx
-                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                            }
-                            TrayCommand::CheckForUpdates => {
-                                tray_view.update(cx, |view, cx| {
-                                    view.set_route(Route::Settings);
-                                    view.check_for_updates(cx);
-                                    cx.notify();
-                                });
-                                let _ = cx
-                                    .update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                            }
-                            TrayCommand::Quit => {
-                                cx.update(|cx| cx.quit());
-                                return;
-                            }
+                        TrayCommand::OpenWallet => {
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                        }
+                        TrayCommand::OpenRoute(route) => {
+                            tray_view.update(cx, |view, cx| {
+                                view.set_route(route);
+                                cx.notify();
+                            });
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                        }
+                        TrayCommand::ConnectDapp => {
+                            tray_view.update(cx, |view, cx| {
+                                view.set_route(Route::WalletConnect);
+                                cx.notify();
+                            });
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                        }
+                        TrayCommand::ReinstallAgents => {
+                            tray_view.update(cx, |view, cx| {
+                                view.set_route(Route::Settings);
+                                view.reinstall_detected_agents_from_menu(cx);
+                            });
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                        }
+                        TrayCommand::CheckForUpdates => {
+                            tray_view.update(cx, |view, cx| {
+                                view.set_route(Route::Settings);
+                                view.check_latest_release(cx);
+                                cx.notify();
+                            });
+                            let _ =
+                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
+                        }
+                        TrayCommand::Quit => {
+                            cx.update(|cx| cx.quit());
+                            return;
+                        }
                     }
                 }
             })
