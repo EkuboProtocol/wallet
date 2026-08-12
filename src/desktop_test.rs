@@ -230,6 +230,10 @@ fn network_rpc_editor_displays_explicit_commas_and_round_trips_them() {
         name: "comma-chain".into(),
         chain_id: "9001".into(),
         rpc_urls: displayed,
+        native_currency_name: "Ether".into(),
+        native_currency_symbol: "ETH".into(),
+        native_currency_decimals: "18".into(),
+        block_explorer_url: "https://explorer.example".into(),
         ..NetworkEditorDraft::default()
     };
     let (parsed, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);

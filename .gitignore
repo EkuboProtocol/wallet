@@ -5,3 +5,7 @@
 *.profraw
 *.profdata
 .DS_Store
+# cargo-packager updater signing keys are generated locally and must never be
+# committed. The public key is supplied to release builds through CI.
+/ekubo-updater.key
+/ekubo-updater.key.pub

@@ -7,6 +7,22 @@ use super::*;
 
 const REPOSITORY: &str = "EkuboProtocol/wallet";
 
+#[test]
+fn installable_updates_use_only_the_stable_release_manifest() {
+    assert_eq!(
+        UPDATE_MANIFEST_URL,
+        "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json"
+    );
+    assert!(!UPDATE_MANIFEST_URL.contains("prerelease"));
+}
+
+#[test]
+fn updater_private_material_is_never_compiled_into_the_module() {
+    let source = include_str!("release_check.rs");
+    assert!(source.contains("UPDATER_PUBLIC_KEY"));
+    assert!(!source.contains("UPDATER_PRIVATE_KEY"));
+}
+
 fn at(text: &str) -> DateTime<Utc> {
     text.parse().expect("a fixed timestamp")
 }
@@ -87,7 +103,7 @@ fn a_repository_override_is_owner_and_name_only() {
 }
 
 #[tokio::test]
-async fn an_available_update_points_to_github_without_self_update_instructions() {
+async fn an_available_update_directs_the_user_to_the_verified_updater() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let check = check_at(
         directory.path(),
@@ -105,8 +121,7 @@ async fn an_available_update_points_to_github_without_self_update_instructions()
         Some("https://github.com/EkuboProtocol/wallet/releases/latest")
     );
     assert!(check.instruction.contains("Updates"));
-    assert!(check.instruction.contains("latest GitHub release"));
-    assert!(check.instruction.contains("cannot download or install"));
+    assert!(check.instruction.contains("download, verify, and install"));
     assert!(check.notice().is_some());
 }
 

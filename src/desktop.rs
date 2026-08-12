@@ -530,6 +530,7 @@ struct DesktopRuntime {
     _server: Arc<Mutex<Option<McpHttpServer>>>,
     _walletconnect: Arc<Mutex<crate::walletconnect::WalletConnectManager>>,
     _tray: Rc<RefCell<Option<PlatformTray>>>,
+    _pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
 }
 
 impl gpui::Global for DesktopRuntime {}
@@ -1067,6 +1068,7 @@ pub struct WalletWindow {
     token_proposal_busy: bool,
     network_proposal_busy: bool,
     release_state: ReleaseDisplayState,
+    pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
 }
 
 #[derive(Clone)]
@@ -1139,8 +1141,17 @@ fn cache_result<T>(result: Result<T>) -> std::result::Result<T, SharedString> {
 enum ReleaseDisplayState {
     Idle,
     Checking,
-    Ready(ReleaseCheck),
+    Ready {
+        check: ReleaseCheck,
+        update: Option<crate::release_check::InstallableUpdate>,
+    },
+    Downloading,
     Failed(SharedString),
+}
+
+struct PreparedUpdate {
+    update: crate::release_check::InstallableUpdate,
+    bytes: Vec<u8>,
 }
 
 enum PortfolioState {
@@ -2545,13 +2556,9 @@ fn parse_network_editor_draft(
         draft.native_currency_symbol.trim(),
         draft.native_currency_decimals.trim(),
     ];
-    let native_currency = if native_values.iter().all(|value| value.is_empty()) {
-        None
-    } else if native_values.iter().any(|value| value.is_empty()) {
-        errors.native_currency = Some(
-            "Enter the native currency name, symbol, and decimals together, or leave all three blank."
-                .into(),
-        );
+    let native_currency = if native_values.iter().any(|value| value.is_empty()) {
+        errors.native_currency =
+            Some("Enter the native currency name, symbol, and decimals.".into());
         None
     } else {
         match native_values[2].parse::<u8>() {
@@ -2602,6 +2609,9 @@ fn parse_network_editor_draft(
             );
             None
         });
+    if block_explorer_url.is_none() && errors.block_explorer_url.is_none() {
+        errors.block_explorer_url = Some("Enter the network's block explorer base URL.".into());
+    }
     let documentation_url =
         parse_optional_base_url(&draft.documentation_url).unwrap_or_else(|()| {
             errors.documentation_url =
@@ -3551,6 +3561,7 @@ impl WalletWindow {
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
         tray: Rc<RefCell<Option<PlatformTray>>>,
+        pending_update: Arc<Mutex<Option<PreparedUpdate>>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
@@ -3686,6 +3697,7 @@ impl WalletWindow {
             token_proposal_busy: false,
             network_proposal_busy: false,
             release_state: ReleaseDisplayState::Idle,
+            pending_update,
         };
         window.open_next_required_legal(cx);
         window.reload_detected_agents(cx);
@@ -5836,23 +5848,32 @@ impl WalletWindow {
                 return;
             }
             let view = cx.entity().downgrade();
-            window.open_dialog(cx, move |dialog, _, cx| {
+            window.open_dialog(cx, move |dialog, window, cx| {
                 let Some(entity) = view.upgrade() else {
                     return dialog.title("Network").child("Network form unavailable.");
                 };
+                let viewport = window.viewport_size();
+                let dialog_width = (viewport.width - px(32.0)).min(px(760.0));
+                let dialog_height = viewport.height - px(32.0);
+                let form_height = (dialog_height - px(150.0)).max(px(220.0));
                 let (busy, editing, form, footer) = {
                     let wallet = entity.read(cx);
                     (
                         wallet.network_editor_busy,
                         wallet.network_editor_original.is_some(),
-                        wallet.render_network_editor_form(&view, cx),
+                        wallet
+                            .render_network_editor_form(&view, cx)
+                            .max_h(form_height)
+                            .overflow_y_scrollbar(),
                         wallet.render_network_editor_footer(&view),
                     )
                 };
                 let on_close_view = view.clone();
                 dialog
-                    .w(px(760.0))
-                    .max_h(px(720.0))
+                    .w(dialog_width)
+                    .max_w(dialog_width)
+                    .max_h(dialog_height)
+                    .margin_top(px(16.0))
                     .title(if editing {
                         "Edit network"
                     } else {
@@ -6702,18 +6723,97 @@ impl WalletWindow {
         };
         self.release_state = ReleaseDisplayState::Checking;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            Ok::<_, anyhow::Error>(crate::release_check::check(&data_dir).await)
+            let check = crate::release_check::check(&data_dir).await;
+            let update = if check.update_available && !crate::UPDATER_PUBLIC_KEY.is_empty() {
+                tokio::task::spawn_blocking(crate::release_check::check_installable)
+                    .await
+                    .context("signed updater task failed")??
+            } else {
+                None
+            };
+            Ok::<_, anyhow::Error>((check, update))
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.release_state = match result {
-                    Ok(check) => ReleaseDisplayState::Ready(check),
+                    Ok((check, update)) => ReleaseDisplayState::Ready { check, update },
                     Err(error) => ReleaseDisplayState::Failed(
                         format!("Could not check the latest release: {error:#}").into(),
                     ),
                 };
                 cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn confirm_update_installation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ReleaseDisplayState::Ready {
+            update: Some(update),
+            ..
+        } = &self.release_state
+        else {
+            return;
+        };
+        let version = update.version.clone();
+        let view = cx.entity().downgrade();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let view = view.clone();
+            alert
+                .title(format!("Install Ekubo Wallet {version}?"))
+                .description("The update will be downloaded and verified before the wallet closes. WalletConnect sessions will disconnect and the local MCP server will stop before installation.")
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Download & install")
+                        .cancel_text("Not now")
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    let _ = view.update(cx, |view, cx| view.download_update(cx));
+                    true
+                })
+        });
+    }
+
+    fn download_update(&mut self, cx: &mut Context<Self>) {
+        let ReleaseDisplayState::Ready {
+            update: Some(update),
+            ..
+        } = &self.release_state
+        else {
+            return;
+        };
+        let update = update.clone();
+        self.release_state = ReleaseDisplayState::Downloading;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            let downloaded_update = update.clone();
+            let bytes = tokio::task::spawn_blocking(move || downloaded_update.download())
+                .await
+                .context("update download task failed")??;
+            Ok::<_, anyhow::Error>(PreparedUpdate { update, bytes })
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| match result {
+                Ok(prepared) => {
+                    if let Ok(mut slot) = view.pending_update.lock() {
+                        *slot = Some(prepared);
+                        cx.quit();
+                    } else {
+                        view.release_state = ReleaseDisplayState::Failed(
+                            "Could not prepare the verified update for installation.".into(),
+                        );
+                        cx.notify();
+                    }
+                }
+                Err(error) => {
+                    view.release_state = ReleaseDisplayState::Failed(
+                        format!("Could not download and verify the update: {error:#}").into(),
+                    );
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -10461,7 +10561,7 @@ impl WalletWindow {
             .child(
                 div()
                     .font_semibold()
-                    .child(selectable_label("Native currency (optional)")),
+                    .child(selectable_label("Native currency")),
             )
             .child(
                 div()
@@ -10481,7 +10581,7 @@ impl WalletWindow {
                     .flex_wrap()
                     .gap_3()
                     .child(field(
-                        "Block explorer URL (optional)",
+                        "Block explorer URL",
                         explorer,
                         self.network_editor_errors.block_explorer_url.clone(),
                         false,
@@ -11761,13 +11861,11 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("Ekubo Wallet does not download or install updates. Open the latest release in your browser and install it through your operating system.")),
-            )
-            .child(
-                app_button("open-latest-release")
-                    .label("View latest release")
-                    .primary()
-                    .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
+                    .child(selectable_label(if crate::UPDATER_PUBLIC_KEY.is_empty() {
+                        "This development build has no update verification key."
+                    } else {
+                        "Stable releases are downloaded and cryptographically verified before installation."
+                    })),
             );
         panel = match &self.release_state {
             ReleaseDisplayState::Idle => panel.child(
@@ -11781,7 +11879,13 @@ impl WalletWindow {
                     .child(Spinner::new())
                     .child(selectable_label("Checking the latest published version…")),
             ),
-            ReleaseDisplayState::Ready(check) => panel
+            ReleaseDisplayState::Downloading => panel.child(
+                h_flex()
+                    .gap_2()
+                    .child(Spinner::new())
+                    .child(selectable_label("Downloading and verifying the update…")),
+            ),
+            ReleaseDisplayState::Ready { check, update } => panel
                 .child(
                     div()
                         .font_semibold()
@@ -11792,6 +11896,23 @@ impl WalletWindow {
                 )
                 .when(check.update_available, |panel| {
                     panel.child(selectable_label("A newer release is available."))
+                })
+                .when_some(update.as_ref(), |panel, update| {
+                    panel.child(
+                        app_button("install-signed-update")
+                            .label(format!("Install {}", update.version))
+                            .primary()
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.confirm_update_installation(window, cx);
+                            })),
+                    )
+                })
+                .when(check.update_available && update.is_none(), |panel| {
+                    panel.child(
+                        app_button("open-latest-release")
+                            .label("View latest release")
+                            .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
+                    )
                 })
                 .child(
                     app_button("recheck-latest-release")
@@ -13198,6 +13319,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let clients = authority.desktop_store();
     let events = authority.events();
     let server_slot = Arc::new(Mutex::new(None::<McpHttpServer>));
+    let pending_update = Arc::new(Mutex::new(None::<PreparedUpdate>));
     let instance_slot = Arc::new(Mutex::new(Some(instance)));
     let walletconnect = Arc::new(Mutex::new(
         crate::walletconnect::WalletConnectManager::default(),
@@ -13239,6 +13361,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 _server: server_slot.clone(),
                 _walletconnect: walletconnect.clone(),
                 _tray: tray.clone(),
+                _pending_update: pending_update.clone(),
             });
             let mut key_bindings = vec![
                 KeyBinding::new("cmd-k", OpenCommandPalette, None),
@@ -13268,6 +13391,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             cx.on_action(|_: &Quit, cx| cx.quit());
             let shutdown_server = server_slot.clone();
             let shutdown_walletconnect = walletconnect.clone();
+            let shutdown_update = pending_update.clone();
             let tokio = gpui_tokio::Tokio::handle(cx);
             cx.on_app_quit(move |_| {
                 if let Ok(mut sessions) = shutdown_walletconnect.lock() {
@@ -13278,9 +13402,24 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     .ok()
                     .and_then(|mut server| server.take());
                 let tokio = tokio.clone();
+                let shutdown_update = shutdown_update.clone();
                 async move {
                     if let Some(server) = server {
                         let _ = tokio.spawn(server.stop()).await;
+                    }
+                    let prepared = shutdown_update
+                        .lock()
+                        .ok()
+                        .and_then(|mut update| update.take());
+                    if let Some(prepared) = prepared {
+                        let _ = tokio
+                            .spawn_blocking(move || {
+                                crate::release_check::install_and_relaunch(
+                                    prepared.update,
+                                    prepared.bytes,
+                                )
+                            })
+                            .await;
                     }
                 }
             })
@@ -13293,6 +13432,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     walletconnect.clone(),
                     walletconnect_presenter.clone(),
                     tray.clone(),
+                    pending_update.clone(),
                     cx,
                 )
             });

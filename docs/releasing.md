@@ -10,7 +10,8 @@ in the protected release environment. CI compiles the public key into the app,
 publishes signed `latest.json`, retains platform signatures, and attaches
 Sigstore provenance.
 
-Updates require explicit confirmation after version and notes are shown.
-Download completes and verifies before shutdown. AppImage uses verified
-replacement; DEB launches the native package-install flow. MCP and
-WalletConnect shut down gracefully immediately before installation and relaunch.
+Updates require explicit confirmation after the stable version is shown.
+Download completes and verifies before shutdown. The packaged macOS app,
+Windows installer, and Linux AppImage update in place; DEB installations use
+the release-page fallback. MCP and WalletConnect shut down gracefully
+immediately before installation and relaunch.

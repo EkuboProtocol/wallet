@@ -3,6 +3,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
+    embed_updater_public_key();
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets the package version");
     println!(
         "cargo:rustc-env=EKUBO_WALLET_BUILD_VERSION={}",
@@ -23,6 +24,23 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=crates");
+}
+
+fn embed_updater_public_key() {
+    println!("cargo:rerun-if-env-changed=EKUBO_UPDATER_PUBLIC_KEY");
+    let key = env::var("EKUBO_UPDATER_PUBLIC_KEY").unwrap_or_default();
+    if env::var("PROFILE").is_ok_and(|profile| profile == "release") && key.trim().is_empty() {
+        panic!("release builds require EKUBO_UPDATER_PUBLIC_KEY");
+    }
+    if !key.is_empty()
+        && (key.len() % 4 != 0
+            || key
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))))
+    {
+        panic!("EKUBO_UPDATER_PUBLIC_KEY must be canonical single-line base64");
+    }
+    println!("cargo:rustc-env=EKUBO_COMPILED_UPDATER_PUBLIC_KEY={key}");
 }
 
 fn exact_build_commit() -> Option<String> {
