@@ -42,6 +42,10 @@ jobs:
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Preserve the expensive native build when a public endpoint is the
+          # thing that failed, so a diagnostic rerun reaches RPCs quickly.
+          cache-on-failure: true
 
       - name: Run the live network matrix
         # One chain at a time: the shared endpoints throttle a parallel run,

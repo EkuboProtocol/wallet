@@ -372,7 +372,22 @@ async fn batch_reads_are_pinned_and_decoded(network: &NetworkConfig) {
             },
         ],
     };
-    let output = retrying("batch read", || batch_eth_call(network, &input, None)).await;
+    let mut output = retrying("batch read", || batch_eth_call(network, &input, None)).await;
+    // `batch_eth_call` deliberately falls back to individual calls whenever
+    // an endpoint transiently refuses Multicall3. That is valid production
+    // behaviour, but this conformance assertion also needs to prove the
+    // optimized path works. Give the public endpoint the same bounded chance
+    // to recover that transport errors receive above before judging support.
+    let mut delay = Duration::from_secs(2);
+    for _ in 0..3 {
+        if output.strategy == BatchStrategy::Multicall3 {
+            break;
+        }
+        eprintln!("  retrying Multicall3 batch read after individual-call fallback");
+        tokio::time::sleep(delay).await;
+        delay *= 2;
+        output = retrying("batch read", || batch_eth_call(network, &input, None)).await;
+    }
     assert_eq!(output.strategy, BatchStrategy::Multicall3);
     assert!(output.fork.is_none());
     assert!(output.block_number.parse::<u64>().unwrap() > 0);
