@@ -399,7 +399,7 @@ impl DesktopStore {
         ensure!(
             redirects
                 .iter()
-                .any(|registered| registered == redirect_uri),
+                .any(|registered| redirect_uri_matches(registered, redirect_uri)),
             "OAuth redirect URI is not registered for this client"
         );
         Ok(McpClient {
@@ -914,6 +914,40 @@ fn validate_redirect_uri(value: &str) -> Result<()> {
         "OAuth redirect URI must use HTTPS or an exact loopback HTTP host"
     );
     Ok(())
+}
+
+/// Native applications bind an ephemeral loopback port for every login. RFC
+/// 8252 requires authorization servers to accept any port for an otherwise
+/// matching loopback redirect; Claude Code can also resolve the loopback host
+/// as either `localhost` or a numeric address between registration and use.
+/// PKCE protects this relaxed port match, and the actual redirect remains
+/// bound byte-for-byte to the issued authorization code and token exchange.
+fn redirect_uri_matches(registered: &str, requested: &str) -> bool {
+    if registered == requested {
+        return true;
+    }
+    let (Ok(mut registered), Ok(mut requested)) =
+        (url::Url::parse(registered), url::Url::parse(requested))
+    else {
+        return false;
+    };
+    let is_loopback = |host: url::Host<&str>| match host {
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+        url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
+    };
+    if registered.scheme() != "http"
+        || requested.scheme() != "http"
+        || !registered.host().is_some_and(is_loopback)
+        || !requested.host().is_some_and(is_loopback)
+    {
+        return false;
+    }
+    let _ = registered.set_host(Some("localhost"));
+    let _ = requested.set_host(Some("localhost"));
+    let _ = registered.set_port(None);
+    let _ = requested.set_port(None);
+    registered == requested
 }
 
 fn validate_code_challenge(value: &str) -> Result<()> {

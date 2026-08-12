@@ -65,6 +65,63 @@ fn registration_creates_no_credential_until_owner_authorizes_login() {
 }
 
 #[test]
+fn native_loopback_redirects_allow_ephemeral_ports_and_host_spellings() {
+    let mut store = store(41);
+    let client = store
+        .register_oauth_client(
+            "Claude Code",
+            AgentKind::ClaudeCode,
+            &["http://127.0.0.1:43119/callback".into()],
+            None,
+        )
+        .unwrap();
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
+
+    assert!(
+        store
+            .validate_oauth_authorization_request(
+                client.id,
+                "http://localhost:49502/callback",
+                &challenge,
+                MCP_SCOPE,
+                MCP_RESOURCE,
+            )
+            .is_ok()
+    );
+    assert!(
+        store
+            .validate_oauth_authorization_request(
+                client.id,
+                "http://[::1]:49502/callback",
+                &challenge,
+                MCP_SCOPE,
+                MCP_RESOURCE,
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn redirect_relaxation_never_changes_path_query_or_https_matching() {
+    assert!(redirect_uri_matches(
+        "http://127.0.0.1:43119/callback?channel=claude",
+        "http://localhost:49502/callback?channel=claude"
+    ));
+    assert!(!redirect_uri_matches(
+        "http://127.0.0.1:43119/callback",
+        "http://localhost:49502/other"
+    ));
+    assert!(!redirect_uri_matches(
+        "http://127.0.0.1:43119/callback?one=1",
+        "http://localhost:49502/callback?one=2"
+    ));
+    assert!(!redirect_uri_matches(
+        "https://example.com:43119/callback",
+        "https://example.com:49502/callback"
+    ));
+}
+
+#[test]
 fn oauth_refresh_families_have_a_hard_non_sliding_session_expiry() {
     let mut store = store(36);
     let client = register(&mut store);
