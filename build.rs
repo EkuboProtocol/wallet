@@ -29,11 +29,12 @@ fn main() {
 fn embed_updater_public_key() {
     println!("cargo:rerun-if-env-changed=EKUBO_UPDATER_PUBLIC_KEY");
     let key = env::var("EKUBO_UPDATER_PUBLIC_KEY").unwrap_or_default();
-    if env::var("PROFILE").is_ok_and(|profile| profile == "release") && key.trim().is_empty() {
-        panic!("release builds require EKUBO_UPDATER_PUBLIC_KEY");
-    }
+    assert!(
+        !(env::var("PROFILE").is_ok_and(|profile| profile == "release") && key.trim().is_empty()),
+        "release builds require EKUBO_UPDATER_PUBLIC_KEY"
+    );
     if !key.is_empty()
-        && (key.len() % 4 != 0
+        && (!key.len().is_multiple_of(4)
             || key
                 .bytes()
                 .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))))

@@ -1143,7 +1143,7 @@ enum ReleaseDisplayState {
     Checking,
     Ready {
         check: ReleaseCheck,
-        update: Option<crate::release_check::InstallableUpdate>,
+        update: Option<Box<crate::release_check::InstallableUpdate>>,
     },
     Downloading,
     Failed(SharedString),
@@ -6737,7 +6737,10 @@ impl WalletWindow {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.release_state = match result {
-                    Ok((check, update)) => ReleaseDisplayState::Ready { check, update },
+                    Ok((check, update)) => ReleaseDisplayState::Ready {
+                        check,
+                        update: update.map(Box::new),
+                    },
                     Err(error) => ReleaseDisplayState::Failed(
                         format!("Could not check the latest release: {error:#}").into(),
                     ),
@@ -6771,7 +6774,7 @@ impl WalletWindow {
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    let _ = view.update(cx, |view, cx| view.download_update(cx));
+                    let _ = view.update(cx, WalletWindow::download_update);
                     true
                 })
         });
@@ -6785,7 +6788,7 @@ impl WalletWindow {
         else {
             return;
         };
-        let update = update.clone();
+        let update = update.as_ref().clone();
         self.release_state = ReleaseDisplayState::Downloading;
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
             let downloaded_update = update.clone();
@@ -13415,7 +13418,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         let _ = tokio
                             .spawn_blocking(move || {
                                 crate::release_check::install_and_relaunch(
-                                    prepared.update,
+                                    &prepared.update,
                                     prepared.bytes,
                                 )
                             })

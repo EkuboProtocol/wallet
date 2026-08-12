@@ -56,7 +56,7 @@ pub fn check_installable() -> anyhow::Result<Option<InstallableUpdate>> {
 /// Installs bytes already verified by [`InstallableUpdate::download`] and
 /// starts the replacement application where the platform installer does not
 /// do that itself.
-pub fn install_and_relaunch(update: InstallableUpdate, bytes: Vec<u8>) -> anyhow::Result<()> {
+pub fn install_and_relaunch(update: &InstallableUpdate, bytes: Vec<u8>) -> anyhow::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let executable = update.extract_path.clone();
     update.install(bytes).context("could not install update")?;
