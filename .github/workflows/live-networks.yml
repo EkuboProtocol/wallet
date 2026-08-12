@@ -29,7 +29,10 @@ jobs:
       # The RPC assertions need overflow checks, not debug symbols. Keeping
       # these artifacts small prevents the GPUI dependency graph from
       # exhausting the hosted runner while linking the follow-up unit test.
-      CARGO_PROFILE_TEST_DEBUG: "0"
+      # `dev` rather than `test`, because `test` governs only the test targets
+      # themselves: the dependencies they link, which are the bulk of both the
+      # build time and the artifacts, are built under `dev` and inherit this.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +46,9 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          # Kept in step with the CI workflow's prefix so one bump discards
+          # every stale entry at once.
+          prefix-key: v1-rust
           # Preserve the expensive native build when a public endpoint is the
           # thing that failed, so a diagnostic rerun reaches RPCs quickly.
           cache-on-failure: true

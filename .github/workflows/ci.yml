@@ -13,6 +13,16 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Debug info for the GPUI, alloy, and schemars graph takes longer to emit and
+  # link than the code takes to compile, and it is the bulk of what the build
+  # cache stores, restores, and uploads. This governs the dependencies; the test
+  # job sets `CARGO_PROFILE_TEST_DEBUG` per runner, so the test binaries keep
+  # whatever the linker there can survive. Line tables still point panic
+  # backtraces at real source lines, and frame sizes come from `opt-level`, so
+  # the Windows stack story is unchanged.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
   test:
     name: Test (${{ matrix.runner }})
@@ -49,13 +59,24 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # Diagnosis runs fail by design until the Windows overflow is fixed;
-          # the expensive vendored SQLCipher/OpenSSL build must still be saved.
+          # A cargo invocation cancelled part way through still saves what it
+          # built, and the entry cannot be replaced afterwards because the key
+          # already exists. That froze a cache holding only `cargo check`
+          # metadata, so every later run recompiled all 549 crates before it
+          # could link a test binary. Bump this prefix to discard a cache that
+          # is wrong rather than merely cold.
+          prefix-key: v1-rust
+          # Tests that fail still leave a fully compiled dependency graph
+          # behind, and that is the expensive half of this job.
           cache-on-failure: true
 
-      - name: Check all targets
-        run: cargo check --locked --all-targets --all-features
-
+      # This also covers what a separate `cargo check --all-targets` used to:
+      # `cargo test` builds the lib, the bins, and every test target, and
+      # unlike that step it does so for the whole workspace rather than the
+      # root package alone. Nothing here has a bench or a Rust example, so
+      # that flag reached nothing this does not. Checking first only bought a
+      # second copy of the graph in a profile the tests cannot link against —
+      # 11 of the Windows job's 48 minutes.
       - name: Run tests
         # Also set in .cargo/config.toml for local runs. Repeated here because
         # the harness runs each test on a spawned thread, and Windows MSVC debug
@@ -81,6 +102,17 @@ jobs:
       - name: Install GPUI and tray dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
 
+      # Clippy compiles the entire dependency graph before it lints a line of
+      # this workspace, which was nine of this job's fifteen minutes on every
+      # run. The cache key carries the job name, so these lint artifacts stay
+      # separate from the test job's rather than displacing them.
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v1-rust
+          # A denied lint fails this job after the graph is already built.
+          cache-on-failure: true
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -90,8 +122,13 @@ jobs:
       - name: Verify dependency licenses and notices
         run: contrib/generate-third-party-licenses.py --check
 
+      # Building the client from source cost five minutes to run a six-second
+      # scan. This fetches the upstream release binary for the same pinned
+      # version instead.
       - name: Install RustSec audit client
-        run: cargo install cargo-audit --locked --version 0.22.2
+        uses: taiki-e/install-action@b20dedce73af6905cdc30d6611090c9b67557c8d # v2.85.12
+        with:
+          tool: cargo-audit@0.22.2
 
       - name: Audit dependency advisories
         run: cargo audit
