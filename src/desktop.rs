@@ -1,6 +1,6 @@
 use crate::{
     BUILD_COMMIT, BUILD_VERSION,
-    agent_config::{AgentAdapter, ConfigPreview},
+    agent_config::{AgentAdapter, ConfigPreview, LOCAL_SERVER_NAME},
     authority::{
         ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioSnapshot,
         OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
@@ -193,6 +193,50 @@ fn visible_agent_sessions<'a>(
     clients
         .iter()
         .filter(|client| client.revoked_at.is_none() && !hidden.contains(&client.id))
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentLoginInstruction {
+    harness: &'static str,
+    command: String,
+    location: &'static str,
+}
+
+fn agent_login_instruction(kind: AgentKind) -> Option<AgentLoginInstruction> {
+    let (harness, command_prefix, location) = match kind {
+        AgentKind::Codex => ("Codex", "codex mcp login", "Run in a terminal."),
+        AgentKind::ClaudeCode => ("Claude Code", "claude mcp login", "Run in a terminal."),
+        AgentKind::GeminiCli => (
+            "Gemini CLI",
+            "/mcp auth",
+            "Paste inside an interactive Gemini CLI session.",
+        ),
+        AgentKind::Cursor => (
+            "Cursor",
+            "cursor-agent mcp login",
+            "Run in a terminal with Cursor Agent installed.",
+        ),
+        AgentKind::Opencode => ("opencode", "opencode mcp auth", "Run in a terminal."),
+        AgentKind::Other => return None,
+    };
+    Some(AgentLoginInstruction {
+        harness,
+        command: format!("{command_prefix} {LOCAL_SERVER_NAME}"),
+        location,
+    })
+}
+
+fn installed_agent_login_instructions(
+    detected: &AgentDetectionState,
+) -> Vec<AgentLoginInstruction> {
+    let AgentDetectionState::Ready(detected) = detected else {
+        return Vec::new();
+    };
+    detected
+        .iter()
+        .filter(|agent| agent.installed.as_ref().is_ok_and(|installed| *installed))
+        .filter_map(|agent| agent_login_instruction(agent.kind))
         .collect()
 }
 
@@ -7537,6 +7581,85 @@ impl WalletWindow {
 
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut agents = div().flex().flex_col().gap_1();
+        let login_instructions = installed_agent_login_instructions(&self.detected_agents);
+        let mut login_commands = div().w_full().flex().flex_col().gap_3();
+        if login_instructions.is_empty() {
+            login_commands = login_commands.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "Install the MCP server into a detected agent to see its sign-in command.",
+                    ),
+            );
+        } else {
+            login_commands = login_commands.child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose a session duration."),
+            );
+            for instruction in login_instructions {
+                let command = instruction.command.clone();
+                let command_for_copy = command.clone();
+                login_commands = login_commands.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .p_3()
+                        .rounded(cx.theme().radius)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_semibold()
+                                .child(format!("Sign in from {}", instruction.harness)),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(instruction.location),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(cx.theme().radius)
+                                        .bg(cx.theme().muted)
+                                        .font_family(MONO_FONT_FAMILY)
+                                        .text_sm()
+                                        .overflow_hidden()
+                                        .child(command),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "copy-agent-login-{}",
+                                        instruction.harness
+                                    )))
+                                    .label("Copy")
+                                    .icon(IconName::Copy)
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            command_for_copy.clone(),
+                                        ));
+                                    })),
+                                ),
+                        ),
+                );
+            }
+        }
         let clients = self.cached_clients().unwrap_or_default();
         let visible_sessions = visible_agent_sessions(clients, &self.hidden_agent_sessions);
         let mut managed_agents = div().flex().flex_col().gap_1();
@@ -7848,6 +7971,8 @@ impl WalletWindow {
                 GroupBox::new()
                     .id("agent-session-settings")
                     .outline()
+                    .child(login_commands)
+                    .child(div().font_semibold().child("Authorized sessions"))
                     .child(managed_agents),
             ))
             .child(self.render_updates(cx))

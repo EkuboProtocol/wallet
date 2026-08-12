@@ -97,6 +97,49 @@ fn revoked_and_optimistically_hidden_agent_sessions_are_not_rendered() {
 }
 
 #[test]
+fn every_supported_agent_has_a_copy_ready_oauth_login_instruction() {
+    let expected = [
+        (AgentKind::Codex, "codex mcp login ekubo-wallet"),
+        (AgentKind::ClaudeCode, "claude mcp login ekubo-wallet"),
+        (AgentKind::GeminiCli, "/mcp auth ekubo-wallet"),
+        (AgentKind::Cursor, "cursor-agent mcp login ekubo-wallet"),
+        (AgentKind::Opencode, "opencode mcp auth ekubo-wallet"),
+    ];
+    for (kind, command) in expected {
+        assert_eq!(agent_login_instruction(kind).unwrap().command, command);
+    }
+    assert_eq!(agent_login_instruction(AgentKind::Other), None);
+}
+
+#[test]
+fn login_instructions_only_include_installed_detected_agents() {
+    let detected = AgentDetectionState::Ready(vec![
+        DetectedAgent {
+            kind: AgentKind::Codex,
+            display_name: "Codex",
+            config_path: "codex.toml".into(),
+            installed: Ok(true),
+        },
+        DetectedAgent {
+            kind: AgentKind::ClaudeCode,
+            display_name: "Claude Code",
+            config_path: "claude.json".into(),
+            installed: Ok(false),
+        },
+        DetectedAgent {
+            kind: AgentKind::Cursor,
+            display_name: "Cursor",
+            config_path: "cursor.json".into(),
+            installed: Err("cannot inspect".into()),
+        },
+    ]);
+    assert_eq!(
+        installed_agent_login_instructions(&detected),
+        vec![agent_login_instruction(AgentKind::Codex).unwrap()]
+    );
+}
+
+#[test]
 fn network_preset_search_prefers_exact_names_and_chain_ids() {
     let presets = ekubo_wallet_core::networks::known_networks();
     let configured = ekubo_wallet_core::config::default_networks();
