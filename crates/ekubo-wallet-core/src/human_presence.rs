@@ -262,6 +262,7 @@ pub struct PlatformHumanPresence;
 
 impl crate::sealed::SealedHumanPresence for PlatformHumanPresence {}
 
+#[cfg(any(test, target_os = "macos"))]
 async fn run_on_dedicated_thread<T, F>(name: &str, operation: F) -> Result<T, HumanPresenceError>
 where
     T: Send + 'static,

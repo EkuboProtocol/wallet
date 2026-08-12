@@ -179,6 +179,7 @@ impl TrayService for PlatformTray {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn application_badge_label(count: usize) -> Option<String> {
     (count > 0).then(|| count.to_string())
 }
