@@ -718,13 +718,20 @@ macro_rules! live_matrix {
 live_matrix! {
     ethereum => 1,
     optimism => 10,
+    gnosis => 100,
+    monad => 143,
+    robinhood => 4663,
     base => 8453,
     arbitrum => 42161,
-    robinhood => 4663,
-    gnosis => 100,
     ink => 57073,
     berachain => 80094,
-    monad => 143,
+    gnosis_chiado => 10200,
+    robinhood_testnet => 46630,
+    berachain_bepolia => 80069,
+    base_sepolia => 84532,
+    arbitrum_sepolia => 421614,
+    ink_sepolia => 763373,
+    optimism_sepolia => 11155420,
 }
 
 /// Failover, proven against a real chain rather than a stub.
