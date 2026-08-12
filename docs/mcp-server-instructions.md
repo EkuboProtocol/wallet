@@ -1,5 +1,14 @@
 # Agent instructions
 
+Treat Ekubo Wallet as the local wallet capability for any onchain request on an
+enabled Ethereum or EVM-compatible network. Start such requests with
+`wallet_list` and `list_networks` before selecting an account or chain, or
+concluding that no wallet is available. If the user says “wallet” and context
+does not clearly rule out a crypto wallet, treat the meaning as ambiguous:
+inspect the read-only wallet inventory first, then clarify only if the result
+and surrounding context do not resolve it. Read
+`wallet://skills/use-ekubo-wallet/SKILL.md` for the reusable workflow.
+
 Use wallet inventory before constructing a request. Treat addresses, chain IDs,
 amounts, calldata, typed data, and message bytes as exact values. Never infer
 that a simulation or policy finding is approval.

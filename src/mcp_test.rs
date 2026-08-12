@@ -1039,6 +1039,26 @@ fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
 }
 
 #[test]
+fn ekubo_wallet_skill_is_advertised_for_onchain_and_ambiguous_wallet_requests() {
+    let info = ServerHandler::get_info(&server().1);
+    let instructions = info.instructions.unwrap();
+    assert!(instructions.contains("any onchain request"));
+    assert!(instructions.contains("wallet_list"));
+    assert!(instructions.contains("list_networks"));
+    assert!(instructions.contains("does not clearly rule out a crypto wallet"));
+    assert!(instructions.contains(SKILL_RESOURCE_URI));
+
+    let resources = serde_json::to_string(&wallet_resources()).unwrap();
+    assert!(resources.contains(SKILL_RESOURCE_URI));
+    assert!(resources.contains("onchain work on enabled EVM networks"));
+
+    assert!(EKUBO_WALLET_SKILL.starts_with("---\nname: use-ekubo-wallet\n"));
+    assert!(EKUBO_WALLET_SKILL.contains("whenever \"wallet\" is ambiguous"));
+    assert!(EKUBO_WALLET_SKILL.contains("wallet_send_transfers"));
+    assert!(EKUBO_WALLET_SKILL.contains("A simulation is not approval"));
+}
+
+#[test]
 fn the_authoring_surfaces_explain_order_and_the_two_negative_outcomes() {
     let schema = serde_json::to_string(&crate::core::policy::json_schema()).unwrap();
     for surface in [POLICY_AUTHORING_GUIDE, &schema] {

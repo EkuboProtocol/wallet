@@ -22,6 +22,11 @@ Settings also retains per-agent repair, OAuth access revocation, and removal.
 The remote Ekubo MCP entry is installed by default and remains independently
 removable.
 
+The local server advertises `wallet://skills/use-ekubo-wallet/SKILL.md` and
+includes its trigger guidance in the MCP handshake: agents are told to discover
+Ekubo Wallet for onchain EVM work and when “wallet” may mean a crypto wallet.
+No separate agent skill file is installed or maintained on disk.
+
 Codex entries use the fixed Streamable HTTP `url` and `auth = "oauth"`; no
 static header, bearer token, refresh token, or client secret is written to any
 managed configuration. The user starts authentication from the harness (for

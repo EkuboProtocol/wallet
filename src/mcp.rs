@@ -3040,6 +3040,7 @@ impl WalletMcpServer {
 const SECURITY_RESOURCE_URI: &str = "wallet://docs/security-model";
 const POLICY_AUTHORING_RESOURCE_URI: &str = "wallet://docs/policy-authoring";
 const POLICY_SCHEMA_RESOURCE_URI: &str = "wallet://schemas/policy";
+const SKILL_RESOURCE_URI: &str = "wallet://skills/use-ekubo-wallet/SKILL.md";
 const TERMS_RESOURCE_URI: &str = "wallet://legal/terms-of-service";
 const PRIVACY_RESOURCE_URI: &str = "wallet://legal/privacy-policy";
 const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
@@ -3057,8 +3058,50 @@ const LICENSES_RESOURCE_URI: &str = "wallet://legal/third-party-licenses";
 // its origin as special.
 const SERVER_INSTRUCTIONS: &str = include_str!("../docs/mcp-server-instructions.md");
 const SECURITY_MODEL: &str = include_str!("../docs/mcp-security-model.md");
+const EKUBO_WALLET_SKILL: &str = include_str!("../docs/skills/use-ekubo-wallet/SKILL.md");
 
 const POLICY_AUTHORING_GUIDE: &str = include_str!("../docs/policy-authoring.md");
+
+fn wallet_resources() -> Vec<Resource> {
+    vec![
+        Resource::new(SKILL_RESOURCE_URI, "use-ekubo-wallet")
+            .with_title("Use Ekubo Wallet")
+            .with_description(
+                "Reusable agent instructions for onchain work on enabled EVM networks and requests where ‘wallet’ may mean a crypto wallet.",
+            )
+            .with_mime_type("text/markdown"),
+        Resource::new(SECURITY_RESOURCE_URI, "security-model")
+            .with_title("Wallet trust and security model")
+            .with_description("The local signing, storage, approval, RPC, and retry boundary.")
+            .with_mime_type("text/markdown"),
+        Resource::new(POLICY_AUTHORING_RESOURCE_URI, "policy-authoring")
+            .with_title("Authoring wallet policies")
+            .with_description(
+                "How policy documents work and how to propose minimal, reviewable changes.",
+            )
+            .with_mime_type("text/markdown"),
+        Resource::new(POLICY_SCHEMA_RESOURCE_URI, "policy-schema")
+            .with_title("Policy JSON Schema")
+            .with_description("The exact schema wallet_propose_policy validates against.")
+            .with_mime_type("application/json"),
+        Resource::new(TERMS_RESOURCE_URI, "terms-of-service")
+            .with_title("Terms of Service")
+            .with_description(
+                "Must be accepted via the native wallet review window before signing tools work.",
+            )
+            .with_mime_type("text/markdown"),
+        Resource::new(PRIVACY_RESOURCE_URI, "privacy-policy")
+            .with_title("Privacy Policy")
+            .with_description(
+                "Discloses the default RPC endpoints; must be acknowledged separately via the native wallet application.",
+            )
+            .with_mime_type("text/markdown"),
+        Resource::new(LICENSES_RESOURCE_URI, "third-party-licenses")
+            .with_title("Third-Party Licenses")
+            .with_description("License attributions for every bundled dependency.")
+            .with_mime_type("text/markdown"),
+    ]
+}
 
 #[tool_handler(router = Self::sanitized_tool_router())]
 impl ServerHandler for WalletMcpServer {
@@ -3095,38 +3138,7 @@ impl ServerHandler for WalletMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult::with_all_items(vec![
-            Resource::new(SECURITY_RESOURCE_URI, "security-model")
-                .with_title("Wallet trust and security model")
-                .with_description("The local signing, storage, approval, RPC, and retry boundary.")
-                .with_mime_type("text/markdown"),
-            Resource::new(POLICY_AUTHORING_RESOURCE_URI, "policy-authoring")
-                .with_title("Authoring wallet policies")
-                .with_description(
-                    "How policy documents work and how to propose minimal, reviewable changes.",
-                )
-                .with_mime_type("text/markdown"),
-            Resource::new(POLICY_SCHEMA_RESOURCE_URI, "policy-schema")
-                .with_title("Policy JSON Schema")
-                .with_description("The exact schema wallet_propose_policy validates against.")
-                .with_mime_type("application/json"),
-            Resource::new(TERMS_RESOURCE_URI, "terms-of-service")
-                .with_title("Terms of Service")
-                .with_description(
-                    "Must be accepted via the native wallet review window before signing tools work.",
-                )
-                .with_mime_type("text/markdown"),
-            Resource::new(PRIVACY_RESOURCE_URI, "privacy-policy")
-                .with_title("Privacy Policy")
-                .with_description(
-                    "Discloses the default RPC endpoints; must be acknowledged separately via the native wallet application.",
-                )
-                .with_mime_type("text/markdown"),
-            Resource::new(LICENSES_RESOURCE_URI, "third-party-licenses")
-                .with_title("Third-Party Licenses")
-                .with_description("License attributions for every bundled dependency.")
-                .with_mime_type("text/markdown"),
-        ]))
+        Ok(ListResourcesResult::with_all_items(wallet_resources()))
     }
 
     async fn read_resource(
@@ -3135,6 +3147,7 @@ impl ServerHandler for WalletMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let contents = match request.uri.as_ref() {
+            SKILL_RESOURCE_URI => EKUBO_WALLET_SKILL.to_string(),
             SECURITY_RESOURCE_URI => SECURITY_MODEL.to_string(),
             POLICY_AUTHORING_RESOURCE_URI => POLICY_AUTHORING_GUIDE.to_string(),
             POLICY_SCHEMA_RESOURCE_URI => {
