@@ -706,3 +706,20 @@ mod record_network_tests {
             .expect("the same profile, under a name it already answered to");
     }
 }
+
+#[test]
+fn a_network_reads_by_its_display_name_never_its_internal_handle_or_an_alias() {
+    // `name` is what an agent types and `aliases` are what a person
+    // abbreviates to in conversation. Neither is what the network is called.
+    let mut network = default_networks().remove(0);
+    network.name = "robinhood".into();
+    network.aliases = vec!["rh".into(), "robinhood-mainnet".into()];
+    network.display_name = Some("Robinhood Chain".into());
+
+    assert_eq!(network.display_label(), "Robinhood Chain");
+
+    // With nothing configured the internal handle is all there is, and that
+    // is still better than showing an alias.
+    network.display_name = None;
+    assert_eq!(network.display_label(), "robinhood");
+}

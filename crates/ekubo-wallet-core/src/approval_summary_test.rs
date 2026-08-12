@@ -669,12 +669,36 @@ fn a_real_outflow_survives_a_flood_of_forged_transfer_logs() {
     );
 }
 
-#[test]
-fn recognized_transfer_event_totals_use_token_decimals_and_symbol() {
-    let token = Address::repeat_byte(0xaa);
+fn balance_change_lines(change: TokenBalanceChange, token: Address) -> Vec<(String, String)> {
     let mut simulation = simulation_with_native_delta("0");
-    simulation.balance_changes.as_mut().unwrap().tokens.insert(
-        format!("{token:#x}"),
+    simulation
+        .balance_changes
+        .as_mut()
+        .unwrap()
+        .tokens
+        .insert(format!("{token:#x}"), change);
+    render_balance_changes(
+        &simulation,
+        &crate::config::default_networks().remove(0),
+        &usdc_metadata(token),
+    )
+}
+
+fn continuation_line(lines: &[(String, String)]) -> Option<String> {
+    lines
+        .iter()
+        .find(|(label, _)| label.is_empty())
+        .map(|(_, value)| value.clone())
+}
+
+#[test]
+fn gross_transfer_totals_stay_hidden_when_they_only_restate_the_net() {
+    // A token that moved one way has a gross flow identical to its net, so
+    // the continuation line said "+1 USDC" twice — once as the balance
+    // change and once as "+1 USDC in, +0 USDC out". A reader who meets that
+    // learns to skip the second line everywhere, including where it matters.
+    let token = Address::repeat_byte(0xaa);
+    let lines = balance_change_lines(
         TokenBalanceChange {
             before: Some("1000000".into()),
             after: Some("2000000".into()),
@@ -682,16 +706,63 @@ fn recognized_transfer_event_totals_use_token_decimals_and_symbol() {
             incoming_transfers: "1000000".into(),
             outgoing_transfers: "0".into(),
         },
+        token,
     );
-    let lines = render_balance_changes(
-        &simulation,
-        &crate::config::default_networks().remove(0),
-        &usdc_metadata(token),
-    );
+
     assert!(
-        lines
-            .iter()
-            .any(|(label, value)| { label.is_empty() && value.contains("+1 USDC in") })
+        lines.iter().any(|(_, value)| value.contains("+1 USDC")),
+        "the net change must still be shown: {lines:?}"
+    );
+    assert_eq!(continuation_line(&lines), None, "{lines:?}");
+}
+
+#[test]
+fn gross_transfer_totals_appear_when_the_token_moved_both_ways() {
+    // Here the net genuinely hides something: 3 USDC arrived and 1 left, and
+    // "+2 USDC" alone does not say that.
+    let token = Address::repeat_byte(0xaa);
+    let lines = balance_change_lines(
+        TokenBalanceChange {
+            before: Some("1000000".into()),
+            after: Some("3000000".into()),
+            delta: Some("2000000".into()),
+            incoming_transfers: "3000000".into(),
+            outgoing_transfers: "1000000".into(),
+        },
+        token,
+    );
+
+    let continuation = continuation_line(&lines).expect("gross flows must be shown: {lines:?}");
+    assert!(continuation.contains("+3 USDC in"), "{continuation}");
+    assert!(continuation.contains("-1 USDC out"), "{continuation}");
+    assert!(
+        !continuation.contains("does not account"),
+        "the events add up here: {continuation}"
+    );
+}
+
+#[test]
+fn gross_transfer_totals_appear_when_the_events_do_not_add_up_to_the_balance() {
+    // A measured change its own Transfer events cannot explain — a rebase, a
+    // transfer fee, a token that misreports — is worth naming even though
+    // only one direction moved.
+    let token = Address::repeat_byte(0xaa);
+    let lines = balance_change_lines(
+        TokenBalanceChange {
+            before: Some("1000000".into()),
+            after: Some("2000000".into()),
+            delta: Some("1000000".into()),
+            incoming_transfers: "500000".into(),
+            outgoing_transfers: "0".into(),
+        },
+        token,
+    );
+
+    let continuation = continuation_line(&lines).expect("the discrepancy must be shown: {lines:?}");
+    assert!(continuation.contains("+0.5 USDC in"), "{continuation}");
+    assert!(
+        continuation.contains("does not account for the change above"),
+        "{continuation}"
     );
 }
 

@@ -59,6 +59,60 @@ pub enum PendingStatus {
 }
 
 impl PendingStatus {
+    /// Owner-facing wording for this state.
+    ///
+    /// The variant names are lifecycle vocabulary: they say what the wallet
+    /// did to a record, not what happened to the owner's money. Anything a
+    /// person reads — the desktop inbox, approval documents, notifications —
+    /// uses this instead of the debug spelling.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => "Waiting for you",
+            Self::Rejected => "Rejected",
+            Self::Signed => "Signed, not sent",
+            Self::Submitting => "Sending",
+            Self::Broadcast => "Waiting to be mined",
+            Self::Confirmed => "Succeeded",
+            Self::Reverted => "Failed on chain",
+            Self::Cancelled => "Cancelled",
+            Self::Replaced => "Superseded",
+            Self::Cancelling => "Cancelling",
+        }
+    }
+
+    /// One sentence saying what the state means for the owner, written to
+    /// stand on its own without the label beside it.
+    #[must_use]
+    pub const fn explanation(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => {
+                "Nothing has been signed or sent. This request is waiting for your decision."
+            }
+            Self::Rejected => "You turned this down, so it was never signed or sent.",
+            Self::Signed => {
+                "The transaction is signed but has not reached the network. It can still be sent or discarded."
+            }
+            Self::Submitting => "The wallet is handing the signed transaction to the network.",
+            Self::Broadcast => {
+                "The network has accepted the transaction and it is waiting to be included in a block."
+            }
+            Self::Confirmed => "The transaction was included in a block and its calls succeeded.",
+            Self::Reverted => {
+                "The transaction was included in a block, but its calls failed. Nothing moved except the network fee, which was still charged."
+            }
+            Self::Cancelled => {
+                "A replacement you sent was mined first, so the original transaction can never run."
+            }
+            Self::Replaced => {
+                "Another transaction from this account used the same nonce, so these signed bytes can never be mined."
+            }
+            Self::Cancelling => {
+                "Your cancellation is racing the original transaction. Whichever the network mines first decides the outcome."
+            }
+        }
+    }
+
     fn parse(value: &str) -> Result<Self> {
         match value {
             "awaiting_approval" => Ok(Self::AwaitingApproval),

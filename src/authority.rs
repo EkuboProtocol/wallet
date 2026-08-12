@@ -116,7 +116,14 @@ struct ReceiptTokenFlow {
 struct ReceiptEffect {
     label: String,
     amount: String,
-    detail: String,
+    /// Present only when the net figure above hides something.
+    ///
+    /// `amount` is the net change, so when a token moved one way this would
+    /// restate it — "+0.187585 USDC" over "0.187585 USDC in, 0 USDC out" is
+    /// the same fact twice, and the reader learns to skip the second line.
+    /// When the wallet both sent and received the same token the net *does*
+    /// hide the gross movement, and only then is there something to add.
+    detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -297,11 +304,13 @@ fn receipt_presentation(
         .map(|(token, flow)| ReceiptEffect {
             label: trusted_token_label(token, metadata),
             amount: signed_token_amount(flow.incoming, flow.outgoing, token, metadata),
-            detail: format!(
-                "Receipt Transfer events: {} in, {} out",
-                token_amount(flow.incoming, token, metadata),
-                token_amount(flow.outgoing, token, metadata)
-            ),
+            detail: (!flow.incoming.is_zero() && !flow.outgoing.is_zero()).then(|| {
+                format!(
+                    "{} received and {} sent; the figure above is the difference",
+                    token_amount(flow.incoming, token, metadata),
+                    token_amount(flow.outgoing, token, metadata)
+                )
+            }),
         })
         .collect();
     ReceiptPresentation {
@@ -332,9 +341,9 @@ async fn transaction_inspection_document(
         }
     };
     let mut request = ApprovalRequest::new(ApprovalKind::Transaction, "Transaction", summary)
-        .fact("Status", format!("{:?}", pending.status))
+        .fact("Status", pending.status.label())
         .fact("Account", &pending.wallet_id)
-        .fact("Network", &pending.network_name)
+        .fact("Network", network.display_label())
         .fact("Chain ID", &pending.chain_id)
         .fact("Sender", format!("{wallet:#x}"))
         .fact(
@@ -367,9 +376,10 @@ async fn transaction_inspection_document(
                 );
             } else {
                 for effect in presentation.effects {
-                    request = request
-                        .fact(effect.label, effect.amount)
-                        .fact("", effect.detail);
+                    request = request.fact(effect.label, effect.amount);
+                    if let Some(detail) = effect.detail {
+                        request = request.fact("", detail);
+                    }
                 }
             }
         } else {
@@ -455,7 +465,7 @@ async fn transaction_inspection_document(
                     network,
                 ),
             )
-            .fact("Execution", format!("{:?}", step.kind));
+            .fact("Why this call is here", step.kind.label());
         for detail in interpretation.details {
             request = request.fact("·", detail);
         }
@@ -665,8 +675,8 @@ impl OwnerApi {
         .warning("This cannot be undone unless you have a separate private-key backup.");
         for transaction in in_flight {
             request = request.warning(format!(
-                "Transaction {} is {:?} on chain {} and may still reach the chain. Removal deletes the only local signed bytes and tracking state.",
-                transaction.request_id, transaction.status, transaction.chain_id
+                "A transaction on chain {} has not settled yet. It may still reach the chain, and removing this account deletes the only local copy of its signed bytes along with everything used to track it.",
+                transaction.chain_id
             ));
         }
         Ok(ReviewDocument::from_request(request, Vec::new()))
@@ -1291,8 +1301,8 @@ impl OwnerApi {
                     .claim_broadcast_retry(request_id)?
             }
             _ => anyhow::bail!(
-                "transaction is {:?}; only signed or unconfirmed broadcast transactions can be sent again",
-                current.status
+                "this transaction is {}; only one that is signed but unsent, or sent but not yet mined, can be sent again",
+                current.status.label().to_lowercase()
             ),
         };
         let (record, broadcast) = submit_claimed(&pending, &wallet, &network, claimed).await?;
@@ -1454,7 +1464,7 @@ impl OwnerApi {
             "Chain context",
             request.chain_id.unwrap_or_else(|| "Not specified".into()),
         )
-        .fact("Encoding", format!("{:?}", request.encoding))
+        .fact("Sent to the wallet as", request.encoding.label())
         .fact("Byte length", display.byte_length.to_string())
         .fact("Line count", display.line_count.to_string())
         .fact(

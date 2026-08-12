@@ -50,6 +50,16 @@ pub enum MessageStatus {
 }
 
 impl MessageStatus {
+    /// Owner-facing wording for this state, used everywhere a person reads it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingApproval => "Waiting for you",
+            Self::Rejected => "Rejected",
+            Self::Signed => "Signed",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self> {
         match value {
             "awaiting_approval" => Ok(Self::AwaitingApproval),
@@ -70,6 +80,16 @@ pub enum MessageEncoding {
 }
 
 impl MessageEncoding {
+    /// How the requester expressed the message, said in words rather than as
+    /// a variant name.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Text => "plain text",
+            Self::Hex => "hexadecimal bytes",
+        }
+    }
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",

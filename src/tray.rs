@@ -17,7 +17,6 @@ const QUIT_ID: &str = "ekubo.quit";
 pub enum TrayCommand {
     OpenWallet,
     OpenRoute(Route),
-    ConnectDapp,
     CheckForUpdates,
     Quit,
 }
@@ -49,26 +48,34 @@ pub struct PlatformTray {
 }
 
 impl PlatformTray {
+    /// Two commands that did the same thing used to sit in this menu: the
+    /// agent-status line and `Settings…` both opened Settings, so one of them
+    /// was a label pretending to be a command. The status line is now inert
+    /// and says what it knows; `Settings` is the only way in.
+    ///
+    /// Nothing here ends in an ellipsis either. The convention reserves one for
+    /// a command that stops to ask for more input, and every one of these just
+    /// brings a window forward.
     pub fn new(dark_mode: bool) -> Result<Self> {
         let menu = Menu::new();
-        let open = MenuItem::with_id(OPEN_ID, "Open Wallet", true, None);
-        let reviews = MenuItem::with_id(REVIEWS_ID, "No pending reviews", false, None);
-        let connect = MenuItem::with_id(CONNECT_ID, "Connect dapp…", true, None);
-        let agents = MenuItem::with_id(AGENTS_ID, "MCP starting…", true, None);
-        let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
-        let settings = MenuItem::with_id(SETTINGS_ID, "Settings…", true, None);
-        let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
+        let open = MenuItem::with_id(OPEN_ID, "Open Ekubo Wallet", true, None);
+        let reviews = MenuItem::with_id(REVIEWS_ID, review_menu_text(0), false, None);
+        let agents = MenuItem::with_id(AGENTS_ID, "Starting the agent gateway", false, None);
+        let connect = MenuItem::with_id(CONNECT_ID, "Connect a dapp", true, None);
+        let settings = MenuItem::with_id(SETTINGS_ID, "Settings", true, None);
+        let updates = MenuItem::with_id(UPDATES_ID, "Check for updates", true, None);
+        let quit = MenuItem::with_id(QUIT_ID, "Quit Ekubo Wallet", true, None);
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         menu.append_items(&[
             &open,
             &reviews,
             &separator_one,
-            &connect,
             &agents,
+            &connect,
+            &settings,
             &separator_two,
             &updates,
-            &settings,
             &quit,
         ])
         .context("failed to construct the tray menu")?;
@@ -151,24 +158,10 @@ impl TrayService for PlatformTray {
         self.snapshot = snapshot.clone();
         set_application_badge_count(snapshot.pending_reviews);
         self.reviews.set_enabled(snapshot.pending_reviews > 0);
-        self.reviews.set_text(match snapshot.pending_reviews {
-            0 => "No pending reviews".to_owned(),
-            1 => "1 pending review".to_owned(),
-            count => format!("{count} pending reviews"),
-        });
-        let status = if snapshot.mcp_online {
-            "online"
-        } else {
-            "offline"
-        };
-        self.agents.set_text(format!(
-            "MCP {status} · {} agent(s) · {} dapp(s)",
-            snapshot.connected_agents, snapshot.walletconnect_sessions
-        ));
-        let _ = self.tray.set_tooltip(Some(format!(
-            "Ekubo Wallet · MCP {status} · {} review(s)",
-            snapshot.pending_reviews
-        )));
+        self.reviews
+            .set_text(review_menu_text(snapshot.pending_reviews));
+        self.agents.set_text(agent_menu_text(snapshot));
+        let _ = self.tray.set_tooltip(Some(tray_tooltip(snapshot)));
     }
 
     fn drain_commands(&mut self) -> Vec<TrayCommand> {
@@ -203,14 +196,73 @@ fn set_application_badge_count(count: usize) {
 #[cfg(not(target_os = "macos"))]
 fn set_application_badge_count(_count: usize) {}
 
+/// "3 requests waiting for you", and the flat truth when there are none. The
+/// item is disabled at zero, so it reads as a status line rather than an
+/// action that would do nothing.
+fn review_menu_text(pending_reviews: usize) -> String {
+    match pending_reviews {
+        0 => "Nothing waiting for you".to_owned(),
+        1 => "1 request waiting for you".to_owned(),
+        count => format!("{count} requests waiting for you"),
+    }
+}
+
+fn count_phrase(count: usize, singular: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {singular}s")
+    }
+}
+
+/// What can reach the wallet right now, in one line. The old wording —
+/// `MCP online · 2 agent(s) · 1 dapp(s)` — named the protocol rather than the
+/// capability and used a suffix nobody says out loud.
+fn agent_menu_text(snapshot: &TraySnapshot) -> String {
+    if !snapshot.mcp_online {
+        return "Agents cannot connect right now".to_owned();
+    }
+    match (snapshot.connected_agents, snapshot.walletconnect_sessions) {
+        (0, 0) => "Ready for agents · nothing connected".to_owned(),
+        (agents, 0) => format!(
+            "Ready for agents · {} connected",
+            count_phrase(agents, "agent")
+        ),
+        (0, dapps) => format!(
+            "Ready for agents · {} connected",
+            count_phrase(dapps, "dapp")
+        ),
+        (agents, dapps) => format!(
+            "Ready for agents · {} and {} connected",
+            count_phrase(agents, "agent"),
+            count_phrase(dapps, "dapp")
+        ),
+    }
+}
+
+/// The hover text has room for one fact, so it carries the only one that is
+/// ever urgent.
+fn tray_tooltip(snapshot: &TraySnapshot) -> String {
+    if snapshot.pending_reviews == 0 {
+        "Ekubo Wallet".to_owned()
+    } else {
+        format!(
+            "Ekubo Wallet — {}",
+            review_menu_text(snapshot.pending_reviews)
+        )
+    }
+}
+
 fn command_for_id(id: &str) -> Option<TrayCommand> {
     match id {
         OPEN_ID => Some(TrayCommand::OpenWallet),
         REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Activity)),
-        CONNECT_ID => Some(TrayCommand::ConnectDapp),
-        AGENTS_ID | SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
+        CONNECT_ID => Some(TrayCommand::OpenRoute(Route::WalletConnect)),
+        SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
         UPDATES_ID => Some(TrayCommand::CheckForUpdates),
         QUIT_ID => Some(TrayCommand::Quit),
+        // `AGENTS_ID` lands here with everything unrecognized: the
+        // agent-status line reports, it does not act.
         _ => None,
     }
 }

@@ -181,6 +181,16 @@ impl std::str::FromStr for RpcStrategy {
 }
 
 impl NetworkConfig {
+    /// What this network is called, for a person reading it.
+    ///
+    /// `name` is the internal handle an agent types, and `aliases` exist so a
+    /// person can abbreviate in conversation — neither is the network's name.
+    /// Anything a human reads says "Robinhood Chain", not "robinhood".
+    #[must_use]
+    pub fn display_label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+
     /// The endpoint tried first, and the one shown wherever a single endpoint
     /// identifies the network. Every constructor and the deserializer refuse
     /// an empty list, so this cannot fail on a value that exists.

@@ -74,6 +74,21 @@ pub enum ExecutionStepKind {
     Other,
 }
 
+impl ExecutionStepKind {
+    /// What this step is for, in words. Approval documents say this instead of
+    /// the variant name, which reads as a category rather than a purpose.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Approval => "Grants a spending allowance",
+            Self::Execution => "Does the work you asked for",
+            Self::AllowanceCleanup => "Takes a spending allowance back",
+            Self::SignatureDependentExecution => "Uses a signature produced earlier",
+            Self::Other => "Something else",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PlannedTransaction {

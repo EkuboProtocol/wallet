@@ -19,6 +19,10 @@ pub fn initialize_platform_notifications() {
     }
 }
 
+/// Where a click on the notification should land.
+///
+/// The request UUID stays here because this is addressing, not prose: it is
+/// how the window finds the row again. It is never shown to the reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationRoute {
     Review(Uuid),
@@ -34,29 +38,69 @@ pub struct WalletNotification {
     pub route: NotificationRoute,
 }
 
+/// The two facts a person can act on when a banner appears: whose money moved
+/// and on which chain. Read from the lifecycle row the event points at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransactionContext {
+    pub account: String,
+    pub network: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NotificationPreferences;
 
+/// Compose the banner for one lifecycle change.
+///
+/// The body used to be `Transaction <uuid> was confirmed.` — a sentence whose
+/// only concrete noun was an identifier the reader has never seen and cannot
+/// use. It now names the account and the network instead, and says what the
+/// state means where that is not obvious from the headline.
 #[must_use]
 pub fn notification_for(
     event: &DomainEvent,
+    context: &TransactionContext,
     _preferences: NotificationPreferences,
 ) -> Option<WalletNotification> {
     let DomainEventKind::Transaction { request_id, stage } = &event.kind else {
         return None;
     };
-    let (verb, review) = match stage {
-        TransactionStage::Proposed => ("needs your attention", true),
-        TransactionStage::Signed => ("was signed", false),
-        TransactionStage::Broadcast => ("was broadcast", false),
-        TransactionStage::Confirmed => ("was confirmed", false),
-        TransactionStage::Reverted => ("was reverted", false),
-        TransactionStage::Replaced => ("was replaced", false),
-        TransactionStage::Cancelled => ("was cancelled", false),
+    let where_from = format!("{} on {}", context.account, context.network);
+    let (title, body, review) = match stage {
+        TransactionStage::Proposed => (
+            "Approval needed",
+            format!("{where_from}. Nothing is signed or sent until you decide."),
+            true,
+        ),
+        TransactionStage::Signed => (
+            "Transaction signed",
+            format!("{where_from}. It has not reached the network yet."),
+            false,
+        ),
+        TransactionStage::Broadcast => (
+            "Transaction sent",
+            format!("{where_from}. Waiting for it to be mined."),
+            false,
+        ),
+        TransactionStage::Confirmed => ("Transaction succeeded", format!("{where_from}."), false),
+        TransactionStage::Reverted => (
+            "Transaction failed on chain",
+            format!("{where_from}. Nothing moved except the network fee."),
+            false,
+        ),
+        TransactionStage::Replaced => (
+            "Transaction superseded",
+            format!("{where_from}. Another transaction from this account used the same nonce."),
+            false,
+        ),
+        TransactionStage::Cancelled => (
+            "Transaction cancelled",
+            format!("{where_from}. Your replacement was mined first."),
+            false,
+        ),
     };
     Some(WalletNotification {
-        title: "Ekubo Wallet".into(),
-        body: format!("Transaction {request_id} {verb}."),
+        title: title.to_owned(),
+        body,
         route: if review {
             NotificationRoute::Review(*request_id)
         } else {

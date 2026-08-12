@@ -109,6 +109,20 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// The harness's own name for itself, spelled the way its own
+    /// documentation does rather than as a Rust variant.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
+            Self::GeminiCli => "Gemini CLI",
+            Self::Cursor => "Cursor",
+            Self::Opencode => "opencode",
+            Self::Other => "an unrecognized harness",
+        }
+    }
+
     const fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
