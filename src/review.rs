@@ -82,8 +82,8 @@ impl ReviewState {
         self.document = document;
         self.generation = self.generation.saturating_add(1);
         self.selected = ReviewDecision::Reject;
+        self.viewed_to_end = false;
         if identity_changed {
-            self.viewed_to_end = false;
             self.scroll_offset = 0.0;
         }
     }

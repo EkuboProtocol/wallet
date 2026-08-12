@@ -1,39 +1,21 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
   "version": 1,
-  "chains": {
-    "*": {
-      "label": "TEMPLATE: the fallback a per-chain entry replaces outright",
-      "max_calls_per_batch": 16,
-      "native_value": { "eq": "0" },
-      "rules": [
-        {
-          "effect": "allow",
-          "label": "TEMPLATE: transfers, but only to the recipients listed here",
-          "calldata": {
-            "selector": {
-              "abi": "transfer(address to, uint256 amount)",
-              "args": { "to": { "in": ["0x2222222222222222222222222222222222222222"] } }
-            }
-          }
-        },
-        {
-          "effect": "allow",
-          "label": "Revoking an allowance is always safe; granting one is not",
-          "calldata": {
-            "selector": {
-              "abi": "approve(address spender, uint256 amount)",
-              "args": { "amount": { "eq": "0" } }
-            }
-          }
+  "rules": [
+    {
+      "effect": "allow",
+      "label": "TEMPLATE: transfers to named recipients on any network",
+      "calldata": {
+        "selector": {
+          "abi": "transfer(address to, uint256 amount)",
+          "args": { "to": { "in": ["0x2222222222222222222222222222222222222222"] } }
         }
-      ]
+      }
     },
-    "8453": {
-      "label": "TEMPLATE: Base replaces the wildcard entirely rather than extending it",
-      "max_calls_per_batch": 4,
-      "native_value": { "eq": "0" },
-      "rules": []
+    {
+      "effect": "deny",
+      "label": "TEMPLATE: all other Base transactions are disabled",
+      "chain_id": { "eq": "8453" }
     }
-  }
+  ]
 }

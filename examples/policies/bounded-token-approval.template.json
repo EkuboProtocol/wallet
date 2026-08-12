@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
+  "version": 1,
+  "rules": [
+    {
+      "effect": "deny",
+      "label": "Never grant a blanket NFT operator",
+      "chain_id": { "eq": "1" },
+      "calldata": {
+        "selector": {
+          "abi": "setApprovalForAll(address operator, bool approved)",
+          "args": { "approved": { "eq": "true" } }
+        }
+      }
+    },
+    {
+      "effect": "allow",
+      "label": "TEMPLATE: bounded approval for one token and router",
+      "chain_id": { "eq": "1" },
+      "to": { "eq": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
+      "calldata": {
+        "selector": {
+          "abi": "approve(address spender, uint256 amount)",
+          "args": {
+            "spender": { "eq": "0x1111111111111111111111111111111111111111" },
+            "amount": { "lte": "1000000000" }
+          }
+        }
+      }
+    }
+  ]
+}

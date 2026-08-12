@@ -283,7 +283,7 @@ fn a_different_function_with_the_same_argument_shape_does_not_match() {
 }
 
 #[test]
-fn trailing_bytes_break_the_canonical_form_check() {
+fn trailing_bytes_are_accepted_after_a_canonical_abi_prefix() {
     let ctx = context();
     let mut data = encode(
         "approve(address spender, uint256 amount)",
@@ -297,9 +297,9 @@ fn trailing_bytes_break_the_canonical_form_check() {
         &serde_json::json!({}),
     );
     assert!(rule.matches(&bytes(data.clone()), &ctx));
-    // alloy's decoder ignores trailing data; re-encoding is what catches it.
+    // Solidity ABI decoding ignores trailing calldata too.
     data.push(0xff);
-    assert!(!rule.matches(&bytes(data), &ctx));
+    assert!(rule.matches(&bytes(data), &ctx));
 }
 
 #[test]
@@ -872,9 +872,10 @@ proptest! {
         prop_assert!(!rule.matches(&bytes(data[..length].to_vec()), &ctx));
     }
 
-    /// Appending anything to a canonical call breaks it, whatever the shape.
+    /// Appending data to a canonical call preserves the decoded ABI prefix,
+    /// whatever the shape.
     #[test]
-    fn no_shape_tolerates_trailing_bytes(
+    fn every_shape_tolerates_trailing_bytes(
         shape in prop_oneof![pinnable_shape(), array_shape()],
         tail in prop::collection::vec(any::<u8>(), 1..8),
     ) {
@@ -882,7 +883,7 @@ proptest! {
         let rule = selector(shape.abi, &serde_json::json!({}));
         let mut data = shape.calldata();
         data.extend_from_slice(&tail);
-        prop_assert!(!rule.matches(&bytes(data), &ctx));
+        prop_assert!(rule.matches(&bytes(data), &ctx));
     }
 }
 
@@ -921,7 +922,7 @@ fn an_illegible_body_is_unreadable_rather_than_absent() {
 
     let mut trailing = honest.clone();
     trailing.push(0x00);
-    assert_eq!(rule.evaluate(&bytes(trailing), &ctx), Match::Unreadable);
+    assert_eq!(rule.evaluate(&bytes(trailing), &ctx), Match::Yes);
 
     let truncated = honest[..honest.len() - 1].to_vec();
     assert_eq!(rule.evaluate(&bytes(truncated), &ctx), Match::Unreadable);
@@ -930,8 +931,8 @@ fn an_illegible_body_is_unreadable_rather_than_absent() {
 #[test]
 fn doubt_survives_negation_and_composition() {
     let ctx = context();
-    let mut data = approve_body();
-    data.push(0x00);
+    let honest = approve_body();
+    let data = honest[..honest.len() - 1].to_vec();
 
     let negated = predicate(serde_json::json!({ "not": { "selector": { "abi": APPROVE } } }));
     assert_eq!(

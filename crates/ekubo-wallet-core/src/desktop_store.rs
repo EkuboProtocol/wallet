@@ -31,7 +31,6 @@ pub const MCP_RESOURCE: &str = "http://127.0.0.1:61744/mcp";
 pub const MCP_SCOPE: &str = "wallet:use";
 
 const AUTHORIZATION_CODE_TTL: Duration = Duration::minutes(5);
-const ACCESS_TOKEN_TTL: Duration = Duration::minutes(10);
 const MAX_OAUTH_CLIENTS: i64 = 128;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,48 +42,57 @@ pub enum AppearancePreference {
     Dark,
 }
 
-/// The owner-selected absolute lifetime of an OAuth refresh-token family.
-/// Access tokens remain short-lived and can never outlive this boundary.
+/// An owner-selected pair of access-token and absolute refresh-token
+/// lifetimes. Keeping the combinations finite and curated avoids nonsensical
+/// configurations such as an access token that outlives its refresh session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OAuthSessionDuration {
-    OneDay,
-    OneWeek,
-    OneMonth,
+pub enum OAuthSessionPreset {
+    OneHourOneDay,
+    OneDayOneWeek,
+    OneWeekOneMonth,
 }
 
-impl OAuthSessionDuration {
+impl OAuthSessionPreset {
     #[must_use]
     pub const fn as_query_value(self) -> &'static str {
         match self {
-            Self::OneDay => "day",
-            Self::OneWeek => "week",
-            Self::OneMonth => "month",
+            Self::OneHourOneDay => "hour-day",
+            Self::OneDayOneWeek => "day-week",
+            Self::OneWeekOneMonth => "week-month",
         }
     }
 
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::OneDay => "1 day",
-            Self::OneWeek => "1 week",
-            Self::OneMonth => "1 month",
+            Self::OneHourOneDay => "1 hour / 1 day",
+            Self::OneDayOneWeek => "1 day / 1 week",
+            Self::OneWeekOneMonth => "1 week / 1 month",
         }
     }
 
     pub fn parse_query_value(value: &str) -> Result<Self> {
         match value {
-            "day" => Ok(Self::OneDay),
-            "week" => Ok(Self::OneWeek),
-            "month" => Ok(Self::OneMonth),
-            _ => anyhow::bail!("unsupported OAuth session duration"),
+            "hour-day" => Ok(Self::OneHourOneDay),
+            "day-week" => Ok(Self::OneDayOneWeek),
+            "week-month" => Ok(Self::OneWeekOneMonth),
+            _ => anyhow::bail!("unsupported OAuth session preset"),
         }
     }
 
-    const fn duration(self) -> Duration {
+    const fn access_duration(self) -> Duration {
         match self {
-            Self::OneDay => Duration::days(1),
-            Self::OneWeek => Duration::weeks(1),
-            Self::OneMonth => Duration::days(30),
+            Self::OneHourOneDay => Duration::hours(1),
+            Self::OneDayOneWeek => Duration::days(1),
+            Self::OneWeekOneMonth => Duration::weeks(1),
+        }
+    }
+
+    const fn refresh_duration(self) -> Duration {
+        match self {
+            Self::OneHourOneDay => Duration::days(1),
+            Self::OneDayOneWeek => Duration::weeks(1),
+            Self::OneWeekOneMonth => Duration::days(30),
         }
     }
 }
@@ -161,6 +169,19 @@ impl OAuthSecret {
     #[must_use]
     pub fn expose_base64url(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.0)
+    }
+
+    fn from_base64url(encoded: &str) -> Result<Self> {
+        let decoded = URL_SAFE_NO_PAD
+            .decode(encoded.as_bytes())
+            .context("OAuth credential is not canonical base64url")?;
+        ensure!(
+            decoded.len() == 32 && URL_SAFE_NO_PAD.encode(&decoded) == encoded,
+            "OAuth credential has an invalid encoding or length"
+        );
+        let mut bytes = [0_u8; 32];
+        bytes.copy_from_slice(&decoded);
+        Ok(Self(bytes))
     }
 }
 
@@ -418,7 +439,7 @@ impl DesktopStore {
             code_challenge,
             scope,
             resource,
-            OAuthSessionDuration::OneDay,
+            OAuthSessionPreset::OneDayOneWeek,
             authorization,
         )
     }
@@ -430,7 +451,7 @@ impl DesktopStore {
         code_challenge: &str,
         scope: &str,
         resource: &str,
-        session_duration: OAuthSessionDuration,
+        session_preset: OAuthSessionPreset,
         authorization: &OwnerAuthorization,
     ) -> Result<OAuthAuthorizationCode> {
         authorization.require(OwnerAuthorizationScope::AgentAccess)?;
@@ -451,8 +472,8 @@ impl DesktopStore {
         transaction.execute(
             "INSERT INTO oauth_authorization_codes(
                  code_hash, client_id, redirect_uri, code_challenge, scope,
-                 resource, expires_at, session_expires_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 resource, expires_at, session_expires_at, access_token_ttl_seconds
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 secret_hash(&code.0).as_slice(),
                 Blob(*client_id.as_bytes()),
@@ -461,7 +482,8 @@ impl DesktopStore {
                 scope,
                 resource,
                 Millis(now + AUTHORIZATION_CODE_TTL),
-                Millis(now + session_duration.duration()),
+                Millis(now + session_preset.refresh_duration()),
+                session_preset.access_duration().num_seconds(),
             ],
         )?;
         transaction.execute(
@@ -531,7 +553,8 @@ impl DesktopStore {
             .connection
             .query_row(
                 "SELECT a.redirect_uri, a.code_challenge, a.scope, a.resource,
-                        a.expires_at, a.session_expires_at, a.used_at
+                        a.expires_at, a.session_expires_at,
+                        a.access_token_ttl_seconds, a.used_at
                  FROM oauth_authorization_codes a
                  JOIN mcp_clients c ON c.client_id = a.client_id
                  WHERE a.code_hash = ?1 AND a.client_id = ?2
@@ -545,7 +568,8 @@ impl DesktopStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, Millis>(4)?.0,
                         row.get::<_, Millis>(5)?.0,
-                        row.get::<_, Option<Millis>>(6)?.map(|value| value.0),
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<Millis>>(7)?.map(|value| value.0),
                     ))
                 },
             )
@@ -560,7 +584,7 @@ impl DesktopStore {
             "OAuth authorization code has the wrong audience"
         );
         ensure!(
-            stored.4 > now && stored.5 > now && stored.6.is_none(),
+            stored.4 > now && stored.5 > now && stored.7.is_none(),
             "OAuth authorization code expired or was already used"
         );
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
@@ -591,6 +615,7 @@ impl DesktopStore {
             Uuid::new_v4(),
             now,
             stored.5,
+            Duration::seconds(stored.6),
         )?;
         transaction.commit()?;
         Ok(pair)
@@ -611,7 +636,8 @@ impl DesktopStore {
         let stored = self
             .connection
             .query_row(
-                "SELECT t.family_id, t.scope, t.resource, t.expires_at, t.consumed_at
+                "SELECT t.scope, t.resource, t.expires_at, t.access_token_ttl_seconds,
+                        t.consumed_at
                  FROM oauth_refresh_tokens t
                  JOIN mcp_clients c ON c.client_id = t.client_id
                  WHERE t.token_hash = ?1 AND t.client_id = ?2
@@ -619,22 +645,18 @@ impl DesktopStore {
                 params![token_hash.as_slice(), Blob(*client_id.as_bytes())],
                 |row| {
                     Ok((
-                        Uuid::from_bytes(row.get::<_, Blob<[u8; 16]>>(0)?.0),
+                        row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Millis>(3)?.0,
+                        row.get::<_, Millis>(2)?.0,
+                        row.get::<_, i64>(3)?,
                         row.get::<_, Option<Millis>>(4)?.map(|value| value.0),
                     ))
                 },
             )
             .optional()?
             .context("invalid OAuth refresh token")?;
-        if stored.4.is_some() {
-            self.revoke_token_family(stored.0)?;
-            anyhow::bail!("OAuth refresh token reuse detected; the token family was revoked");
-        }
         ensure!(
-            stored.2 == resource && stored.3 > now,
+            stored.1 == resource && stored.2 > now && stored.4.is_none(),
             "OAuth session expired or has the wrong audience"
         );
         let transaction = self.connection.transaction()?;
@@ -646,39 +668,26 @@ impl DesktopStore {
             "DELETE FROM oauth_refresh_tokens WHERE expires_at <= ?1",
             [Millis(now)],
         )?;
-        let changed = transaction.execute(
-            "UPDATE oauth_refresh_tokens SET consumed_at = ?1
-             WHERE token_hash = ?2 AND consumed_at IS NULL",
-            params![Millis(now), token_hash.as_slice()],
-        )?;
-        ensure!(changed == 1, "OAuth refresh token was already consumed");
-        let pair = insert_token_pair(
+        let access = insert_access_token(
             &transaction,
             client_id,
-            &stored.1,
+            &stored.0,
             resource,
-            stored.0,
             now,
-            stored.3,
+            stored.2,
+            Duration::seconds(stored.3),
         )?;
         transaction.commit()?;
-        Ok(pair)
-    }
-
-    fn revoke_token_family(&mut self, family_id: Uuid) -> Result<()> {
-        let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "DELETE FROM oauth_access_tokens WHERE client_id IN (
-                 SELECT client_id FROM oauth_refresh_tokens WHERE family_id = ?1
-             )",
-            [Blob(*family_id.as_bytes())],
-        )?;
-        transaction.execute(
-            "DELETE FROM oauth_refresh_tokens WHERE family_id = ?1",
-            [Blob(*family_id.as_bytes())],
-        )?;
-        transaction.commit()?;
-        Ok(())
+        Ok(OAuthTokenPair {
+            access_token: access.0,
+            // Public desktop clients do not reliably persist rotated refresh
+            // tokens before retrying or restarting. Return the same opaque
+            // credential until the owner's hard session deadline instead of
+            // turning an innocent retry into family-wide revocation.
+            refresh_token: OAuthSecret::from_base64url(encoded_refresh_token)?,
+            expires_in: access.1,
+            scope: stored.0,
+        })
     }
 
     pub fn authenticate_access_token(
@@ -941,11 +950,59 @@ fn insert_token_pair(
     family_id: Uuid,
     now: DateTime<Utc>,
     session_expires_at: DateTime<Utc>,
+    access_token_ttl: Duration,
 ) -> Result<OAuthTokenPair> {
     ensure!(session_expires_at > now, "OAuth session already expired");
-    let access_token = OAuthSecret::generate()?;
+    let (access_token, expires_in) = insert_access_token(
+        transaction,
+        client_id,
+        scope,
+        resource,
+        now,
+        session_expires_at,
+        access_token_ttl,
+    )?;
     let refresh_token = OAuthSecret::generate()?;
-    let access_expires_at = std::cmp::min(now + ACCESS_TOKEN_TTL, session_expires_at);
+    transaction.execute(
+        "INSERT INTO oauth_refresh_tokens(
+             token_hash, family_id, client_id, scope, resource, created_at,
+             expires_at, access_token_ttl_seconds
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            secret_hash(&refresh_token.0).as_slice(),
+            Blob(*family_id.as_bytes()),
+            Blob(*client_id.as_bytes()),
+            scope,
+            resource,
+            Millis(now),
+            Millis(session_expires_at),
+            access_token_ttl.num_seconds(),
+        ],
+    )?;
+    Ok(OAuthTokenPair {
+        access_token,
+        refresh_token,
+        expires_in,
+        scope: scope.to_owned(),
+    })
+}
+
+fn insert_access_token(
+    transaction: &rusqlite::Transaction<'_>,
+    client_id: Uuid,
+    scope: &str,
+    resource: &str,
+    now: DateTime<Utc>,
+    session_expires_at: DateTime<Utc>,
+    access_token_ttl: Duration,
+) -> Result<(OAuthSecret, u64)> {
+    ensure!(session_expires_at > now, "OAuth session already expired");
+    ensure!(
+        access_token_ttl > Duration::zero(),
+        "invalid access-token lifetime"
+    );
+    let access_token = OAuthSecret::generate()?;
+    let access_expires_at = std::cmp::min(now + access_token_ttl, session_expires_at);
     transaction.execute(
         "INSERT INTO oauth_access_tokens(
              token_hash, client_id, scope, resource, created_at, expires_at
@@ -959,27 +1016,10 @@ fn insert_token_pair(
             Millis(access_expires_at),
         ],
     )?;
-    transaction.execute(
-        "INSERT INTO oauth_refresh_tokens(
-             token_hash, family_id, client_id, scope, resource, created_at, expires_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            secret_hash(&refresh_token.0).as_slice(),
-            Blob(*family_id.as_bytes()),
-            Blob(*client_id.as_bytes()),
-            scope,
-            resource,
-            Millis(now),
-            Millis(session_expires_at),
-        ],
-    )?;
-    Ok(OAuthTokenPair {
+    Ok((
         access_token,
-        refresh_token,
-        expires_in: u64::try_from((access_expires_at - now).num_seconds())
-            .expect("positive token TTL"),
-        scope: scope.to_owned(),
-    })
+        u64::try_from((access_expires_at - now).num_seconds()).expect("positive token TTL"),
+    ))
 }
 
 #[cfg(test)]

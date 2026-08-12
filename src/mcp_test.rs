@@ -72,7 +72,7 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
     )
     .unwrap();
     policies
-        .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+        .put("primary", &WalletPolicy::allow_anything(), None)
         .unwrap();
     let pending_database = PolicyStore::open(
         &directory.path().join("policies.db"),
@@ -1036,33 +1036,29 @@ fn a_policy_denial_is_documented_as_a_step_forward_not_a_stop() {
 }
 
 #[test]
-fn the_authoring_surfaces_separate_the_two_negative_outcomes() {
-    // The policy fold reads "deny, else allow, else …", and every earlier
-    // wording of that third branch called it a denial. That made the guide
-    // contradict itself: an agent told a policy queues whatever it does not
-    // permit will propose a `deny` rule to gate something routine, and then
-    // the user cannot approve it. The two surfaces an agent actually reads
-    // must say which of the two negatives it is holding.
+fn the_authoring_surfaces_explain_order_and_the_two_negative_outcomes() {
     let schema = serde_json::to_string(&crate::core::policy::json_schema()).unwrap();
     for surface in [POLICY_AUTHORING_GUIDE, &schema] {
         assert!(
-            surface.contains("nothing signs, nothing queues"),
+            surface.contains("rejects without queuing")
+                || surface.contains("rejects the complete transaction"),
             "a deny rule forecloses rather than gating"
         );
         assert!(
-            surface.contains("queues for explicit human approval"),
+            surface.contains("explicit owner approval") || surface.contains("needs owner"),
             "matching no rule is a question, not a refusal"
         );
+        assert!(
+            surface.contains("first matching rule"),
+            "order is authority"
+        );
     }
-    // The guide has to be usable without the schema beside it, so the corners
-    // that decide whether a proposed rule can ever fire belong in it too.
     for fact in [
-        "no rule can widen it",
-        "An absent slot constrains nothing",
-        "1 to 4096",
-        "type-checked against the signature",
-        "Never bare hex",
-        "only variable there is",
+        "Present matchers are ANDed",
+        "omitted matcher means any value",
+        "integer comparisons",
+        "There is no `from` matcher",
+        "The only policy variable is `$self`",
     ] {
         assert!(
             POLICY_AUTHORING_GUIDE.contains(fact),
@@ -1682,7 +1678,7 @@ fn policy_proposals_bind_revision_and_return_a_permission_diff() {
     let invalid = server.wallet_propose_policy(Parameters(ProposePolicyInput {
         wallet_id: "primary".into(),
         source_revision: 1,
-        policy: serde_json::json!({"chains": {"1": {"unexpected": true}}}),
+        policy: serde_json::json!({"version": 1, "rules": [], "unexpected": true}),
         rationale: "broken".into(),
     }));
     let Err(error) = invalid else {

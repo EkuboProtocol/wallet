@@ -178,9 +178,9 @@ async fn oauth_consent_page_has_exact_duration_choices_and_cannot_be_framed() {
         .await
         .unwrap();
     let body = std::str::from_utf8(&body).unwrap();
-    assert!(body.contains("1 day"));
-    assert!(body.contains("1 week"));
-    assert!(body.contains("1 month"));
+    assert!(body.contains("1 hour / 1 day"));
+    assert!(body.contains("1 day / 1 week"));
+    assert!(body.contains("1 week / 1 month"));
     assert!(body.contains("Codex &lt;local&gt;"));
     assert!(!body.contains("<script"));
     assert!(!body.contains("forever"));

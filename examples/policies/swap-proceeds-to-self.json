@@ -1,40 +1,33 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
   "version": 1,
-  "chains": {
-    "1": {
-      "label": "Swap on one router, through confirmed tokens, paying back to this wallet",
-      "max_calls_per_batch": 8,
-      "native_value": { "eq": "0" },
-      "rules": [
-        {
-          "effect": "allow",
-          "label": "Approve the router for a named token, any amount",
-          "to": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] },
-          "calldata": {
-            "selector": {
-              "abi": "approve(address spender, uint256 amount)",
-              "args": {
-                "spender": { "eq": "0x1111111111111111111111111111111111111111" }
-              }
-            }
-          }
-        },
-        {
-          "effect": "allow",
-          "label": "Every hop must be a confirmed token and the proceeds must come back here",
-          "to": { "eq": "0x1111111111111111111111111111111111111111" },
-          "calldata": {
-            "selector": {
-              "abi": "swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)",
-              "args": {
-                "path": { "each": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] } },
-                "to": { "eq": "$self" }
-              }
-            }
+  "rules": [
+    {
+      "effect": "allow",
+      "label": "Approve a named Ethereum router to spend named tokens",
+      "chain_id": { "eq": "1" },
+      "to": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] },
+      "calldata": {
+        "selector": {
+          "abi": "approve(address spender, uint256 amount)",
+          "args": { "spender": { "eq": "0x1111111111111111111111111111111111111111" } }
+        }
+      }
+    },
+    {
+      "effect": "allow",
+      "label": "Swap named tokens through that router and return proceeds here",
+      "chain_id": { "eq": "1" },
+      "to": { "eq": "0x1111111111111111111111111111111111111111" },
+      "calldata": {
+        "selector": {
+          "abi": "swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)",
+          "args": {
+            "path": { "each": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] } },
+            "to": { "eq": "$self" }
           }
         }
-      ]
+      }
     }
-  }
+  ]
 }

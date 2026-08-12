@@ -14,7 +14,7 @@ use ekubo_wallet_core::{
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
     desktop_store::{
         AgentKind, AppearancePreference, DesktopStore, McpClient, OAuthAuthorizationCode,
-        OAuthSessionDuration, OAuthTokenPair,
+        OAuthSessionPreset, OAuthTokenPair,
     },
     execution::BroadcastResult,
     human_presence::{
@@ -286,7 +286,7 @@ impl OwnerApi {
         code_challenge: &str,
         scope: &str,
         resource: &str,
-        session_duration: OAuthSessionDuration,
+        session_preset: OAuthSessionPreset,
     ) -> Result<OAuthAuthorizationCode> {
         let client = self.desktop()?.validate_oauth_authorization_request(
             client_id,
@@ -306,7 +306,7 @@ impl OwnerApi {
             code_challenge,
             scope,
             resource,
-            session_duration,
+            session_preset,
             &authorization,
         )?;
         self.events

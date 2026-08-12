@@ -112,7 +112,7 @@ fn purging_a_wallet_leaves_nothing_for_the_next_one_to_inherit() {
     let path = directory.path().join("policies.db");
     let mut store = PolicyStore::open(&path, &key(5)).unwrap();
     store
-        .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+        .put("primary", &WalletPolicy::allow_anything(), None)
         .unwrap();
     store
         .put_proposal(
@@ -267,7 +267,7 @@ fn stores_only_current_policy_with_optimistic_revision() {
     let path = directory.path().join("policies.db");
     let mut store = PolicyStore::open(&path, &key(7)).unwrap();
     let first = store
-        .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+        .put("primary", &WalletPolicy::allow_anything(), None)
         .unwrap();
     assert_eq!(first.revision, 1);
     assert!(store.put("primary", &first.policy, None).is_err());
@@ -297,7 +297,7 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
             .put_proposal(
                 "primary",
                 active.revision + 1,
-                &WalletPolicy::allow_all_with_approval(),
+                &WalletPolicy::allow_anything(),
                 "widen",
             )
             .is_err()
@@ -308,7 +308,7 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
             .put_proposal(
                 "primary",
                 active.revision,
-                &WalletPolicy::allow_all_with_approval(),
+                &WalletPolicy::allow_anything(),
                 "   ",
             )
             .is_err()
@@ -318,7 +318,7 @@ fn single_proposal_per_wallet_binds_the_source_revision_and_latest_prevails() {
         .put_proposal(
             "primary",
             active.revision,
-            &WalletPolicy::allow_all_with_approval(),
+            &WalletPolicy::allow_anything(),
             "enable automatic signing",
         )
         .unwrap();
@@ -367,7 +367,7 @@ fn a_proposal_replaced_during_review_is_refused_not_discarded() {
         .put_proposal(
             "primary",
             active.revision,
-            &WalletPolicy::allow_all_with_approval(),
+            &WalletPolicy::allow_anything(),
             "the one a human is looking at",
         )
         .unwrap();
@@ -423,7 +423,7 @@ fn authenticated_page_corruption_fails_closed() {
     let path = directory.path().join("policies.db");
     let mut store = PolicyStore::open(&path, &key(4)).unwrap();
     store
-        .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+        .put("primary", &WalletPolicy::allow_anything(), None)
         .unwrap();
     drop(store);
 
@@ -506,7 +506,7 @@ fn committed_state_does_not_depend_on_a_persistent_wal() {
     let path = directory.path().join("policies.db");
     let mut store = PolicyStore::open(&path, &key(5)).unwrap();
     store
-        .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+        .put("primary", &WalletPolicy::allow_anything(), None)
         .unwrap();
     drop(store);
     assert!(!path.with_extension("db-wal").exists());
@@ -567,7 +567,7 @@ mod in_flight_tests {
         let key = DatabaseKey::new([3; 32]);
         let mut database = PolicyStore::open(&path, &key).unwrap();
         database
-            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .put("primary", &WalletPolicy::allow_anything(), None)
             .unwrap();
         assert!(
             database
@@ -666,7 +666,7 @@ mod first_policy_clears_residue_tests {
     fn installing_a_first_policy_clears_what_the_name_still_held() {
         let (_directory, mut database) = store();
         database
-            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .put("primary", &WalletPolicy::allow_anything(), None)
             .unwrap();
         database
             .put_proposal(
@@ -714,7 +714,7 @@ mod first_policy_clears_residue_tests {
     fn replacing_an_existing_policy_keeps_the_wallets_own_state() {
         let (_directory, mut database) = store();
         let first = database
-            .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+            .put("primary", &WalletPolicy::allow_anything(), None)
             .unwrap();
         database
             .put_proposal(

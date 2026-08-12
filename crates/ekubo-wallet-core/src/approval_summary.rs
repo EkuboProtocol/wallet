@@ -255,7 +255,8 @@ const MAX_DISPLAYED_BALANCE_CHANGES: usize = 32;
 
 /// Render the simulated net balance changes as `(label, change)` pairs —
 /// which asset, then its delta — with symbols and decimals when the wallet
-/// could read them, and always with exact base units.
+/// could read them. Raw base units are reserved for unrecognized assets whose
+/// decimals the owner has not trusted.
 #[must_use]
 pub fn render_balance_changes(
     simulation: &SimulationResult,
@@ -306,11 +307,13 @@ pub fn render_balance_changes(
             .unwrap_or_default();
         let label = token.map_or_else(|| raw_token.clone(), |token| token_label(token, &display));
         let delta_text = match change.delta.as_deref() {
-            // No queried balance for this address, so the only evidence it
-            // moved anything is a log the emitter wrote about itself.
-            None => {
-                "net balance not tracked; reported only by that contract's own logs".to_string()
-            }
+            // If balanceOf was unavailable, present the signed net of the
+            // standard Transfer events instead of an opaque missing-data
+            // message. This remains display evidence, never policy authority.
+            None => transfer_event_net(change).map_or_else(
+                || "unparseable Transfer event amounts".to_string(),
+                |delta| format_signed_amount(&delta, display.decimals, display.symbol.as_deref()),
+            ),
             Some(raw) => parse_signed(raw).map_or_else(
                 || format!("unparseable net change reported as {raw:?}"),
                 |delta| format_signed_amount(&delta, display.decimals, display.symbol.as_deref()),
@@ -385,17 +388,20 @@ fn parse_signed(value: &str) -> Option<BigInt> {
     value.parse::<BigInt>().ok()
 }
 
+fn transfer_event_net(change: &crate::simulation::TokenBalanceChange) -> Option<BigInt> {
+    Some(parse_signed(&change.incoming_transfers)? - parse_signed(&change.outgoing_transfers)?)
+}
+
 fn format_signed_amount(delta: &BigInt, decimals: Option<u8>, symbol: Option<&str>) -> String {
     let negative = delta.sign() == Sign::Minus;
     let magnitude = delta.magnitude().to_string();
     let sign = if negative { "-" } else { "+" };
-    let base_units = format!("{sign}{magnitude}");
     let Some(decimals) = decimals else {
-        return format!("{base_units} base units");
+        return format!("{sign}{magnitude} base units");
     };
     let scaled = format_fixed_point(&magnitude, decimals);
     let unit = symbol.map_or(String::new(), |symbol| format!(" {symbol}"));
-    format!("{sign}{scaled}{unit} ({base_units} base units)")
+    format!("{sign}{scaled}{unit}")
 }
 
 pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenMetadata) -> String {
@@ -403,12 +409,7 @@ pub(crate) fn format_token_amount(amount: U256, token: Address, display: &TokenM
     let label = token_label(token, display);
     display.decimals.map_or_else(
         || format!("{base_units} base units of {label}"),
-        |decimals| {
-            format!(
-                "{} {label} ({base_units} base units)",
-                format_fixed_point(&base_units, decimals)
-            )
-        },
+        |decimals| format!("{} {label}", format_fixed_point(&base_units, decimals)),
     )
 }
 

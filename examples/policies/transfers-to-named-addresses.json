@@ -1,24 +1,18 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
   "version": 1,
-  "chains": {
-    "1": {
-      "label": "Move named tokens, but only to addresses this policy names",
-      "max_calls_per_batch": 4,
-      "native_value": { "eq": "0" },
-      "rules": [
-        {
-          "effect": "allow",
-          "label": "ERC-20 transfer to a named recipient, in any amount",
-          "to": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] },
-          "calldata": {
-            "selector": {
-              "abi": "transfer(address to, uint256 amount)",
-              "args": { "to": { "in": ["0x2222222222222222222222222222222222222222"] } }
-            }
-          }
+  "rules": [
+    {
+      "effect": "allow",
+      "label": "Ethereum ERC-20 transfers to a named recipient",
+      "chain_id": { "eq": "1" },
+      "to": { "in": ["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] },
+      "calldata": {
+        "selector": {
+          "abi": "transfer(address to, uint256 amount)",
+          "args": { "to": { "in": ["0x2222222222222222222222222222222222222222"] } }
         }
-      ]
+      }
     }
-  }
+  ]
 }

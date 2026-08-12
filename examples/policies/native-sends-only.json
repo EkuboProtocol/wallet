@@ -1,19 +1,13 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
   "version": 1,
-  "chains": {
-    "1": {
-      "label": "Plain ETH sends to named addresses, and nothing else",
-      "max_calls_per_batch": 2,
-      "native_value": "any_value",
-      "rules": [
-        {
-          "effect": "allow",
-          "label": "Empty calldata is a plain send; the recipient must be one this policy names",
-          "to": { "in": ["0x2222222222222222222222222222222222222222"] },
-          "calldata": { "eq": "0x" }
-        }
-      ]
+  "rules": [
+    {
+      "effect": "allow",
+      "label": "Plain Ethereum sends to named recipients",
+      "chain_id": { "eq": "1" },
+      "to": { "in": ["0x2222222222222222222222222222222222222222"] },
+      "calldata": { "eq": "0x" }
     }
-  }
+  ]
 }

@@ -23,8 +23,7 @@ use crate::{
         execution_plan::{ExecutionPlan, SimulationFailureAction, SimulationFailureDirective},
         policy::{
             DELEGATION_AUTHORIZED_CODE, DELEGATION_REPLACED_CODE, FindingSeverity, PolicyFinding,
-            PolicyOutcome, SIMULATION_FAILED_CODE, TOKEN_BALANCE_UNVERIFIED_CODE, evaluate_policy,
-            policy_allows, policy_outcome,
+            PolicyOutcome, SIMULATION_FAILED_CODE, evaluate_policy, policy_allows, policy_outcome,
         },
         predicate::PolicyContext,
     },
@@ -704,38 +703,6 @@ async fn simulate_execution_through(
     };
 
     let mut findings = evaluate_policy(plan, &stored_policy.policy, context);
-    // A tracked token that did not answer `balanceOf` is a limit that cannot
-    // be enforced. `token_balance_results` turns a reverted or undecodable
-    // probe into `None`, and with no `Transfer` log to fall back on
-    // `token_balance_changes` then drops the token from the change set
-    // altogether — so the review said "none detected" for a transaction that
-    // moved it, and the automatic path had no number to hold the policy's
-    // limit against.
-    //
-    // Named individually: "a token could not be read" is not actionable, and
-    // which token it was is the whole question.
-    let unverified = unverified_token_probes(&tracked_tokens, &balances_before, &balances_after);
-    if !unverified.is_empty() {
-        findings.push(PolicyFinding {
-            severity: FindingSeverity::Error,
-            code: TOKEN_BALANCE_UNVERIFIED_CODE.into(),
-            message: format!(
-                "the balance of {} could not be read before and after this plan, so how much of \
-                 it moved is unknown and the policy's limit on it cannot be checked: {}",
-                if unverified.len() == 1 {
-                    "a token the policy limits"
-                } else {
-                    "tokens the policy limits"
-                },
-                unverified
-                    .iter()
-                    .map(|token| format!("{token:#x}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            step: None,
-        });
-    }
     let simulation = execution_output(plan, main, simulated_header.gas_limit());
     // A plan that does not execute is never allowed, whatever the policy says
     // about its calls: there is no policy setting that turns a revert into an
@@ -985,32 +952,6 @@ fn balance_probe_address(plan: &ExecutionPlan) -> Address {
     Address::from_slice(&digest.as_slice()[12..])
 }
 
-/// The tracked tokens whose balance could not be established on either side.
-///
-/// A probe answers or it does not; `None` on both sides means the wallet has
-/// no number for this token at all, which is the case that used to vanish from
-/// the review. One side present is enough to place the token in the change set
-/// where a reader will see it, so only the doubly-absent ones are reported
-/// here.
-///
-/// Separate from the reporting so the rule is testable on its own: the branch
-/// that mattered needs an adversarial token to reach, and none of the fixtures
-/// have one.
-pub(crate) fn unverified_token_probes(
-    tracked: &[Address],
-    before: &BTreeMap<Address, Option<U256>>,
-    after: &BTreeMap<Address, Option<U256>>,
-) -> Vec<Address> {
-    tracked
-        .iter()
-        .copied()
-        .filter(|token| {
-            before.get(token).copied().flatten().is_none()
-                && after.get(token).copied().flatten().is_none()
-        })
-        .collect()
-}
-
 fn token_balance_results(
     tokens: &[Address],
     results: &[SimCallResult],
@@ -1046,9 +987,9 @@ pub(crate) fn effective_gas_limit(network: &NetworkConfig, block_limit: u64) -> 
 }
 
 fn tracked_tokens(policy: &crate::core::policy::WalletPolicy, chain_id: &str) -> Vec<Address> {
-    policy
-        .chain(chain_id)
-        .map_or_else(Vec::new, crate::core::policy::ChainPolicy::named_addresses)
+    chain_id
+        .parse()
+        .map_or_else(|_| Vec::new(), |chain_id| policy.named_addresses(chain_id))
 }
 
 fn transfer_activity(wallet: Address, logs: &[Log]) -> BTreeMap<Address, TransferActivity> {

@@ -7,7 +7,7 @@
 //!
 //! Each case states the call and the verdict it must get. Denials are as
 //! load-bearing as grants here — most of these files exist to show something
-//! being refused.
+//! withholding automatic signing.
 
 use alloy::{
     dyn_abi::{DynSolValue, JsonAbiExt},
@@ -272,7 +272,7 @@ fn swap_example_requires_confirmed_hops_and_proceeds_to_self() {
 }
 
 #[test]
-fn a_deny_rule_beats_a_blanket_allow() {
+fn an_earlier_deny_rule_beats_a_later_blanket_allow() {
     let name = "deny-blanket-operators.json";
     let policy = example(name);
     check(
@@ -287,7 +287,7 @@ fn a_deny_rule_beats_a_blanket_allow() {
         &policy,
         &plan("1", USDC, &set_approval_for_all(ROUTER, true), "0"),
         false,
-        "the deny rule wins over the blanket allow",
+        "the earlier deny rule wins over the later blanket allow",
     );
     check(
         name,
@@ -450,14 +450,14 @@ fn the_edge_case_example_shows_each_corner_of_the_language() {
         &policy,
         &plan("1", ROUTER, &encode("poke()", &[]), "1000000000000000000"),
         true,
-        "the native_value guard lists this exact amount",
+        "the rule lists this exact native value",
     );
     check(
         name,
         &policy,
         &plan("1", ROUTER, &encode("poke()", &[]), "5"),
         false,
-        "an amount the native_value guard does not list",
+        "an amount the rule does not list",
     );
 }
 
@@ -494,18 +494,18 @@ fn the_three_outcomes_are_distinguishable() {
 }
 
 #[test]
-fn a_deny_rule_outranks_an_allow_that_also_matches() {
-    // Both rules match the same call. Deny-precedence decides, and the outcome
-    // is the hard one: a plan like this must not reach an approval prompt.
+fn an_earlier_deny_rule_outranks_a_later_allow_that_also_matches() {
+    // Both rules match the same call. First-match order decides, and the
+    // outcome is the hard one: this plan must not reach an approval prompt.
     let policy = WalletPolicy::parse(json!({
         "version": 1,
-        "chains": { "1": { "rules": [
-            { "effect": "allow", "label": "anything to this token" },
-            { "effect": "deny", "label": "but never an operator grant",
+        "rules": [
+            { "effect": "deny", "label": "never an operator grant",
               "calldata": { "selector": {
                   "abi": "setApprovalForAll(address operator, bool approved)",
                   "args": { "approved": { "eq": "true" } } } } },
-        ]}},
+            { "effect": "allow", "label": "anything else" }
+        ]
     }))
     .expect("policy parses");
     assert_eq!(
@@ -520,8 +520,9 @@ fn a_deny_rule_outranks_an_allow_that_also_matches() {
 // --------------------------------------------------------------- the defaults
 
 #[test]
-fn an_unmatched_call_is_denied_and_says_why() {
-    // The property every example above rests on: silence denies.
+fn an_unmatched_call_requires_approval_and_says_why() {
+    // The property every example above rests on: silence never signs
+    // automatically, but it remains available for owner review.
     let policy = example("transfers-to-named-addresses.json");
     let findings = evaluate_policy(&plan("1", STRANGER, "0xdeadbeef", "0"), &policy, &context());
     assert_eq!(
@@ -530,12 +531,12 @@ fn an_unmatched_call_is_denied_and_says_why() {
             .map(|finding| finding.code.as_str())
             .collect::<Vec<_>>(),
         ["call_not_allowed"],
-        "an unmatched call is refused by the default, and the finding names it"
+        "an unmatched call reaches the approval fallback, and the finding names it"
     );
 }
 
 #[test]
-fn a_chain_the_example_does_not_configure_is_refused() {
+fn a_chain_the_example_does_not_configure_is_not_automatically_allowed() {
     // These examples key on chain 1 with no wildcard, so nothing else applies.
     for name in [
         "transfers-to-named-addresses.json",
@@ -553,9 +554,9 @@ fn a_chain_the_example_does_not_configure_is_refused() {
 }
 
 #[test]
-fn every_example_refuses_a_call_it_never_describes() {
-    // A blanket sanity net: no example may permit an arbitrary call to an
-    // unknown contract, except the two that exist to allow everything.
+fn every_example_with_restricted_rules_withholds_automatic_signing_for_unknown_calls() {
+    // A blanket sanity net: no restricted example may permit an arbitrary call
+    // to an unknown contract.
     for name in [
         "transfers-to-named-addresses.json",
         "revoke-approvals-only.json",
@@ -563,9 +564,9 @@ fn every_example_refuses_a_call_it_never_describes() {
         "native-sends-only.json",
         "batched-calls.json",
         "predicate-edge-cases.json",
-        "token-budget.template.json",
+        "bounded-token-approval.template.json",
         "approval-wildcards.template.json",
-        "deny-all.json",
+        "disable-signing.json",
     ] {
         let policy = example(name);
         assert!(

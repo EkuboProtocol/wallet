@@ -13,23 +13,15 @@
 //!
 //! * **A predicate never errors at match time.** Anything that would be an
 //!   error — calldata too short, a decode that fails, a literal that does not
-//!   parse as the value's type — is a non-match. Since only a definite match
-//!   satisfies an `allow`, an unanswerable question never signs automatically:
-//!   at worst the call falls through to human approval.
-//! * **A matched call is canonically encoded.** `abi_decode_input` alone
-//!   ignores trailing bytes and accepts dirty address padding, so
-//!   [`Predicate::Selector`] re-encodes what it decoded and requires the bytes
-//!   back. That rejects trailing garbage, non-canonical offsets, and unclean
-//!   words in one comparison, which means a rule cannot be satisfied by an
-//!   alternate encoding that a target contract's decoder would read differently.
-//! * **Failing that check is doubt, not denial.** The two above nearly
-//!   cancelled each other out. Reporting a non-canonical call as a plain
-//!   non-match is right for an `allow` and wrong for everything else: a `deny`
-//!   naming the selector stopped firing, so one appended byte carried a
-//!   denied call through whatever broader `allow` sat beside it, and a `not`
-//!   around the same predicate inverted into a positive match. So there are
-//!   three answers, not two — see [`Match`] — and an `allow` requires
-//!   certainty while a `deny` needs only suspicion.
+//!   parse as the value's type — makes that rule inapplicable. Ordered policy
+//!   evaluation then continues to the next rule.
+//! * **A matched call starts with a canonical ABI encoding.** Solidity permits
+//!   trailing calldata, so [`Predicate::Selector`] re-encodes decoded values
+//!   and requires that canonical encoding as a prefix. Dirty padding,
+//!   malformed offsets, out-of-width words, and truncation remain unreadable.
+//! * **Unreadable is neither a match nor a mismatch.** It survives boolean
+//!   composition, but at the rule layer it makes that rule inapplicable so
+//!   evaluation can continue to a later ordered fallback.
 
 use alloy::{
     dyn_abi::{DynSolType, DynSolValue, JsonAbiExt},
@@ -49,18 +41,16 @@ use std::{
 /// Two answers are not enough. A selector predicate that meets its own
 /// function, encoded in a form this policy cannot decode, is not answering
 /// "no" — it is answering "this is my subject and I cannot read it". Those
-/// collapse safely for an `allow`, which must refuse both, and unsafely for
-/// everything else: reported as a non-match, a `deny` naming that selector
-/// stops firing while a broader `allow` still admits the call, and a `not`
-/// around it turns the unreadable call into a positive match. Doubt is
-/// therefore its own answer and it propagates, so that it can fail closed in
-/// both directions rather than in only one.
+/// cannot be collapsed through boolean composition: treating it as `No` would
+/// let `not` turn unreadable input into a match. Doubt is therefore its own
+/// answer and propagates until the rule layer skips that rule and evaluates the
+/// next ordered rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Match {
     Yes,
     No,
     /// The predicate's own subject, in an encoding it cannot decide. Satisfies
-    /// no `allow` and triggers every `deny` that could have named it.
+    /// neither an `allow` nor a `deny`; ordered evaluation continues.
     Unreadable,
 }
 
@@ -99,17 +89,11 @@ impl Match {
         }
     }
 
-    /// Whether this answer may satisfy an `allow`. Only certainty does.
+    /// Whether this answer is a definite match. Only certainty consumes the
+    /// call at the ordered-rule layer.
     #[must_use]
     pub const fn is_match(self) -> bool {
         matches!(self, Self::Yes)
-    }
-
-    /// Whether this answer must trigger a `deny`. Doubt does: a rule written
-    /// to stop a call cannot be escaped by encoding that call unreadably.
-    #[must_use]
-    pub const fn is_suspected(self) -> bool {
-        matches!(self, Self::Yes | Self::Unreadable)
     }
 }
 
@@ -191,12 +175,12 @@ impl SelectorPredicate {
         &self.args
     }
 
-    /// Whether `data` is a canonically encoded call to this signature whose
+    /// Whether `data` starts with a canonical call to this signature whose
     /// named arguments all satisfy their predicates.
     ///
     /// The selector decides the subject and the body decides the answer. Once
     /// the four bytes match, this call *is* the function named here, so a body
-    /// that will not decode or will not round-trip is [`Match::Unreadable`]
+    /// that will not decode or will not re-encode as its prefix is [`Match::Unreadable`]
     /// rather than [`Match::No`]: the arguments are unknown, not absent.
     fn evaluate(&self, data: &[u8], context: &PolicyContext) -> Match {
         if data.len() < 4 || data[..4] != self.function.selector()[..] {
@@ -206,21 +190,13 @@ impl SelectorPredicate {
         let Ok(values) = self.function.abi_decode_input(body) else {
             return Match::Unreadable;
         };
-        // Canonical-form check: see the module comment. `abi_decode_input`
-        // alone ignores trailing bytes and accepts dirty padding, so a call a
-        // target contract would execute can decode here into arguments that
-        // are not the ones it will act on.
-        let Ok(reencoded) = self.function.abi_encode_input_raw(&values) else {
+        // Require the decoded values to be the canonical prefix of the body.
+        // Solidity accepts trailing calldata, but dirty words, truncated
+        // heads, and malformed offsets must not satisfy a policy predicate.
+        let Ok(canonical) = self.function.abi_encode_input_raw(&values) else {
             return Match::Unreadable;
         };
-        if reencoded != body {
-            return Match::Unreadable;
-        }
-        // Round-tripping is not the whole of being canonical. A narrow type
-        // keeps its entire 32-byte word through decode and encode alike, so
-        // both halves of the comparison above carry the same dirty bits and
-        // agree — see [`within_declared_width`] for what that lets through.
-        if !values.iter().all(within_declared_width) {
+        if !body.starts_with(&canonical) || !values.iter().all(within_declared_width) {
             return Match::Unreadable;
         }
         self.args
@@ -316,6 +292,15 @@ pub enum Predicate {
     Eq(String),
     /// Equal to one of a set of literals, any of which may be `$self`.
     In(BTreeSet<String>),
+    /// Less than an integer literal. Valid only for signed and unsigned ABI
+    /// integer values.
+    Lt(String),
+    /// Less than or equal to an integer literal.
+    Lte(String),
+    /// Greater than an integer literal.
+    Gt(String),
+    /// Greater than or equal to an integer literal.
+    Gte(String),
     /// The `bytes` value is a canonically encoded call to this exact function
     /// whose named arguments satisfy their own predicates. Applies only to a
     /// `bytes` value: a rule's `calldata` slot, or a `bytes` argument reached
@@ -352,6 +337,13 @@ impl Predicate {
                     .iter()
                     .try_for_each(|literal| check_literal(literal, ty))
             }
+            Self::Lt(literal) | Self::Lte(literal) | Self::Gt(literal) | Self::Gte(literal) => {
+                ensure!(
+                    matches!(ty, DynSolType::Uint(_) | DynSolType::Int(_)),
+                    "ordered comparisons need an integer, not {ty:?}"
+                );
+                check_literal(literal, ty)
+            }
             Self::Selector(_) => {
                 ensure!(
                     matches!(ty, DynSolType::Bytes),
@@ -380,13 +372,11 @@ impl Predicate {
         }
     }
 
-    /// How `value` answers this predicate. Never errors: an unanswerable
-    /// question is [`Match::No`] or [`Match::Unreadable`], neither of which
-    /// satisfies an `allow`, so uncertainty never signs automatically.
-    ///
-    /// The two differ in what else they do. `No` says the predicate's subject
-    /// is not here; `Unreadable` says it is here in a form that cannot be
-    /// decided, which additionally trips any `deny` written over it.
+    /// How `value` answers this predicate. Never errors: `No` says the
+    /// predicate's subject is not here, while `Unreadable` says it is here in a
+    /// form this predicate cannot decide. Neither is a match; `Unreadable`
+    /// remains distinct so boolean composition cannot invert doubt into a
+    /// match. At the rule boundary, both let ordered evaluation continue.
     #[must_use]
     pub fn evaluate(&self, value: &DynSolValue, context: &PolicyContext) -> Match {
         match self {
@@ -405,6 +395,14 @@ impl Predicate {
                         .any(|canonical| canonical == rendered)
                 })
             })),
+            Self::Lt(literal) => compare_integer(value, literal, context)
+                .map_or(Match::No, |v| Match::of(v == std::cmp::Ordering::Less)),
+            Self::Lte(literal) => compare_integer(value, literal, context)
+                .map_or(Match::No, |v| Match::of(v != std::cmp::Ordering::Greater)),
+            Self::Gt(literal) => compare_integer(value, literal, context)
+                .map_or(Match::No, |v| Match::of(v == std::cmp::Ordering::Greater)),
+            Self::Gte(literal) => compare_integer(value, literal, context)
+                .map_or(Match::No, |v| Match::of(v != std::cmp::Ordering::Less)),
             Self::Selector(selector) => match value {
                 DynSolValue::Bytes(data) => selector.evaluate(data, context),
                 _ => Match::No,
@@ -500,6 +498,18 @@ impl Predicate {
             (Self::Eq(left), Self::In(right)) => right.contains(left),
             (Self::In(left), Self::In(right)) => left.is_subset(right),
             (Self::In(left), Self::Eq(right)) => left.len() == 1 && left.contains(right),
+            (Self::Lt(left), Self::Lt(right)) | (Self::Lt(left), Self::Lte(right)) => {
+                decimal_literal_cmp(left, right)
+                    .is_some_and(|order| order != std::cmp::Ordering::Greater)
+            }
+            (Self::Lte(left), Self::Lte(right)) => decimal_literal_cmp(left, right)
+                .is_some_and(|order| order != std::cmp::Ordering::Greater),
+            (Self::Gt(left), Self::Gt(right)) | (Self::Gt(left), Self::Gte(right)) => {
+                decimal_literal_cmp(left, right)
+                    .is_some_and(|order| order != std::cmp::Ordering::Less)
+            }
+            (Self::Gte(left), Self::Gte(right)) => decimal_literal_cmp(left, right)
+                .is_some_and(|order| order != std::cmp::Ordering::Less),
             (Self::Each(left), Self::Each(right)) => left.is_narrower_than(right),
             // Containment reverses under negation: every value `not A` admits
             // is admitted by `not B` exactly when B admits everything A does.
@@ -540,6 +550,7 @@ impl Predicate {
                 }
             }
             Self::Not(inner) => inner.literals(into),
+            Self::Lt(_) | Self::Lte(_) | Self::Gt(_) | Self::Gte(_) => {}
             Self::AnyValue | Self::Selector(_) | Self::Each(_) | Self::Length(_) => {}
         }
     }
@@ -565,6 +576,10 @@ impl Predicate {
                     .collect::<Vec<_>>();
                 format!("one of {}", described.join(", "))
             }
+            Self::Lt(literal) => format!("less than {literal}"),
+            Self::Lte(literal) => format!("at most {literal}"),
+            Self::Gt(literal) => format!("greater than {literal}"),
+            Self::Gte(literal) => format!("at least {literal}"),
             Self::Selector(selector) => {
                 if selector.args.is_empty() {
                     format!(
@@ -645,8 +660,8 @@ fn length_of(value: &DynSolValue) -> Option<usize> {
 /// what gets signed.
 ///
 /// So the width is checked directly, and a value that fails is `Unreadable`
-/// like every other unanswerable question here: refused for an `allow`,
-/// suspected for a `deny`.
+/// like every other unanswerable question here. The containing rule is skipped
+/// and ordered evaluation continues.
 fn within_declared_width(value: &DynSolValue) -> bool {
     match value {
         DynSolValue::Uint(word, bits) => *bits >= 256 || *word < (U256::from(1) << *bits),
@@ -688,6 +703,31 @@ fn render(value: &DynSolValue) -> Option<String> {
         DynSolValue::Uint(value, _) => value.to_string(),
         _ => return None,
     })
+}
+
+fn compare_integer(
+    value: &DynSolValue,
+    literal: &str,
+    context: &PolicyContext,
+) -> Option<std::cmp::Ordering> {
+    let ty = value.as_type()?;
+    let canonical = resolve_literal(literal, &ty, context).ok()?;
+    match value {
+        DynSolValue::Uint(value, _) => U256::from_str(&canonical)
+            .ok()
+            .map(|other| value.cmp(&other)),
+        DynSolValue::Int(value, _) => I256::from_str(&canonical)
+            .ok()
+            .map(|other| value.cmp(&other)),
+        _ => None,
+    }
+}
+
+fn decimal_literal_cmp(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    match (left.starts_with('-'), right.starts_with('-')) {
+        (true, _) | (_, true) => Some(I256::from_str(left).ok()?.cmp(&I256::from_str(right).ok()?)),
+        _ => Some(U256::from_str(left).ok()?.cmp(&U256::from_str(right).ok()?)),
+    }
 }
 
 /// Every literal in a policy document is written one of exactly two ways: hex

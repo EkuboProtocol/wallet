@@ -29,3 +29,17 @@ fn refresh_rejects_stale_events_and_resets_changed_documents() {
     assert!(state.scroll_offset().abs() < f32::EPSILON);
     assert!(!state.select(1, ReviewDecision::Reject));
 }
+
+#[test]
+fn refresh_of_same_document_still_requires_it_to_be_viewed_again() {
+    let original = document("same");
+    let mut state = ReviewState::new(original.clone());
+    assert!(state.mark_viewed_to_end(1));
+    assert!(state.select(1, ReviewDecision::Approve));
+
+    state.refresh(original);
+
+    assert_eq!(state.selected(), ReviewDecision::Reject);
+    assert!(!state.approve_enabled());
+    assert!(!state.select(1, ReviewDecision::Approve));
+}

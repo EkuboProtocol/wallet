@@ -11,7 +11,8 @@ use std::{
 };
 #[cfg(target_os = "macos")]
 use std::{
-    io::Cursor,
+    io::{Cursor, Read, Seek},
+    os::fd::AsRawFd,
     process::{Command, Stdio},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -239,15 +240,39 @@ impl SystemScreenPicker {
 impl ScreenPicker for SystemScreenPicker {
     #[cfg(target_os = "macos")]
     fn capture_once(&self) -> Result<Option<CapturedFrame>> {
+        // `screencapture`/ImageIO needs seekable output; stdout is a pipe and
+        // silently produced no usable image on current macOS. An unnamed
+        // tempfile is seekable but has no directory entry, so captured pixels
+        // are never saved at a path, cached, or left for another process to
+        // discover. Clear close-on-exec only for this descriptor so the picker
+        // can open its `/dev/fd` alias, then close it with the child.
+        let mut capture = tempfile::tempfile().context("could not allocate ephemeral capture")?;
+        let fd = capture.as_raw_fd();
+        let mut flags = rustix::io::fcntl_getfd(&capture)
+            .context("could not inspect ephemeral capture descriptor")?;
+        flags.remove(rustix::io::FdFlags::CLOEXEC);
+        rustix::io::fcntl_setfd(&capture, flags)
+            .context("could not share ephemeral capture descriptor with the picker")?;
+        let target = format!("/dev/fd/{fd}");
         let output = Command::new("/usr/sbin/screencapture")
-            .args(["-i", "-x", "-t", "png", "/dev/fd/1"])
+            .args(["-i", "-x", "-t", "png", &target])
             .stdin(Stdio::null())
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
             .output()
             .context("could not open the macOS screen picker")?;
-        let mut encoded = output.stdout;
-        if !output.status.success() || encoded.is_empty() {
-            encoded.zeroize();
+        if !output.status.success() {
+            return Ok(None);
+        }
+        capture
+            .rewind()
+            .context("could not rewind screen capture")?;
+        let mut encoded = Vec::new();
+        capture
+            .take(u64::try_from(MAX_CAPTURE_BYTES + 1)?)
+            .read_to_end(&mut encoded)
+            .context("could not read selected screen capture")?;
+        if encoded.is_empty() {
             return Ok(None);
         }
         ensure!(

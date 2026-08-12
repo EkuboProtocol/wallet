@@ -6,6 +6,7 @@ pub use ekubo_wallet_core::{
 };
 
 pub mod agent_config;
+pub mod assets;
 pub mod authority;
 pub mod batch_read;
 pub mod dapp_identity;

@@ -1,6 +1,7 @@
 use crate::{
     BUILD_COMMIT, BUILD_VERSION,
     agent_config::{AgentAdapter, ConfigPreview, LOCAL_SERVER_NAME},
+    assets::{PENCIL_ICON, TRASH_ICON, WalletAssets},
     authority::{
         ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioSnapshot,
         OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
@@ -587,23 +588,16 @@ pub struct WalletWindow {
     network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
-    policy_chain_input: Option<Entity<InputState>>,
-    policy_chain_label_input: Option<Entity<InputState>>,
-    policy_chain_max_calls_input: Option<Entity<InputState>>,
-    policy_chain_native_values_input: Option<Entity<InputState>>,
-    policy_chain_original_key: Option<String>,
-    policy_chain_native_value_mode: GuidedNativeValueMode,
-    policy_chain_errors: GuidedPolicyChainErrors,
-    policy_rule_chain_key: Option<String>,
+    policy_rule_editor_open: bool,
     policy_rule_original_index: Option<usize>,
     policy_rule_effect: GuidedRuleEffect,
     policy_rule_target_mode: GuidedLiteralMode,
-    policy_rule_sender_mode: GuidedLiteralMode,
+    policy_rule_chain_mode: GuidedLiteralMode,
     policy_rule_value_mode: GuidedLiteralMode,
     policy_rule_calldata_mode: GuidedCalldataMode,
     policy_rule_label_input: Option<Entity<InputState>>,
     policy_rule_targets_input: Option<Entity<InputState>>,
-    policy_rule_senders_input: Option<Entity<InputState>>,
+    policy_rule_chain_ids_input: Option<Entity<InputState>>,
     policy_rule_values_input: Option<Entity<InputState>>,
     policy_rule_abi_input: Option<Entity<InputState>>,
     policy_rule_args_input: Option<Entity<InputState>>,
@@ -833,13 +827,6 @@ enum PolicyEditorMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidedNativeValueMode {
-    None,
-    Any,
-    Exact,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GuidedRuleEffect {
     Allow,
     Deny,
@@ -849,6 +836,7 @@ enum GuidedRuleEffect {
 enum GuidedLiteralMode {
     Any,
     Exact,
+    Predicate,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -859,28 +847,10 @@ enum GuidedCalldataMode {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct GuidedPolicyChainErrors {
-    chain: Option<String>,
-    label: Option<String>,
-    max_calls: Option<String>,
-    native_values: Option<String>,
-    form: Option<String>,
-}
-
-struct GuidedPolicyChainDraft {
-    chain: String,
-    label: String,
-    max_calls: String,
-    native_value_mode: GuidedNativeValueMode,
-    native_values: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct GuidedPolicyRuleErrors {
-    chain: Option<String>,
     label: Option<String>,
     targets: Option<String>,
-    senders: Option<String>,
+    chain_ids: Option<String>,
     values: Option<String>,
     abi: Option<String>,
     args: Option<String>,
@@ -893,8 +863,8 @@ struct GuidedPolicyRuleDraft {
     label: String,
     target_mode: GuidedLiteralMode,
     targets: String,
-    sender_mode: GuidedLiteralMode,
-    senders: String,
+    chain_mode: GuidedLiteralMode,
+    chain_ids: String,
     value_mode: GuidedLiteralMode,
     values: String,
     calldata_mode: GuidedCalldataMode,
@@ -916,6 +886,7 @@ struct ActiveReview {
     scroll_handle: ScrollHandle,
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
+    scroll_interacted: bool,
 }
 
 enum ActiveReviewCompletion {
@@ -2332,7 +2303,7 @@ impl ListDelegate for TokenListDelegate {
             actions = actions
                 .child(
                     Button::new(("edit-token", index.row))
-                        .icon(IconName::Settings2)
+                        .icon(Icon::default().path(PENCIL_ICON))
                         .ghost()
                         .tooltip("Edit token")
                         .accessibility_id("Edit token")
@@ -2345,7 +2316,7 @@ impl ListDelegate for TokenListDelegate {
                 )
                 .child(
                     Button::new(("remove-token", index.row))
-                        .icon(IconName::Delete)
+                        .icon(Icon::default().path(TRASH_ICON))
                         .ghost()
                         .tooltip("Delete token")
                         .accessibility_id("Delete token")
@@ -2385,11 +2356,13 @@ impl ListDelegate for TokenListDelegate {
                                         .flex_1()
                                         .min_w_0()
                                         .child(
-                                            h_flex()
+                                            div()
                                                 .w_full()
-                                                .gap_3()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_0p5()
                                                 .child(
-                                                    div().flex_1().min_w_0().truncate().child(
+                                                    div().w_full().truncate().child(
                                                         token
                                                             .symbol
                                                             .as_deref()
@@ -2398,11 +2371,28 @@ impl ListDelegate for TokenListDelegate {
                                                     ),
                                                 )
                                                 .child(
-                                                    div()
-                                                        .flex_none()
+                                                    h_flex()
+                                                        .w_full()
+                                                        .min_w_0()
+                                                        .gap_2()
                                                         .text_sm()
                                                         .text_color(cx.theme().muted_foreground)
-                                                        .child(network_name),
+                                                        .child(
+                                                            div().min_w_0().truncate().child(
+                                                                token
+                                                                    .name
+                                                                    .as_deref()
+                                                                    .unwrap_or("No full name")
+                                                                    .to_owned(),
+                                                            ),
+                                                        )
+                                                        .child(div().flex_none().child("·"))
+                                                        .child(
+                                                            div()
+                                                                .flex_none()
+                                                                .truncate()
+                                                                .child(network_name),
+                                                        ),
                                                 ),
                                         )
                                         .child(
@@ -2420,8 +2410,7 @@ impl ListDelegate for TokenListDelegate {
                                                 .text_color(cx.theme().muted_foreground)
                                                 .truncate()
                                                 .child(format!(
-                                                    "{} · {} decimals · {}",
-                                                    token.name.as_deref().unwrap_or("No full name"),
+                                                    "{} decimals · {}",
                                                     token.decimals.map_or_else(
                                                         || "unknown".to_owned(),
                                                         |value| value.to_string()
@@ -2612,164 +2601,13 @@ fn review_policy_draft(
 }
 
 fn allow_anything_policy_document() -> Result<(String, WalletPolicy)> {
-    let policy = WalletPolicy::allow_all_with_approval();
+    let policy = WalletPolicy::allow_anything();
     let document = serde_json::to_string_pretty(&policy)?;
     Ok((document, policy))
 }
 
-fn update_guided_policy_chain(
-    document: &str,
-    original_key: Option<&str>,
-    draft: &GuidedPolicyChainDraft,
-) -> std::result::Result<(String, WalletPolicy), GuidedPolicyChainErrors> {
-    let mut errors = GuidedPolicyChainErrors::default();
-    let chain = draft.chain.trim();
-    let canonical_chain = if chain == "*" {
-        Some("*".to_owned())
-    } else {
-        match chain.parse::<u64>() {
-            Ok(value) if value > 0 && value.to_string() == chain => Some(chain.to_owned()),
-            _ => {
-                errors.chain =
-                    Some("Enter * or a positive decimal chain ID with no leading zeroes.".into());
-                None
-            }
-        }
-    };
-    let label = draft.label.trim();
-    if !label.is_empty()
-        && (label.chars().count() > 160
-            || ekubo_wallet_core::sanitize::stripped_capped(label, 160) != label)
-    {
-        errors.label = Some(
-            "Use at most 160 visible characters with no control or bidirectional characters."
-                .into(),
-        );
-    }
-    let max_calls = if let Ok(value @ 1..=4096) = draft.max_calls.trim().parse::<u32>() {
-        Some(value)
-    } else {
-        errors.max_calls = Some("Enter a whole number from 1 through 4096.".into());
-        None
-    };
-    let native_value = match draft.native_value_mode {
-        GuidedNativeValueMode::None => Some(serde_json::json!({ "eq": "0" })),
-        GuidedNativeValueMode::Any => Some(serde_json::Value::String("any_value".into())),
-        GuidedNativeValueMode::Exact => {
-            let values = draft
-                .native_values
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .collect::<BTreeSet<_>>();
-            if values.is_empty()
-                || values
-                    .iter()
-                    .any(|value| !value.bytes().all(|byte| byte.is_ascii_digit()))
-            {
-                errors.native_values = Some(
-                    "Enter one or more non-negative decimal wei values, separated by commas."
-                        .into(),
-                );
-                None
-            } else {
-                let values = values.into_iter().map(str::to_owned).collect::<Vec<_>>();
-                Some(if values.len() == 1 {
-                    serde_json::json!({ "eq": values[0] })
-                } else {
-                    serde_json::json!({ "in": values })
-                })
-            }
-        }
-    };
-    if errors != GuidedPolicyChainErrors::default() {
-        return Err(errors);
-    }
-
-    let mut value: serde_json::Value = match serde_json::from_str(document) {
-        Ok(value) => value,
-        Err(error) => {
-            errors.form = Some(format!(
-                "The advanced document is not valid JSON. Fix it before using the guided editor: {error}"
-            ));
-            return Err(errors);
-        }
-    };
-    let Some(chains) = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("chains"))
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        errors.form = Some("The policy document has no `chains` object.".into());
-        return Err(errors);
-    };
-    let chain_key = canonical_chain.expect("validated above");
-    if original_key != Some(chain_key.as_str()) && chains.contains_key(&chain_key) {
-        errors.chain =
-            Some("That chain already has a policy entry. Edit the existing entry.".into());
-        return Err(errors);
-    }
-    let mut chain_value = match original_key {
-        Some(key) => {
-            if let Some(value) = chains.remove(key) {
-                value
-            } else {
-                errors.form = Some("The chain entry changed while it was being edited.".into());
-                return Err(errors);
-            }
-        }
-        None => serde_json::json!({ "rules": [] }),
-    };
-    let Some(chain_object) = chain_value.as_object_mut() else {
-        errors.form = Some("The selected chain entry is not an object.".into());
-        return Err(errors);
-    };
-    if label.is_empty() {
-        chain_object.remove("label");
-    } else {
-        chain_object.insert("label".into(), serde_json::Value::String(label.to_owned()));
-    }
-    chain_object.insert(
-        "max_calls_per_batch".into(),
-        serde_json::Value::Number(max_calls.expect("validated above").into()),
-    );
-    chain_object.insert(
-        "native_value".into(),
-        native_value.expect("validated above"),
-    );
-    chain_object
-        .entry("rules")
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    chains.insert(chain_key, chain_value);
-
-    match WalletPolicy::parse(value) {
-        Ok(policy) => match serde_json::to_string_pretty(&policy) {
-            Ok(document) => Ok((document, policy)),
-            Err(error) => {
-                errors.form = Some(format!("Could not serialize the policy: {error:#}"));
-                Err(errors)
-            }
-        },
-        Err(error) => {
-            errors.form = Some(format!("The resulting policy is invalid: {error:#}"));
-            Err(errors)
-        }
-    }
-}
-
-fn remove_guided_policy_chain(document: &str, chain: &str) -> Result<(String, WalletPolicy)> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(document).context("policy document is not valid JSON")?;
-    let chains = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("chains"))
-        .and_then(serde_json::Value::as_object_mut)
-        .context("policy document has no `chains` object")?;
-    ensure!(
-        chains.remove(chain).is_some(),
-        "the selected chain entry no longer exists"
-    );
-    let policy = WalletPolicy::parse(value)?;
+fn disable_signing_policy_document() -> Result<(String, WalletPolicy)> {
+    let policy = WalletPolicy::deny_all();
     let document = serde_json::to_string_pretty(&policy)?;
     Ok((document, policy))
 }
@@ -2778,9 +2616,15 @@ fn guided_literal_predicate(
     mode: GuidedLiteralMode,
     input: &str,
     address: bool,
+    expected: &str,
 ) -> std::result::Result<Option<serde_json::Value>, String> {
     if mode == GuidedLiteralMode::Any {
         return Ok(None);
+    }
+    if mode == GuidedLiteralMode::Predicate {
+        return serde_json::from_str(input.trim())
+            .map(Some)
+            .map_err(|error| format!("Enter one predicate JSON object: {error}"));
     }
     let values = input
         .split(',')
@@ -2788,11 +2632,9 @@ fn guided_literal_predicate(
         .filter(|value| !value.is_empty())
         .collect::<BTreeSet<_>>();
     if values.is_empty() {
-        return Err(if address {
-            "Enter one or more 0x-prefixed addresses, separated by commas.".into()
-        } else {
-            "Enter one or more non-negative decimal wei values, separated by commas.".into()
-        });
+        return Err(format!(
+            "Enter one or more {expected}, separated by commas."
+        ));
     }
     let valid = if address {
         values.iter().all(|value| {
@@ -2807,11 +2649,7 @@ fn guided_literal_predicate(
             .all(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
     };
     if !valid {
-        return Err(if address {
-            "Use complete 0x-prefixed addresses or $self, separated by commas.".into()
-        } else {
-            "Use non-negative decimal wei values, separated by commas.".into()
-        });
+        return Err(format!("Use {expected}, separated by commas."));
     }
     let values = values.into_iter().map(str::to_owned).collect::<Vec<_>>();
     Ok(Some(if values.len() == 1 {
@@ -2823,7 +2661,6 @@ fn guided_literal_predicate(
 
 fn update_guided_policy_rule(
     document: &str,
-    chain_key: &str,
     original_index: Option<usize>,
     draft: &GuidedPolicyRuleDraft,
 ) -> std::result::Result<(String, WalletPolicy), Box<GuidedPolicyRuleErrors>> {
@@ -2838,18 +2675,33 @@ fn update_guided_policy_rule(
                 .into(),
         );
     }
-    let target = guided_literal_predicate(draft.target_mode, &draft.targets, true)
-        .map_err(|error| errors.targets = Some(error))
-        .ok()
-        .flatten();
-    let sender = guided_literal_predicate(draft.sender_mode, &draft.senders, true)
-        .map_err(|error| errors.senders = Some(error))
-        .ok()
-        .flatten();
-    let native_value = guided_literal_predicate(draft.value_mode, &draft.values, false)
-        .map_err(|error| errors.values = Some(error))
-        .ok()
-        .flatten();
+    let target = guided_literal_predicate(
+        draft.target_mode,
+        &draft.targets,
+        true,
+        "complete 0x-prefixed addresses or $self",
+    )
+    .map_err(|error| errors.targets = Some(error))
+    .ok()
+    .flatten();
+    let chain_id = guided_literal_predicate(
+        draft.chain_mode,
+        &draft.chain_ids,
+        false,
+        "non-negative decimal chain IDs",
+    )
+    .map_err(|error| errors.chain_ids = Some(error))
+    .ok()
+    .flatten();
+    let native_value = guided_literal_predicate(
+        draft.value_mode,
+        &draft.values,
+        false,
+        "non-negative decimal wei values",
+    )
+    .map_err(|error| errors.values = Some(error))
+    .ok()
+    .flatten();
     let calldata = match draft.calldata_mode {
         GuidedCalldataMode::Any => None,
         GuidedCalldataMode::Empty => Some(serde_json::json!({ "eq": "0x" })),
@@ -2897,9 +2749,9 @@ fn update_guided_policy_rule(
         rule.insert("label".into(), serde_json::Value::String(label.into()));
     }
     for (slot, predicate) in [
+        ("chain_id", chain_id),
         ("to", target),
-        ("from", sender),
-        ("value", native_value),
+        ("native_value", native_value),
         ("calldata", calldata),
     ] {
         if let Some(predicate) = predicate {
@@ -2918,14 +2770,10 @@ fn update_guided_policy_rule(
     };
     let rules = value
         .as_object_mut()
-        .and_then(|root| root.get_mut("chains"))
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|chains| chains.get_mut(chain_key))
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|chain| chain.get_mut("rules"))
+        .and_then(|root| root.get_mut("rules"))
         .and_then(serde_json::Value::as_array_mut);
     let Some(rules) = rules else {
-        errors.chain = Some("The selected chain entry no longer exists.".into());
+        errors.form = Some("The policy document has no ordered `rules` list.".into());
         return Err(Box::new(errors));
     };
     let rule = serde_json::Value::Object(rule);
@@ -2959,22 +2807,14 @@ fn update_guided_policy_rule(
     }
 }
 
-fn remove_guided_policy_rule(
-    document: &str,
-    chain_key: &str,
-    index: usize,
-) -> Result<(String, WalletPolicy)> {
+fn remove_guided_policy_rule(document: &str, index: usize) -> Result<(String, WalletPolicy)> {
     let mut value: serde_json::Value =
         serde_json::from_str(document).context("policy document is not valid JSON")?;
     let rules = value
         .as_object_mut()
-        .and_then(|root| root.get_mut("chains"))
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|chains| chains.get_mut(chain_key))
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|chain| chain.get_mut("rules"))
+        .and_then(|root| root.get_mut("rules"))
         .and_then(serde_json::Value::as_array_mut)
-        .context("the selected chain has no rule list")?;
+        .context("the policy document has no ordered rule list")?;
     ensure!(index < rules.len(), "the selected rule no longer exists");
     rules.remove(index);
     let policy = WalletPolicy::parse(value)?;
@@ -3004,17 +2844,23 @@ fn guided_predicate_values(
                     .context("the literal set contains a non-string value")?;
                 Ok((GuidedLiteralMode::Exact, values.join(", ")))
             } else {
-                anyhow::bail!("this predicate requires Advanced JSON")
+                Ok((
+                    GuidedLiteralMode::Predicate,
+                    serde_json::to_string_pretty(&serde_json::Value::Object(object))?,
+                ))
             }
         }
-        _ => anyhow::bail!("this predicate requires Advanced JSON"),
+        other => Ok((
+            GuidedLiteralMode::Predicate,
+            serde_json::to_string_pretty(&other)?,
+        )),
     }
 }
 
 fn guided_rule_draft(rule: &Rule) -> Result<GuidedPolicyRuleDraft> {
     let (target_mode, targets) = guided_predicate_values(rule.to.as_ref())?;
-    let (sender_mode, senders) = guided_predicate_values(rule.from.as_ref())?;
-    let (value_mode, values) = guided_predicate_values(rule.value.as_ref())?;
+    let (chain_mode, chain_ids) = guided_predicate_values(rule.chain_id.as_ref())?;
+    let (value_mode, values) = guided_predicate_values(rule.native_value.as_ref())?;
     let (calldata_mode, abi, args) = match rule.calldata.as_ref() {
         None => (GuidedCalldataMode::Any, String::new(), "{}".into()),
         Some(predicate) => {
@@ -3058,8 +2904,8 @@ fn guided_rule_draft(rule: &Rule) -> Result<GuidedPolicyRuleDraft> {
         label: rule.label.clone().unwrap_or_default(),
         target_mode,
         targets,
-        sender_mode,
-        senders,
+        chain_mode,
+        chain_ids,
         value_mode,
         values,
         calldata_mode,
@@ -3194,23 +3040,16 @@ impl WalletWindow {
             network_proposal_error: None,
             policy_json_input: None,
             policy_editor: None,
-            policy_chain_input: None,
-            policy_chain_label_input: None,
-            policy_chain_max_calls_input: None,
-            policy_chain_native_values_input: None,
-            policy_chain_original_key: None,
-            policy_chain_native_value_mode: GuidedNativeValueMode::None,
-            policy_chain_errors: GuidedPolicyChainErrors::default(),
-            policy_rule_chain_key: None,
+            policy_rule_editor_open: false,
             policy_rule_original_index: None,
             policy_rule_effect: GuidedRuleEffect::Allow,
             policy_rule_target_mode: GuidedLiteralMode::Any,
-            policy_rule_sender_mode: GuidedLiteralMode::Any,
+            policy_rule_chain_mode: GuidedLiteralMode::Any,
             policy_rule_value_mode: GuidedLiteralMode::Any,
             policy_rule_calldata_mode: GuidedCalldataMode::Any,
             policy_rule_label_input: None,
             policy_rule_targets_input: None,
-            policy_rule_senders_input: None,
+            policy_rule_chain_ids_input: None,
             policy_rule_values_input: None,
             policy_rule_abi_input: None,
             policy_rule_args_input: None,
@@ -3430,30 +3269,6 @@ impl WalletWindow {
                     .placeholder("Select an account to inspect and edit its policy")
             }));
         }
-        if self.policy_chain_input.is_none() {
-            self.policy_chain_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Chain ID, or * for every chain")
-            }));
-        }
-        if self.policy_chain_label_input.is_none() {
-            self.policy_chain_label_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("What this chain policy is for")
-            }));
-        }
-        if self.policy_chain_max_calls_input.is_none() {
-            self.policy_chain_max_calls_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("Maximum calls per batch")
-                    .default_value("1")
-            }));
-        }
-        if self.policy_chain_native_values_input.is_none() {
-            self.policy_chain_native_values_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder(
-                    "Comma-separated exact wei values, for example 0, 1000000000000000000",
-                )
-            }));
-        }
         if self.policy_rule_label_input.is_none() {
             self.policy_rule_label_input =
                 Some(cx.new(|cx| {
@@ -3466,9 +3281,9 @@ impl WalletWindow {
                     .placeholder("0x-prefixed target addresses, separated by commas")
             }));
         }
-        if self.policy_rule_senders_input.is_none() {
-            self.policy_rule_senders_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("0x-prefixed sender addresses or $self")
+        if self.policy_rule_chain_ids_input.is_none() {
+            self.policy_rule_chain_ids_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Decimal chain IDs, separated by commas")
             }));
         }
         if self.policy_rule_values_input.is_none() {
@@ -4171,6 +3986,7 @@ impl WalletWindow {
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
+            scroll_interacted: false,
         });
     }
 
@@ -4416,7 +4232,6 @@ impl WalletWindow {
                             validation: None,
                             mode: PolicyEditorMode::Guided,
                         });
-                        self.reset_guided_policy_chain_form(window, cx);
                         self.reset_guided_policy_rule_form(window, cx);
                         self.policy_action_error = None;
                         self.policy_editor_anchor.scroll_to(window, cx);
@@ -4470,7 +4285,6 @@ impl WalletWindow {
                             validation: Some(Ok(review)),
                             mode: PolicyEditorMode::Advanced,
                         });
-                        self.reset_guided_policy_chain_form(window, cx);
                         self.reset_guided_policy_rule_form(window, cx);
                         self.policy_action_error = None;
                     }
@@ -4525,195 +4339,11 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn reset_guided_policy_chain_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [
-            self.policy_chain_input.as_ref(),
-            self.policy_chain_label_input.as_ref(),
-            self.policy_chain_native_values_input.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
-        if let Some(input) = self.policy_chain_max_calls_input.as_ref() {
-            input.update(cx, |input, cx| input.set_value("1", window, cx));
-        }
-        self.policy_chain_original_key = None;
-        self.policy_chain_native_value_mode = GuidedNativeValueMode::None;
-        self.policy_chain_errors = GuidedPolicyChainErrors::default();
-        cx.notify();
-    }
-
-    fn edit_guided_policy_chain(
-        &mut self,
-        chain_key: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(Ok(policy)) = self
-            .policy_editor
-            .as_ref()
-            .map(|editor| &editor.guided_policy)
-        else {
-            return;
-        };
-        let Some(chain) = policy.chains.get(chain_key) else {
-            self.policy_chain_errors.form =
-                Some("The selected chain entry no longer exists.".into());
-            cx.notify();
-            return;
-        };
-        let native = serde_json::to_value(&chain.native_value);
-        let (native_mode, native_values) = match native {
-            Ok(serde_json::Value::String(value)) if value == "any_value" => {
-                (GuidedNativeValueMode::Any, String::new())
-            }
-            Ok(serde_json::Value::Object(object)) if object.len() == 1 => {
-                if let Some(serde_json::Value::String(value)) = object.get("eq")
-                    && value == "0"
-                {
-                    (GuidedNativeValueMode::None, String::new())
-                } else if let Some(serde_json::Value::String(value)) = object.get("eq") {
-                    (GuidedNativeValueMode::Exact, value.clone())
-                } else if let Some(serde_json::Value::Array(values)) = object.get("in") {
-                    let values = values
-                        .iter()
-                        .map(|value| value.as_str())
-                        .collect::<Option<Vec<_>>>();
-                    let Some(values) = values else {
-                        self.policy_chain_errors.form = Some(
-                            "This native-value predicate needs the Advanced JSON editor.".into(),
-                        );
-                        cx.notify();
-                        return;
-                    };
-                    (GuidedNativeValueMode::Exact, values.join(", "))
-                } else {
-                    self.policy_chain_errors.form =
-                        Some("This native-value predicate needs the Advanced JSON editor.".into());
-                    cx.notify();
-                    return;
-                }
-            }
-            Ok(_) | Err(_) => {
-                self.policy_chain_errors.form =
-                    Some("This native-value predicate needs the Advanced JSON editor.".into());
-                cx.notify();
-                return;
-            }
-        };
-        let values = [
-            (self.policy_chain_input.as_ref(), chain_key.to_owned()),
-            (
-                self.policy_chain_label_input.as_ref(),
-                chain.label.clone().unwrap_or_default(),
-            ),
-            (
-                self.policy_chain_max_calls_input.as_ref(),
-                chain.max_calls_per_batch.to_string(),
-            ),
-            (
-                self.policy_chain_native_values_input.as_ref(),
-                native_values,
-            ),
-        ];
-        for (input, value) in values {
-            if let Some(input) = input {
-                input.update(cx, |input, cx| input.set_value(value, window, cx));
-            }
-        }
-        self.policy_chain_original_key = Some(chain_key.to_owned());
-        self.policy_chain_native_value_mode = native_mode;
-        self.policy_chain_errors = GuidedPolicyChainErrors::default();
-        if let Some(input) = self.policy_chain_input.as_ref() {
-            input.update(cx, |input, cx| {
-                input.set_selected_range(0..input.value().len(), cx);
-                input.focus(window, cx);
-            });
-        }
-        self.policy_editor_anchor.scroll_to(window, cx);
-        cx.notify();
-    }
-
-    fn save_guided_policy_chain(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inputs = (
-            self.policy_chain_input.as_ref(),
-            self.policy_chain_label_input.as_ref(),
-            self.policy_chain_max_calls_input.as_ref(),
-            self.policy_chain_native_values_input.as_ref(),
-            self.policy_json_input.as_ref(),
-        );
-        let (Some(chain), Some(label), Some(max_calls), Some(native_values), Some(document_input)) =
-            inputs
-        else {
-            return;
-        };
-        let draft = GuidedPolicyChainDraft {
-            chain: chain.read(cx).value().to_string(),
-            label: label.read(cx).value().to_string(),
-            max_calls: max_calls.read(cx).value().to_string(),
-            native_value_mode: self.policy_chain_native_value_mode,
-            native_values: native_values.read(cx).value().to_string(),
-        };
-        let result = update_guided_policy_chain(
-            document_input.read(cx).value().as_ref(),
-            self.policy_chain_original_key.as_deref(),
-            &draft,
-        );
-        match result {
-            Ok((document, policy)) => {
-                document_input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
-                self.reset_guided_policy_chain_form(window, cx);
-            }
-            Err(errors) => self.policy_chain_errors = errors,
-        }
-        cx.notify();
-    }
-
-    fn remove_guided_policy_chain(
-        &mut self,
-        chain_key: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(input) = self.policy_json_input.as_ref() else {
-            return;
-        };
-        match remove_guided_policy_chain(input.read(cx).value().as_ref(), chain_key) {
-            Ok((document, policy)) => {
-                input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.policy_action_error = None;
-                if self.policy_chain_original_key.as_deref() == Some(chain_key) {
-                    self.reset_guided_policy_chain_form(window, cx);
-                }
-                if self.policy_rule_chain_key.as_deref() == Some(chain_key) {
-                    self.reset_guided_policy_rule_form(window, cx);
-                }
-            }
-            Err(error) => {
-                self.policy_action_error =
-                    Some(format!("Could not remove chain from draft: {error:#}").into());
-            }
-        }
-        cx.notify();
-    }
-
     fn reset_guided_policy_rule_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for input in [
             self.policy_rule_label_input.as_ref(),
             self.policy_rule_targets_input.as_ref(),
-            self.policy_rule_senders_input.as_ref(),
+            self.policy_rule_chain_ids_input.as_ref(),
             self.policy_rule_values_input.as_ref(),
             self.policy_rule_abi_input.as_ref(),
         ]
@@ -4725,11 +4355,11 @@ impl WalletWindow {
         if let Some(input) = self.policy_rule_args_input.as_ref() {
             input.update(cx, |input, cx| input.set_value("{}", window, cx));
         }
-        self.policy_rule_chain_key = None;
+        self.policy_rule_editor_open = false;
         self.policy_rule_original_index = None;
         self.policy_rule_effect = GuidedRuleEffect::Allow;
         self.policy_rule_target_mode = GuidedLiteralMode::Any;
-        self.policy_rule_sender_mode = GuidedLiteralMode::Any;
+        self.policy_rule_chain_mode = GuidedLiteralMode::Any;
         self.policy_rule_value_mode = GuidedLiteralMode::Any;
         self.policy_rule_calldata_mode = GuidedCalldataMode::Any;
         self.policy_rule_errors = GuidedPolicyRuleErrors::default();
@@ -4738,7 +4368,6 @@ impl WalletWindow {
 
     fn begin_guided_policy_rule(
         &mut self,
-        chain_key: &str,
         index: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -4752,11 +4381,7 @@ impl WalletWindow {
             else {
                 return;
             };
-            let Some(rule) = policy
-                .chains
-                .get(chain_key)
-                .and_then(|chain| chain.rules.get(index))
-            else {
+            let Some(rule) = policy.rules.get(index) else {
                 self.policy_rule_errors.form = Some("The selected rule no longer exists.".into());
                 cx.notify();
                 return;
@@ -4774,7 +4399,7 @@ impl WalletWindow {
             let values = [
                 (self.policy_rule_label_input.as_ref(), draft.label),
                 (self.policy_rule_targets_input.as_ref(), draft.targets),
-                (self.policy_rule_senders_input.as_ref(), draft.senders),
+                (self.policy_rule_chain_ids_input.as_ref(), draft.chain_ids),
                 (self.policy_rule_values_input.as_ref(), draft.values),
                 (self.policy_rule_abi_input.as_ref(), draft.abi),
                 (self.policy_rule_args_input.as_ref(), draft.args),
@@ -4786,12 +4411,12 @@ impl WalletWindow {
             }
             self.policy_rule_effect = draft.effect;
             self.policy_rule_target_mode = draft.target_mode;
-            self.policy_rule_sender_mode = draft.sender_mode;
+            self.policy_rule_chain_mode = draft.chain_mode;
             self.policy_rule_value_mode = draft.value_mode;
             self.policy_rule_calldata_mode = draft.calldata_mode;
             self.policy_rule_original_index = Some(index);
         }
-        self.policy_rule_chain_key = Some(chain_key.to_owned());
+        self.policy_rule_editor_open = true;
         if let Some(input) = self.policy_rule_label_input.as_ref() {
             input.update(cx, |input, cx| input.focus(window, cx));
         }
@@ -4803,7 +4428,7 @@ impl WalletWindow {
         let inputs = (
             self.policy_rule_label_input.as_ref(),
             self.policy_rule_targets_input.as_ref(),
-            self.policy_rule_senders_input.as_ref(),
+            self.policy_rule_chain_ids_input.as_ref(),
             self.policy_rule_values_input.as_ref(),
             self.policy_rule_abi_input.as_ref(),
             self.policy_rule_args_input.as_ref(),
@@ -4812,7 +4437,7 @@ impl WalletWindow {
         let (
             Some(label),
             Some(targets),
-            Some(senders),
+            Some(chain_ids),
             Some(values),
             Some(abi),
             Some(args),
@@ -4821,16 +4446,16 @@ impl WalletWindow {
         else {
             return;
         };
-        let Some(chain_key) = self.policy_rule_chain_key.as_deref() else {
+        if !self.policy_rule_editor_open {
             return;
-        };
+        }
         let draft = GuidedPolicyRuleDraft {
             effect: self.policy_rule_effect,
             label: label.read(cx).value().to_string(),
             target_mode: self.policy_rule_target_mode,
             targets: targets.read(cx).value().to_string(),
-            sender_mode: self.policy_rule_sender_mode,
-            senders: senders.read(cx).value().to_string(),
+            chain_mode: self.policy_rule_chain_mode,
+            chain_ids: chain_ids.read(cx).value().to_string(),
             value_mode: self.policy_rule_value_mode,
             values: values.read(cx).value().to_string(),
             calldata_mode: self.policy_rule_calldata_mode,
@@ -4839,7 +4464,6 @@ impl WalletWindow {
         };
         match update_guided_policy_rule(
             document_input.read(cx).value().as_ref(),
-            chain_key,
             self.policy_rule_original_index,
             &draft,
         ) {
@@ -4859,7 +4483,6 @@ impl WalletWindow {
 
     fn remove_guided_policy_rule(
         &mut self,
-        chain_key: &str,
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -4867,21 +4490,64 @@ impl WalletWindow {
         let Some(input) = self.policy_json_input.as_ref() else {
             return;
         };
-        match remove_guided_policy_rule(input.read(cx).value().as_ref(), chain_key, index) {
+        match remove_guided_policy_rule(input.read(cx).value().as_ref(), index) {
             Ok((document, policy)) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 if let Some(editor) = self.policy_editor.as_mut() {
                     editor.guided_policy = Ok(policy);
                     editor.validation = None;
                 }
-                if self.policy_rule_chain_key.as_deref() == Some(chain_key) {
-                    self.reset_guided_policy_rule_form(window, cx);
-                }
+                self.reset_guided_policy_rule_form(window, cx);
                 self.policy_action_error = None;
             }
             Err(error) => {
                 self.policy_action_error =
                     Some(format!("Could not remove rule from draft: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn move_guided_policy_rule(
+        &mut self,
+        from: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.policy_json_input.as_ref() else {
+            return;
+        };
+        let result = (|| -> Result<(String, WalletPolicy)> {
+            let mut value: serde_json::Value =
+                serde_json::from_str(input.read(cx).value().as_ref())
+                    .context("policy document is not valid JSON")?;
+            let rules = value
+                .as_object_mut()
+                .and_then(|root| root.get_mut("rules"))
+                .and_then(serde_json::Value::as_array_mut)
+                .context("the policy document has no ordered rule list")?;
+            ensure!(
+                from < rules.len() && to < rules.len(),
+                "the selected rule no longer exists"
+            );
+            rules.swap(from, to);
+            let policy = WalletPolicy::parse(value)?;
+            Ok((serde_json::to_string_pretty(&policy)?, policy))
+        })();
+        match result {
+            Ok((document, policy)) => {
+                input.update(cx, |input, cx| input.set_value(document, window, cx));
+                if let Some(editor) = self.policy_editor.as_mut() {
+                    editor.guided_policy = Ok(policy);
+                    editor.validation = None;
+                }
+                self.policy_action_error = None;
+                self.reset_guided_policy_rule_form(window, cx);
+            }
+            Err(error) => {
+                self.policy_action_error =
+                    Some(format!("Could not reorder rule: {error:#}").into());
             }
         }
         cx.notify();
@@ -4902,12 +4568,33 @@ impl WalletWindow {
                     "Danger: this draft automatically signs every call on every chain, including arbitrary calldata and native value. Validate the diff carefully before installing it."
                         .into(),
                 );
-                self.reset_guided_policy_chain_form(window, cx);
                 self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
                     Some(format!("Could not prepare the allow-anything policy: {error:#}").into());
+            }
+        }
+        cx.notify();
+    }
+
+    fn apply_disable_signing_policy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(editor), Some(input)) =
+            (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
+        else {
+            return;
+        };
+        match disable_signing_policy_document() {
+            Ok((document, policy)) => {
+                input.update(cx, |input, cx| input.set_value(document, window, cx));
+                editor.validation = None;
+                editor.guided_policy = Ok(policy);
+                self.policy_action_error = None;
+                self.reset_guided_policy_rule_form(window, cx);
+            }
+            Err(error) => {
+                self.policy_action_error =
+                    Some(format!("Could not prepare the disable-signing policy: {error:#}").into());
             }
         }
         cx.notify();
@@ -4925,7 +4612,6 @@ impl WalletWindow {
                 editor.validation = None;
                 editor.guided_policy = Ok(WalletPolicy::require_approval_for_everything());
                 self.policy_action_error = None;
-                self.reset_guided_policy_chain_form(window, cx);
                 self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
@@ -5078,6 +4764,7 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
+                    scroll_interacted: false,
                 });
             }
             Err(error) => {
@@ -6407,13 +6094,11 @@ impl WalletWindow {
             && active.awaiting_refresh
             && active.completion.is_none()
         {
-            let identity_changed = active.state.document().identity != prompt.document.identity;
             active.state.refresh(prompt.document);
-            if identity_changed {
-                active.scroll_handle = ScrollHandle::new();
-                active.scroll_check_scheduled = false;
-                active.scroll_layout_ready = false;
-            }
+            active.scroll_handle = ScrollHandle::new();
+            active.scroll_check_scheduled = false;
+            active.scroll_layout_ready = false;
+            active.scroll_interacted = false;
             active.simulation = Some(prompt.simulation);
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
             active.awaiting_refresh = false;
@@ -6442,6 +6127,7 @@ impl WalletWindow {
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
+            scroll_interacted: false,
         });
     }
 
@@ -6462,6 +6148,7 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
+                    scroll_interacted: false,
                 });
                 self.clear_route_error(Route::Reviews);
             }
@@ -6492,6 +6179,7 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
+                    scroll_interacted: false,
                 });
                 self.clear_route_error(Route::Reviews);
             }
@@ -6551,7 +6239,8 @@ impl WalletWindow {
         let Some(review) = self.active_review.as_mut() else {
             return;
         };
-        if review.scroll_layout_ready
+        if review.scroll_interacted
+            && review.scroll_layout_ready
             && !review.state.approve_enabled()
             && scroll_reached_end(
                 review.scroll_handle.offset().y,
@@ -6969,7 +6658,7 @@ impl WalletWindow {
                 ButtonVariants::primary,
             );
             let button = if route == Route::Reviews {
-                let logo = if cx.theme().is_dark() {
+                let logo = if cx.theme().is_dark() || route == self.route {
                     self.sidebar_logo_dark.clone()
                 } else {
                     self.sidebar_logo_light.clone()
@@ -6990,17 +6679,17 @@ impl WalletWindow {
                         badge.child(
                             div()
                                 .absolute()
-                                .top(px(-4.0))
-                                .right(px(-8.0))
-                                .w(px(30.0))
-                                .h(px(24.0))
+                                .top(px(-2.0))
+                                .right(px(-5.0))
+                                .w(px(26.0))
+                                .h(px(20.0))
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
                                 .bg(cx.theme().red)
                                 .text_color(gpui_component::white())
-                                .text_sm()
+                                .text_xs()
                                 .font_semibold()
                                 .child(count),
                         )
@@ -7597,7 +7286,7 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose a session duration."),
+                    .child("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose paired access-token and refresh-session lifetimes."),
             );
             for instruction in login_instructions {
                 let command = instruction.command.clone();
@@ -7714,7 +7403,7 @@ impl WalletWindow {
                                                 .text_color(if expired {
                                                     cx.theme().danger
                                                 } else {
-                                                    cx.theme().success
+                                                    cx.theme().muted_foreground
                                                 })
                                                 .child(expiration),
                                         )
@@ -8139,178 +7828,10 @@ impl WalletWindow {
         }
     }
 
-    fn render_guided_policy_chain_form(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut form = div()
-            .p_4()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .font_semibold()
-                    .child(if self.policy_chain_original_key.is_some() {
-                        "Edit chain policy"
-                    } else {
-                        "Add chain policy"
-                    }),
-            );
-        if let Some(input) = self.policy_chain_input.as_ref() {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child("Chain")
-                    .child(Input::new(input))
-                    .when_some(self.policy_chain_errors.chain.clone(), |field, error| {
-                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                    }),
-            );
-        }
-        if let Some(input) = self.policy_chain_label_input.as_ref() {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child("Description (optional)")
-                    .child(Input::new(input))
-                    .when_some(self.policy_chain_errors.label.clone(), |field, error| {
-                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                    }),
-            );
-        }
-        if let Some(input) = self.policy_chain_max_calls_input.as_ref() {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child("Maximum calls in one atomic batch")
-                    .child(Input::new(input))
-                    .when_some(
-                        self.policy_chain_errors.max_calls.clone(),
-                        |field, error| {
-                            field.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                        },
-                    ),
-            );
-        }
-        form = form
-            .child("Native value guard")
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        Button::new("policy-native-none")
-                            .label("No native value")
-                            .when(
-                                self.policy_chain_native_value_mode
-                                    == GuidedNativeValueMode::None,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_chain_native_value_mode =
-                                    GuidedNativeValueMode::None;
-                                view.policy_chain_errors.native_values = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("policy-native-any")
-                            .label("Any native value")
-                            .when(
-                                self.policy_chain_native_value_mode
-                                    == GuidedNativeValueMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_chain_native_value_mode = GuidedNativeValueMode::Any;
-                                view.policy_chain_errors.native_values = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("policy-native-exact")
-                            .label("Exact wei values")
-                            .when(
-                                self.policy_chain_native_value_mode
-                                    == GuidedNativeValueMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_chain_native_value_mode =
-                                    GuidedNativeValueMode::Exact;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("This is a guard, not a grant: a rule must still allow the call before it can sign automatically."),
-            );
-        if self.policy_chain_native_value_mode == GuidedNativeValueMode::Exact
-            && let Some(input) = self.policy_chain_native_values_input.as_ref()
-        {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child("Allowed values in wei")
-                    .child(Input::new(input))
-                    .when_some(
-                        self.policy_chain_errors.native_values.clone(),
-                        |field, error| {
-                            field.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                        },
-                    ),
-            );
-        }
-        form = form
-            .when_some(self.policy_chain_errors.form.clone(), |form, error| {
-                form.child(div().text_sm().text_color(cx.theme().danger).child(error))
-            })
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("save-guided-policy-chain")
-                            .label(if self.policy_chain_original_key.is_some() {
-                                "Save chain draft"
-                            } else {
-                                "Add chain draft"
-                            })
-                            .primary()
-                            .disabled(self.policy_installing)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.save_guided_policy_chain(window, cx);
-                            })),
-                    )
-                    .when(self.policy_chain_original_key.is_some(), |actions| {
-                        actions.child(
-                            Button::new("cancel-guided-policy-chain")
-                                .label("Cancel edit")
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.reset_guided_policy_chain_form(window, cx);
-                                })),
-                        )
-                    }),
-            );
-        form
-    }
-
     fn render_guided_policy_rule_form(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let Some(chain_key) = self.policy_rule_chain_key.as_ref() else {
+        if !self.policy_rule_editor_open {
             return div();
-        };
+        }
         let mut form = div()
             .p_4()
             .rounded_lg()
@@ -8320,7 +7841,7 @@ impl WalletWindow {
             .flex_col()
             .gap_3()
             .child(div().font_semibold().child(format!(
-                "{} rule for chain {chain_key}",
+                "{} ordered rule",
                 if self.policy_rule_original_index.is_some() {
                     "Edit"
                 } else {
@@ -8370,36 +7891,50 @@ impl WalletWindow {
                     }),
             );
         }
-        form = form.child("Called contract or recipient").child(
-            h_flex()
-                .gap_2()
-                .child(
-                    Button::new("policy-rule-target-any")
-                        .label("Any target")
-                        .when(
-                            self.policy_rule_target_mode == GuidedLiteralMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_target_mode = GuidedLiteralMode::Any;
-                            view.policy_rule_errors.targets = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("policy-rule-target-exact")
-                        .label("Named targets")
-                        .when(
-                            self.policy_rule_target_mode == GuidedLiteralMode::Exact,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_target_mode = GuidedLiteralMode::Exact;
-                            cx.notify();
-                        })),
-                ),
-        );
-        if self.policy_rule_target_mode == GuidedLiteralMode::Exact
+        form = form
+            .child("Called contract or recipient")
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("policy-rule-target-any")
+                            .label("Any target")
+                            .when(
+                                self.policy_rule_target_mode == GuidedLiteralMode::Any,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_target_mode = GuidedLiteralMode::Any;
+                                view.policy_rule_errors.targets = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("policy-rule-target-exact")
+                            .label("Named targets")
+                            .when(
+                                self.policy_rule_target_mode == GuidedLiteralMode::Exact,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_target_mode = GuidedLiteralMode::Exact;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                Button::new("policy-rule-target-predicate")
+                    .label("Predicate")
+                    .when(
+                        self.policy_rule_target_mode == GuidedLiteralMode::Predicate,
+                        ButtonVariants::primary,
+                    )
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.policy_rule_target_mode = GuidedLiteralMode::Predicate;
+                        cx.notify();
+                    })),
+            );
+        if self.policy_rule_target_mode != GuidedLiteralMode::Any
             && let Some(input) = self.policy_rule_targets_input.as_ref()
         {
             form = form.child(
@@ -8413,37 +7948,51 @@ impl WalletWindow {
                     }),
             );
         }
-        form = form.child("Sending account").child(
-            h_flex()
-                .gap_2()
-                .child(
-                    Button::new("policy-rule-sender-any")
-                        .label("Selected wallet")
-                        .when(
-                            self.policy_rule_sender_mode == GuidedLiteralMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_sender_mode = GuidedLiteralMode::Any;
-                            view.policy_rule_errors.senders = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("policy-rule-sender-exact")
-                        .label("Named senders")
-                        .when(
-                            self.policy_rule_sender_mode == GuidedLiteralMode::Exact,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_sender_mode = GuidedLiteralMode::Exact;
-                            cx.notify();
-                        })),
-                ),
-        );
-        if self.policy_rule_sender_mode == GuidedLiteralMode::Exact
-            && let Some(input) = self.policy_rule_senders_input.as_ref()
+        form = form
+            .child("Network chain ID")
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("policy-rule-chain-any")
+                            .label("Any network")
+                            .when(
+                                self.policy_rule_chain_mode == GuidedLiteralMode::Any,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_chain_mode = GuidedLiteralMode::Any;
+                                view.policy_rule_errors.chain_ids = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("policy-rule-chain-exact")
+                            .label("Specific chain IDs")
+                            .when(
+                                self.policy_rule_chain_mode == GuidedLiteralMode::Exact,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_chain_mode = GuidedLiteralMode::Exact;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                Button::new("policy-rule-chain-predicate")
+                    .label("Predicate")
+                    .when(
+                        self.policy_rule_chain_mode == GuidedLiteralMode::Predicate,
+                        ButtonVariants::primary,
+                    )
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.policy_rule_chain_mode = GuidedLiteralMode::Predicate;
+                        cx.notify();
+                    })),
+            );
+        if self.policy_rule_chain_mode != GuidedLiteralMode::Any
+            && let Some(input) = self.policy_rule_chain_ids_input.as_ref()
         {
             form = form.child(
                 div()
@@ -8451,41 +8000,55 @@ impl WalletWindow {
                     .flex_col()
                     .gap_1()
                     .child(Input::new(input))
-                    .when_some(self.policy_rule_errors.senders.clone(), |field, error| {
+                    .when_some(self.policy_rule_errors.chain_ids.clone(), |field, error| {
                         field.child(div().text_sm().text_color(cx.theme().danger).child(error))
                     }),
             );
         }
-        form = form.child("Native value on the call").child(
-            h_flex()
-                .gap_2()
-                .child(
-                    Button::new("policy-rule-value-any")
-                        .label("Any value")
-                        .when(
-                            self.policy_rule_value_mode == GuidedLiteralMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_value_mode = GuidedLiteralMode::Any;
-                            view.policy_rule_errors.values = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("policy-rule-value-exact")
-                        .label("Exact wei values")
-                        .when(
-                            self.policy_rule_value_mode == GuidedLiteralMode::Exact,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_value_mode = GuidedLiteralMode::Exact;
-                            cx.notify();
-                        })),
-                ),
-        );
-        if self.policy_rule_value_mode == GuidedLiteralMode::Exact
+        form = form
+            .child("Native value on the call")
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("policy-rule-value-any")
+                            .label("Any value")
+                            .when(
+                                self.policy_rule_value_mode == GuidedLiteralMode::Any,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_value_mode = GuidedLiteralMode::Any;
+                                view.policy_rule_errors.values = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("policy-rule-value-exact")
+                            .label("Exact wei values")
+                            .when(
+                                self.policy_rule_value_mode == GuidedLiteralMode::Exact,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_value_mode = GuidedLiteralMode::Exact;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                Button::new("policy-rule-value-predicate")
+                    .label("Range or predicate")
+                    .when(
+                        self.policy_rule_value_mode == GuidedLiteralMode::Predicate,
+                        ButtonVariants::primary,
+                    )
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.policy_rule_value_mode = GuidedLiteralMode::Predicate;
+                        cx.notify();
+                    })),
+            );
+        if self.policy_rule_value_mode != GuidedLiteralMode::Any
             && let Some(input) = self.policy_rule_values_input.as_ref()
         {
             form = form.child(
@@ -8579,10 +8142,7 @@ impl WalletWindow {
                 );
             }
         }
-        form.when_some(self.policy_rule_errors.chain.clone(), |form, error| {
-            form.child(div().text_sm().text_color(cx.theme().danger).child(error))
-        })
-        .when_some(self.policy_rule_errors.form.clone(), |form, error| {
+        form.when_some(self.policy_rule_errors.form.clone(), |form, error| {
             form.child(div().text_sm().text_color(cx.theme().danger).child(error))
         })
         .child(
@@ -8902,7 +8462,7 @@ impl WalletWindow {
                     );
                 }
                 Ok(policy) => {
-                    if policy == &WalletPolicy::allow_all_with_approval() {
+                    if policy == &WalletPolicy::allow_anything() {
                         editor_panel = editor_panel.child(
                             div()
                                 .p_3()
@@ -8913,79 +8473,44 @@ impl WalletWindow {
                                 .child("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value."),
                         );
                     }
-                    let mut chain_cards = div().flex().flex_col().gap_3();
-                    for (chain_key, chain) in &policy.chains {
-                        let edit_key = chain_key.clone();
-                        let remove_key = chain_key.clone();
-                        let mut rules = div().flex().flex_col().gap_1();
-                        if chain.rules.is_empty() {
-                            rules = rules.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("No automatic allow or hard-deny rules; calls queue for review."),
-                            );
-                        } else {
-                            for (rule_index, rule) in chain.rules.iter().enumerate() {
-                                let edit_rule_chain = chain_key.clone();
-                                let remove_rule_chain = chain_key.clone();
-                                rules = rules.child(
-                                    div()
-                                        .py_2()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .font_family(MONO_FONT_FAMILY)
-                                                .text_sm()
-                                                .child(rule.describe()),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .child(
-                                                    Button::new(SharedString::from(format!(
-                                                        "edit-policy-rule-{chain_key}-{rule_index}"
-                                                    )))
-                                                    .label("Edit")
-                                                    .on_click(cx.listener(
-                                                        move |view, _, window, cx| {
-                                                            view.begin_guided_policy_rule(
-                                                                &edit_rule_chain,
-                                                                Some(rule_index),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                )
-                                                .child(
-                                                    Button::new(SharedString::from(format!(
-                                                        "remove-policy-rule-{chain_key}-{rule_index}"
-                                                    )))
-                                                    .label("Remove")
-                                                    .danger()
-                                                    .on_click(cx.listener(
-                                                        move |view, _, window, cx| {
-                                                            view.remove_guided_policy_rule(
-                                                                &remove_rule_chain,
-                                                                rule_index,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                ),
-                                        ),
+                    let mut rule_cards = div().flex().flex_col().gap_2();
+                    for (rule_index, rule) in policy.rules.iter().enumerate() {
+                        let mut controls = h_flex().gap_2();
+                        if rule_index > 0 {
+                            controls =
+                                controls.child(
+                                    Button::new(SharedString::from(format!(
+                                        "move-policy-rule-up-{rule_index}"
+                                    )))
+                                    .label("Move up")
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.move_guided_policy_rule(
+                                            rule_index,
+                                            rule_index - 1,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
                                 );
-                            }
                         }
-                        let add_rule_chain = chain_key.clone();
-                        chain_cards = chain_cards.child(
+                        if rule_index + 1 < policy.rules.len() {
+                            controls =
+                                controls.child(
+                                    Button::new(SharedString::from(format!(
+                                        "move-policy-rule-down-{rule_index}"
+                                    )))
+                                    .label("Move down")
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.move_guided_policy_rule(
+                                            rule_index,
+                                            rule_index + 1,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                                );
+                        }
+                        rule_cards = rule_cards.child(
                             div()
                                 .p_3()
                                 .rounded_lg()
@@ -8994,104 +8519,70 @@ impl WalletWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
+                                .child(div().font_semibold().child(format!(
+                                    "{}. {}",
+                                    rule_index + 1,
+                                    match rule.effect {
+                                        Effect::Allow => "Allow",
+                                        Effect::Deny => "Deny",
+                                    }
+                                )))
+                                .child(div().min_w_0().text_sm().child(rule.describe()))
                                 .child(
-                                    h_flex()
-                                        .w_full()
-                                        .justify_between()
-                                        .gap_3()
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("The first matching rule decides this call."),
+                                )
+                                .child(
+                                    controls
                                         .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(div().font_semibold().child(
-                                                    if chain_key == "*" {
-                                                        "Every otherwise-unconfigured chain"
-                                                            .to_owned()
-                                                    } else {
-                                                        format!("Chain {chain_key}")
-                                                    },
-                                                ))
-                                                .when_some(chain.label.clone(), |column, label| {
-                                                    column.child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(cx.theme().muted_foreground)
-                                                            .child(label),
-                                                    )
-                                                }),
+                                            Button::new(SharedString::from(format!(
+                                                "edit-policy-rule-{rule_index}"
+                                            )))
+                                            .label("Edit")
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.begin_guided_policy_rule(
+                                                    Some(rule_index),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
                                         )
                                         .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .child(
-                                                    Button::new(SharedString::from(format!(
-                                                        "edit-policy-chain-{chain_key}"
-                                                    )))
-                                                    .label("Edit")
-                                                    .on_click(cx.listener(
-                                                        move |view, _, window, cx| {
-                                                            view.edit_guided_policy_chain(
-                                                                &edit_key, window, cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                )
-                                                .child(
-                                                    Button::new(SharedString::from(format!(
-                                                        "remove-policy-chain-{chain_key}"
-                                                    )))
-                                                    .label("Remove")
-                                                    .danger()
-                                                    .on_click(cx.listener(
-                                                        move |view, _, window, cx| {
-                                                            view.remove_guided_policy_chain(
-                                                                &remove_key,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                ),
+                                            Button::new(SharedString::from(format!(
+                                                "remove-policy-rule-{rule_index}"
+                                            )))
+                                            .label("Remove")
+                                            .danger()
+                                            .on_click(cx.listener(move |view, _, window, cx| {
+                                                view.remove_guided_policy_rule(
+                                                    rule_index, window, cx,
+                                                );
+                                            })),
                                         ),
-                                )
-                                .child(format!(
-                                    "Maximum {} call(s) per batch · native value {}",
-                                    chain.max_calls_per_batch,
-                                    chain.native_value.describe()
-                                ))
-                                .child(rules)
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "add-policy-rule-{chain_key}"
-                                    )))
-                                    .label("Add rule")
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.begin_guided_policy_rule(
-                                            &add_rule_chain,
-                                            None,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
                                 ),
                         );
                     }
-                    if policy.chains.is_empty() {
-                        chain_cards = chain_cards.child(
-                            div()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("No chains are configured; every request requires review."),
-                        );
+                    if policy.rules.is_empty() {
+                        rule_cards =
+                            rule_cards.child(div().text_color(cx.theme().muted_foreground).child(
+                                "No rules. Every transaction request will need your approval.",
+                            ));
                     }
                     editor_panel = editor_panel
-                        .child(self.render_guided_policy_chain_form(cx))
                         .child(self.render_guided_policy_rule_form(cx))
                         .child(
                             GroupBox::new()
-                                .id("guided-policy-chains")
+                                .id("guided-policy-rules")
                                 .outline()
-                                .title("Chain policies")
-                                .child(chain_cards),
+                                .title("Ordered rules")
+                                .child(rule_cards)
+                                .child(Button::new("add-policy-rule").label("Add rule").on_click(
+                                    cx.listener(|view, _, window, cx| {
+                                        view.begin_guided_policy_rule(None, window, cx);
+                                    }),
+                                )),
                         );
                 }
             },
@@ -9107,6 +8598,14 @@ impl WalletWindow {
                         .disabled(self.policy_installing)
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.reset_policy_editor(window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("disable-signing-policy-draft")
+                        .label("Disable transaction signing")
+                        .disabled(self.policy_installing)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.apply_disable_signing_policy(window, cx);
                         })),
                 )
                 .child(
@@ -9369,15 +8868,21 @@ impl WalletWindow {
         panel.children(self.walletconnect_sessions.iter().cloned().map(|session| {
             let session_id = session.id;
             div()
+                .w_full()
+                .min_w_0()
                 .p_3()
                 .rounded_lg()
                 .border_1()
                 .border_color(cx.theme().border)
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .justify_between()
+                .gap_3()
                 .child(
                     div()
+                        .min_w_0()
+                        .flex_1()
                         .flex()
                         .flex_col()
                         .child(format!(
@@ -9387,12 +8892,20 @@ impl WalletWindow {
                         ))
                         .child(
                             div()
+                                .min_w_0()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(format!(
-                                    "{} active request(s) · topic {}",
-                                    session.active_requests, session.pairing_topic
-                                )),
+                                .child(format!("{} active request(s)", session.active_requests)),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .font_family(MONO_FONT_FAMILY)
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(format!("Topic {}", session.pairing_topic)),
                         )
                         .when_some(session.last_error, |column, error| {
                             column.child(format!("Connection error: {error}"))
@@ -9400,6 +8913,7 @@ impl WalletWindow {
                 )
                 .child(
                     Button::new(SharedString::from(format!("disconnect-wc-{session_id}")))
+                        .flex_none()
                         .label("Disconnect")
                         .danger()
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -10134,13 +9648,16 @@ impl WalletWindow {
                                                         .border_color(if disabled {
                                                             cx.theme().border
                                                         } else {
-                                                            cx.theme().success
+                                                            cx.theme().primary
+                                                        })
+                                                        .when(!disabled, |badge| {
+                                                            badge.bg(cx.theme().primary)
                                                         })
                                                         .text_xs()
                                                         .text_color(if disabled {
                                                             cx.theme().muted_foreground
                                                         } else {
-                                                            cx.theme().success
+                                                            cx.theme().primary_foreground
                                                         })
                                                         .child(if disabled {
                                                             "Disabled"
@@ -10346,6 +9863,18 @@ impl WalletWindow {
             .iter()
             .filter(|network| !network.disabled)
             .collect::<Vec<_>>();
+        let selected_network_name = self.portfolio_chain_id.and_then(|selected| {
+            enabled_networks
+                .iter()
+                .find(|network| network.chain_id == selected)
+                .map(|network| {
+                    network
+                        .display_name
+                        .as_deref()
+                        .unwrap_or(&network.name)
+                        .to_owned()
+                })
+        });
         let mut network_picker = div().flex().flex_wrap().gap_2();
         for network in &enabled_networks {
             let chain_id = network.chain_id;
@@ -10375,19 +9904,33 @@ impl WalletWindow {
                 GroupBox::new()
                     .id("portfolio-network-picker")
                     .outline()
-                    .title("Network")
+                    .title("Portfolio network")
                     .child(network_picker),
             )
             .child(
                 div()
+                    .w_full()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
+                    .gap_3()
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Only non-zero balances on the selected network are shown"),
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div().font_semibold().child(
+                                    selected_network_name
+                                        .unwrap_or_else(|| "Select a network".to_owned()),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Only non-zero balances are shown"),
+                            ),
                     )
                     .child(
                         Button::new("refresh-portfolio")
@@ -10472,7 +10015,8 @@ impl WalletWindow {
                             .as_deref()
                             .unwrap_or(&item.network.name);
                         let mut card = div()
-                            .min_w(px(230.0))
+                            .w_full()
+                            .min_w_0()
                             .flex_1()
                             .p_3()
                             .rounded_lg()
@@ -10506,16 +10050,22 @@ impl WalletWindow {
                                     asset_index += 1;
                                     balances = balances.child(
                                         div()
+                                            .w_full()
+                                            .min_w_0()
                                             .py_2()
                                             .when(row_index + 1 < asset_count, |row| {
                                                 row.border_b_1().border_color(cx.theme().border)
                                             })
                                             .flex()
+                                            .flex_wrap()
                                             .justify_between()
                                             .gap_3()
                                             .child("Native")
                                             .child(
                                                 div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .truncate()
                                                     .font_family(MONO_FONT_FAMILY)
                                                     .text_sm()
                                                     .child(native_balance),
@@ -10538,24 +10088,35 @@ impl WalletWindow {
                                     );
                                     balances = balances.child(
                                         div()
+                                            .w_full()
+                                            .min_w_0()
                                             .py_2()
                                             .when(row_index + 1 < asset_count, |row| {
                                                 row.border_b_1().border_color(cx.theme().border)
                                             })
                                             .flex()
+                                            .flex_wrap()
                                             .justify_between()
                                             .gap_3()
                                             .child(
-                                                div().min_w_0().child(label).child(
-                                                    div()
-                                                        .text_xs()
-                                                        .font_family(MONO_FONT_FAMILY)
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(token.address.clone()),
-                                                ),
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .child(div().truncate().child(label))
+                                                    .child(
+                                                        div()
+                                                            .w_full()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .text_xs()
+                                                            .font_family(MONO_FONT_FAMILY)
+                                                            .text_color(cx.theme().muted_foreground)
+                                                            .child(token.address.clone()),
+                                                    ),
                                             )
                                             .child(
                                                 div()
+                                                    .flex_none()
                                                     .font_family(MONO_FONT_FAMILY)
                                                     .text_sm()
                                                     .child(balance),
@@ -10577,6 +10138,8 @@ impl WalletWindow {
                         shown_accounts += 1;
                         content = content.child(
                             div()
+                                .w_full()
+                                .min_w_0()
                                 .p_4()
                                 .rounded_lg()
                                 .border_1()
@@ -10586,12 +10149,21 @@ impl WalletWindow {
                                 .gap_3()
                                 .child(
                                     div()
+                                        .w_full()
+                                        .min_w_0()
                                         .child(
-                                            div().font_semibold().child(account.wallet.id.clone()),
+                                            div()
+                                                .min_w_0()
+                                                .font_semibold()
+                                                .truncate()
+                                                .child(account.wallet.id.clone()),
                                         )
                                         .child(
                                             div()
                                                 .font_family(MONO_FONT_FAMILY)
+                                                .w_full()
+                                                .min_w_0()
+                                                .truncate()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child(account.wallet.address.to_checksum(None)),
@@ -11120,8 +10692,6 @@ impl WalletWindow {
             }
             let amount_color = if fact.value.trim_start().starts_with('-') {
                 cx.theme().danger
-            } else if fact.value.trim_start().starts_with('+') {
-                cx.theme().success
             } else {
                 cx.theme().foreground
             };
@@ -11250,7 +10820,7 @@ impl WalletWindow {
         let (icon, color, title) = if simulation.simulation.success {
             (
                 IconName::CircleCheck,
-                cx.theme().success,
+                cx.theme().primary,
                 "Simulation succeeded",
             )
         } else {
@@ -11513,7 +11083,10 @@ impl WalletWindow {
                     .min_h_0()
                     .track_scroll(&active.scroll_handle)
                     .overflow_y_scrollbar()
-                    .on_scroll_wheel(cx.listener(|_view, _, window, cx| {
+                    .on_scroll_wheel(cx.listener(|view, _, window, cx| {
+                        if let Some(review) = view.active_review.as_mut() {
+                            review.scroll_interacted = true;
+                        }
                         cx.defer_in(window, |view, _, cx| {
                             view.update_review_scroll_state(cx);
                         });
@@ -12245,13 +11818,9 @@ fn show_wallet_window(
         view.network_editor_original = None;
         view.policy_json_input = None;
         view.policy_editor = None;
-        view.policy_chain_input = None;
-        view.policy_chain_label_input = None;
-        view.policy_chain_max_calls_input = None;
-        view.policy_chain_native_values_input = None;
         view.policy_rule_label_input = None;
         view.policy_rule_targets_input = None;
-        view.policy_rule_senders_input = None;
+        view.policy_rule_chain_ids_input = None;
         view.policy_rule_values_input = None;
         view.policy_rule_abi_input = None;
         view.policy_rule_args_input = None;
@@ -12308,7 +11877,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
     let (walletconnect_presenter, mut walletconnect_prompts) = ProposalPresenter::channel();
 
     gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(WalletAssets::default())
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
             apply_appearance_preference(

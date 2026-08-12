@@ -1,5 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/EkuboProtocol/wallet/main/schemas/policy.schema.json",
   "version": 1,
-  "rules": []
+  "rules": [
+    {
+      "effect": "allow",
+      "label": "Every transaction call"
+    }
+  ]
 }

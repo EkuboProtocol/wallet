@@ -46,11 +46,11 @@ pub struct PlatformTray {
     reviews: MenuItem,
     agents: MenuItem,
     snapshot: TraySnapshot,
-    dark_mode: bool,
+    dark_menu_bar: bool,
 }
 
 impl PlatformTray {
-    pub fn new(dark_mode: bool) -> Result<Self> {
+    pub fn new(dark_menu_bar: bool) -> Result<Self> {
         let menu = Menu::new();
         let open = MenuItem::with_id(OPEN_ID, "Open Wallet", true, None);
         let reviews = MenuItem::with_id(REVIEWS_ID, "No pending reviews", true, None);
@@ -81,7 +81,7 @@ impl PlatformTray {
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(true)
             .with_tooltip("Ekubo Wallet")
-            .with_icon(wallet_icon(dark_mode)?)
+            .with_icon(wallet_icon(dark_menu_bar)?)
             .with_icon_as_template(false)
             .build()
             .context("the desktop has no usable tray host")?;
@@ -96,18 +96,18 @@ impl PlatformTray {
                 connected_agents: 0,
                 walletconnect_sessions: 0,
             },
-            dark_mode,
+            dark_menu_bar,
         })
     }
 
-    pub fn set_dark_mode(&mut self, dark_mode: bool) {
-        if self.dark_mode == dark_mode {
+    pub fn set_dark_mode(&mut self, dark_menu_bar: bool) {
+        if self.dark_menu_bar == dark_menu_bar {
             return;
         }
-        if let Ok(icon) = wallet_icon(dark_mode)
+        if let Ok(icon) = wallet_icon(dark_menu_bar)
             && self.tray.set_icon(Some(icon)).is_ok()
         {
-            self.dark_mode = dark_mode;
+            self.dark_menu_bar = dark_menu_bar;
         }
     }
 
@@ -172,18 +172,52 @@ fn command_for_id(id: &str) -> Option<TrayCommand> {
 }
 
 #[cfg(target_os = "macos")]
-fn wallet_icon(dark_mode: bool) -> Result<Icon> {
-    let encoded = if dark_mode {
-        include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice()
-    } else {
-        include_bytes!("../assets/tray/light_mode_tray_icon.png").as_slice()
-    };
+fn wallet_icon(dark_menu_bar: bool) -> Result<Icon> {
+    let encoded = macos_tray_artwork(dark_menu_bar);
     let image = image::load_from_memory_with_format(encoded, image::ImageFormat::Png)
         .context("failed to decode the macOS tray artwork")?
         .into_rgba8();
+    let image = scaled_tray_artwork(image);
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height)
         .context("failed to construct the macOS tray icon pixels")
+}
+
+/// A dark macOS menu bar requires white artwork; a light menu bar requires
+/// dark artwork. Keep this mapping separate from the filenames so it is both
+/// explicit and testable.
+#[cfg(target_os = "macos")]
+fn macos_tray_artwork(dark_menu_bar: bool) -> &'static [u8] {
+    if dark_menu_bar {
+        include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice()
+    } else {
+        include_bytes!("../assets/tray/light_mode_tray_icon.png").as_slice()
+    }
+}
+
+/// Keep the status item's pixel canvas stable while making the visible mark
+/// 20% smaller. AppKit uses the canvas when reserving menu-bar space, so
+/// shrinking the canvas itself would let it scale the artwork straight back
+/// up and would also make the item's width jump between releases.
+#[cfg(target_os = "macos")]
+fn scaled_tray_artwork(image: image::RgbaImage) -> image::RgbaImage {
+    let (width, height) = image.dimensions();
+    let scaled_width = width.saturating_mul(4) / 5;
+    let scaled_height = height.saturating_mul(4) / 5;
+    let scaled = image::imageops::resize(
+        &image,
+        scaled_width,
+        scaled_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut canvas = image::RgbaImage::new(width, height);
+    image::imageops::overlay(
+        &mut canvas,
+        &scaled,
+        i64::from((width - scaled_width) / 2),
+        i64::from((height - scaled_height) / 2),
+    );
+    canvas
 }
 
 #[cfg(not(target_os = "macos"))]

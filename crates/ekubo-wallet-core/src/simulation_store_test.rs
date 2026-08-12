@@ -183,7 +183,7 @@ fn the_cap_evicts_the_oldest_rather_than_refusing_new_work() {
 fn a_recorded_result_names_the_policy_revision_it_was_evaluated_under() {
     let stored = StoredPolicy {
         wallet_id: "primary".into(),
-        policy: WalletPolicy::allow_all_with_approval(),
+        policy: WalletPolicy::allow_anything(),
         revision: 7,
         updated_at: Utc::now(),
     };

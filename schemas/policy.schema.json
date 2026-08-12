@@ -3,292 +3,70 @@
   "title": "Ekubo Wallet policy",
   "type": "object",
   "properties": {
-    "$schema": {
-      "description": "Optional URL of this schema, for editor completion only. Nothing is\nfetched from it.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "version": {
-      "description": "The document format version. Must be 1.",
-      "type": "integer",
-      "format": "uint8",
-      "minimum": 1,
-      "maximum": 1,
-      "default": 1
-    },
-    "chains": {
-      "description": "Canonical decimal chain ID (no leading zeros), or `\"*\"` for every\nchain. An exact entry replaces `\"*\"` for that chain outright rather\nthan extending it, so a permission on one chain never reaches another.\nA chain with neither entry is ungoverned: its plans queue for human\napproval.",
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ChainPolicy"
-      }
-    }
+    "$schema": { "type": ["string", "null"] },
+    "version": { "type": "integer", "minimum": 1, "maximum": 1 },
+    "rules": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/Rule" } }
   },
   "additionalProperties": false,
-  "required": [
-    "chains"
-  ],
+  "required": ["version", "rules"],
   "$defs": {
-    "ChainPolicy": {
-      "type": "object",
-      "properties": {
-        "label": {
-          "description": "1-160 characters, shown to the owner reviewing this chain's authority.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "max_calls_per_batch": {
-          "description": "How many calls one atomic batch may carry, 1 to 4096. A plan with more\nqueues for human approval; it is not rejected.",
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 1,
-          "maximum": 4096,
-          "default": 16
-        },
-        "native_value": {
-          "description": "Applied to every call independently, on top of whichever rule matched.\nA guard rather than a grant: no rule can widen it, and a call it\nrefuses queues for human approval rather than being rejected. Omitted,\nit is `{\"eq\": \"0\"}`, so a document that never mentions native value\nnever sends any. It is a `uint256` in wei.",
-          "$ref": "#/$defs/Predicate",
-          "default": {
-            "eq": "0"
-          }
-        },
-        "rules": {
-          "description": "An unordered set. Order carries no meaning and deny always beats allow,\nso a rule can be read without reading the rules around it.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/Rule"
-          },
-          "default": []
-        }
-      },
-      "additionalProperties": false
-    },
-    "Predicate": {
-      "description": "One predicate over one value.\n\nExternally tagged, so a document reads `{\"in\": [\"0x…\"]}`, `\"any_value\"`, or\n`{\"each\": {\"selector\": {\"abi\": \"…\"}}}`.",
-      "oneOf": [
-        {
-          "description": "Matches every value, including one this policy cannot decode. The only\nway to write an unconstrained slot explicitly.",
-          "type": "string",
-          "const": "any_value"
-        },
-        {
-          "description": "Equal to one literal, written as 0x-prefixed hex or unprefixed decimal\n— never bare hex — and read as the type of the value it is compared\nagainst. May be the `$self` variable standing for this wallet's own\naddress.",
-          "type": "object",
-          "properties": {
-            "eq": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "eq"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "Equal to one of a set of literals, any of which may be `$self`.",
-          "type": "object",
-          "properties": {
-            "in": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": {
-                "type": "string"
-              }
-            }
-          },
-          "required": [
-            "in"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "The `bytes` value is a canonically encoded call to this exact function\nwhose named arguments satisfy their own predicates. Applies only to a\n`bytes` value: a rule's `calldata` slot, or a `bytes` argument reached\nthrough `each`.",
-          "type": "object",
-          "properties": {
-            "selector": {
-              "$ref": "#/$defs/SelectorPredicate"
-            }
-          },
-          "required": [
-            "selector"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "Every element of an array satisfies the inner predicate. Applies only\nto an array value; an empty array satisfies it vacuously.",
-          "type": "object",
-          "properties": {
-            "each": {
-              "$ref": "#/$defs/Predicate"
-            }
-          },
-          "required": [
-            "each"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "At least one of these predicates matches. An empty list never matches.",
-          "type": "object",
-          "properties": {
-            "any": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Predicate"
-              }
-            }
-          },
-          "required": [
-            "any"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "All of these predicates match. An empty list matches vacuously.",
-          "type": "object",
-          "properties": {
-            "all": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Predicate"
-              }
-            }
-          },
-          "required": [
-            "all"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "The inner predicate does not match. A value the inner predicate cannot\ndecode stays undecided rather than inverting into a match.",
-          "type": "object",
-          "properties": {
-            "not": {
-              "$ref": "#/$defs/Predicate"
-            }
-          },
-          "required": [
-            "not"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "description": "The element count of an array, or the byte length of a `bytes` or\n`string`, satisfies the inner predicate as a `uint256`.",
-          "type": "object",
-          "properties": {
-            "length": {
-              "$ref": "#/$defs/Predicate"
-            }
-          },
-          "required": [
-            "length"
-          ],
-          "additionalProperties": false
-        }
-      ]
-    },
-    "SelectorPredicate": {
-      "type": "object",
-      "properties": {
-        "abi": {
-          "description": "The function's full signature with every parameter named, such as\n`approve(address spender, uint256 amount)`. The four-byte selector is\nderived from it, so a policy can never allowlist bytes whose meaning it\ndoes not know.",
-          "type": "string"
-        },
-        "args": {
-          "description": "Constraints on parameters, by the names `abi` gives them. A parameter\nleft out is unconstrained.",
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/Predicate"
-          }
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "abi"
-      ]
-    },
     "Rule": {
-      "description": "One rule: a conjunction of predicate slots and the effect of matching them.\nEvery slot is optional and an absent slot constrains nothing, so a rule\nnaming only `to` covers every function that contract has, including any\nbatching entry point that forwards elsewhere.",
       "type": "object",
       "properties": {
-        "effect": {
-          "$ref": "#/$defs/Effect"
-        },
-        "label": {
-          "description": "1-160 characters, shown verbatim in the permission diff the owner\nreviews. Say what the rule is for, not what it says.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "to": {
-          "description": "The contract or recipient being called.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Predicate"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "from": {
-          "description": "The sending wallet. Rarely needed — a plan's sender is already bound to\nthe selected wallet before a policy ever sees it — but available so one\ndocument can carry rules for several wallets.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Predicate"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "value": {
-          "description": "Native value attached to this call, in wei.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Predicate"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "calldata": {
-          "description": "The call's calldata. `{\"eq\": \"0x\"}` is a plain native send; a\n`selector` predicate decodes it and constrains its arguments.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Predicate"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
+        "effect": { "$ref": "#/$defs/Effect" },
+        "label": { "type": ["string", "null"] },
+        "chain_id": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "to": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "native_value": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] },
+        "calldata": { "anyOf": [{ "$ref": "#/$defs/Predicate" }, { "type": "null" }] }
       },
       "additionalProperties": false,
-      "required": [
-        "effect"
-      ]
+      "required": ["effect"]
     },
     "Effect": {
       "oneOf": [
-        {
-          "description": "A matching call signs automatically, with no prompt.",
-          "type": "string",
-          "const": "allow"
-        },
-        {
-          "description": "A matching call is refused outright: nothing signs, nothing queues, and\nno approval can override it. Use it to foreclose something, not to gate\nit — a call no rule covers already queues for human approval.",
-          "type": "string",
-          "const": "deny"
-        }
+        { "type": "string", "const": "allow" },
+        { "type": "string", "const": "deny" }
       ]
-    }
+    },
+    "Predicate": {
+      "oneOf": [
+        { "type": "string", "const": "any_value" },
+        { "$ref": "#/$defs/Eq" },
+        { "$ref": "#/$defs/In" },
+        { "$ref": "#/$defs/Lt" },
+        { "$ref": "#/$defs/Lte" },
+        { "$ref": "#/$defs/Gt" },
+        { "$ref": "#/$defs/Gte" },
+        { "$ref": "#/$defs/Selector" },
+        { "$ref": "#/$defs/Each" },
+        { "$ref": "#/$defs/Any" },
+        { "$ref": "#/$defs/All" },
+        { "$ref": "#/$defs/Not" },
+        { "$ref": "#/$defs/Length" }
+      ]
+    },
+    "Eq": { "type": "object", "properties": { "eq": { "type": "string" } }, "required": ["eq"], "additionalProperties": false },
+    "In": { "type": "object", "properties": { "in": { "type": "array", "uniqueItems": true, "items": { "type": "string" } } }, "required": ["in"], "additionalProperties": false },
+    "Lt": { "type": "object", "properties": { "lt": { "type": "string" } }, "required": ["lt"], "additionalProperties": false },
+    "Lte": { "type": "object", "properties": { "lte": { "type": "string" } }, "required": ["lte"], "additionalProperties": false },
+    "Gt": { "type": "object", "properties": { "gt": { "type": "string" } }, "required": ["gt"], "additionalProperties": false },
+    "Gte": { "type": "object", "properties": { "gte": { "type": "string" } }, "required": ["gte"], "additionalProperties": false },
+    "Selector": { "type": "object", "properties": { "selector": { "$ref": "#/$defs/SelectorPredicate" } }, "required": ["selector"], "additionalProperties": false },
+    "SelectorPredicate": {
+      "type": "object",
+      "properties": {
+        "abi": { "type": "string" },
+        "args": { "type": "object", "additionalProperties": { "$ref": "#/$defs/Predicate" } }
+      },
+      "additionalProperties": false,
+      "required": ["abi"]
+    },
+    "Each": { "type": "object", "properties": { "each": { "$ref": "#/$defs/Predicate" } }, "required": ["each"], "additionalProperties": false },
+    "Any": { "type": "object", "properties": { "any": { "type": "array", "items": { "$ref": "#/$defs/Predicate" } } }, "required": ["any"], "additionalProperties": false },
+    "All": { "type": "object", "properties": { "all": { "type": "array", "items": { "$ref": "#/$defs/Predicate" } } }, "required": ["all"], "additionalProperties": false },
+    "Not": { "type": "object", "properties": { "not": { "$ref": "#/$defs/Predicate" } }, "required": ["not"], "additionalProperties": false },
+    "Length": { "type": "object", "properties": { "length": { "$ref": "#/$defs/Predicate" } }, "required": ["length"], "additionalProperties": false }
   },
-  "description": "Stateless per-call signing policy. Every call in a plan is graded on its own against one chain's unordered rule set: any matching deny rule rejects the plan outright — nothing signs, nothing queues, and no approval overrides it — otherwise any matching allow rule signs it automatically, otherwise the plan queues for explicit human approval in the CLI. Every other refusal (no rule, the native_value guard, max_calls_per_batch, an ungoverned chain) queues the same way; only a deny rule forecloses. There are no amount limits, budgets, or spend counters — a rule bounds which calls may be made, not how much they move."
+  "description": "Ordered stateless per-call signing policy. The first matching rule decides each call: allow signs automatically, deny rejects without queuing, and reaching the end requires explicit owner approval. Omitted matchers mean anything and present matchers are ANDed. Native-value comparisons are per-call conditions, not cumulative spending budgets."
 }

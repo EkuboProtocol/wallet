@@ -979,6 +979,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  resource TEXT NOT NULL,
                  expires_at INTEGER NOT NULL,
                  session_expires_at INTEGER NOT NULL,
+                 access_token_ttl_seconds INTEGER NOT NULL CHECK (access_token_ttl_seconds > 0),
                  used_at INTEGER,
                  FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
              ) STRICT",
@@ -999,6 +1000,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  resource TEXT NOT NULL,
                  created_at INTEGER NOT NULL,
                  expires_at INTEGER NOT NULL,
+                 access_token_ttl_seconds INTEGER NOT NULL CHECK (access_token_ttl_seconds > 0),
                  consumed_at INTEGER,
                  FOREIGN KEY (client_id) REFERENCES mcp_clients(client_id) ON DELETE CASCADE
              ) STRICT",

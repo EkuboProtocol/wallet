@@ -10,14 +10,17 @@ fn macos_notifications_name_the_packaged_wallet_instead_of_the_fallback_placehol
 
 #[test]
 fn every_transaction_lifecycle_stage_has_a_lock_screen_safe_notification() {
-    for stage in [
-        TransactionStage::Proposed,
-        TransactionStage::Signed,
-        TransactionStage::Broadcast,
-        TransactionStage::Confirmed,
-        TransactionStage::Reverted,
-        TransactionStage::Replaced,
-        TransactionStage::Cancelled,
+    for (stage, expected) in [
+        (
+            TransactionStage::Proposed,
+            "A transaction needs your attention.",
+        ),
+        (TransactionStage::Signed, "A transaction was signed."),
+        (TransactionStage::Broadcast, "A transaction was broadcast."),
+        (TransactionStage::Confirmed, "A transaction was confirmed."),
+        (TransactionStage::Reverted, "A transaction was reverted."),
+        (TransactionStage::Replaced, "A transaction was replaced."),
+        (TransactionStage::Cancelled, "A transaction was cancelled."),
     ] {
         let event = DomainEvent {
             occurred_at: Utc::now(),
@@ -27,6 +30,7 @@ fn every_transaction_lifecycle_stage_has_a_lock_screen_safe_notification() {
             },
         };
         let notification = notification_for(&event, NotificationPreferences::default()).unwrap();
+        assert_eq!(notification.body, expected);
         assert!(!notification.body.contains(&request_id(&event).to_string()));
     }
 }

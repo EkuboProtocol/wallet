@@ -52,7 +52,7 @@ fn registration_creates_no_credential_until_owner_authorizes_login() {
     assert!(store.clients().unwrap().is_empty());
 
     let pair = authorize_and_exchange(&mut store, &client);
-    assert_eq!(pair.expires_in, 10 * 60);
+    assert_eq!(pair.expires_in, 24 * 60 * 60);
     assert_eq!(store.clients().unwrap()[0].id, client.id);
     assert_eq!(
         store
@@ -94,7 +94,7 @@ fn oauth_refresh_families_have_a_hard_non_sliding_session_expiry() {
 }
 
 #[test]
-fn owner_selected_oauth_session_lifetime_is_bound_to_the_authorization_code() {
+fn owner_selected_oauth_access_and_refresh_lifetimes_are_bound_to_the_code() {
     let mut store = store(37);
     let client = register(&mut store);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
@@ -106,7 +106,7 @@ fn owner_selected_oauth_session_lifetime_is_bound_to_the_authorization_code() {
             &challenge,
             MCP_SCOPE,
             MCP_RESOURCE,
-            OAuthSessionDuration::OneWeek,
+            OAuthSessionPreset::OneWeekOneMonth,
             &agent_authorization(),
         )
         .unwrap();
@@ -128,16 +128,33 @@ fn owner_selected_oauth_session_lifetime_is_bound_to_the_authorization_code() {
         )
         .unwrap();
 
-    assert!(expiration >= before + chrono::Duration::weeks(1) - chrono::Duration::seconds(1));
-    assert!(expiration <= chrono::Utc::now() + chrono::Duration::weeks(1));
+    assert!(expiration >= before + chrono::Duration::days(30) - chrono::Duration::seconds(1));
+    assert!(expiration <= chrono::Utc::now() + chrono::Duration::days(30));
     assert_eq!(
         store.clients().unwrap()[0].session_expires_at,
         Some(expiration)
     );
-    assert_eq!(pair.expires_in, 10 * 60);
-    assert_eq!(OAuthSessionDuration::OneDay.as_query_value(), "day");
-    assert_eq!(OAuthSessionDuration::OneMonth.label(), "1 month");
-    assert!(OAuthSessionDuration::parse_query_value("forever").is_err());
+    assert_eq!(pair.expires_in, 7 * 24 * 60 * 60);
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT access_token_ttl_seconds FROM oauth_refresh_tokens",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        7 * 24 * 60 * 60
+    );
+    assert_eq!(
+        OAuthSessionPreset::OneHourOneDay.as_query_value(),
+        "hour-day"
+    );
+    assert_eq!(
+        OAuthSessionPreset::OneWeekOneMonth.label(),
+        "1 week / 1 month"
+    );
+    assert!(OAuthSessionPreset::parse_query_value("forever").is_err());
 }
 
 #[test]
@@ -216,7 +233,7 @@ fn authorization_codes_are_one_time_and_pkce_bound() {
 }
 
 #[test]
-fn refresh_tokens_rotate_and_reuse_revokes_the_family() {
+fn refresh_token_is_stable_and_reusable_across_client_restarts() {
     let mut store = store(33);
     let client = register(&mut store);
     let first = authorize_and_exchange(&mut store, &client);
@@ -224,16 +241,22 @@ fn refresh_tokens_rotate_and_reuse_revokes_the_family() {
     let second = store
         .refresh_access_token(&first_refresh, client.id, MCP_RESOURCE)
         .unwrap();
-    assert!(
-        store
-            .refresh_access_token(&first_refresh, client.id, MCP_RESOURCE)
-            .is_err()
-    );
+    assert_eq!(second.refresh_token.expose_base64url(), first_refresh);
+    let third = store
+        .refresh_access_token(&first_refresh, client.id, MCP_RESOURCE)
+        .unwrap();
+    assert_eq!(third.refresh_token.expose_base64url(), first_refresh);
     assert!(
         store
             .authenticate_access_token(&second.access_token.expose_base64url(), MCP_RESOURCE)
             .unwrap()
-            .is_none()
+            .is_some()
+    );
+    assert!(
+        store
+            .authenticate_access_token(&third.access_token.expose_base64url(), MCP_RESOURCE)
+            .unwrap()
+            .is_some()
     );
 }
 
@@ -248,6 +271,33 @@ fn revocation_invalidates_access_without_removing_harness_registration() {
             .authenticate_access_token(&pair.access_token.expose_base64url(), MCP_RESOURCE)
             .unwrap()
             .is_none()
+    );
+    assert!(
+        store
+            .refresh_access_token(
+                &pair.refresh_token.expose_base64url(),
+                client.id,
+                MCP_RESOURCE,
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT COUNT(*) FROM oauth_access_tokens", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT COUNT(*) FROM oauth_refresh_tokens", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        0
     );
     assert!(
         store

@@ -17,7 +17,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ekubo_wallet_core::desktop_store::{
     AgentKind, AuthenticatedClient, DesktopStore, MCP_PORT, MCP_RESOURCE, MCP_SCOPE,
-    OAuthSessionDuration, OAuthTokenPair,
+    OAuthSessionPreset, OAuthTokenPair,
 };
 use rand::TryRng as _;
 use rmcp::transport::streamable_http_server::{
@@ -274,7 +274,7 @@ async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
         let (Some(consent), Some(duration)) = (selection.consent, selection.duration) else {
             return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
         };
-        let Ok(session_duration) = OAuthSessionDuration::parse_query_value(&duration) else {
+        let Ok(session_preset) = OAuthSessionPreset::parse_query_value(&duration) else {
             return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
         };
         let pending = {
@@ -287,7 +287,7 @@ async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
         let Some(pending) = pending else {
             return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
         };
-        return finish_authorization(state, pending.request, session_duration).await;
+        return finish_authorization(state, pending.request, session_preset).await;
     }
     let query: AuthorizationRequest = match serde_urlencoded::from_str(&encoded_query) {
         Ok(query) => query,
@@ -315,7 +315,7 @@ async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
 async fn finish_authorization(
     state: Arc<HttpState>,
     query: AuthorizationRequest,
-    session_duration: OAuthSessionDuration,
+    session_preset: OAuthSessionPreset,
 ) -> Response {
     let Ok(mut redirect) = url::Url::parse(&query.redirect_uri) else {
         return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
@@ -329,7 +329,7 @@ async fn finish_authorization(
             &query.code_challenge,
             scope,
             &query.resource,
-            session_duration,
+            session_preset,
         )
         .await;
     match result {
@@ -381,9 +381,9 @@ fn create_pending_consent(state: &HttpState, request: AuthorizationRequest) -> R
 
 fn consent_page(client_name: &str, scope: &str, consent: &str) -> Response {
     let choices = [
-        OAuthSessionDuration::OneDay,
-        OAuthSessionDuration::OneWeek,
-        OAuthSessionDuration::OneMonth,
+        OAuthSessionPreset::OneHourOneDay,
+        OAuthSessionPreset::OneDayOneWeek,
+        OAuthSessionPreset::OneWeekOneMonth,
     ];
     let mut buttons = String::new();
     for duration in choices {
@@ -401,7 +401,7 @@ fn consent_page(client_name: &str, scope: &str, consent: &str) -> Response {
         .expect("writing OAuth consent HTML to a string cannot fail");
     }
     let body = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Authorize Ekubo Wallet</title><style>:root{{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}}main{{width:min(32rem,calc(100% - 2rem));padding:2rem;border:1px solid GrayText;border-radius:1rem;box-sizing:border-box}}h1{{font-size:1.35rem;margin:0 0 1rem}}p{{line-height:1.5}}code{{font-family:ui-monospace,monospace}}.choices{{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;margin-top:1.5rem}}.choice{{padding:.8rem .5rem;text-align:center;text-decoration:none;border:1px solid LinkText;border-radius:.6rem;color:LinkText;font-weight:600}}.choice:focus,.choice:hover{{outline:2px solid LinkText;outline-offset:2px}}small{{display:block;margin-top:1.25rem;color:GrayText;line-height:1.4}}@media(max-width:28rem){{.choices{{grid-template-columns:1fr}}}}</style></head><body><main><h1>Authorize {}</h1><p><strong>{}</strong> is requesting <code>{}</code> access to this wallet.</p><p>Choose how long its refresh session may remain valid. Access tokens themselves expire after 10 minutes.</p><div class=\"choices\">{buttons}</div><small>The wallet will ask for operating-system authentication after you choose. You can revoke this client at any time in Settings.</small></main></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Authorize Ekubo Wallet</title><style>:root{{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}}main{{width:min(32rem,calc(100% - 2rem));padding:2rem;border:1px solid GrayText;border-radius:1rem;box-sizing:border-box}}h1{{font-size:1.35rem;margin:0 0 1rem}}p{{line-height:1.5}}code{{font-family:ui-monospace,monospace}}.choices{{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;margin-top:1.5rem}}.choice{{padding:.8rem .5rem;text-align:center;text-decoration:none;border:1px solid LinkText;border-radius:.6rem;color:LinkText;font-weight:600}}.choice:focus,.choice:hover{{outline:2px solid LinkText;outline-offset:2px}}small{{display:block;margin-top:1.25rem;color:GrayText;line-height:1.4}}@media(max-width:28rem){{.choices{{grid-template-columns:1fr}}}}</style></head><body><main><h1>Authorize {}</h1><p><strong>{}</strong> is requesting <code>{}</code> access to this wallet.</p><p>Choose an access-token lifetime and the absolute refresh-session deadline. Shorter access tokens reduce the value of a leaked bearer token; the client can reuse its refresh credential until the paired deadline.</p><div class=\"choices\">{buttons}</div><small>Each choice is shown as access / refresh. Your agent harness is responsible for protecting both credentials; either can authorize wallet operations while valid. The wallet will ask for operating-system authentication after you choose, and revocation in Settings immediately invalidates both.</small></main></body></html>",
         escape_html(client_name),
         escape_html(client_name),
         escape_html(scope),

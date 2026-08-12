@@ -460,8 +460,7 @@ fn plan_data_uri(sender: Address) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn automatic_path_signs_broadcasts_and_confirms_through_the_stub() {
     let (address, chain) = start_stub().await;
-    let (_directory, server, wallet) =
-        pipeline_server(address, &WalletPolicy::allow_all_with_approval());
+    let (_directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
 
     let output = server
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {
@@ -591,13 +590,9 @@ async fn an_explicit_deny_rule_is_refused_outright_and_never_queues() {
     let (address, _chain) = start_stub().await;
     let policy = WalletPolicy::parse(serde_json::json!({
         "version": 1,
-        "chains": { "*": {
-            "native_value": "any_value",
-            "rules": [
-                { "effect": "allow", "label": "everything, in principle" },
-                { "effect": "deny", "label": "except anything at all, in practice" },
-            ],
-        }},
+        "rules": [
+            { "effect": "deny", "label": "deny every transaction" }
+        ]
     }))
     .expect("policy parses");
     let (directory, server, wallet) = pipeline_server(address, &policy);
@@ -637,8 +632,7 @@ async fn an_explicit_deny_rule_is_refused_outright_and_never_queues() {
 #[tokio::test(flavor = "multi_thread")]
 async fn simulate_then_send_consumes_the_recorded_simulation() {
     let (address, _chain) = start_stub().await;
-    let (_directory, server, wallet) =
-        pipeline_server(address, &WalletPolicy::allow_all_with_approval());
+    let (_directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
 
     let simulated = server
         .wallet_simulate_execution_plan(Parameters(SimulateInput {
@@ -883,8 +877,7 @@ async fn a_failed_refresh_cannot_approve_the_previous_transaction() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_send_no_endpoint_accepted_leaves_the_chain_usable() {
     let (address, chain) = start_stub_lying(StubLie { refuses_send: true }).await;
-    let (_directory, server, wallet) =
-        pipeline_server(address, &WalletPolicy::allow_all_with_approval());
+    let (_directory, server, wallet) = pipeline_server(address, &WalletPolicy::allow_anything());
 
     let output = server
         .wallet_send_execution_plan(Parameters(SendExecutionPlanInput {

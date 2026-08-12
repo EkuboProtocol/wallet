@@ -209,7 +209,7 @@ fn rejects_address_words_with_dirty_high_bytes() {
 }
 
 #[tokio::test]
-async fn renders_token_amounts_with_symbol_and_exact_base_units() {
+async fn renders_recognized_token_amounts_without_redundant_base_units() {
     let token = Address::repeat_byte(0x33);
     let spender = Address::repeat_byte(0x44);
     let interpretation = interpret_step(
@@ -223,7 +223,7 @@ async fn renders_token_amounts_with_symbol_and_exact_base_units() {
     .await;
     let description = interpretation.description.unwrap();
     assert!(description.contains("1.2345 USDC"), "{description}");
-    assert!(description.contains("1234500 base units"), "{description}");
+    assert!(!description.contains("base units"), "{description}");
     assert!(interpretation.warnings.is_empty());
 }
 
@@ -510,10 +510,10 @@ fn fixed_point_rendering_never_rounds() {
 }
 
 #[test]
-fn signed_amounts_keep_sign_and_base_units() {
+fn signed_amounts_keep_sign_and_only_unknown_assets_use_base_units() {
     assert_eq!(
         format_signed_amount(&BigInt::from(-1_500_000), Some(6), Some("USDC")),
-        "-1.5 USDC (-1500000 base units)"
+        "-1.5 USDC"
     );
     assert_eq!(
         format_signed_amount(&BigInt::from(25), None, None),
@@ -529,10 +529,7 @@ fn balance_deltas_beyond_fixed_width_integers_stay_exact() {
     let huge = "-".to_string() + &"9".repeat(60);
     let delta = parse_signed(&huge).expect("arbitrary precision parses");
     let rendered = format_signed_amount(&delta, Some(18), Some("TKN"));
-    assert!(
-        rendered.contains(&format!("({huge} base units)")),
-        "{rendered}"
-    );
+    assert!(!rendered.contains("base units"), "{rendered}");
     assert!(rendered.starts_with('-'), "{rendered}");
     assert_eq!(
         parse_signed(&format!("-{}", U256::MAX)).map(|value| value.sign()),
@@ -691,9 +688,35 @@ fn recognized_transfer_event_totals_use_token_decimals_and_symbol() {
         &crate::config::default_networks().remove(0),
         &usdc_metadata(token),
     );
-    assert!(lines.iter().any(|(label, value)| {
-        label.is_empty() && value.contains("+1 USDC (+1000000 base units) in")
-    }));
+    assert!(
+        lines
+            .iter()
+            .any(|(label, value)| { label.is_empty() && value.contains("+1 USDC in") })
+    );
+}
+
+#[test]
+fn event_only_token_change_shows_the_signed_net_in_human_units() {
+    let token = Address::repeat_byte(0xbb);
+    let mut simulation = simulation_with_native_delta("0");
+    simulation.balance_changes.as_mut().unwrap().tokens.insert(
+        format!("{token:#x}"),
+        TokenBalanceChange {
+            before: None,
+            after: None,
+            delta: None,
+            incoming_transfers: "2000000".into(),
+            outgoing_transfers: "500000".into(),
+        },
+    );
+    let lines = render_balance_changes(
+        &simulation,
+        &crate::config::default_networks().remove(0),
+        &usdc_metadata(token),
+    );
+    assert_eq!(lines[0].1, "+1.5 USDC");
+    assert!(!lines.iter().any(|(_, value)| value.contains("not tracked")));
+    assert!(!lines.iter().any(|(_, value)| value.contains("base units")));
 }
 
 #[test]

@@ -275,7 +275,7 @@ async fn live_direct_simulation_uses_eth_simulate_v1() {
     };
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
-        policy: crate::core::policy::WalletPolicy::allow_all_with_approval(),
+        policy: crate::core::policy::WalletPolicy::allow_anything(),
         revision: 1,
         updated_at: Utc::now(),
     };
@@ -305,7 +305,7 @@ async fn live_batch_simulation_executes_canonical_calibur() {
     };
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
-        policy: crate::core::policy::WalletPolicy::allow_all_with_approval(),
+        policy: crate::core::policy::WalletPolicy::allow_anything(),
         revision: 1,
         updated_at: Utc::now(),
     };
@@ -342,17 +342,20 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
     }
     .abi_encode()
     .into();
-    let mut wallet_policy = crate::core::policy::WalletPolicy::allow_all_with_approval();
+    let mut wallet_policy = crate::core::policy::WalletPolicy::allow_anything();
     // Naming WETH in a rule's `to` is what puts it in the pre-queried balance
     // set; the allow-all rule beside it is what actually authorizes the call.
-    wallet_policy.chains.get_mut("*").unwrap().rules.push(Rule {
-        effect: Effect::Allow,
-        label: Some("Wrapped Ether".into()),
-        to: Some(Predicate::Eq(format!("{weth:#x}"))),
-        from: None,
-        value: None,
-        calldata: None,
-    });
+    wallet_policy.rules.insert(
+        0,
+        Rule {
+            effect: Effect::Allow,
+            label: Some("Wrapped Ether".into()),
+            chain_id: None,
+            to: Some(Predicate::Eq(format!("{weth:#x}"))),
+            native_value: None,
+            calldata: None,
+        },
+    );
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
         policy: wallet_policy,
@@ -401,7 +404,7 @@ fn a_failed_batch_says_the_delegation_was_never_observed() {
     };
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
-        policy: crate::core::policy::WalletPolicy::allow_all_with_approval(),
+        policy: crate::core::policy::WalletPolicy::allow_anything(),
         revision: 1,
         updated_at: Utc::now(),
     };
@@ -443,43 +446,6 @@ fn a_failed_batch_says_the_delegation_was_never_observed() {
             .iter()
             .any(|finding| finding.code == DELEGATION_AUTHORIZED_CODE)
     );
-}
-
-#[test]
-fn a_token_that_answers_neither_probe_is_named_rather_than_dropped() {
-    // The gap an adversarial token walks through. `token_balance_results`
-    // turns a reverted or undecodable `balanceOf` into `None`, and with no
-    // standard `Transfer` log to fall back on `token_balance_changes` drops
-    // the token from the change set entirely -- so the review document
-    // rendered an empty set as "none detected" for a transaction that moved
-    // it, and the automatic path had no number to hold the policy's limit
-    // against.
-    let quiet = Address::repeat_byte(0xaa);
-    let readable = Address::repeat_byte(0xbb);
-    let tracked = vec![quiet, readable];
-
-    let before: BTreeMap<Address, Option<U256>> = [(quiet, None), (readable, Some(U256::from(10)))]
-        .into_iter()
-        .collect();
-    let after: BTreeMap<Address, Option<U256>> = [(quiet, None), (readable, Some(U256::from(4)))]
-        .into_iter()
-        .collect();
-    assert_eq!(
-        unverified_token_probes(&tracked, &before, &after),
-        vec![quiet],
-        "only the token with no number on either side is unverifiable"
-    );
-
-    // One side present is enough to put the token in the change set, where a
-    // reader will see it -- that is not the silent case.
-    let half: BTreeMap<Address, Option<U256>> = [(quiet, Some(U256::from(1))), (readable, None)]
-        .into_iter()
-        .collect();
-    assert!(unverified_token_probes(&tracked, &half, &after).is_empty());
-    assert!(unverified_token_probes(&tracked, &before, &half).is_empty());
-
-    // A token nothing tracks is not the policy's business and is not reported.
-    assert!(unverified_token_probes(&[], &before, &after).is_empty());
 }
 
 mod bounded_rpc_message_tests {

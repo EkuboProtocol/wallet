@@ -76,6 +76,7 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 # Allow development checks with Command Line Tools alone. Signed release CI
 # may precompile the same pinned Metal shaders using full Xcode.
 gpui_macos = { git = "https://github.com/zed-industries/zed", features = ["runtime_shaders"] }
+rustix = { version = "1.1.4", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 interprocess = "2.4.3"

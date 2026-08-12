@@ -39,7 +39,7 @@ fn store() -> (tempfile::TempDir, PendingStore) {
     let path = directory.path().join("policies.db");
     let mut database = PolicyStore::open(&path, &DatabaseKey::new([9; 32])).unwrap();
     database
-        .put("primary", &WalletPolicy::allow_all_with_approval(), None)
+        .put("primary", &WalletPolicy::allow_anything(), None)
         .unwrap();
     (directory, PendingStore::new(database))
 }
