@@ -11263,13 +11263,13 @@ impl WalletWindow {
                             .truncate()
                             .font_medium(),
                         );
-                    let mut metadata = div()
+                    let mut metadata = h_flex()
                         .w_full()
                         .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .text_sm()
+                        .flex_wrap()
+                        .justify_start()
+                        .gap_1()
+                        .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(selectable_text(
                             SharedString::from(format!(
@@ -11288,57 +11288,64 @@ impl WalletWindow {
                         } else {
                             address.clone()
                         };
-                        metadata = metadata.child(match row.explorer_url {
-                            Some(explorer_url) => app_button(SharedString::from(format!(
-                                "portfolio-token-explorer-{}-{}-{address}",
-                                account.wallet.id, row.chain_id
-                            )))
-                            .label(address_label)
-                            .link()
-                            .h(px(22.0))
-                            .max_w_full()
-                            .min_w_0()
-                            .px_0()
-                            .text_xs()
-                            .font_normal()
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_color(cx.theme().muted_foreground)
-                            .tooltip(address.clone())
-                            .on_click(move |_, _, cx| cx.open_url(&explorer_url))
-                            .into_any_element(),
-                            None => selectable_text(
-                                SharedString::from(format!(
-                                    "portfolio-asset-address-{}-{}-{address}",
-                                    account.wallet.id, row.chain_id
-                                )),
-                                &address_label,
+                        metadata = metadata
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("·"),
                             )
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_color(cx.theme().muted_foreground)
-                            .into_any_element(),
-                        });
+                            .child(match row.explorer_url {
+                                Some(explorer_url) => app_button(SharedString::from(format!(
+                                    "portfolio-token-explorer-{}-{}-{address}",
+                                    account.wallet.id, row.chain_id
+                                )))
+                                .label(address_label)
+                                .link()
+                                .h(px(22.0))
+                                .max_w_full()
+                                .min_w_0()
+                                .px_0()
+                                .text_xs()
+                                .font_normal()
+                                .font_family(MONO_FONT_FAMILY)
+                                .text_color(cx.theme().muted_foreground)
+                                .tooltip(address.clone())
+                                .on_click(move |_, _, cx| cx.open_url(&explorer_url))
+                                .into_any_element(),
+                                None => selectable_text(
+                                    SharedString::from(format!(
+                                        "portfolio-asset-address-{}-{}-{address}",
+                                        account.wallet.id, row.chain_id
+                                    )),
+                                    &address_label,
+                                )
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .font_family(MONO_FONT_FAMILY)
+                                .text_color(cx.theme().muted_foreground)
+                                .into_any_element(),
+                            });
                     }
                     balances = balances.child(
                         div()
                             .w_full()
                             .min_w_0()
-                            .py_3()
+                            .py_2()
                             .when(index + 1 < row_count, |row| {
                                 row.border_b_1().border_color(cx.theme().border)
                             })
                             .flex()
                             .flex_col()
-                            .gap_1()
+                            .gap_0p5()
                             .child(
                                 div()
                                     .w_full()
                                     .min_w_0()
                                     .flex()
                                     .flex_wrap()
-                                    .items_start()
+                                    .items_center()
                                     .justify_between()
                                     .gap_3()
                                     .child(
@@ -11353,37 +11360,24 @@ impl WalletWindow {
                                             .min_w_0()
                                             .max_w_full()
                                             .flex_none()
-                                            .flex()
-                                            .flex_col()
-                                            .items_end()
+                                            .id(SharedString::from(format!(
+                                                "portfolio-balance-scroll-{}-{}-{address}",
+                                                account.wallet.id, row.chain_id
+                                            )))
+                                            .overflow_x_scroll()
+                                            .text_right()
+                                            .font_family(MONO_FONT_FAMILY)
+                                            .text_lg()
+                                            .font_semibold()
                                             .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(selectable_label("Balance")),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "portfolio-balance-scroll-{}-{}-{address}",
+                                                selectable_text(
+                                                    SharedString::from(format!(
+                                                        "portfolio-asset-balance-{}-{}-{address}",
                                                         account.wallet.id, row.chain_id
-                                                    )))
-                                                    .max_w_full()
-                                                    .overflow_x_scroll()
-                                                    .text_right()
-                                                    .font_family(MONO_FONT_FAMILY)
-                                                    .text_lg()
-                                                    .font_semibold()
-                                                    .child(
-                                                        selectable_text(
-                                                            SharedString::from(format!(
-                                                                "portfolio-asset-balance-{}-{}-{address}",
-                                                                account.wallet.id, row.chain_id
-                                                            )),
-                                                            &row.balance,
-                                                        )
-                                                        .whitespace_nowrap(),
-                                                    ),
+                                                    )),
+                                                    &row.balance,
+                                                )
+                                                .whitespace_nowrap(),
                                             ),
                                     ),
                             )
@@ -13496,14 +13490,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             tray_view.update(cx, |view, cx| {
                                 view.set_route(Route::WalletConnect);
                                 cx.notify();
-                            });
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                        }
-                        TrayCommand::ReinstallAgents => {
-                            tray_view.update(cx, |view, cx| {
-                                view.set_route(Route::Settings);
-                                view.reinstall_detected_agents_from_menu(cx);
                             });
                             let _ =
                                 cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));

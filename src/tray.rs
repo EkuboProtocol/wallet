@@ -9,7 +9,6 @@ const OPEN_ID: &str = "ekubo.open";
 const REVIEWS_ID: &str = "ekubo.reviews";
 const CONNECT_ID: &str = "ekubo.connect";
 const AGENTS_ID: &str = "ekubo.agents";
-const REINSTALL_AGENTS_ID: &str = "ekubo.reinstall-agents";
 const UPDATES_ID: &str = "ekubo.updates";
 const SETTINGS_ID: &str = "ekubo.settings";
 const QUIT_ID: &str = "ekubo.quit";
@@ -19,7 +18,6 @@ pub enum TrayCommand {
     OpenWallet,
     OpenRoute(Route),
     ConnectDapp,
-    ReinstallAgents,
     CheckForUpdates,
     Quit,
 }
@@ -54,14 +52,12 @@ impl PlatformTray {
     pub fn new(dark_mode: bool) -> Result<Self> {
         let menu = Menu::new();
         let open = MenuItem::with_id(OPEN_ID, "Open Wallet", true, None);
-        let reviews = MenuItem::with_id(REVIEWS_ID, "No pending reviews", true, None);
+        let reviews = MenuItem::with_id(REVIEWS_ID, "No pending reviews", false, None);
         let connect = MenuItem::with_id(CONNECT_ID, "Connect dapp…", true, None);
         let agents = MenuItem::with_id(AGENTS_ID, "MCP starting…", true, None);
-        let reinstall_agents =
-            MenuItem::with_id(REINSTALL_AGENTS_ID, "Reinstall MCP Server", true, None);
-        let updates = MenuItem::with_id(UPDATES_ID, "View Latest Release…", true, None);
+        let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Settings…", true, None);
-        let quit = MenuItem::with_id(QUIT_ID, "Quit Ekubo Wallet", true, None);
+        let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
         let separator_one = PredefinedMenuItem::separator();
         let separator_two = PredefinedMenuItem::separator();
         menu.append_items(&[
@@ -70,7 +66,6 @@ impl PlatformTray {
             &separator_one,
             &connect,
             &agents,
-            &reinstall_agents,
             &separator_two,
             &updates,
             &settings,
@@ -155,6 +150,7 @@ impl TrayService for PlatformTray {
     fn update(&mut self, snapshot: &TraySnapshot) {
         self.snapshot = snapshot.clone();
         set_application_badge_count(snapshot.pending_reviews);
+        self.reviews.set_enabled(snapshot.pending_reviews > 0);
         self.reviews.set_text(match snapshot.pending_reviews {
             0 => "No pending reviews".to_owned(),
             1 => "1 pending review".to_owned(),
@@ -212,7 +208,6 @@ fn command_for_id(id: &str) -> Option<TrayCommand> {
         REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Activity)),
         CONNECT_ID => Some(TrayCommand::ConnectDapp),
         AGENTS_ID | SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
-        REINSTALL_AGENTS_ID => Some(TrayCommand::ReinstallAgents),
         UPDATES_ID => Some(TrayCommand::CheckForUpdates),
         QUIT_ID => Some(TrayCommand::Quit),
         _ => None,
