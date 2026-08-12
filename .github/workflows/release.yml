@@ -42,7 +42,7 @@ jobs:
             formats: nsis
             artifact: windows
           - os: ubuntu-24.04
-            formats: appimage,deb,rpm
+            formats: appimage,deb
             artifact: linux
     runs-on: ${{ matrix.os }}
     steps:
@@ -50,7 +50,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libfuse2 rpm
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev libfuse2
       - name: Require protected update signing key
         shell: bash
         env:
@@ -106,6 +106,8 @@ jobs:
         run: test -f dist/latest.json && test -f dist/latest.json.sig && find dist -name '*.sig' -print -quit | grep .
       - uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: dist/**
       - uses: actions/attest-build-provenance@v2
         with:

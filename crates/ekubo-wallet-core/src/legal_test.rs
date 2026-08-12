@@ -12,6 +12,7 @@ fn documents_have_stable_nonempty_digests() {
     for document in [
         LegalDocument::TermsOfService,
         LegalDocument::PrivacyPolicy,
+        LegalDocument::ApplicationLicense,
         LegalDocument::ThirdPartyLicenses,
     ] {
         assert!(!document.text().is_empty());
@@ -169,6 +170,14 @@ fn stale_digests_cannot_be_recorded_and_stale_acceptance_is_superseded() {
     assert!(
         store
             .record_acceptance(LegalDocument::TermsOfService, "0xdeadbeef")
+            .is_err()
+    );
+    assert!(
+        store
+            .record_acceptance(
+                LegalDocument::ApplicationLicense,
+                &LegalDocument::ApplicationLicense.digest(),
+            )
             .is_err()
     );
     assert!(

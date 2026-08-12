@@ -86,7 +86,7 @@ fn a_new_database_starts_with_the_default_list() {
 }
 
 #[test]
-fn seeded_rows_are_attributed_to_the_curator() {
+fn seeded_rows_use_the_default_tokens_source() {
     let directory = tempfile::tempdir().unwrap();
     let store = TokenStore::new(
         PolicyStore::open_with(
@@ -100,6 +100,37 @@ fn seeded_rows_are_attributed_to_the_curator() {
     let stored = store.get(first.chain_id, first.address).unwrap().unwrap();
     assert_eq!(stored.source, SOURCE);
     assert_eq!(stored.symbol.as_deref(), Some(first.symbol.as_str()));
+}
+
+#[test]
+fn production_open_renames_the_legacy_seed_source() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let key = DatabaseKey::new([39; 32]);
+    let database = PolicyStore::open_with(&path, &key, SeedDefaults::Yes).unwrap();
+    let first = embedded().unwrap().tokens.into_iter().next().unwrap();
+    database
+        .connection
+        .execute(
+            "UPDATE tokens SET source = ?1 WHERE chain_id = ?2 AND address = ?3",
+            rusqlite::params![
+                LEGACY_SOURCE,
+                i64::try_from(first.chain_id).unwrap(),
+                crate::sql::Blob(first.address)
+            ],
+        )
+        .unwrap();
+    drop(database);
+
+    let reopened = TokenStore::new(PolicyStore::open_with(&path, &key, SeedDefaults::Yes).unwrap());
+    assert_eq!(
+        reopened
+            .get(first.chain_id, first.address)
+            .unwrap()
+            .unwrap()
+            .source,
+        SOURCE
+    );
 }
 
 #[test]

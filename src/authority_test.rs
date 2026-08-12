@@ -70,7 +70,7 @@ fn export_lease_conceals_and_conditionally_clears_its_clipboard_value() {
 }
 
 #[tokio::test]
-async fn notification_preview_preference_is_owner_controlled_and_persisted() {
+async fn notification_previews_are_always_detailed() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("wallet.db");
     let desktop = DesktopStore::open(&database, &DatabaseKey::new([13; 32])).unwrap();
@@ -79,24 +79,12 @@ async fn notification_preview_preference_is_owner_controlled_and_persisted() {
         desktop: Arc::new(Mutex::new(desktop)),
         events: EventBus::default(),
     };
-    let mut events = owner.event_bus().subscribe();
-
-    assert!(!owner.detailed_notification_previews().unwrap());
-    owner
-        .set_detailed_notification_previews(true)
-        .await
-        .unwrap();
     assert!(owner.detailed_notification_previews().unwrap());
-    assert!(matches!(
-        events.try_recv().unwrap().kind,
-        DomainEventKind::ConfigurationChanged
-    ));
-
     owner
         .set_detailed_notification_previews(false)
         .await
         .unwrap();
-    assert!(!owner.detailed_notification_previews().unwrap());
+    assert!(owner.detailed_notification_previews().unwrap());
 }
 
 #[test]
@@ -122,6 +110,27 @@ fn appearance_preference_is_core_owned_and_publishes_configuration_changes() {
         owner.appearance_preference().unwrap(),
         AppearancePreference::Dark
     );
+    assert!(matches!(
+        events.try_recv().unwrap().kind,
+        DomainEventKind::ConfigurationChanged
+    ));
+}
+
+#[test]
+fn testnet_mode_is_core_owned_and_publishes_configuration_changes() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("wallet.db");
+    let desktop = DesktopStore::open(&database, &DatabaseKey::new([38; 32])).unwrap();
+    let owner = OwnerApi {
+        config: ConfigStore::open(directory.path(), DatabaseKey::new([38; 32])),
+        desktop: Arc::new(Mutex::new(desktop)),
+        events: EventBus::default(),
+    };
+    let mut events = owner.event_bus().subscribe();
+
+    assert!(!owner.testnet_mode().unwrap());
+    owner.set_testnet_mode(true).unwrap();
+    assert!(owner.testnet_mode().unwrap());
     assert!(matches!(
         events.try_recv().unwrap().kind,
         DomainEventKind::ConfigurationChanged

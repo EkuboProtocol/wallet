@@ -46,11 +46,12 @@ pub struct PlatformTray {
     reviews: MenuItem,
     agents: MenuItem,
     snapshot: TraySnapshot,
-    dark_menu_bar: bool,
+    #[cfg(not(target_os = "macos"))]
+    dark_mode: bool,
 }
 
 impl PlatformTray {
-    pub fn new(dark_menu_bar: bool) -> Result<Self> {
+    pub fn new(dark_mode: bool) -> Result<Self> {
         let menu = Menu::new();
         let open = MenuItem::with_id(OPEN_ID, "Open Wallet", true, None);
         let reviews = MenuItem::with_id(REVIEWS_ID, "No pending reviews", true, None);
@@ -81,8 +82,12 @@ impl PlatformTray {
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(true)
             .with_tooltip("Ekubo Wallet")
-            .with_icon(wallet_icon(dark_menu_bar)?)
-            .with_icon_as_template(false)
+            .with_icon(wallet_icon(dark_mode)?)
+            // AppKit owns the status-item foreground color. The icon remains
+            // one stable template for its entire lifetime so AppKit can react
+            // to the actual menu-bar backdrop (which is independent of the
+            // application's light/dark preference).
+            .with_icon_as_template(cfg!(target_os = "macos"))
             .build()
             .context("the desktop has no usable tray host")?;
 
@@ -96,19 +101,38 @@ impl PlatformTray {
                 connected_agents: 0,
                 walletconnect_sessions: 0,
             },
-            dark_menu_bar,
+            #[cfg(not(target_os = "macos"))]
+            dark_mode,
         })
     }
 
-    pub fn set_dark_mode(&mut self, dark_menu_bar: bool) {
-        if self.dark_menu_bar == dark_menu_bar {
-            return;
-        }
-        if let Ok(icon) = wallet_icon(dark_menu_bar)
-            && self.tray.set_icon(Some(icon)).is_ok()
+    pub fn set_dark_mode(&mut self, dark_mode: bool) {
+        #[cfg(target_os = "macos")]
         {
-            self.dark_menu_bar = dark_menu_bar;
+            // Replacing a tray-icon image can drop AppKit's template-image
+            // state and leave the raw dark pixels visible on a dark menu bar.
+            // The template already adapts itself, so theme updates are a no-op.
+            let _ = dark_mode;
         }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if self.dark_mode == dark_mode {
+                return;
+            }
+            if let Ok(icon) = wallet_icon(dark_mode)
+                && self.tray.set_icon(Some(icon)).is_ok()
+            {
+                self.dark_mode = dark_mode;
+            }
+        }
+    }
+
+    /// Update only MCP connectivity without discarding newer review, agent,
+    /// or dapp counts held by the shared tray snapshot.
+    pub fn set_mcp_online(&mut self, online: bool) {
+        let mut snapshot = self.snapshot.clone();
+        snapshot.mcp_online = online;
+        self.update(&snapshot);
     }
 
     /// Block until the native tray backend emits a command. Desktop startup
@@ -130,6 +154,7 @@ impl TrayService for PlatformTray {
 
     fn update(&mut self, snapshot: &TraySnapshot) {
         self.snapshot = snapshot.clone();
+        set_application_badge_count(snapshot.pending_reviews);
         self.reviews.set_text(match snapshot.pending_reviews {
             0 => "No pending reviews".to_owned(),
             1 => "1 pending review".to_owned(),
@@ -158,10 +183,33 @@ impl TrayService for PlatformTray {
     }
 }
 
+fn application_badge_label(count: usize) -> Option<String> {
+    (count > 0).then(|| count.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn set_application_badge_count(count: usize) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::NSString;
+
+    let Some(main_thread) = MainThreadMarker::new() else {
+        tracing::warn!("ignored a macOS Dock badge update away from the main thread");
+        return;
+    };
+    let label = application_badge_label(count).map(|label| NSString::from_str(&label));
+    NSApplication::sharedApplication(main_thread)
+        .dockTile()
+        .setBadgeLabel(label.as_deref());
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_application_badge_count(_count: usize) {}
+
 fn command_for_id(id: &str) -> Option<TrayCommand> {
     match id {
         OPEN_ID => Some(TrayCommand::OpenWallet),
-        REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Reviews)),
+        REVIEWS_ID => Some(TrayCommand::OpenRoute(Route::Activity)),
         CONNECT_ID => Some(TrayCommand::ConnectDapp),
         AGENTS_ID | SETTINGS_ID => Some(TrayCommand::OpenRoute(Route::Settings)),
         REINSTALL_AGENTS_ID => Some(TrayCommand::ReinstallAgents),
@@ -172,40 +220,35 @@ fn command_for_id(id: &str) -> Option<TrayCommand> {
 }
 
 #[cfg(target_os = "macos")]
-fn wallet_icon(dark_menu_bar: bool) -> Result<Icon> {
-    let encoded = macos_tray_artwork(dark_menu_bar);
+fn wallet_icon(_dark_mode: bool) -> Result<Icon> {
+    let encoded = macos_tray_artwork();
     let image = image::load_from_memory_with_format(encoded, image::ImageFormat::Png)
         .context("failed to decode the macOS tray artwork")?
         .into_rgba8();
-    let image = scaled_tray_artwork(image);
+    let image = scaled_tray_artwork(&image);
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height)
         .context("failed to construct the macOS tray icon pixels")
 }
 
-/// A dark macOS menu bar requires white artwork; a light menu bar requires
-/// dark artwork. Keep this mapping separate from the filenames so it is both
-/// explicit and testable.
+/// `AppKit` uses the alpha channel of this single monochrome source as its
+/// status-item template and supplies the contrasting foreground color.
 #[cfg(target_os = "macos")]
-fn macos_tray_artwork(dark_menu_bar: bool) -> &'static [u8] {
-    if dark_menu_bar {
-        include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice()
-    } else {
-        include_bytes!("../assets/tray/light_mode_tray_icon.png").as_slice()
-    }
+fn macos_tray_artwork() -> &'static [u8] {
+    include_bytes!("../assets/tray/dark_mode_tray_icon.png").as_slice()
 }
 
 /// Keep the status item's pixel canvas stable while making the visible mark
-/// 20% smaller. AppKit uses the canvas when reserving menu-bar space, so
+/// 20% smaller. `AppKit` uses the canvas when reserving menu-bar space, so
 /// shrinking the canvas itself would let it scale the artwork straight back
 /// up and would also make the item's width jump between releases.
 #[cfg(target_os = "macos")]
-fn scaled_tray_artwork(image: image::RgbaImage) -> image::RgbaImage {
+fn scaled_tray_artwork(image: &image::RgbaImage) -> image::RgbaImage {
     let (width, height) = image.dimensions();
     let scaled_width = width.saturating_mul(4) / 5;
     let scaled_height = height.saturating_mul(4) / 5;
     let scaled = image::imageops::resize(
-        &image,
+        image,
         scaled_width,
         scaled_height,
         image::imageops::FilterType::Lanczos3,

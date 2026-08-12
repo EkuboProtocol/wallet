@@ -9,18 +9,15 @@ fn macos_notifications_name_the_packaged_wallet_instead_of_the_fallback_placehol
 }
 
 #[test]
-fn every_transaction_lifecycle_stage_has_a_lock_screen_safe_notification() {
-    for (stage, expected) in [
-        (
-            TransactionStage::Proposed,
-            "A transaction needs your attention.",
-        ),
-        (TransactionStage::Signed, "A transaction was signed."),
-        (TransactionStage::Broadcast, "A transaction was broadcast."),
-        (TransactionStage::Confirmed, "A transaction was confirmed."),
-        (TransactionStage::Reverted, "A transaction was reverted."),
-        (TransactionStage::Replaced, "A transaction was replaced."),
-        (TransactionStage::Cancelled, "A transaction was cancelled."),
+fn every_transaction_lifecycle_stage_has_a_detailed_notification() {
+    for (stage, expected_verb) in [
+        (TransactionStage::Proposed, "needs your attention"),
+        (TransactionStage::Signed, "was signed"),
+        (TransactionStage::Broadcast, "was broadcast"),
+        (TransactionStage::Confirmed, "was confirmed"),
+        (TransactionStage::Reverted, "was reverted"),
+        (TransactionStage::Replaced, "was replaced"),
+        (TransactionStage::Cancelled, "was cancelled"),
     ] {
         let event = DomainEvent {
             occurred_at: Utc::now(),
@@ -29,9 +26,11 @@ fn every_transaction_lifecycle_stage_has_a_lock_screen_safe_notification() {
                 stage,
             },
         };
-        let notification = notification_for(&event, NotificationPreferences::default()).unwrap();
-        assert_eq!(notification.body, expected);
-        assert!(!notification.body.contains(&request_id(&event).to_string()));
+        let notification = notification_for(&event, NotificationPreferences).unwrap();
+        assert_eq!(
+            notification.body,
+            format!("Transaction {} {expected_verb}.", request_id(&event))
+        );
     }
 }
 
@@ -72,7 +71,7 @@ fn proposed_transactions_route_to_review_and_lifecycle_updates_route_to_activity
             occurred_at: Utc::now(),
             kind: DomainEventKind::Transaction { request_id, stage },
         };
-        let notification = notification_for(&event, NotificationPreferences::default()).unwrap();
+        let notification = notification_for(&event, NotificationPreferences).unwrap();
         assert_eq!(notification.route, expected_route);
     }
 }

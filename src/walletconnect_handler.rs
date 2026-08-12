@@ -188,7 +188,6 @@ impl DesktopSession {
             .fact("Required methods", join_or_none(&proposal.required_methods))
             .fact("Optional methods", join_or_none(&proposal.optional_methods))
             .fact("Claimed URL", dapp.url.clone().unwrap_or_else(|| "not stated".into()))
-            .fact("Pairing topic", &proposal.pairing_topic)
             .warning("Dapp identity metadata is self-asserted and unverified. Approve only a connection you initiated from the intended site.");
         for caution in dapp.cautions {
             request = request.warning(caution);

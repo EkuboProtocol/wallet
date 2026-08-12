@@ -29,6 +29,10 @@ use std::path::Path;
 /// `contrib/generate-third-party-licenses.py`; CI fails when it is stale or a
 /// resolved dependency only offers a forbidden strong-copyleft license.
 pub const THIRD_PARTY_LICENSES: &str = include_str!("../../../THIRD_PARTY_LICENSES.md");
+/// Exact application license bundled with this build. Keeping it beside the
+/// other legal documents makes every viewer work offline and avoids an
+/// unexpected jump to a source-hosting website.
+pub const APPLICATION_LICENSE: &str = include_str!("../../../LICENSE");
 
 pub const TERMS_OF_SERVICE: &str = "\
 # Ekubo Wallet Terms of Service
@@ -318,6 +322,7 @@ pub fn privacy_policy() -> String {
 pub enum LegalDocument {
     TermsOfService,
     PrivacyPolicy,
+    ApplicationLicense,
     ThirdPartyLicenses,
 }
 
@@ -327,6 +332,7 @@ impl LegalDocument {
         match self {
             Self::TermsOfService => TERMS_OF_SERVICE.into(),
             Self::PrivacyPolicy => privacy_policy(),
+            Self::ApplicationLicense => APPLICATION_LICENSE.into(),
             Self::ThirdPartyLicenses => THIRD_PARTY_LICENSES.into(),
         }
     }
@@ -348,6 +354,7 @@ impl LegalDocument {
         match self {
             Self::TermsOfService => "Terms of Service",
             Self::PrivacyPolicy => "Privacy Policy",
+            Self::ApplicationLicense => "Application License",
             Self::ThirdPartyLicenses => "Third-Party Licenses",
         }
     }
@@ -403,7 +410,9 @@ impl LegalStore {
         let key = match document {
             LegalDocument::TermsOfService => "terms_of_service",
             LegalDocument::PrivacyPolicy => "privacy_policy",
-            LegalDocument::ThirdPartyLicenses => return Ok(None),
+            LegalDocument::ApplicationLicense | LegalDocument::ThirdPartyLicenses => {
+                return Ok(None);
+            }
         };
         Ok(self
             .database
@@ -425,8 +434,11 @@ impl LegalStore {
     /// it actually displayed.
     pub fn record_acceptance(&self, document: LegalDocument, reviewed_digest: &str) -> Result<()> {
         ensure!(
-            document != LegalDocument::ThirdPartyLicenses,
-            "third-party licenses are informational and are not accepted"
+            matches!(
+                document,
+                LegalDocument::TermsOfService | LegalDocument::PrivacyPolicy
+            ),
+            "informational legal documents are not accepted"
         );
         ensure!(
             reviewed_digest == document.digest(),
@@ -436,7 +448,9 @@ impl LegalStore {
         let key = match document {
             LegalDocument::TermsOfService => "terms_of_service",
             LegalDocument::PrivacyPolicy => "privacy_policy",
-            LegalDocument::ThirdPartyLicenses => unreachable!("rejected above"),
+            LegalDocument::ApplicationLicense | LegalDocument::ThirdPartyLicenses => {
+                unreachable!("rejected above")
+            }
         };
         self.database.connection.execute(
             "INSERT INTO legal_acceptance(document, digest, accepted_at)

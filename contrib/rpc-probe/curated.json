@@ -1,5 +1,5 @@
 {
-  "note": "Hand-written identity for the chains the wallet ships as defaults. Names and aliases are not cosmetic: they are what an owner types and what an MCP caller passes as `network`, so a regeneration that renamed `ethereum` to `eth` would break every stored habit and every script. Anything not listed here keeps the name derived from the registry's short name. `max_gas_limit` is the ceiling this wallet will simulate or sign at on that chain, independent of what a block would allow. `rpc_first` names the endpoint that should lead the list — the chain's own published endpoint, or on Ethereum an MEV-protecting one — so an owner's traffic goes to the operator the chain itself points at before it goes to anyone found in a directory. It is honoured only when that endpoint probed healthy, and never when pinning it would put a node without eth_simulateV1 ahead of one that has it. `block_explorer_url` names the explorer a person should be sent to when the registry's first listing for the chain is not the one its users read.",
+  "note": "Hand-written identity for the chains the wallet ships as defaults. Names and aliases are not cosmetic: they are what an owner types and what an MCP caller passes as `network`, so a regeneration that renamed `ethereum` to `eth` would break every stored habit and every script. Anything not listed here keeps the name derived from the registry's short name. Default testnets ship disabled and are hidden until testnet mode is enabled. `max_gas_limit` is the ceiling this wallet will simulate or sign at on that chain, independent of what a block would allow. `rpc_first` names the endpoint that should lead the list — the chain's own published endpoint, or on Ethereum an MEV-protecting one — so an owner's traffic goes to the operator the chain itself points at before it goes to anyone found in a directory. It is honoured only when that endpoint probed healthy, and never when pinning it would put a node without eth_simulateV1 ahead of one that has it. `block_explorer_url` names the explorer a person should be sent to when the registry's first listing for the chain is not the one its users read.",
   "chains": {
     "1": {
       "name": "ethereum",
@@ -70,6 +70,17 @@
       "documentation_url": "https://docs.monad.xyz/developer-essentials/network-information",
       "rpc_first": "https://rpc.monad.xyz"
     },
+    "10200": {
+      "name": "gnosis-chiado",
+      "display_name": "Gnosis Chiado Testnet",
+      "aliases": [
+        "chiado",
+        "chi"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.gnosischain.com/about/networks/chiado",
+      "rpc_first": "https://rpc.chiadochain.net"
+    },
     "146": {
       "name": "sonic",
       "display_name": "Sonic",
@@ -135,6 +146,17 @@
       "rpc_first": "https://rpc.mainnet.chain.robinhood.com",
       "block_explorer_url": "https://robinscan.io"
     },
+    "46630": {
+      "name": "robinhood-testnet",
+      "display_name": "Robinhood Chain Testnet",
+      "aliases": [
+        "robinhood-sepolia",
+        "rh-testnet"
+      ],
+      "max_gas_limit": "32000000",
+      "documentation_url": "https://docs.robinhood.com/chain/connecting/",
+      "rpc_first": "https://rpc.testnet.chain.robinhood.com"
+    },
     "57073": {
       "name": "ink",
       "display_name": "Ink",
@@ -142,7 +164,7 @@
         "ink-mainnet"
       ],
       "max_gas_limit": "16777216",
-      "documentation_url": "https://docs.inkonchain.com/general/connect-wallet",
+      "documentation_url": "https://docs.inkonchain.com/general/network-information",
       "rpc_first": "https://rpc-gel.inkonchain.com"
     },
     "59144": {
@@ -160,6 +182,58 @@
       "max_gas_limit": "16777216",
       "documentation_url": "https://docs.berachain.com/general/introduction/connect-to-berachain",
       "rpc_first": "https://rpc.berachain.com"
+    },
+    "80069": {
+      "name": "berachain-bepolia",
+      "display_name": "Berachain Bepolia",
+      "aliases": [
+        "bepolia"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.berachain.com/general/introduction/connect-to-berachain",
+      "rpc_first": "https://bepolia.rpc.berachain.com"
+    },
+    "84532": {
+      "name": "base-sepolia",
+      "display_name": "Base Sepolia Testnet",
+      "aliases": [
+        "basesep"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
+      "rpc_first": "https://sepolia.base.org"
+    },
+    "421614": {
+      "name": "arbitrum-sepolia",
+      "display_name": "Arbitrum Sepolia",
+      "aliases": [
+        "arb-sepolia",
+        "arb-sep"
+      ],
+      "max_gas_limit": "32000000",
+      "documentation_url": "https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info",
+      "rpc_first": "https://sepolia-rollup.arbitrum.io/rpc"
+    },
+    "763373": {
+      "name": "ink-sepolia",
+      "display_name": "Ink Sepolia",
+      "aliases": [
+        "inksepolia"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.inkonchain.com/general/connect-wallet",
+      "rpc_first": "https://rpc-gel-sepolia.inkonchain.com"
+    },
+    "11155420": {
+      "name": "optimism-sepolia",
+      "display_name": "OP Sepolia Testnet",
+      "aliases": [
+        "op-sepolia",
+        "opsep"
+      ],
+      "max_gas_limit": "16777216",
+      "documentation_url": "https://docs.optimism.io/op-mainnet/network-information/connecting-to-op",
+      "rpc_first": "https://sepolia.optimism.io"
     },
     "81457": {
       "name": "blast",

@@ -144,10 +144,10 @@ fn network_preset_search_prefers_exact_names_and_chain_ids() {
     let presets = ekubo_wallet_core::networks::known_networks();
     let configured = ekubo_wallet_core::config::default_networks();
 
-    let by_chain = network_presets_for_display(presets, &configured, "8453", 10);
+    let by_chain = network_presets_for_display(presets, &configured, "8453", 10, false);
     assert_eq!(by_chain[0].config.chain_id, 8453);
 
-    let by_name = network_presets_for_display(presets, &configured, "base", 10);
+    let by_name = network_presets_for_display(presets, &configured, "base", 10, false);
     assert_eq!(by_name[0].config.name, "base");
     assert!(
         by_name
@@ -164,6 +164,7 @@ fn network_reset_preview_names_every_custom_or_modified_row() {
     configured.push(NetworkConfig {
         name: "owner-chain".into(),
         disabled: true,
+        testnet: false,
         display_name: Some("Owner Chain".into()),
         aliases: Vec::new(),
         chain_id: 9_999_991,
@@ -199,7 +200,7 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
         documentation_url: "https://docs.example/network".into(),
     };
 
-    let (network, errors) = parse_network_editor_draft(&draft, true, RpcStrategy::Random);
+    let (network, errors) = parse_network_editor_draft(&draft, true, true, RpcStrategy::Random);
     assert_eq!(errors, NetworkEditorErrors::default());
     let network = network.unwrap();
     assert_eq!(network.name, "owner-chain");
@@ -209,6 +210,7 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
     assert_eq!(network.rpc_urls.len(), 2);
     assert_eq!(network.rpc_strategy, RpcStrategy::Random);
     assert!(network.disabled);
+    assert!(network.testnet);
     assert_eq!(network.native_currency.unwrap().symbol, "ETH");
 }
 
@@ -230,7 +232,7 @@ fn network_rpc_editor_displays_explicit_commas_and_round_trips_them() {
         rpc_urls: displayed,
         ..NetworkEditorDraft::default()
     };
-    let (parsed, errors) = parse_network_editor_draft(&draft, false, RpcStrategy::Ordered);
+    let (parsed, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
     assert_eq!(errors, NetworkEditorErrors::default());
     assert_eq!(parsed.unwrap().rpc_urls, urls);
 }
@@ -246,7 +248,7 @@ fn structured_network_editor_reports_errors_beside_the_relevant_fields() {
         ..NetworkEditorDraft::default()
     };
 
-    let (network, errors) = parse_network_editor_draft(&draft, false, RpcStrategy::Ordered);
+    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
     assert!(network.is_none());
     assert!(errors.name.is_some());
     assert!(errors.chain_id.is_some());
@@ -272,21 +274,62 @@ fn serial_review_queue_never_overwrites_and_preserves_arrival_order() {
 #[test]
 fn portfolio_amounts_preserve_every_significant_digit() {
     assert_eq!(
-        format_asset_balance("123450000", Some(6), Some("USDC"), "base units"),
-        "123.45 USDC"
+        format_asset_amount("123450000", Some(6), "base units"),
+        "123.45"
     );
     assert_eq!(
-        format_asset_balance(
+        format_asset_amount(
             "340282366920938463463374607431768211455",
             Some(18),
-            Some("TKN"),
             "base units"
         ),
-        "340282366920938463463.374607431768211455 TKN"
+        "340282366920938463463.374607431768211455"
     );
+    assert_eq!(format_asset_amount("7", None, "base units"), "7 base units");
+}
+
+#[test]
+fn portfolio_rows_are_commingled_by_chain_then_token_address() {
+    let mut rows = vec![
+        PortfolioBalanceRow {
+            chain_id: 10,
+            network_name: "Optimism".into(),
+            asset_address: "0xbb".into(),
+            token_symbol: Some("B".into()),
+            token_name: Some("Token B".into()),
+            native: false,
+            balance: "2".into(),
+            explorer_url: None,
+        },
+        PortfolioBalanceRow {
+            chain_id: 1,
+            network_name: "Ethereum".into(),
+            asset_address: "0xcc".into(),
+            token_symbol: Some("C".into()),
+            token_name: Some("Token C".into()),
+            native: false,
+            balance: "3".into(),
+            explorer_url: None,
+        },
+        PortfolioBalanceRow {
+            chain_id: 1,
+            network_name: "Ethereum".into(),
+            asset_address: "0xAA".into(),
+            token_symbol: Some("A".into()),
+            token_name: Some("Token A".into()),
+            native: false,
+            balance: "1".into(),
+            explorer_url: None,
+        },
+    ];
+
+    sort_portfolio_balance_rows(&mut rows);
+
     assert_eq!(
-        format_asset_balance("7", None, Some("UNKNOWN"), "base units"),
-        "7 base units"
+        rows.iter()
+            .map(|row| (row.chain_id, row.asset_address.as_str()))
+            .collect::<Vec<_>>(),
+        [(1, "0xAA"), (1, "0xcc"), (10, "0xbb")]
     );
 }
 
@@ -440,11 +483,11 @@ fn tray_artwork_tracks_both_system_appearance_families() {
 
 #[test]
 fn command_palette_reaches_every_desktop_route() {
-    assert_eq!(Route::ALL.len(), 9);
+    assert_eq!(Route::ALL.len(), 8);
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
-    assert_eq!(Route::ALL.first(), Some(&Route::Reviews));
-    assert_eq!(Route::Reviews.label(), "Inbox");
+    assert_eq!(Route::ALL.first(), Some(&Route::Activity));
+    assert_eq!(Route::Activity.label(), "Activity");
     assert_eq!(Route::Overview.label(), "Portfolio");
     assert!(NAVIGATION_RAIL_WIDTH >= px(80.0));
     assert!(NAVIGATION_BUTTON_SIZE >= px(52.0));
@@ -476,8 +519,7 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
         ("⌘5", "cmd-5"),
         ("⌘6", "cmd-6"),
         ("⌘7", "cmd-7"),
-        ("⌘8", "cmd-8"),
-        ("⌘9 / ⌘,", "cmd-9"),
+        ("⌘8 / ⌘,", "cmd-8"),
     ];
     #[cfg(not(target_os = "macos"))]
     let expected = [
@@ -488,8 +530,7 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
         ("Ctrl+5", "ctrl-5"),
         ("Ctrl+6", "ctrl-6"),
         ("Ctrl+7", "ctrl-7"),
-        ("Ctrl+8", "ctrl-8"),
-        ("Ctrl+9 / Ctrl+,", "ctrl-9"),
+        ("Ctrl+8 / Ctrl+,", "ctrl-8"),
     ];
 
     let actual = Route::ALL.map(|route| (route.shortcut(), route.key_binding()));
@@ -578,6 +619,29 @@ fn legal_markdown_rows_are_fixed_width_semantic_and_contained() {
 }
 
 #[test]
+fn legal_rows_keep_punctuation_literal_and_linkify_web_urls() {
+    let html = legal_row_html(
+        "crate-name 1.2.3 — https://github.com/example/crate. Contact <dev@example.com>",
+    );
+    assert!(html.contains("crate-name 1.2.3"));
+    assert!(!html.contains("\\-"));
+    assert!(!html.contains("\\."));
+    assert!(html.contains(
+        "<a href=\"https://github.com/example/crate\">https://github.com/example/crate</a>."
+    ));
+    assert!(html.contains("&lt;dev@example.com&gt;"));
+}
+
+#[test]
+fn long_legal_urls_remain_clickable_across_wrapped_rows() {
+    let url =
+        "https://example.com/a/path/that/is/deliberately/longer/than/the/legal/view/line/width";
+    let rows = legal_markdown_rows(url);
+    assert!(rows.len() > 1);
+    assert!(rows.iter().all(|row| row.link_url.as_deref() == Some(url)));
+}
+
+#[test]
 fn explorer_transaction_links_use_the_configured_chain_url() {
     let mut network = crate::config::default_networks().remove(0);
     network.chain_id = 7;
@@ -586,6 +650,23 @@ fn explorer_transaction_links_use_the_configured_chain_url() {
         block_explorer_transaction_url(&[network], 7, "0xabc").as_deref(),
         Some("https://explorer.example/base/tx/0xabc")
     );
+}
+
+#[test]
+fn explorer_token_links_use_the_configured_chain_url() {
+    let mut network = crate::config::default_networks().remove(0);
+    network.block_explorer_url = Some("https://explorer.example/base/".parse().unwrap());
+    assert_eq!(
+        block_explorer_token_url(&network, "0xabc").as_deref(),
+        Some("https://explorer.example/base/token/0xabc")
+    );
+}
+
+#[test]
+fn portfolio_account_selection_is_clamped_after_accounts_change() {
+    assert_eq!(clamped_portfolio_account_index(3, 1), 1);
+    assert_eq!(clamped_portfolio_account_index(1, 2), 0);
+    assert_eq!(clamped_portfolio_account_index(0, 7), 0);
 }
 
 fn relative_luminance(rgb: u32) -> f64 {
@@ -645,21 +726,26 @@ fn every_button_interaction_state_has_aa_text_contrast_in_both_themes() {
 #[test]
 #[allow(clippy::unreadable_literal)]
 fn interaction_palette_uses_the_figma_brand_colors() {
-    for dark in [false, true] {
-        let palette = interface_interaction_palette(dark);
-        assert_eq!(palette.primary, 0x9d5af2);
-        assert_eq!(palette.primary_hover, 0xb174ff);
-        assert_eq!(palette.primary_foreground, 0x101010);
-        assert_eq!(palette.danger, 0xeb1e74);
-        assert_eq!(palette.success, 0x26e7ad);
-        assert_eq!(palette.warning, 0xdf7b32);
-    }
+    let dark = interface_interaction_palette(true);
+    assert_eq!(dark.primary, 0x7a36d2);
+    assert_eq!(dark.primary_hover, 0x8b4ade);
+    assert_eq!(dark.primary_foreground, 0xffffff);
+    assert_eq!(dark.danger, 0xb5124f);
+    assert_eq!(dark.danger_foreground, 0xffffff);
+    assert_eq!(dark.success, 0x26e7ad);
+    assert_eq!(dark.warning, 0xdf7b32);
+
+    let light = interface_interaction_palette(false);
+    assert_eq!(light.primary, 0x7a36d2);
+    assert_eq!(light.primary_foreground, 0xffffff);
+    assert_eq!(light.danger, 0xb5124f);
+    assert_eq!(light.danger_foreground, 0xffffff);
 }
 
 #[test]
-fn shared_controls_meet_the_application_interaction_targets() {
-    assert_eq!(CONTROL_HEIGHT, px(44.0));
-    assert_eq!(COMPACT_CONTROL_HEIGHT, px(40.0));
+fn shared_controls_use_contextual_desktop_dimensions() {
+    assert_eq!(BUTTON_HEIGHT, px(44.0));
+    assert_eq!(COPY_BUTTON_HEIGHT, px(32.0));
     assert_eq!(CONTROL_RADIUS, px(14.0));
     assert_eq!(SURFACE_RADIUS, px(16.0));
 }
@@ -728,33 +814,6 @@ fn embedded_suisse_fonts_are_true_type_and_name_both_application_families() {
 }
 
 #[test]
-fn only_disabled_networks_offer_permanent_removal() {
-    let mut network = ekubo_wallet_core::networks::default_networks()
-        .into_iter()
-        .find(|network| network.name == "ethereum")
-        .unwrap();
-
-    assert!(!network_can_be_removed(&network));
-    network.disabled = true;
-    assert!(network_can_be_removed(&network));
-}
-
-#[test]
-fn restoring_network_defaults_preserves_disabled_state_and_one_endpoint() {
-    let mut reviewed = crate::config::default_networks().remove(0);
-    reviewed.disabled = true;
-    let mut preset = reviewed.clone();
-    preset.disabled = false;
-    preset
-        .rpc_urls
-        .push("https://fallback.example".parse().unwrap());
-
-    let restored = restored_network_configuration(&reviewed, preset);
-    assert!(restored.disabled);
-    assert_eq!(restored.rpc_urls.len(), 1);
-}
-
-#[test]
 fn networks_stay_sorted_by_numeric_chain_id_when_enabled_state_changes() {
     let mut networks = ekubo_wallet_core::networks::default_networks();
     for network in &mut networks {
@@ -762,7 +821,7 @@ fn networks_stay_sorted_by_numeric_chain_id_when_enabled_state_changes() {
     }
     networks.reverse();
 
-    let sorted = networks_for_display(&networks);
+    let sorted = networks_for_display(&networks, false);
     assert!(
         sorted
             .windows(2)
@@ -771,22 +830,23 @@ fn networks_stay_sorted_by_numeric_chain_id_when_enabled_state_changes() {
 }
 
 #[test]
-fn token_removal_confirmation_is_bound_to_the_exact_row() {
-    let first = StoredToken {
-        chain_id: "1".to_owned(),
-        address: alloy::primitives::Address::repeat_byte(0x11).to_checksum(None),
-        symbol: Some("USDC".to_owned()),
-        name: Some("USD Coin".to_owned()),
-        decimals: Some(6),
-        source: "Manual entry".to_owned(),
-        added_at: chrono::DateTime::UNIX_EPOCH,
-    };
-    let mut second = first.clone();
-    second.symbol = Some("CHANGED".to_owned());
+fn testnet_mode_controls_visibility_without_hiding_unknown_chain_context() {
+    let networks = ekubo_wallet_core::networks::default_networks();
+    let testnet_chain = networks
+        .iter()
+        .find(|network| network.testnet)
+        .map(|network| network.chain_id)
+        .unwrap();
+    let configured = networks
+        .iter()
+        .map(|network| network.chain_id)
+        .collect::<BTreeSet<_>>();
+    let hidden = visible_network_chain_ids(&networks, false);
 
-    assert!(token_removal_is_confirmed(Some(&first), &first));
-    assert!(!token_removal_is_confirmed(Some(&first), &second));
-    assert!(!token_removal_is_confirmed(None, &first));
+    assert!(!hidden.contains(&testnet_chain));
+    assert!(!chain_is_visible(Some(testnet_chain), &hidden, &configured));
+    assert!(chain_is_visible(Some(u64::MAX), &hidden, &configured));
+    assert!(visible_network_chain_ids(&networks, true).contains(&testnet_chain));
 }
 
 #[test]
@@ -915,9 +975,12 @@ fn legal_gate_requires_both_current_owner_documents_in_order() {
 }
 
 #[test]
-fn third_party_licenses_are_informational_not_acceptance_gated() {
+fn bundled_licenses_are_informational_not_acceptance_gated() {
     assert!(legal_requires_acceptance(LegalDocument::TermsOfService));
     assert!(legal_requires_acceptance(LegalDocument::PrivacyPolicy));
+    assert!(!legal_requires_acceptance(
+        LegalDocument::ApplicationLicense
+    ));
     assert!(!legal_requires_acceptance(
         LegalDocument::ThirdPartyLicenses
     ));
@@ -959,6 +1022,10 @@ fn owner_legal_documents_fail_closed_when_status_is_unavailable() {
         None
     ));
     assert!(!legal_review_requires_acceptance(
+        LegalDocument::ApplicationLicense,
+        None
+    ));
+    assert!(!legal_review_requires_acceptance(
         LegalDocument::ThirdPartyLicenses,
         None
     ));
@@ -974,15 +1041,10 @@ fn legal_acceptance_waits_until_the_final_virtual_row_has_rendered() {
 }
 
 #[test]
-fn application_license_is_compiled_and_links_to_the_build_revision() {
-    assert!(crate::APPLICATION_LICENSE_TEXT.contains("Functional Source License, Version 1.1"));
-    assert!(crate::APPLICATION_LICENSE_TEXT.contains("Copyright 2026 Ekubo, Inc."));
-    let url = application_license_url();
-    assert!(url.starts_with("https://github.com/EkuboProtocol/wallet/blob/"));
-    assert!(url.ends_with("/LICENSE"));
-    if !BUILD_COMMIT.is_empty() {
-        assert!(url.contains(BUILD_COMMIT));
-    }
+fn application_license_is_compiled_for_the_legal_viewer() {
+    let text = LegalDocument::ApplicationLicense.text();
+    assert!(text.contains("Functional Source License, Version 1.1"));
+    assert!(text.contains("Copyright 2026 Ekubo, Inc."));
 }
 
 #[test]

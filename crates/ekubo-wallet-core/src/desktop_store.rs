@@ -250,9 +250,11 @@ impl DesktopStore {
     }
 
     pub fn detailed_notification_previews(&self) -> Result<bool> {
-        Ok(self
-            .setting("notification_detailed_previews")?
-            .unwrap_or(false))
+        // Detailed lifecycle notifications are the wallet's single supported
+        // presentation. Keep the decision in core because notification
+        // privacy is wallet-owned security state, even though there is no
+        // longer a mutable UI preference for it.
+        Ok(true)
     }
 
     pub fn set_detailed_notification_previews(
@@ -270,6 +272,16 @@ impl DesktopStore {
 
     pub fn set_appearance_preference(&mut self, preference: AppearancePreference) -> Result<()> {
         self.set_setting("appearance_preference", &preference)
+    }
+
+    /// Whether owner-facing surfaces include networks explicitly classified
+    /// as testnets and records linked to those networks.
+    pub fn testnet_mode(&self) -> Result<bool> {
+        Ok(self.setting("testnet_mode")?.unwrap_or(false))
+    }
+
+    pub fn set_testnet_mode(&mut self, enabled: bool) -> Result<()> {
+        self.set_setting("testnet_mode", &enabled)
     }
 
     /// Record public OAuth client metadata. This does not authorize the client

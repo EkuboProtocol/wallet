@@ -402,6 +402,16 @@ impl OwnerApi {
         Ok(())
     }
 
+    pub fn testnet_mode(&self) -> Result<bool> {
+        self.desktop()?.testnet_mode()
+    }
+
+    pub fn set_testnet_mode(&self, enabled: bool) -> Result<()> {
+        self.desktop()?.set_testnet_mode(enabled)?;
+        self.events.publish(DomainEventKind::ConfigurationChanged);
+        Ok(())
+    }
+
     pub fn policy(&self, wallet_id: &str) -> Result<Option<StoredPolicy>> {
         PolicyStore::production(self.config.data_dir())?.get(wallet_id)
     }
@@ -479,19 +489,20 @@ impl OwnerApi {
         self.config.network_by_chain_id(&chain_id.to_string())
     }
 
-    /// Read every account on one owner-selected configured network with
-    /// bounded concurrency. The network is block-pinned by the same core path
-    /// exposed to agents, and one account's failure does not hide the others.
-    pub async fn portfolio(&self, chain_id: u64) -> Result<OwnerPortfolioSnapshot> {
+    /// Read every account on all enabled configured networks with bounded
+    /// concurrency. Each network is block-pinned by the same core path exposed
+    /// to agents, and one read's failure does not hide the others.
+    pub async fn portfolio(&self) -> Result<OwnerPortfolioSnapshot> {
         use futures::{StreamExt as _, stream};
 
         let mut snapshot = self.config.load()?;
+        let testnet_mode = self.testnet_mode()?;
         snapshot
             .networks
-            .retain(|network| network.chain_id == chain_id && !network.disabled);
+            .retain(|network| !network.disabled && (testnet_mode || !network.testnet));
         ensure!(
-            snapshot.networks.len() == 1,
-            "chain {chain_id} is not an enabled configured network"
+            !snapshot.networks.is_empty(),
+            "there are no enabled configured networks"
         );
         let token_store = TokenStore::production(self.config.data_dir())?;
         let mut known_by_chain = std::collections::BTreeMap::new();
@@ -610,13 +621,6 @@ impl OwnerApi {
             .reset_networks_to_defaults(reviewed_networks, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(networks)
-    }
-
-    pub async fn remove_network(&self, reviewed: &NetworkConfig) -> Result<NetworkConfig> {
-        let authorization = authorize_owner(OwnerAuthorizationScope::NetworkSettings).await?;
-        let removed = self.config.remove_network(reviewed, &authorization)?;
-        self.events.publish(DomainEventKind::ConfigurationChanged);
-        Ok(removed)
     }
 
     pub async fn set_network_disabled(

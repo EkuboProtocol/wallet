@@ -67,7 +67,7 @@ VENDORED = (
 # The name recorded as the source of every seeded row. It reaches the token
 # review and search screens, so it reads as a provenance claim rather than a
 # file name.
-LIST_NAME = "Ekubo default tokens"
+LIST_NAME = "Default tokens"
 
 
 def is_evm_address(value: str) -> bool:

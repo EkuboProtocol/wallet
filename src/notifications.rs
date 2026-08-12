@@ -35,38 +35,28 @@ pub struct WalletNotification {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NotificationPreferences {
-    pub detailed_previews: bool,
-}
+pub struct NotificationPreferences;
 
 #[must_use]
 pub fn notification_for(
     event: &DomainEvent,
-    preferences: NotificationPreferences,
+    _preferences: NotificationPreferences,
 ) -> Option<WalletNotification> {
     let DomainEventKind::Transaction { request_id, stage } = &event.kind else {
         return None;
     };
-    let (verb, generic_body, review) = match stage {
-        TransactionStage::Proposed => (
-            "needs your attention",
-            "A transaction needs your attention.",
-            true,
-        ),
-        TransactionStage::Signed => ("was signed", "A transaction was signed.", false),
-        TransactionStage::Broadcast => ("was broadcast", "A transaction was broadcast.", false),
-        TransactionStage::Confirmed => ("was confirmed", "A transaction was confirmed.", false),
-        TransactionStage::Reverted => ("was reverted", "A transaction was reverted.", false),
-        TransactionStage::Replaced => ("was replaced", "A transaction was replaced.", false),
-        TransactionStage::Cancelled => ("was cancelled", "A transaction was cancelled.", false),
+    let (verb, review) = match stage {
+        TransactionStage::Proposed => ("needs your attention", true),
+        TransactionStage::Signed => ("was signed", false),
+        TransactionStage::Broadcast => ("was broadcast", false),
+        TransactionStage::Confirmed => ("was confirmed", false),
+        TransactionStage::Reverted => ("was reverted", false),
+        TransactionStage::Replaced => ("was replaced", false),
+        TransactionStage::Cancelled => ("was cancelled", false),
     };
     Some(WalletNotification {
         title: "Ekubo Wallet".into(),
-        body: if preferences.detailed_previews {
-            format!("Transaction {request_id} {verb}.")
-        } else {
-            generic_body.into()
-        },
+        body: format!("Transaction {request_id} {verb}."),
         route: if review {
             NotificationRoute::Review(*request_id)
         } else {

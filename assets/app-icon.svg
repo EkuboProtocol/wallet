@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="ekubo-app-icon-title">
+  <title id="ekubo-app-icon-title">Ekubo Wallet</title>
+  <defs>
+    <linearGradient id="ekubo-purple" x1="72" y1="64" x2="452" y2="464" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9D5AF2"/>
+      <stop offset="0.5" stop-color="#661CC4"/>
+      <stop offset="1" stop-color="#261B34"/>
+    </linearGradient>
+    <radialGradient id="ekubo-highlight" cx="0" cy="0" r="1" gradientTransform="translate(136 112) rotate(48) scale(360)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.72" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="ekubo-app-icon-shape">
+      <rect x="40" y="40" width="432" height="432" rx="96"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#ekubo-app-icon-shape)">
+    <rect x="40" y="40" width="432" height="432" fill="url(#ekubo-purple)"/>
+    <rect x="40" y="40" width="432" height="432" fill="url(#ekubo-highlight)"/>
+  </g>
+
+  <!-- Exact normalized Ekubo symbol from the approved brand asset. -->
+  <path
+    transform="translate(116 165) scale(5.6)"
+    fill="#FFFFFF"
+    fill-rule="evenodd"
+    clip-rule="evenodd"
+    d="M0 7.5C0 3.35787 3.35786 0 7.5 0H42.5C46.6421 0 50 3.35786 50 7.5V25C50 29.1421 46.6421 32.5 42.5 32.5H7.5C3.35786 32.5 0 29.1421 0 25V7.5ZM25 16.25C25 21.7728 20.5228 26.25 15 26.25C9.47715 26.25 5 21.7728 5 16.25C5 10.7272 9.47715 6.25 15 6.25C20.5228 6.25 25 10.7272 25 16.25ZM25 16.25C25 10.7272 29.4772 6.25 35 6.25C40.5228 6.25 45 10.7272 45 16.25C45 21.7728 40.5228 26.25 35 26.25C29.4772 26.25 25 21.7728 25 16.25Z"
+  />
+</svg>

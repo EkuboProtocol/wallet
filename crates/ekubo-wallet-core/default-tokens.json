@@ -1,5 +1,5 @@
 {
-  "name": "Ekubo default tokens",
+  "name": "Default tokens",
   "source_url": "https://raw.githubusercontent.com/EkuboProtocol/default-tokens/refs/heads/main/tokens.json",
   "source_sha256": "84cbf618f81791db5ee43b9d5cad947142bf039debd0df932cd0ec33e122474e",
   "upstream_tokens": 19646,

@@ -4,7 +4,7 @@ Install the signed native package for the platform:
 
 - macOS: notarized `.app` distributed in a `.dmg`.
 - Windows: signed per-user NSIS installer.
-- Linux: AppImage, `.deb`, or `.rpm`, including desktop entry, icons,
+- Linux: AppImage or `.deb`, including desktop entry, icons,
   StatusNotifierItem integration, and the polkit policy.
 
 The app launches without arguments. On startup it detects supported agents and
@@ -50,5 +50,6 @@ open "target/release/bundle/macos/Ekubo Wallet.app"
 ```
 
 The packaged app gets its Dock icon from the `icons` entry under
-`package.metadata.packager` in `Cargo.toml`; `build.rs` deterministically
-generates the checked design at `target/packager-assets/icon-512.png`.
+`package.metadata.packager` in `Cargo.toml`. The editable source is
+`assets/app-icon.svg`; `assets/app-icon-512.png` is its checked raster export
+for packagers that do not accept SVG application icons.

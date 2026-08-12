@@ -131,14 +131,39 @@ fn every_fresh_default_has_a_block_explorer() {
 }
 
 #[test]
-fn defaults_are_mainnets_drawn_from_the_registry() {
-    for profile in known_networks().iter().filter(|profile| profile.is_default) {
-        assert!(
-            !profile.is_testnet,
-            "{} is a testnet and should not be configured by default",
-            profile.config.name
-        );
-    }
+fn default_testnets_are_the_probed_project_operated_endpoints() {
+    let expected = [
+        (10200, "https://rpc.chiadochain.net/"),
+        (46630, "https://rpc.testnet.chain.robinhood.com/"),
+        (80069, "https://bepolia.rpc.berachain.com/"),
+        (84532, "https://sepolia.base.org/"),
+        (421_614, "https://sepolia-rollup.arbitrum.io/rpc"),
+        (763_373, "https://rpc-gel-sepolia.inkonchain.com/"),
+        (11_155_420, "https://sepolia.optimism.io/"),
+    ];
+    let defaults = known_networks()
+        .iter()
+        .filter(|profile| profile.is_default && profile.config.testnet)
+        .map(|profile| {
+            assert!(
+                profile.simulate_endpoints > 0,
+                "default testnet {} has no compatible simulation endpoint",
+                profile.config.name
+            );
+            (
+                profile.config.chain_id,
+                profile.config.primary_rpc_url().as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(defaults, expected);
+    assert!(
+        default_networks()
+            .iter()
+            .filter(|network| network.testnet)
+            .all(|network| network.disabled),
+        "testnet defaults must never start enabled"
+    );
 }
 
 /// Renaming a network breaks every script, alias, and habit that addresses

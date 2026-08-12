@@ -10277,19 +10277,22 @@
   },
   {
    "chain_id": 10200,
-   "name": "chi",
+   "name": "gnosis-chiado",
    "display_name": "Gnosis Chiado Testnet",
-   "aliases": [],
-   "default": false,
+   "aliases": [
+    "chiado",
+    "chi"
+   ],
+   "default": true,
    "testnet": true,
    "native_currency": {
     "name": "Chiado xDAI",
     "symbol": "XDAI",
     "decimals": 18
    },
-   "max_gas_limit": null,
+   "max_gas_limit": "16777216",
    "block_explorer_url": "https://blockscout.chiadochain.net",
-   "documentation_url": "https://docs.gnosischain.com",
+   "documentation_url": "https://docs.gnosischain.com/about/networks/chiado",
    "simulate_endpoints": 2,
    "fork_endpoints": 2,
    "rpc_urls": [
@@ -12404,24 +12407,27 @@
   },
   {
    "chain_id": 46630,
-   "name": "rh-testnet",
+   "name": "robinhood-testnet",
    "display_name": "Robinhood Chain Testnet",
-   "aliases": [],
-   "default": false,
+   "aliases": [
+    "robinhood-sepolia",
+    "rh-testnet"
+   ],
+   "default": true,
    "testnet": true,
    "native_currency": {
     "name": "Sepolia Ether",
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
+   "max_gas_limit": "32000000",
    "block_explorer_url": "https://explorer.testnet.chain.robinhood.com",
-   "documentation_url": "https://docs.robinhood.com/chain/",
+   "documentation_url": "https://docs.robinhood.com/chain/connecting/",
    "simulate_endpoints": 3,
    "fork_endpoints": 3,
    "rpc_urls": [
-    "https://robinhood-sepolia-rpc.publicnode.com/",
     "https://rpc.testnet.chain.robinhood.com/",
+    "https://robinhood-sepolia-rpc.publicnode.com/",
     "https://robinhood-testnet.drpc.org/",
     "https://rpc.testnet.chain.robinhood.com/rpc"
    ]
@@ -12826,7 +12832,7 @@
    },
    "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer.inkonchain.com",
-   "documentation_url": "https://docs.inkonchain.com/general/connect-wallet",
+   "documentation_url": "https://docs.inkonchain.com/general/network-information",
    "simulate_endpoints": 3,
    "fork_endpoints": 3,
    "rpc_urls": [
@@ -13561,17 +13567,19 @@
    "chain_id": 80069,
    "name": "berachain-bepolia",
    "display_name": "Berachain Bepolia",
-   "aliases": [],
-   "default": false,
+   "aliases": [
+    "bepolia"
+   ],
+   "default": true,
    "testnet": true,
    "native_currency": {
     "name": "Testnet BERA Token",
     "symbol": "BERA",
     "decimals": 18
    },
-   "max_gas_limit": null,
+   "max_gas_limit": "16777216",
    "block_explorer_url": "https://bepolia.beratrail.io",
-   "documentation_url": "https://www.berachain.com",
+   "documentation_url": "https://docs.berachain.com/general/introduction/connect-to-berachain",
    "simulate_endpoints": 1,
    "fork_endpoints": 1,
    "rpc_urls": [
@@ -13759,27 +13767,29 @@
   },
   {
    "chain_id": 84532,
-   "name": "basesep",
+   "name": "base-sepolia",
    "display_name": "Base Sepolia Testnet",
-   "aliases": [],
-   "default": false,
+   "aliases": [
+    "basesep"
+   ],
+   "default": true,
    "testnet": true,
    "native_currency": {
     "name": "Sepolia Ether",
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
+   "max_gas_limit": "16777216",
    "block_explorer_url": "https://sepolia.basescan.org",
-   "documentation_url": "https://base.org",
+   "documentation_url": "https://docs.base.org/base-chain/quickstart/connecting-to-base",
    "simulate_endpoints": 5,
    "fork_endpoints": 5,
    "rpc_urls": [
+    "https://sepolia.base.org/",
     "https://base-testnet.api.pocket.network/",
     "https://base-sepolia.rpc.sentio.xyz/",
     "https://base-sepolia-public.nodies.app/",
     "https://base-sepolia-rpc.publicnode.com/",
-    "https://sepolia.base.org/",
     "https://base-sepolia.drpc.org/"
    ]
   },
@@ -15385,24 +15395,27 @@
   },
   {
    "chain_id": 421614,
-   "name": "arb-sep",
+   "name": "arbitrum-sepolia",
    "display_name": "Arbitrum Sepolia",
-   "aliases": [],
-   "default": false,
+   "aliases": [
+    "arb-sepolia",
+    "arb-sep"
+   ],
+   "default": true,
    "testnet": true,
    "native_currency": {
     "name": "Sepolia Ether",
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
+   "max_gas_limit": "32000000",
    "block_explorer_url": "https://sepolia.arbiscan.io",
-   "documentation_url": "https://arbitrum.io",
+   "documentation_url": "https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info",
    "simulate_endpoints": 3,
    "fork_endpoints": 3,
    "rpc_urls": [
-    "https://arbitrum-sepolia-testnet.api.pocket.network/",
     "https://sepolia-rollup.arbitrum.io/rpc",
+    "https://arbitrum-sepolia-testnet.api.pocket.network/",
     "https://arbitrum-sepolia-rpc.publicnode.com/",
     "https://arbitrum-sepolia.drpc.org/",
     "https://arbitrum-sepolia.gateway.tenderly.co/"
@@ -15931,19 +15944,21 @@
   },
   {
    "chain_id": 763373,
-   "name": "inksepolia",
+   "name": "ink-sepolia",
    "display_name": "Ink Sepolia",
-   "aliases": [],
-   "default": false,
+   "aliases": [
+    "inksepolia"
+   ],
+   "default": true,
    "testnet": true,
    "native_currency": {
     "name": "Sepolia Ether",
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
+   "max_gas_limit": "16777216",
    "block_explorer_url": "https://explorer-sepolia.inkonchain.com",
-   "documentation_url": "https://inkonchain.com/",
+   "documentation_url": "https://docs.inkonchain.com/general/connect-wallet",
    "simulate_endpoints": 1,
    "fork_endpoints": 1,
    "rpc_urls": [
@@ -16823,25 +16838,28 @@
   },
   {
    "chain_id": 11155420,
-   "name": "opsep",
+   "name": "optimism-sepolia",
    "display_name": "OP Sepolia Testnet",
-   "aliases": [],
-   "default": false,
+   "aliases": [
+    "op-sepolia",
+    "opsep"
+   ],
+   "default": true,
    "testnet": true,
    "native_currency": {
     "name": "Sepolia Ether",
     "symbol": "ETH",
     "decimals": 18
    },
-   "max_gas_limit": null,
+   "max_gas_limit": "16777216",
    "block_explorer_url": "https://sepolia-optimism.etherscan.io",
-   "documentation_url": "https://optimism.io",
+   "documentation_url": "https://docs.optimism.io/op-mainnet/network-information/connecting-to-op",
    "simulate_endpoints": 3,
    "fork_endpoints": 3,
    "rpc_urls": [
+    "https://sepolia.optimism.io/",
     "https://op-sepolia-testnet.api.pocket.network/",
     "https://optimism-sepolia-public.nodies.app/",
-    "https://sepolia.optimism.io/",
     "https://optimism-sepolia.drpc.org/",
     "https://optimism-sepolia.gateway.tenderly.co/"
    ]

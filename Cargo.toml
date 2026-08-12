@@ -1,6 +1,6 @@
 [package]
 name = "ekubo-wallet"
-version = "1.0.0-rc.0"
+version = "1.0.0-rc.1"
 edition = "2024"
 rust-version = "1.91"
 build = "build.rs"
@@ -53,7 +53,6 @@ rand = "0.10.0"
 # Same feature set as the core crate's, so the release check adds a call site
 # rather than a build.
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
-rqrr = "0.10.1"
 rmcp = { version = "3.1.0", features = ["transport-streamable-http-server"] }
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -76,26 +75,24 @@ uuid = { version = "1.18.1", features = ["serde", "v4"] }
 # Allow development checks with Command Line Tools alone. Signed release CI
 # may precompile the same pinned Metal shaders using full Xcode.
 gpui_macos = { git = "https://github.com/zed-industries/zed", features = ["runtime_shaders"] }
-rustix = { version = "1.1.4", features = ["fs"] }
+objc2 = "0.6.3"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder"] }
+objc2-foundation = { version = "0.3.1", default-features = false, features = ["NSString"] }
 
 [target.'cfg(windows)'.dependencies]
 interprocess = "2.4.3"
 
 [dev-dependencies]
 ekubo-wallet-core = { path = "crates/ekubo-wallet-core", features = ["test-hooks"] }
-qrcode = "0.14.1"
 sha2 = "0.10.9"
-
-[build-dependencies]
-image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [package.metadata.packager]
 product-name = "Ekubo Wallet"
 identifier = "org.ekubo.wallet"
-formats = ["app", "dmg", "nsis", "appimage", "deb", "rpm"]
+formats = ["app", "dmg", "nsis", "appimage", "deb"]
 before-packaging-command = "cargo build --release"
 resources = ["schemas", "contrib/polkit/com.ekubo.wallet.policy"]
-icons = ["target/packager-assets/icon-512.png"]
+icons = ["assets/app-icon-512.png"]
 
 [package.metadata.gpui-revisions]
 zed = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1"

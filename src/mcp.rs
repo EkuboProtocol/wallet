@@ -327,6 +327,7 @@ struct PublicWallet {
 struct PublicNetwork {
     name: String,
     chain_id: String,
+    testnet: bool,
     /// Every endpoint configured for this network, in the order the wallet
     /// tries them. Reported in full because failover reaches any of them, so
     /// naming only the first would describe traffic that does not happen.
@@ -494,6 +495,9 @@ struct AddNetworkInput {
     aliases: Vec<String>,
     /// Canonical decimal chain ID, positive and without leading zeros.
     chain_id: String,
+    /// Whether this is a test network. Testnet data stays out of owner-facing
+    /// surfaces until the owner enables testnet mode.
+    testnet: bool,
     /// One to eight distinct http/https RPC endpoints, tried in the order
     /// given. Several is better than one: the wallet moves to the next when
     /// an endpoint fails, and a network with a single endpoint stops working
@@ -1091,6 +1095,7 @@ impl WalletMcpServer {
                 .map(|network| PublicNetwork {
                     name: network.name,
                     chain_id: network.chain_id.to_string(),
+                    testnet: network.testnet,
                     rpc_urls: network.rpc_urls.iter().map(ToString::to_string).collect(),
                     rpc_strategy: network.rpc_strategy.to_string(),
                 })
@@ -2068,9 +2073,12 @@ impl WalletMcpServer {
         Parameters(input): Parameters<AddNetworkInput>,
     ) -> Result<Json<ProposedNetworkOutput>, ErrorData> {
         let chain_id = parse_chain_id(&input.chain_id).map_err(|error| tool_error(&error))?;
+        let testnet = ekubo_wallet_core::networks::known_network(chain_id)
+            .map_or(input.testnet, |profile| profile.config.testnet);
         let candidate = NetworkConfig {
             name: input.name,
             disabled: false,
+            testnet,
             display_name: Some(input.display_name),
             aliases: input.aliases,
             chain_id,

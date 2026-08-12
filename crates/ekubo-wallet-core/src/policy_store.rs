@@ -322,6 +322,9 @@ impl PolicyStore {
             "policy database schema {version} is not the schema this build understands \
              ({SCHEMA_VERSION})"
         );
+        if seed_defaults == SeedDefaults::Yes {
+            crate::default_tokens::rename_legacy_source(&connection)?;
+        }
         verify_integrity(&connection)?;
         // Narrowed through a handle that refuses to follow a link, not through
         // the name. This runs after the connection is open, which is exactly

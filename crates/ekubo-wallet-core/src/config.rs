@@ -63,6 +63,10 @@ pub struct NetworkConfig {
     /// Disabled profiles remain inspectable and editable but are excluded
     /// from ordinary wallet activity until the owner enables them again.
     pub disabled: bool,
+    /// Test networks are hidden from owner-facing data unless testnet mode is
+    /// enabled. This classification travels with the configured network so
+    /// custom networks and reviewed agent proposals cannot lose it.
+    pub testnet: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -487,38 +491,6 @@ impl ConfigStore {
         })
     }
 
-    /// Delete a disabled network after core-verified owner authorization.
-    pub fn remove_network(
-        &self,
-        reviewed: &NetworkConfig,
-        authorization: &OwnerAuthorization,
-    ) -> Result<NetworkConfig> {
-        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
-        ensure!(
-            reviewed.disabled,
-            "disable network {} before deleting it",
-            reviewed.name
-        );
-        self.update(|config| {
-            let index = config
-                .networks
-                .iter()
-                .position(|network| network.chain_id == reviewed.chain_id)
-                .with_context(|| {
-                    format!(
-                        "network {} (chain {}) no longer exists",
-                        reviewed.name, reviewed.chain_id
-                    )
-                })?;
-            ensure!(
-                config.networks[index] == *reviewed,
-                "network {} changed while removal was being authenticated; review the current settings",
-                reviewed.name
-            );
-            Ok(config.networks.remove(index))
-        })
-    }
-
     pub fn wallet(&self, id: &str) -> Result<WalletMetadata> {
         self.load()?
             .wallets
@@ -865,11 +837,28 @@ fn validate_network_identifier(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_known_network_classification(network: &NetworkConfig) -> Result<()> {
+    if let Some(known) = crate::networks::known_network(network.chain_id) {
+        ensure!(
+            network.testnet == known.config.testnet,
+            "chain {} is classified as {} by the built-in registry",
+            network.chain_id,
+            if known.config.testnet {
+                "a testnet"
+            } else {
+                "a mainnet"
+            }
+        );
+    }
+    Ok(())
+}
+
 pub fn add_configured_network(
     networks: &mut Vec<NetworkConfig>,
     next: NetworkConfig,
 ) -> Result<()> {
     validate_network(&next)?;
+    validate_known_network_classification(&next)?;
     if let Some(existing) = networks
         .iter()
         .find(|network| network.chain_id == next.chain_id)
@@ -912,6 +901,7 @@ pub fn replace_configured_network(
     next: NetworkConfig,
 ) -> Result<()> {
     validate_network(&next)?;
+    validate_known_network_classification(&next)?;
     let identifiers = std::iter::once(&next.name)
         .chain(next.aliases.iter())
         .collect::<BTreeSet<_>>();

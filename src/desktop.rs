@@ -1,10 +1,10 @@
 use crate::{
-    BUILD_COMMIT, BUILD_VERSION,
+    BUILD_VERSION,
     agent_config::{AgentAdapter, ConfigPreview, LOCAL_SERVER_NAME},
-    assets::{PENCIL_ICON, TRASH_ICON, WalletAssets},
+    assets::{PENCIL_ICON, WalletAssets},
     authority::{
-        ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioSnapshot,
-        OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
+        ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioAccount,
+        OwnerPortfolioSnapshot, OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
     },
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     http_server::McpHttpServer,
@@ -17,8 +17,8 @@ use crate::{
     single_instance::{InstanceOutcome, SingleInstance},
     tray::{PlatformTray, TrayCommand, TrayService, TraySnapshot},
     walletconnect::{
-        ProposalCommand, ProposalPresenter, ProposalPrompt, QrChoices, QrPreview, SessionSummary,
-        SystemScreenPicker, WalletConnectManager, run_session, scan_screen,
+        ProposalCommand, ProposalPresenter, ProposalPrompt, SessionSummary, WalletConnectManager,
+        run_session,
     },
 };
 use anyhow::{Context as _, Result, ensure};
@@ -37,9 +37,9 @@ use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
-    App, ClipboardItem, Context, ElementId, Entity, FocusHandle, Interactivity, KeyBinding,
-    MouseButton, ObjectFit, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
+    AnyElement, AnyView, App, ClipboardItem, Context, ElementId, Entity, FocusHandle,
+    Interactivity, KeyBinding, MouseButton, QuitMode, Render, RenderImage, RenderOnce, Role,
+    ScrollAnchor, ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle,
     WindowOptions, actions, div, img, prelude::*, px, size, uniform_list,
 };
@@ -48,13 +48,14 @@ use gpui_component::{
     Sizable, StyledExt, Theme, ThemeMode, ThemeTokens, WindowExt as _,
     alert::Alert,
     button::{Button, ButtonVariant, ButtonVariants},
-    dialog::DialogButtonProps,
-    group_box::{GroupBox, GroupBoxVariants as _},
+    dialog::{DialogButtonProps, DialogFooter},
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     scroll::ScrollableElement,
     spinner::Spinner,
+    switch::Switch,
+    tab::{Tab, TabBar},
     text::TextView,
 };
 use std::{
@@ -66,6 +67,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
@@ -76,18 +78,95 @@ const UI_FONT_FAMILY: &str = "Suisse Intl";
 const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
-const CONTROL_HEIGHT: gpui::Pixels = px(44.0);
-const COMPACT_CONTROL_HEIGHT: gpui::Pixels = px(40.0);
+const BUTTON_HEIGHT: gpui::Pixels = px(44.0);
+const COPY_BUTTON_HEIGHT: gpui::Pixels = px(32.0);
 const CONTROL_RADIUS: gpui::Pixels = px(14.0);
 const SURFACE_RADIUS: gpui::Pixels = px(16.0);
-const REPOSITORY_URL: &str = "https://github.com/EkuboProtocol/wallet";
 const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases/latest";
 
 fn app_button(id: impl Into<ElementId>) -> Button {
     Button::new(id)
-        .with_size(CONTROL_HEIGHT)
-        .rounded(CONTROL_RADIUS)
+        // Keep the component's semantic Medium size so icons and text retain
+        // their intended metrics. Passing a pixel value to `with_size` scales
+        // icons and padding; it does not set a button height.
+        .h(BUTTON_HEIGHT)
+        .px_3()
+        .rounded(px(12.0))
         .font_medium()
+}
+
+/// A conventional bordered section with its heading inside the content flow.
+/// Keeping the title in normal layout avoids border collisions and preserves
+/// the same hierarchy on every settings surface.
+#[derive(IntoElement)]
+struct GroupBox {
+    id: Option<ElementId>,
+    title: Option<AnyElement>,
+    children: Vec<AnyElement>,
+    gap: gpui::Pixels,
+}
+
+impl GroupBox {
+    fn new() -> Self {
+        Self {
+            id: None,
+            title: None,
+            children: Vec::new(),
+            gap: px(16.0),
+        }
+    }
+
+    fn id(mut self, id: impl Into<ElementId>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
+
+    fn title(mut self, title: impl IntoElement) -> Self {
+        self.title = Some(title.into_any_element());
+        self
+    }
+
+    fn outline(self) -> Self {
+        self
+    }
+
+    fn compact(mut self) -> Self {
+        self.gap = px(8.0);
+        self
+    }
+}
+
+impl ParentElement for GroupBox {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.children.extend(elements);
+    }
+}
+
+impl RenderOnce for GroupBox {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        div()
+            .id(self.id.unwrap_or_else(|| "group-box".into()))
+            .w_full()
+            .p_4()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .text_color(cx.theme().group_box_foreground)
+            .flex()
+            .flex_col()
+            .gap(self.gap)
+            .when_some(self.title, |section, title| {
+                section.child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_medium()
+                        .text_color(cx.theme().group_box_foreground)
+                        .child(title),
+                )
+            })
+            .children(self.children)
+    }
 }
 
 /// The component button exposes a stable accessibility ID but not an explicit
@@ -122,34 +201,115 @@ fn app_input(state: &Entity<InputState>, cx: &App) -> Input {
 }
 
 fn field_error(
-    id: impl Into<ElementId>,
+    id: impl Into<SharedString>,
     message: impl Into<SharedString>,
     cx: &App,
 ) -> impl IntoElement {
+    let id = id.into();
+    let message = message.into();
     div()
-        .id(id)
+        .id(id.clone())
         .role(Role::Alert)
         .text_sm()
         .text_color(cx.theme().danger)
-        .child(message.into())
+        .child(selectable_text(format!("{id}-text"), &message))
+}
+
+#[derive(Default)]
+struct CopyFeedbackState {
+    copied: bool,
+}
+
+#[derive(IntoElement)]
+struct CopyButton {
+    id: ElementId,
+    value: String,
+    accessibility_label: SharedString,
+    large: bool,
+}
+
+impl CopyButton {
+    fn large(mut self) -> Self {
+        self.large = true;
+        self
+    }
+}
+
+impl RenderOnce for CopyButton {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state =
+            window.use_keyed_state(self.id.clone(), cx, |_, _| CopyFeedbackState::default());
+        let copied = state.read(cx).copied;
+        let value = self.value;
+        let state_for_click = state.clone();
+        app_button(self.id)
+            .when(!self.large, |button| {
+                button
+                    .small()
+                    .h(COPY_BUTTON_HEIGHT)
+                    .px_2()
+                    .rounded(px(10.0))
+            })
+            .ghost()
+            .icon(if copied {
+                IconName::Check
+            } else {
+                IconName::Copy
+            })
+            .label(if copied { "Copied" } else { "Copy" })
+            .tooltip(self.accessibility_label)
+            .when(!copied, |button| {
+                button.on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                    state_for_click.update(cx, |state, cx| {
+                        state.copied = true;
+                        cx.notify();
+                    });
+                    let state = state_for_click.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(Duration::from_secs(1)).await;
+                        state.update(cx, |state, cx| {
+                            state.copied = false;
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                })
+            })
+    }
 }
 
 fn copy_button(
     id: impl Into<ElementId>,
     value: String,
     accessibility_label: impl Into<SharedString>,
-) -> Button {
-    let accessibility_label = accessibility_label.into();
-    app_button(id)
-        .with_size(COMPACT_CONTROL_HEIGHT)
-        .rounded(px(12.0))
-        .ghost()
-        .icon(IconName::Copy)
-        .label("Copy")
-        .tooltip(accessibility_label.clone())
-        .on_click(move |_, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-        })
+) -> CopyButton {
+    CopyButton {
+        id: id.into(),
+        value,
+        accessibility_label: accessibility_label.into(),
+        large: false,
+    }
+}
+
+fn account_switcher(
+    id: impl Into<ElementId>,
+    account_labels: &[String],
+    selected_index: usize,
+    on_click: impl Fn(&usize, &mut Window, &mut App) + 'static,
+) -> TabBar {
+    TabBar::new(id)
+        .w_full()
+        .segmented()
+        .large()
+        .selected_index(selected_index)
+        .on_click(on_click)
+        .children(
+            account_labels
+                .iter()
+                .cloned()
+                .map(|label| Tab::new().label(label)),
+        )
 }
 
 fn markdown_escape_plain_text(value: &str) -> SharedString {
@@ -186,6 +346,96 @@ fn selectable_text(id: impl Into<ElementId>, value: &str) -> TextView {
     TextView::markdown(id, markdown_escape_plain_text(value)).selectable(true)
 }
 
+fn push_html_escaped(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&#39;"),
+            _ => output.push(character),
+        }
+    }
+}
+
+/// Legal documents are trusted, bundled text, but still need HTML escaping.
+/// Rendering them as HTML keeps ordinary punctuation literal and lets the
+/// component's native link handler open only validated HTTP(S) URLs.
+fn legal_row_html(value: &str) -> SharedString {
+    let mut html = String::with_capacity(value.len());
+    for (index, word) in value.split(' ').enumerate() {
+        if index > 0 {
+            html.push(' ');
+        }
+        let candidate = word.trim_end_matches(['.', ',', ';', ':', ')', ']']);
+        let suffix = &word[candidate.len()..];
+        let parsed = url::Url::parse(candidate)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+        if let Some(url) = parsed {
+            html.push_str("<a href=\"");
+            push_html_escaped(&mut html, url.as_str());
+            html.push_str("\">");
+            push_html_escaped(&mut html, candidate);
+            html.push_str("</a>");
+            push_html_escaped(&mut html, suffix);
+        } else {
+            push_html_escaped(&mut html, word);
+        }
+    }
+    html.into()
+}
+
+fn selectable_legal_text(
+    id: impl Into<ElementId>,
+    value: &str,
+    link_url: Option<&str>,
+) -> TextView {
+    let html = if let Some(link_url) = link_url {
+        let mut html = String::with_capacity(value.len() + link_url.len() + 32);
+        html.push_str("<a href=\"");
+        push_html_escaped(&mut html, link_url);
+        html.push_str("\">");
+        push_html_escaped(&mut html, value);
+        html.push_str("</a>");
+        html.into()
+    } else {
+        legal_row_html(value)
+    };
+    TextView::html(id, html).selectable(true)
+}
+
+/// Selectable copy for singular labels, descriptions, status messages, and
+/// alerts. `track_caller` gives each call site a stable element identity; list
+/// rows use `selectable_text` directly with their record identity instead.
+#[track_caller]
+fn selectable_label(value: impl Into<SharedString>) -> TextView {
+    let value = value.into();
+    gpui_component::text::markdown(markdown_escape_plain_text(&value)).selectable(true)
+}
+
+fn selectable_error_alert(id: impl Into<SharedString>, message: impl Into<SharedString>) -> Alert {
+    let id = id.into();
+    let message = message.into();
+    Alert::error(
+        id.clone(),
+        selectable_text(format!("{id}-message"), &message),
+    )
+}
+
+fn selectable_warning_alert(
+    id: impl Into<SharedString>,
+    message: impl Into<SharedString>,
+) -> Alert {
+    let id = id.into();
+    let message = message.into();
+    Alert::warning(
+        id.clone(),
+        selectable_text(format!("{id}-message"), &message),
+    )
+}
+
 fn markdown_fenced_code(value: &str) -> SharedString {
     let longest_run = value
         .split(|character| character != '`')
@@ -210,7 +460,12 @@ fn copyable_value(id: impl Into<SharedString>, label: &'static str, value: Strin
         .flex()
         .flex_col()
         .gap_1()
-        .child(div().text_sm().font_medium().child(label))
+        .child(
+            div()
+                .text_sm()
+                .font_medium()
+                .child(selectable_text(format!("{id}-label"), label)),
+        )
         .child(
             h_flex()
                 .w_full()
@@ -236,14 +491,6 @@ fn primary_enter(event: &InputEvent) -> bool {
             shift: false
         }
     )
-}
-
-fn application_license_url() -> String {
-    if BUILD_COMMIT.is_empty() {
-        format!("{REPOSITORY_URL}/blob/main/LICENSE")
-    } else {
-        format!("{REPOSITORY_URL}/blob/{BUILD_COMMIT}/LICENSE")
-    }
 }
 
 const EMBEDDED_FONTS: &[&[u8]] = &[
@@ -305,17 +552,12 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: Option<&Leg
         && status.is_none_or(|status| match document {
             LegalDocument::TermsOfService => !status.terms_of_service.accepted,
             LegalDocument::PrivacyPolicy => !status.privacy_policy.accepted,
-            LegalDocument::ThirdPartyLicenses => false,
+            LegalDocument::ApplicationLicense | LegalDocument::ThirdPartyLicenses => false,
         })
 }
 
-fn settings_section(title: &'static str, content: impl IntoElement) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(div().text_lg().font_medium().child(title))
-        .child(content)
+fn settings_section(title: &'static str, content: GroupBox) -> gpui::Div {
+    div().w_full().child(content.title(title))
 }
 
 fn scroll_reached_end(offset_y: gpui::Pixels, max_offset_y: gpui::Pixels) -> bool {
@@ -401,17 +643,82 @@ fn installed_agent_login_instructions(
         .collect()
 }
 
-fn format_asset_balance(
-    raw: &str,
-    decimals: Option<u8>,
-    symbol: Option<&str>,
-    base_unit: &str,
-) -> String {
+fn format_asset_amount(raw: &str, decimals: Option<u8>, base_unit: &str) -> String {
     let Some(decimals) = decimals else {
         return format!("{raw} {base_unit}");
     };
-    let amount = ekubo_wallet_core::approval_summary::format_fixed_point(raw, decimals);
-    symbol.map_or(amount.clone(), |symbol| format!("{amount} {symbol}"))
+    ekubo_wallet_core::approval_summary::format_fixed_point(raw, decimals)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortfolioBalanceRow {
+    chain_id: u64,
+    network_name: String,
+    asset_address: String,
+    token_symbol: Option<String>,
+    token_name: Option<String>,
+    native: bool,
+    balance: String,
+    explorer_url: Option<String>,
+}
+
+fn portfolio_balance_rows(account: &OwnerPortfolioAccount) -> Vec<PortfolioBalanceRow> {
+    const NATIVE_ASSET_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+    let mut rows = Vec::new();
+    for item in &account.networks {
+        let Ok(portfolio) = &item.result else {
+            continue;
+        };
+        let network_name = item
+            .network
+            .display_name
+            .as_deref()
+            .unwrap_or(&item.network.name)
+            .to_owned();
+        if portfolio.native_balance != "0" {
+            let native = item.network.native_currency.as_ref();
+            rows.push(PortfolioBalanceRow {
+                chain_id: item.network.chain_id,
+                network_name: network_name.clone(),
+                asset_address: NATIVE_ASSET_ADDRESS.to_owned(),
+                token_symbol: native.map(|currency| currency.symbol.clone()),
+                token_name: native.map(|currency| currency.name.clone()),
+                native: true,
+                balance: format_asset_amount(
+                    &portfolio.native_balance,
+                    native.map(|currency| currency.decimals),
+                    "wei",
+                ),
+                explorer_url: None,
+            });
+        }
+        rows.extend(portfolio.tokens.iter().map(|token| PortfolioBalanceRow {
+            chain_id: item.network.chain_id,
+            network_name: network_name.clone(),
+            asset_address: token.address.clone(),
+            token_symbol: token.symbol.clone(),
+            token_name: token.name.clone(),
+            native: false,
+            balance: format_asset_amount(&token.balance, token.decimals, "base units"),
+            explorer_url: block_explorer_token_url(&item.network, &token.address),
+        }));
+    }
+    sort_portfolio_balance_rows(&mut rows);
+    rows
+}
+
+fn sort_portfolio_balance_rows(rows: &mut [PortfolioBalanceRow]) {
+    rows.sort_by(|left, right| {
+        left.chain_id.cmp(&right.chain_id).then_with(|| {
+            left.asset_address
+                .to_ascii_lowercase()
+                .cmp(&right.asset_address.to_ascii_lowercase())
+        })
+    });
+}
+
+fn clamped_portfolio_account_index(account_count: usize, selected: usize) -> usize {
+    selected.min(account_count.saturating_sub(1))
 }
 
 fn token_list_url_draft(value: &str) -> Result<String> {
@@ -507,7 +814,6 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Route {
     Overview,
-    Reviews,
     Activity,
     Accounts,
     Policies,
@@ -518,10 +824,9 @@ pub enum Route {
 }
 
 impl Route {
-    const ALL: [Self; 9] = [
-        Self::Reviews,
-        Self::Overview,
+    const ALL: [Self; 8] = [
         Self::Activity,
+        Self::Overview,
         Self::Accounts,
         Self::Policies,
         Self::Networks,
@@ -533,7 +838,6 @@ impl Route {
     const fn label(self) -> &'static str {
         match self {
             Self::Overview => "Portfolio",
-            Self::Reviews => "Inbox",
             Self::Activity => "Activity",
             Self::Accounts => "Accounts",
             Self::Policies => "Policies",
@@ -554,8 +858,7 @@ impl Route {
     const fn icon(self) -> IconName {
         match self {
             Self::Overview => IconName::LayoutDashboard,
-            Self::Reviews => IconName::Inbox,
-            Self::Activity => IconName::Frame,
+            Self::Activity => IconName::Inbox,
             Self::Accounts => IconName::User,
             Self::Policies => IconName::Inspector,
             Self::Networks => IconName::Network,
@@ -568,60 +871,56 @@ impl Route {
     #[cfg(target_os = "macos")]
     const fn shortcut(self) -> &'static str {
         match self {
-            Self::Reviews => "⌘1",
             Self::Overview => "⌘2",
-            Self::Activity => "⌘3",
-            Self::Accounts => "⌘4",
-            Self::Policies => "⌘5",
-            Self::Networks => "⌘6",
-            Self::Tokens => "⌘7",
-            Self::WalletConnect => "⌘8",
-            Self::Settings => "⌘9 / ⌘,",
+            Self::Activity => "⌘1",
+            Self::Accounts => "⌘3",
+            Self::Policies => "⌘4",
+            Self::Networks => "⌘5",
+            Self::Tokens => "⌘6",
+            Self::WalletConnect => "⌘7",
+            Self::Settings => "⌘8 / ⌘,",
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     const fn shortcut(self) -> &'static str {
         match self {
-            Self::Reviews => "Ctrl+1",
             Self::Overview => "Ctrl+2",
-            Self::Activity => "Ctrl+3",
-            Self::Accounts => "Ctrl+4",
-            Self::Policies => "Ctrl+5",
-            Self::Networks => "Ctrl+6",
-            Self::Tokens => "Ctrl+7",
-            Self::WalletConnect => "Ctrl+8",
-            Self::Settings => "Ctrl+9 / Ctrl+,",
+            Self::Activity => "Ctrl+1",
+            Self::Accounts => "Ctrl+3",
+            Self::Policies => "Ctrl+4",
+            Self::Networks => "Ctrl+5",
+            Self::Tokens => "Ctrl+6",
+            Self::WalletConnect => "Ctrl+7",
+            Self::Settings => "Ctrl+8 / Ctrl+,",
         }
     }
 
     #[cfg(target_os = "macos")]
     const fn key_binding(self) -> &'static str {
         match self {
-            Self::Reviews => "cmd-1",
             Self::Overview => "cmd-2",
-            Self::Activity => "cmd-3",
-            Self::Accounts => "cmd-4",
-            Self::Policies => "cmd-5",
-            Self::Networks => "cmd-6",
-            Self::Tokens => "cmd-7",
-            Self::WalletConnect => "cmd-8",
-            Self::Settings => "cmd-9",
+            Self::Activity => "cmd-1",
+            Self::Accounts => "cmd-3",
+            Self::Policies => "cmd-4",
+            Self::Networks => "cmd-5",
+            Self::Tokens => "cmd-6",
+            Self::WalletConnect => "cmd-7",
+            Self::Settings => "cmd-8",
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     const fn key_binding(self) -> &'static str {
         match self {
-            Self::Reviews => "ctrl-1",
             Self::Overview => "ctrl-2",
-            Self::Activity => "ctrl-3",
-            Self::Accounts => "ctrl-4",
-            Self::Policies => "ctrl-5",
-            Self::Networks => "ctrl-6",
-            Self::Tokens => "ctrl-7",
-            Self::WalletConnect => "ctrl-8",
-            Self::Settings => "ctrl-9",
+            Self::Activity => "ctrl-1",
+            Self::Accounts => "ctrl-3",
+            Self::Policies => "ctrl-4",
+            Self::Networks => "ctrl-5",
+            Self::Tokens => "ctrl-6",
+            Self::WalletConnect => "ctrl-7",
+            Self::Settings => "ctrl-8",
         }
     }
 }
@@ -667,9 +966,9 @@ pub struct WalletWindow {
     token_name_input: Option<Entity<InputState>>,
     token_decimals_input: Option<Entity<InputState>>,
     token_editor_open: bool,
-    token_editor_original: Option<StoredToken>,
     token_editor_errors: TokenEditorErrors,
     token_editor_busy: bool,
+    token_list_import_open: bool,
     token_import_state: TokenImportState,
     token_import_error: Option<SharedString>,
     token_import_status: Option<SharedString>,
@@ -689,6 +988,9 @@ pub struct WalletWindow {
     hidden_agent_sessions: BTreeSet<uuid::Uuid>,
     account_id_input: Option<Entity<InputState>>,
     private_key_input: Option<Entity<InputState>>,
+    account_entry_mode: AccountEntryMode,
+    account_operation: Option<AccountOperation>,
+    account_status: Option<SharedString>,
     account_id_error: Option<SharedString>,
     private_key_error: Option<SharedString>,
     account_action_errors: BTreeMap<String, SharedString>,
@@ -696,30 +998,24 @@ pub struct WalletWindow {
     legal_review: Option<LegalReview>,
     legal_gate: bool,
     route_errors: BTreeMap<Route, SharedString>,
-    detailed_notification_previews: Arc<AtomicBool>,
     appearance_preference: AppearancePreference,
-    notification_preference_busy: bool,
+    testnet_mode: bool,
     portfolio: PortfolioState,
     portfolio_generation: u64,
-    portfolio_chain_id: Option<u64>,
+    portfolio_account_index: usize,
+    initial_route_resolved: bool,
     route_scroll_handle: ScrollHandle,
-    network_editor_anchor: ScrollAnchor,
-    token_editor_anchor: ScrollAnchor,
     policy_editor_anchor: ScrollAnchor,
     modal_focus: FocusHandle,
     walletconnect: Arc<Mutex<WalletConnectManager>>,
     walletconnect_sessions: Vec<SessionSummary>,
     walletconnect_presenter: ProposalPresenter,
     walletconnect_uri_input: Option<Entity<InputState>>,
-    walletconnect_scan: WalletConnectScanState,
-    walletconnect_scan_generation: u64,
-    network_json_input: Option<Entity<InputState>>,
-    network_json_error: Option<SharedString>,
     network_editor_open: bool,
     network_editor_original: Option<NetworkConfig>,
     network_editor_disabled: bool,
+    network_editor_testnet: bool,
     network_editor_rpc_strategy: RpcStrategy,
-    network_editor_advanced: bool,
     network_editor_busy: bool,
     network_editor_errors: NetworkEditorErrors,
     network_name_input: Option<Entity<InputState>>,
@@ -744,8 +1040,6 @@ pub struct WalletWindow {
     network_reset_busy: bool,
     network_action_busy: BTreeSet<String>,
     network_action_errors: BTreeMap<String, SharedString>,
-    expanded_networks: BTreeSet<String>,
-    pending_network_removal: Option<NetworkConfig>,
     network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
@@ -892,31 +1186,16 @@ enum TokenImportState {
     Fetching,
 }
 
-enum WalletConnectScanState {
-    Idle,
-    Scanning,
-    Choices {
-        choices: QrChoices,
-        previews: Vec<Arc<RenderImage>>,
-    },
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountEntryMode {
+    Create,
+    Import,
 }
 
-fn render_qr_preview(mut preview: QrPreview) -> Result<Arc<RenderImage>> {
-    let expected = usize::try_from(preview.width)?
-        .checked_mul(usize::try_from(preview.height)?)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .context("QR preview dimensions overflow")?;
-    ensure!(
-        preview.rgba.len() == expected,
-        "QR preview has inconsistent dimensions"
-    );
-    for pixel in preview.rgba.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    let pixels = std::mem::take(&mut preview.rgba);
-    let buffer = image::RgbaImage::from_raw(preview.width, preview.height, pixels)
-        .context("QR preview has inconsistent dimensions")?;
-    Ok(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccountOperation {
+    Creating,
+    Importing,
 }
 
 fn render_embedded_png(bytes: &[u8]) -> Result<Arc<RenderImage>> {
@@ -952,6 +1231,7 @@ enum LegalRowKind {
 struct LegalDisplayRow {
     text: SharedString,
     kind: LegalRowKind,
+    link_url: Option<SharedString>,
 }
 
 struct AccountExport {
@@ -982,6 +1262,7 @@ struct PolicyEditor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Kept for the disabled "Coming soon" guided editor branch.
 enum PolicyEditorMode {
     Guided,
     Advanced,
@@ -1047,7 +1328,6 @@ struct ActiveReview {
     scroll_handle: ScrollHandle,
     scroll_check_scheduled: bool,
     scroll_layout_ready: bool,
-    scroll_interacted: bool,
 }
 
 enum ActiveReviewCompletion {
@@ -1097,8 +1377,18 @@ impl<T> SerialQueue<T> {
         }
     }
 
+    #[cfg(test)]
     fn next(&mut self, active: bool) -> Option<T> {
         (!active).then(|| self.pending.pop_front()).flatten()
+    }
+
+    fn push(&mut self, item: T) {
+        self.pending.push_back(item);
+    }
+
+    fn next_where(&mut self, predicate: impl FnMut(&T) -> bool) -> Option<T> {
+        let index = self.pending.iter().position(predicate)?;
+        self.pending.remove(index)
     }
 
     fn len(&self) -> usize {
@@ -1117,7 +1407,6 @@ struct RouteListDelegate {
 
 struct TokenListDelegate {
     owner: OwnerApi,
-    editor: WeakEntity<WalletWindow>,
     all_tokens: Vec<StoredToken>,
     visible_tokens: Vec<StoredToken>,
     query: String,
@@ -1125,9 +1414,10 @@ struct TokenListDelegate {
     error: Option<SharedString>,
     action_errors: BTreeMap<(u64, alloy::primitives::Address), SharedString>,
     selected: Option<IndexPath>,
-    pending_removal: Option<StoredToken>,
     removing: BTreeSet<(u64, alloy::primitives::Address)>,
     network_names: BTreeMap<u64, SharedString>,
+    visible_chain_ids: BTreeSet<u64>,
+    configured_chain_ids: BTreeSet<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1177,6 +1467,114 @@ struct ActivityFeedback {
     error: bool,
 }
 
+fn activity_record_is_awaiting_approval(record: &OwnerActivityRecord) -> bool {
+    match record {
+        OwnerActivityRecord::Transaction(item) => item.status == PendingStatus::AwaitingApproval,
+        OwnerActivityRecord::Message(item) => item.status == MessageStatus::AwaitingApproval,
+        OwnerActivityRecord::TypedData(item) => item.status == TypedDataStatus::AwaitingApproval,
+    }
+}
+
+fn activity_record_chain_id(record: &OwnerActivityRecord) -> Option<u64> {
+    match record {
+        OwnerActivityRecord::Transaction(item) => item.chain_id.parse().ok(),
+        OwnerActivityRecord::Message(item) => item.chain_id.as_deref()?.parse().ok(),
+        OwnerActivityRecord::TypedData(item) => item.chain_id.parse().ok(),
+    }
+}
+
+fn visible_network_chain_ids(networks: &[NetworkConfig], testnet_mode: bool) -> BTreeSet<u64> {
+    networks
+        .iter()
+        .filter(|network| testnet_mode || !network.testnet)
+        .map(|network| network.chain_id)
+        .collect()
+}
+
+fn chain_is_visible(
+    chain_id: Option<u64>,
+    visible_chain_ids: &BTreeSet<u64>,
+    configured_chain_ids: &BTreeSet<u64>,
+) -> bool {
+    chain_id.is_none_or(|chain_id| {
+        visible_chain_ids.contains(&chain_id) || !configured_chain_ids.contains(&chain_id)
+    })
+}
+
+fn review_fact_chain_id(fact: &ApprovalFact) -> Option<u64> {
+    if !matches!(fact.label.as_str(), "Chain" | "Chain ID") {
+        return None;
+    }
+    fact.value
+        .trim()
+        .strip_prefix("eip155:")
+        .unwrap_or(fact.value.trim())
+        .parse()
+        .ok()
+}
+
+fn review_document_chain_ids(document: &ReviewDocument) -> Vec<u64> {
+    document
+        .request
+        .facts
+        .iter()
+        .chain(
+            document
+                .request
+                .sections
+                .iter()
+                .flat_map(|section| section.facts.iter()),
+        )
+        .filter_map(review_fact_chain_id)
+        .collect()
+}
+
+fn review_document_is_visible(
+    document: &ReviewDocument,
+    networks: &[NetworkConfig],
+    testnet_mode: bool,
+) -> bool {
+    if testnet_mode {
+        return true;
+    }
+    let visible_chain_ids = visible_network_chain_ids(networks, false);
+    let configured_chain_ids = networks
+        .iter()
+        .map(|network| network.chain_id)
+        .collect::<BTreeSet<_>>();
+    review_document_chain_ids(document)
+        .into_iter()
+        .all(|chain_id| chain_is_visible(Some(chain_id), &visible_chain_ids, &configured_chain_ids))
+}
+
+fn transaction_notification_is_visible(
+    owner: &OwnerApi,
+    event: &crate::events::DomainEvent,
+) -> bool {
+    let crate::events::DomainEventKind::Transaction { request_id, .. } = &event.kind else {
+        return false;
+    };
+    let Ok(record) = owner.transaction(*request_id) else {
+        return false;
+    };
+    let Ok(networks) = owner.networks() else {
+        return false;
+    };
+    let Ok(testnet_mode) = owner.testnet_mode() else {
+        return false;
+    };
+    let visible_chain_ids = visible_network_chain_ids(&networks, testnet_mode);
+    let configured_chain_ids = networks
+        .iter()
+        .map(|network| network.chain_id)
+        .collect::<BTreeSet<_>>();
+    chain_is_visible(
+        record.chain_id.parse().ok(),
+        &visible_chain_ids,
+        &configured_chain_ids,
+    )
+}
+
 fn render_activity_row(
     record: &OwnerActivityRecord,
     selected: bool,
@@ -1205,9 +1603,12 @@ fn render_activity_row(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(format!(
-                            "{:?} · transaction · {} · {}",
-                            item.status, item.wallet_id, item.network_name
+                        .child(selectable_text(
+                            format!("activity-row-title-{request_id}"),
+                            &format!(
+                                "{:?} · transaction · {} · {}",
+                                item.status, item.wallet_id, item.network_name
+                            ),
                         ))
                         .child(
                             div()
@@ -1215,7 +1616,10 @@ fn render_activity_row(
                                 .text_color(cx.theme().muted_foreground)
                                 .font_family(MONO_FONT_FAMILY)
                                 .truncate()
-                                .child(request_id.to_string()),
+                                .child(selectable_text(
+                                    format!("activity-row-request-{request_id}"),
+                                    &request_id.to_string(),
+                                )),
                         ),
                 )
                 .child(
@@ -1317,9 +1721,9 @@ fn render_activity_row(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(format!(
-                            "{:?} · message signature · {}",
-                            item.status, item.wallet_id
+                        .child(selectable_text(
+                            format!("activity-row-title-{request_id}"),
+                            &format!("{:?} · message signature · {}", item.status, item.wallet_id),
                         ))
                         .child(
                             div()
@@ -1327,7 +1731,10 @@ fn render_activity_row(
                                 .text_color(cx.theme().muted_foreground)
                                 .font_family(MONO_FONT_FAMILY)
                                 .truncate()
-                                .child(request_id.to_string()),
+                                .child(selectable_text(
+                                    format!("activity-row-request-{request_id}"),
+                                    &request_id.to_string(),
+                                )),
                         ),
                 )
                 .child(
@@ -1371,9 +1778,12 @@ fn render_activity_row(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(format!(
-                            "{:?} · typed-data signature · {} · chain {}",
-                            item.status, item.wallet_id, item.chain_id
+                        .child(selectable_text(
+                            format!("activity-row-title-{request_id}"),
+                            &format!(
+                                "{:?} · typed-data signature · {} · chain {}",
+                                item.status, item.wallet_id, item.chain_id
+                            ),
                         ))
                         .child(
                             div()
@@ -1381,7 +1791,10 @@ fn render_activity_row(
                                 .text_color(cx.theme().muted_foreground)
                                 .font_family(MONO_FONT_FAMILY)
                                 .truncate()
-                                .child(request_id.to_string()),
+                                .child(selectable_text(
+                                    format!("activity-row-request-{request_id}"),
+                                    &request_id.to_string(),
+                                )),
                         ),
                 )
                 .child(
@@ -1448,7 +1861,10 @@ fn render_activity_row(
                     } else {
                         cx.theme().muted_foreground
                     })
-                    .child(feedback.message),
+                    .child(selectable_text(
+                        format!("activity-feedback-{request_id}"),
+                        &feedback.message,
+                    )),
             );
         }
         outer.child(card_container)
@@ -1508,10 +1924,9 @@ impl TokenProposalListDelegate {
 }
 
 impl TokenListDelegate {
-    fn new(owner: OwnerApi, editor: WeakEntity<WalletWindow>) -> Self {
+    fn new(owner: OwnerApi) -> Self {
         Self {
             owner,
-            editor,
             all_tokens: Vec::new(),
             visible_tokens: Vec::new(),
             query: String::new(),
@@ -1519,9 +1934,10 @@ impl TokenListDelegate {
             error: None,
             action_errors: BTreeMap::new(),
             selected: None,
-            pending_removal: None,
             removing: BTreeSet::new(),
             network_names: BTreeMap::new(),
+            visible_chain_ids: BTreeSet::new(),
+            configured_chain_ids: BTreeSet::new(),
         }
     }
 
@@ -1529,13 +1945,6 @@ impl TokenListDelegate {
         self.loading = false;
         match result {
             Ok(tokens) => {
-                if self
-                    .pending_removal
-                    .as_ref()
-                    .is_some_and(|reviewed| !tokens.contains(reviewed))
-                {
-                    self.pending_removal = None;
-                }
                 self.all_tokens = tokens;
                 self.error = None;
                 self.apply_filters();
@@ -1551,7 +1960,14 @@ impl TokenListDelegate {
         self.visible_tokens = self
             .all_tokens
             .iter()
-            .filter(|token| token_matches_search(token, &self.query))
+            .filter(|token| {
+                let chain_id = token.chain_id.parse::<u64>().ok();
+                chain_is_visible(
+                    chain_id,
+                    &self.visible_chain_ids,
+                    &self.configured_chain_ids,
+                ) && token_matches_search(token, &self.query)
+            })
             .cloned()
             .collect();
         let query = self.query.trim().to_lowercase();
@@ -1567,8 +1983,16 @@ impl TokenListDelegate {
         self.selected = None;
     }
 
-    fn replace_networks(&mut self, networks: &[NetworkConfig]) {
-        self.network_names = token_network_names(networks);
+    fn replace_networks(&mut self, networks: &[NetworkConfig], testnet_mode: bool) {
+        let visible = networks
+            .iter()
+            .filter(|network| testnet_mode || !network.testnet)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.network_names = token_network_names(&visible);
+        self.visible_chain_ids = visible_network_chain_ids(networks, testnet_mode);
+        self.configured_chain_ids = networks.iter().map(|network| network.chain_id).collect();
+        self.apply_filters();
     }
 }
 
@@ -1732,6 +2156,37 @@ fn push_wrapped_legal_rows(
     let mut prefix_len = line_len;
     for word in text.split_whitespace() {
         let word_len = word.chars().count();
+        let url_candidate = word.trim_end_matches(['.', ',', ';', ':', ')', ']']);
+        let link_url = url::Url::parse(url_candidate)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+            .map(|url| SharedString::from(url.to_string()));
+        if word_len > LEGAL_WRAP_COLUMNS.saturating_sub(prefix_len)
+            && let Some(link_url) = link_url
+        {
+            if line_len > prefix_len {
+                rows.push(LegalDisplayRow {
+                    text: std::mem::take(&mut line).into(),
+                    kind,
+                    link_url: None,
+                });
+            }
+            let available = LEGAL_WRAP_COLUMNS.saturating_sub(continuation_prefix.chars().count());
+            let characters = word.chars().collect::<Vec<_>>();
+            for chunk in characters.chunks(available.max(1)) {
+                let mut text = continuation_prefix.to_owned();
+                text.extend(chunk);
+                rows.push(LegalDisplayRow {
+                    text: text.into(),
+                    kind,
+                    link_url: Some(link_url.clone()),
+                });
+            }
+            continuation_prefix.clone_into(&mut line);
+            line_len = line.chars().count();
+            prefix_len = line_len;
+            continue;
+        }
         let separator = usize::from(line_len > prefix_len);
         if line_len + separator + word_len <= LEGAL_WRAP_COLUMNS {
             if separator == 1 {
@@ -1744,20 +2199,22 @@ fn push_wrapped_legal_rows(
         }
         if line_len > prefix_len {
             rows.push(LegalDisplayRow {
-                text: line.into(),
+                text: std::mem::take(&mut line).into(),
                 kind,
+                link_url: None,
             });
-            line = continuation_prefix.to_owned();
+            continuation_prefix.clone_into(&mut line);
             line_len = line.chars().count();
             prefix_len = line_len;
         }
         for character in word.chars() {
             if line_len == LEGAL_WRAP_COLUMNS {
                 rows.push(LegalDisplayRow {
-                    text: line.into(),
+                    text: std::mem::take(&mut line).into(),
                     kind,
+                    link_url: None,
                 });
-                line = continuation_prefix.to_owned();
+                continuation_prefix.clone_into(&mut line);
                 line_len = line.chars().count();
                 prefix_len = line_len;
             }
@@ -1769,6 +2226,7 @@ fn push_wrapped_legal_rows(
         rows.push(LegalDisplayRow {
             text: line.into(),
             kind,
+            link_url: None,
         });
     }
 }
@@ -1801,6 +2259,7 @@ fn legal_markdown_rows(text: &str) -> Arc<[LegalDisplayRow]> {
                 rows.push(LegalDisplayRow {
                     text: "".into(),
                     kind: LegalRowKind::Blank,
+                    link_url: None,
                 });
             }
         } else if let Some(heading) = line.strip_prefix('#') {
@@ -1831,21 +2290,11 @@ fn legal_list_reached_end(state: &UniformListScrollHandle, end_rendered: &Atomic
     end_rendered.load(Ordering::Acquire) || state.is_scrolled_to_end() == Some(true)
 }
 
-fn network_can_be_removed(network: &NetworkConfig) -> bool {
-    network.disabled
-}
-
-fn restored_network_configuration(
-    reviewed: &NetworkConfig,
-    mut preset: NetworkConfig,
-) -> NetworkConfig {
-    preset.disabled = reviewed.disabled;
-    preset.rpc_urls.truncate(1);
-    preset
-}
-
-fn networks_for_display(networks: &[NetworkConfig]) -> Vec<&NetworkConfig> {
-    let mut networks = networks.iter().collect::<Vec<_>>();
+fn networks_for_display(networks: &[NetworkConfig], testnet_mode: bool) -> Vec<&NetworkConfig> {
+    let mut networks = networks
+        .iter()
+        .filter(|network| testnet_mode || !network.testnet)
+        .collect::<Vec<_>>();
     networks.sort_by_key(|network| (network.chain_id, network.name.as_str()));
     networks
 }
@@ -1860,10 +2309,21 @@ fn block_explorer_transaction_url(
         .find(|network| network.chain_id == chain_id)?
         .block_explorer_url
         .as_ref()?;
+    Some(block_explorer_resource_url(base, "tx", transaction_hash))
+}
+
+fn block_explorer_token_url(network: &NetworkConfig, token_address: &str) -> Option<String> {
+    network
+        .block_explorer_url
+        .as_ref()
+        .map(|base| block_explorer_resource_url(base, "token", token_address))
+}
+
+fn block_explorer_resource_url(base: &url::Url, resource: &str, identifier: &str) -> String {
     let mut url = base.clone();
     let root = url.path().trim_end_matches('/');
-    url.set_path(&format!("{root}/tx/{transaction_hash}"));
-    Some(url.into())
+    url.set_path(&format!("{root}/{resource}/{identifier}"));
+    url.into()
 }
 
 fn network_preset_match_rank(profile: &NetworkProfile, query: &str) -> Option<(usize, usize)> {
@@ -1908,6 +2368,7 @@ fn network_presets_for_display<'a>(
     configured: &[NetworkConfig],
     query: &str,
     limit: usize,
+    testnet_mode: bool,
 ) -> Vec<&'a NetworkProfile> {
     let configured_chains = configured
         .iter()
@@ -1915,12 +2376,13 @@ fn network_presets_for_display<'a>(
         .collect::<BTreeSet<_>>();
     let mut matches = presets
         .iter()
+        .filter(|profile| testnet_mode || !profile.config.testnet)
         .filter_map(|profile| network_preset_match_rank(profile, query).map(|rank| (rank, profile)))
         .collect::<Vec<_>>();
     matches.sort_by_key(|(rank, profile)| {
         (
             *rank,
-            profile.is_testnet,
+            profile.config.testnet,
             configured_chains.contains(&profile.config.chain_id),
             profile.config.chain_id,
         )
@@ -1948,6 +2410,7 @@ fn networks_discarded_by_default_reset(
 fn parse_network_editor_draft(
     draft: &NetworkEditorDraft,
     disabled: bool,
+    testnet: bool,
     rpc_strategy: RpcStrategy,
 ) -> (Option<NetworkConfig>, NetworkEditorErrors) {
     let mut errors = NetworkEditorErrors::default();
@@ -2143,6 +2606,7 @@ fn parse_network_editor_draft(
     let network = NetworkConfig {
         name: name.to_owned(),
         disabled,
+        testnet,
         display_name: (!display_name.is_empty()).then(|| display_name.to_owned()),
         aliases,
         chain_id: chain_id.expect("validated above"),
@@ -2154,6 +2618,20 @@ fn parse_network_editor_draft(
         block_explorer_url,
         documentation_url,
     };
+    if let Some(known) = ekubo_wallet_core::networks::known_network(network.chain_id)
+        && known.config.testnet != network.testnet
+    {
+        errors.form = Some(format!(
+            "Chain {} is classified as {} by the built-in network registry.",
+            network.chain_id,
+            if known.config.testnet {
+                "a testnet"
+            } else {
+                "a mainnet"
+            }
+        ));
+        return (None, errors);
+    }
     if let Err(error) = ekubo_wallet_core::config::validate_network(&network) {
         errors.form = Some(format!("Network settings are invalid: {error:#}"));
         (None, errors)
@@ -2182,10 +2660,6 @@ fn rpc_urls_for_editor(urls: &[url::Url]) -> String {
         .join(",\n")
 }
 
-fn token_removal_is_confirmed(pending: Option<&StoredToken>, row: &StoredToken) -> bool {
-    pending == Some(row)
-}
-
 const TOKEN_INVENTORY_PAGE_SIZE: usize = 10_000;
 const MAX_DESKTOP_TOKEN_INVENTORY: usize = 100_000;
 
@@ -2207,18 +2681,71 @@ fn collect_token_inventory(
     }
 }
 
-fn review_queue_decision_count(queues: &OwnerReviewQueues) -> usize {
+fn review_queue_decision_count(
+    queues: &OwnerReviewQueues,
+    networks: &[NetworkConfig],
+    testnet_mode: bool,
+) -> usize {
+    let visible_chain_ids = visible_network_chain_ids(networks, testnet_mode);
+    let configured_chain_ids = networks
+        .iter()
+        .map(|network| network.chain_id)
+        .collect::<BTreeSet<_>>();
     let token_sources = queues
         .token_proposals
         .iter()
+        .filter(|proposal| {
+            chain_is_visible(
+                Some(proposal.token.chain_id),
+                &visible_chain_ids,
+                &configured_chain_ids,
+            )
+        })
         .map(|proposal| proposal.source.as_str())
         .collect::<std::collections::BTreeSet<_>>()
         .len();
-    queues.transactions.len()
-        + queues.typed_data.len()
-        + queues.messages.len()
+    queues
+        .transactions
+        .iter()
+        .filter(|request| {
+            chain_is_visible(
+                request.chain_id.parse().ok(),
+                &visible_chain_ids,
+                &configured_chain_ids,
+            )
+        })
+        .count()
+        + queues
+            .typed_data
+            .iter()
+            .filter(|request| {
+                chain_is_visible(
+                    request.chain_id.parse().ok(),
+                    &visible_chain_ids,
+                    &configured_chain_ids,
+                )
+            })
+            .count()
+        + queues
+            .messages
+            .iter()
+            .filter(|request| {
+                chain_is_visible(
+                    request
+                        .chain_id
+                        .as_deref()
+                        .and_then(|chain| chain.parse().ok()),
+                    &visible_chain_ids,
+                    &configured_chain_ids,
+                )
+            })
+            .count()
         + queues.policy_proposals.len()
-        + queues.network_proposals.len()
+        + queues
+            .network_proposals
+            .iter()
+            .filter(|proposal| testnet_mode || !proposal.testnet)
+            .count()
         + token_sources
 }
 
@@ -2358,145 +2885,71 @@ impl ListDelegate for TokenListDelegate {
             .and_then(|chain_id| self.network_names.get(&chain_id).cloned())
             .unwrap_or_else(|| format!("Unknown network · chain {}", token.chain_id).into());
         let state = cx.entity().downgrade();
-        let editor = self.editor.clone();
-        let edit_token = token.clone();
         let removal_token = token.clone();
-        let begin_removal_token = token.clone();
         let removing = chain_id
             .zip(address)
             .is_some_and(|identity| self.removing.contains(&identity));
-        let pending_removal = token_removal_is_confirmed(self.pending_removal.as_ref(), &token);
         let action_error = chain_id
             .zip(address)
             .and_then(|identity| self.action_errors.get(&identity).cloned());
         let row_id = format!("token-{}-{}", token.chain_id, token.address);
         let address_text_id = SharedString::from(format!("{row_id}-address"));
-        let mut actions = div().flex().flex_col().flex_none().gap_1();
-        if pending_removal {
-            let confirm_state = state.clone();
-            let owner = self.owner.clone();
-            actions = actions
-                .child(
-                    app_button(("confirm-remove-token", index.row))
-                        .label(if removing {
-                            "Authenticating…"
-                        } else {
-                            "Authenticate & remove"
-                        })
-                        .danger()
-                        .disabled(removing)
-                        .on_click(move |_, _, cx| {
-                            let Some((chain_id, address)) = chain_id.zip(address) else {
-                                return;
-                            };
-                            let reviewed = confirm_state
-                                .update(cx, |list, cx| {
-                                    let delegate = list.delegate_mut();
-                                    if !token_removal_is_confirmed(
-                                        delegate.pending_removal.as_ref(),
-                                        &removal_token,
-                                    ) {
-                                        return None;
-                                    }
-                                    delegate.action_errors.remove(&(chain_id, address));
-                                    delegate.removing.insert((chain_id, address));
-                                    cx.notify();
-                                    Some(removal_token.clone())
-                                })
-                                .ok()
-                                .flatten();
-                            let Some(reviewed) = reviewed else {
-                                return;
-                            };
-                            let owner = owner.clone();
-                            let state = confirm_state.clone();
-                            let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                                owner.remove_token(&reviewed).await
-                            });
-                            cx.spawn(async move |cx| {
-                                let result = task.await;
-                                let _ = state.update(cx, |list, cx| {
-                                    let delegate = list.delegate_mut();
-                                    delegate.removing.remove(&(chain_id, address));
-                                    match result {
-                                        Ok(_) => {
-                                            delegate.pending_removal = None;
-                                            delegate.action_errors.remove(&(chain_id, address));
-                                            delegate.all_tokens.retain(|item| {
-                                                !(item.chain_id.parse::<u64>().ok()
-                                                    == Some(chain_id)
-                                                    && item
-                                                        .address
-                                                        .parse::<alloy::primitives::Address>()
-                                                        .ok()
-                                                        == Some(address))
-                                            });
-                                            delegate.apply_filters();
-                                        }
-                                        Err(error) => {
-                                            delegate.action_errors.insert(
-                                                (chain_id, address),
-                                                format!("Could not remove token: {error:#}").into(),
-                                            );
-                                        }
-                                    }
-                                    cx.notify();
+        let owner = self.owner.clone();
+        let actions = app_button(("remove-token", index.row))
+            .label(if removing { "Removing…" } else { "Remove" })
+            .danger()
+            .disabled(chain_id.zip(address).is_none() || removing)
+            .on_click(move |_, _, cx| {
+                let Some((chain_id, address)) = chain_id.zip(address) else {
+                    return;
+                };
+                let started = state
+                    .update(cx, |list, cx| {
+                        let delegate = list.delegate_mut();
+                        if !delegate.removing.insert((chain_id, address)) {
+                            return false;
+                        }
+                        delegate.action_errors.remove(&(chain_id, address));
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !started {
+                    return;
+                }
+                let owner = owner.clone();
+                let state = state.clone();
+                let removal_token = removal_token.clone();
+                let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+                    owner.remove_token(&removal_token).await
+                });
+                cx.spawn(async move |cx| {
+                    let result = task.await;
+                    let _ = state.update(cx, |list, cx| {
+                        let delegate = list.delegate_mut();
+                        delegate.removing.remove(&(chain_id, address));
+                        match result {
+                            Ok(()) => {
+                                delegate.action_errors.remove(&(chain_id, address));
+                                delegate.all_tokens.retain(|item| {
+                                    !(item.chain_id.parse::<u64>().ok() == Some(chain_id)
+                                        && item.address.parse::<alloy::primitives::Address>().ok()
+                                            == Some(address))
                                 });
-                            })
-                            .detach();
-                        }),
-                )
-                .child(
-                    app_button(("cancel-remove-token", index.row))
-                        .label("Cancel")
-                        .disabled(removing)
-                        .on_click({
-                            let state = state.clone();
-                            move |_, _, cx| {
-                                let _ = state.update(cx, |list, cx| {
-                                    list.delegate_mut().pending_removal = None;
-                                    cx.notify();
-                                });
+                                delegate.apply_filters();
                             }
-                        }),
-                );
-        } else {
-            actions = actions
-                .child(
-                    app_button(("edit-token", index.row))
-                        .icon(Icon::default().path(PENCIL_ICON))
-                        .label("Edit")
-                        .ghost()
-                        .tooltip("Edit token")
-                        .disabled(chain_id.zip(address).is_none() || removing)
-                        .on_click(move |_, window, cx| {
-                            let _ = editor.update(cx, |view, cx| {
-                                view.edit_token(&edit_token, window, cx);
-                            });
-                        }),
-                )
-                .child(
-                    app_button(("remove-token", index.row))
-                        .icon(Icon::default().path(TRASH_ICON))
-                        .label("Delete")
-                        .ghost()
-                        .tooltip("Delete token")
-                        .danger()
-                        .disabled(chain_id.zip(address).is_none() || removing)
-                        .on_click(move |_, _, cx| {
-                            let Some(identity) = chain_id.zip(address) else {
-                                return;
-                            };
-                            let removal_token = begin_removal_token.clone();
-                            let _ = state.update(cx, |list, cx| {
-                                let delegate = list.delegate_mut();
-                                delegate.action_errors.remove(&identity);
-                                delegate.pending_removal = Some(removal_token.clone());
-                                cx.notify();
-                            });
-                        }),
-                );
-        }
+                            Err(error) => {
+                                delegate.action_errors.insert(
+                                    (chain_id, address),
+                                    format!("Could not remove token: {error:#}").into(),
+                                );
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            });
         Some(
             ListItem::new(SharedString::from(row_id))
                 .selected(self.selected == Some(index))
@@ -2524,36 +2977,32 @@ impl ListDelegate for TokenListDelegate {
                                                 .gap_0p5()
                                                 .child(
                                                     div().w_full().truncate().child(
-                                                        token
-                                                            .symbol
-                                                            .as_deref()
-                                                            .unwrap_or("Unnamed token")
-                                                            .to_owned(),
+                                                        selectable_text(
+                                                            ("token-symbol", index.row),
+                                                            token
+                                                                .symbol
+                                                                .as_deref()
+                                                                .unwrap_or("Unnamed token"),
+                                                        ),
                                                     ),
                                                 )
                                                 .child(
-                                                    h_flex()
+                                                    div()
                                                         .w_full()
                                                         .min_w_0()
-                                                        .gap_2()
                                                         .text_sm()
                                                         .text_color(cx.theme().muted_foreground)
-                                                        .child(
-                                                            div().min_w_0().truncate().child(
+                                                        .truncate()
+                                                        .child(selectable_text(
+                                                            ("token-metadata", index.row),
+                                                            &format!(
+                                                                "{} · {network_name}",
                                                                 token
                                                                     .name
                                                                     .as_deref()
                                                                     .unwrap_or("No full name")
-                                                                    .to_owned(),
                                                             ),
-                                                        )
-                                                        .child(div().flex_none().child("·"))
-                                                        .child(
-                                                            div()
-                                                                .flex_none()
-                                                                .truncate()
-                                                                .child(network_name),
-                                                        ),
+                                                        )),
                                                 ),
                                         )
                                         .child(
@@ -2569,20 +3018,27 @@ impl ListDelegate for TokenListDelegate {
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
                                                 .truncate()
-                                                .child(format!(
-                                                    "{} decimals · {}",
-                                                    token.decimals.map_or_else(
-                                                        || "unknown".to_owned(),
-                                                        |value| value.to_string()
+                                                .child(selectable_text(
+                                                    ("token-decimals-source", index.row),
+                                                    &format!(
+                                                        "{} decimals · {}",
+                                                        token.decimals.map_or_else(
+                                                            || "unknown".to_owned(),
+                                                            |value| value.to_string()
+                                                        ),
+                                                        token.source
                                                     ),
-                                                    token.source
                                                 )),
                                         ),
                                 )
                                 .child(actions),
                         )
                         .when_some(action_error, |row, error| {
-                            row.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                            row.child(
+                                div().text_sm().text_color(cx.theme().danger).child(
+                                    selectable_text(("token-action-error", index.row), &error),
+                                ),
+                            )
                         }),
                 ),
         )
@@ -2603,11 +3059,13 @@ impl ListDelegate for TokenListDelegate {
             .items_center()
             .justify_center()
             .text_color(cx.theme().muted_foreground)
-            .child(
-                self.error
+            .child(selectable_text(
+                "token-list-empty-message",
+                &self
+                    .error
                     .clone()
                     .unwrap_or_else(|| "No tokens match these filters.".into()),
-            )
+            ))
     }
 }
 
@@ -2654,19 +3112,19 @@ impl ListDelegate for TokenProposalListDelegate {
                             h_flex()
                                 .w_full()
                                 .gap_3()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(token.symbol.clone()),
-                                )
+                                .child(div().flex_1().min_w_0().truncate().child(selectable_text(
+                                    ("token-proposal-symbol", index.row),
+                                    &token.symbol,
+                                )))
                                 .child(
                                     div()
                                         .flex_none()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(network_name),
+                                        .child(selectable_text(
+                                            ("token-proposal-network", index.row),
+                                            &network_name,
+                                        )),
                                 ),
                         )
                         .child(
@@ -2682,10 +3140,13 @@ impl ListDelegate for TokenProposalListDelegate {
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .truncate()
-                                .child(format!(
-                                    "{} · {} decimals",
-                                    token.name.as_deref().unwrap_or("No full name"),
-                                    token.decimals
+                                .child(selectable_text(
+                                    ("token-proposal-metadata", index.row),
+                                    &format!(
+                                        "{} · {} decimals",
+                                        token.name.as_deref().unwrap_or("No full name"),
+                                        token.decimals
+                                    ),
                                 )),
                         ),
                 ),
@@ -3080,11 +3541,11 @@ impl WalletWindow {
         review_presenter: GuiReviewPresenter,
         walletconnect: Arc<Mutex<WalletConnectManager>>,
         walletconnect_presenter: ProposalPresenter,
-        detailed_notification_previews: Arc<AtomicBool>,
         tray: Rc<RefCell<Option<PlatformTray>>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
+        let testnet_mode = owner.testnet_mode().unwrap_or(false);
         let network_presets = Arc::from(owner.network_presets());
         let route_scroll_handle = ScrollHandle::new();
         let sidebar_logo_light =
@@ -3119,9 +3580,9 @@ impl WalletWindow {
             token_name_input: None,
             token_decimals_input: None,
             token_editor_open: false,
-            token_editor_original: None,
             token_editor_errors: TokenEditorErrors::default(),
             token_editor_busy: false,
+            token_list_import_open: false,
             token_import_state: TokenImportState::Idle,
             token_import_error: None,
             token_import_status: None,
@@ -3141,6 +3602,9 @@ impl WalletWindow {
             hidden_agent_sessions: BTreeSet::new(),
             account_id_input: None,
             private_key_input: None,
+            account_entry_mode: AccountEntryMode::Create,
+            account_operation: None,
+            account_status: None,
             account_id_error: None,
             private_key_error: None,
             account_action_errors: BTreeMap::new(),
@@ -3148,14 +3612,12 @@ impl WalletWindow {
             legal_review: None,
             legal_gate: false,
             route_errors: BTreeMap::new(),
-            detailed_notification_previews,
             appearance_preference,
-            notification_preference_busy: false,
+            testnet_mode,
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
-            portfolio_chain_id: None,
-            network_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
-            token_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
+            portfolio_account_index: 0,
+            initial_route_resolved: false,
             policy_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
             route_scroll_handle,
             modal_focus: cx.focus_handle(),
@@ -3163,15 +3625,11 @@ impl WalletWindow {
             walletconnect_sessions: Vec::new(),
             walletconnect_presenter,
             walletconnect_uri_input: None,
-            walletconnect_scan: WalletConnectScanState::Idle,
-            walletconnect_scan_generation: 0,
-            network_json_input: None,
-            network_json_error: None,
             network_editor_open: false,
             network_editor_original: None,
             network_editor_disabled: false,
+            network_editor_testnet: false,
             network_editor_rpc_strategy: RpcStrategy::Ordered,
-            network_editor_advanced: false,
             network_editor_busy: false,
             network_editor_errors: NetworkEditorErrors::default(),
             network_name_input: None,
@@ -3196,8 +3654,6 @@ impl WalletWindow {
             network_reset_busy: false,
             network_action_busy: BTreeSet::new(),
             network_action_errors: BTreeMap::new(),
-            expanded_networks: BTreeSet::new(),
-            pending_network_removal: None,
             network_proposal_error: None,
             policy_json_input: None,
             policy_editor: None,
@@ -3272,9 +3728,8 @@ impl WalletWindow {
         }
         if self.token_list.is_none() {
             let owner = self.owner.clone();
-            let editor = cx.entity().downgrade();
             self.token_list = Some(cx.new(|cx| {
-                ListState::new(TokenListDelegate::new(owner, editor), window, cx)
+                ListState::new(TokenListDelegate::new(owner), window, cx)
                     .searchable(true)
                     .selectable(false)
             }));
@@ -3295,13 +3750,19 @@ impl WalletWindow {
         {
             if let Some(list) = self.token_list.as_ref() {
                 list.update(cx, |list, cx| {
-                    list.delegate_mut().replace_networks(networks);
+                    list.delegate_mut()
+                        .replace_networks(networks, self.testnet_mode);
                     cx.notify();
                 });
             }
             if let Some(list) = self.token_proposal_list.as_ref() {
+                let visible = networks
+                    .iter()
+                    .filter(|network| self.testnet_mode || !network.testnet)
+                    .cloned()
+                    .collect::<Vec<_>>();
                 list.update(cx, |list, cx| {
-                    list.delegate_mut().replace_networks(networks);
+                    list.delegate_mut().replace_networks(&visible);
                     cx.notify();
                 });
             }
@@ -3385,11 +3846,7 @@ impl WalletWindow {
             self.private_key_input = Some(input);
         }
         if self.walletconnect_uri_input.is_none() {
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("wc: pairing URI")
-                    .masked(true)
-            });
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("wc: pairing URI"));
             self.form_input_subscriptions.push(cx.subscribe_in(
                 &input,
                 window,
@@ -3401,76 +3858,59 @@ impl WalletWindow {
             ));
             self.walletconnect_uri_input = Some(input);
         }
-        if self.network_json_input.is_none() {
-            self.network_json_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .code_editor("json")
-                    .rows(12)
-                    .placeholder("Paste a complete network JSON object")
-            }));
-        }
         if self.network_name_input.is_none() {
-            self.network_name_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Internal name, for example ethereum")
-            }));
+            self.network_name_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("my-rollup")));
         }
         if self.network_display_name_input.is_none() {
-            self.network_display_name_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Display name, for example Ethereum")
-            }));
+            self.network_display_name_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("My Rollup")));
         }
         if self.network_aliases_input.is_none() {
-            self.network_aliases_input =
-                Some(cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("Aliases separated by commas")
-                }));
+            self.network_aliases_input = Some(cx.new(|cx| {
+                InputState::new(window, cx).placeholder("my-rollup-testnet, rollup-test")
+            }));
         }
         if self.network_chain_id_input.is_none() {
             self.network_chain_id_input =
-                Some(cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("Positive decimal chain ID")
-                }));
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("123456")));
         }
         if self.network_rpc_urls_input.is_none() {
             self.network_rpc_urls_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .rows(5)
-                    .placeholder("https://primary.example,\nhttps://fallback.example")
+                InputState::new(window, cx).rows(5).placeholder(
+                    "https://rpc.my-rollup.example,\nhttps://rpc-backup.my-rollup.example",
+                )
             }));
         }
         if self.network_max_gas_limit_input.is_none() {
             self.network_max_gas_limit_input =
-                Some(cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("Optional maximum gas limit")
-                }));
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("30000000")));
         }
         if self.network_max_fee_per_gas_input.is_none() {
-            self.network_max_fee_per_gas_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Optional maximum fee per gas in wei")
-            }));
+            self.network_max_fee_per_gas_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("100000000000")));
         }
         if self.network_native_name_input.is_none() {
-            self.network_native_name_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Currency name, for example Ether")
-            }));
+            self.network_native_name_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("Ether")));
         }
         if self.network_native_symbol_input.is_none() {
-            self.network_native_symbol_input = Some(
-                cx.new(|cx| InputState::new(window, cx).placeholder("Symbol, for example ETH")),
-            );
+            self.network_native_symbol_input =
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("ETH")));
         }
         if self.network_native_decimals_input.is_none() {
             self.network_native_decimals_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder("Decimals, usually 18")));
+                Some(cx.new(|cx| InputState::new(window, cx).placeholder("18")));
         }
         if self.network_explorer_url_input.is_none() {
             self.network_explorer_url_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Optional block explorer base URL")
+                InputState::new(window, cx).placeholder("https://explorer.my-rollup.example")
             }));
         }
         if self.network_documentation_url_input.is_none() {
-            let input =
-                cx.new(|cx| InputState::new(window, cx).placeholder("Optional documentation URL"));
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("https://docs.my-rollup.example")
+            });
             self.form_input_subscriptions.push(cx.subscribe_in(
                 &input,
                 window,
@@ -3585,6 +4025,14 @@ impl WalletWindow {
                 view.desktop_snapshot_loading = false;
                 match result {
                     Ok(snapshot) => {
+                        if !view.initial_route_resolved
+                            && let Ok(accounts) = &snapshot.accounts
+                        {
+                            view.initial_route_resolved = true;
+                            if accounts.is_empty() && view.route == Route::Overview {
+                                view.set_route(Route::Accounts);
+                            }
+                        }
                         if let Ok(clients) = &snapshot.clients {
                             view.hidden_agent_sessions.retain(|client_id| {
                                 clients.iter().any(|client| {
@@ -3593,22 +4041,21 @@ impl WalletWindow {
                             });
                         }
                         if let Ok(networks) = &snapshot.networks {
-                            if view
-                                .pending_network_removal
-                                .as_ref()
-                                .is_some_and(|reviewed| !networks.contains(reviewed))
-                            {
-                                view.pending_network_removal = None;
-                            }
                             if let Some(list) = view.token_list.as_ref() {
                                 list.update(cx, |list, cx| {
-                                    list.delegate_mut().replace_networks(networks);
+                                    list.delegate_mut()
+                                        .replace_networks(networks, view.testnet_mode);
                                     cx.notify();
                                 });
                             }
                             if let Some(list) = view.token_proposal_list.as_ref() {
+                                let visible = networks
+                                    .iter()
+                                    .filter(|network| view.testnet_mode || !network.testnet)
+                                    .cloned()
+                                    .collect::<Vec<_>>();
                                 list.update(cx, |list, cx| {
-                                    list.delegate_mut().replace_networks(networks);
+                                    list.delegate_mut().replace_networks(&visible);
                                     cx.notify();
                                 });
                             }
@@ -3690,6 +4137,30 @@ impl WalletWindow {
             .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 
+    fn chain_id_is_visible(&self, chain_id: Option<u64>) -> bool {
+        if self.testnet_mode {
+            return true;
+        }
+        self.cached_networks().map_or(true, |networks| {
+            chain_id.is_none_or(|chain_id| {
+                networks
+                    .iter()
+                    .find(|network| network.chain_id == chain_id)
+                    .is_none_or(|network| !network.testnet)
+            })
+        })
+    }
+
+    fn token_proposal_is_visible(&self, proposal: &TokenProposal) -> bool {
+        self.chain_id_is_visible(Some(proposal.token.chain_id))
+    }
+
+    fn review_document_is_visible(&self, document: &ReviewDocument) -> bool {
+        self.cached_networks().map_or(true, |networks| {
+            review_document_is_visible(document, networks, self.testnet_mode)
+        })
+    }
+
     fn cached_message_document(&self, request_id: uuid::Uuid) -> Result<&ReviewDocument> {
         self.snapshot()?
             .message_documents
@@ -3742,99 +4213,219 @@ impl WalletWindow {
     }
 
     fn open_new_token_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chain_id) = self.token_chain_id_input.as_ref() else {
+        let Some(chain_id) = self.token_chain_id_input.clone() else {
             return;
         };
-        let Some(address) = self.token_address_input.as_ref() else {
+        let Some(address) = self.token_address_input.clone() else {
             return;
         };
-        let Some(symbol) = self.token_symbol_input.as_ref() else {
+        let Some(symbol) = self.token_symbol_input.clone() else {
             return;
         };
-        let Some(name) = self.token_name_input.as_ref() else {
+        let Some(name) = self.token_name_input.clone() else {
             return;
         };
-        let Some(decimals) = self.token_decimals_input.as_ref() else {
+        let Some(decimals) = self.token_decimals_input.clone() else {
             return;
         };
-        for input in [chain_id, address, symbol, name, decimals] {
+        for input in [&chain_id, &address, &symbol, &name, &decimals] {
             input.update(cx, |input, cx| input.set_value("", window, cx));
         }
         self.token_editor_open = true;
-        self.token_editor_original = None;
         self.token_editor_errors = TokenEditorErrors::default();
-        chain_id.update(cx, |input, cx| input.focus(window, cx));
-        self.token_editor_anchor.scroll_to(window, cx);
-        cx.notify();
-    }
-
-    fn edit_token(&mut self, token: &StoredToken, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chain_id_input) = self.token_chain_id_input.as_ref() else {
-            return;
-        };
-        let Some(address_input) = self.token_address_input.as_ref() else {
-            return;
-        };
-        let Some(symbol_input) = self.token_symbol_input.as_ref() else {
-            return;
-        };
-        let Some(name_input) = self.token_name_input.as_ref() else {
-            return;
-        };
-        let Some(decimals_input) = self.token_decimals_input.as_ref() else {
-            return;
-        };
-        let Ok(chain_id) = token.chain_id.parse::<u64>() else {
-            self.token_editor_errors.form =
-                Some("This stored token has an invalid chain ID.".to_owned());
-            self.token_editor_open = true;
-            cx.notify();
-            return;
-        };
-        let Ok(address) = token.address.parse::<alloy::primitives::Address>() else {
-            self.token_editor_errors.form =
-                Some("This stored token has an invalid address.".to_owned());
-            self.token_editor_open = true;
-            cx.notify();
-            return;
-        };
-        chain_id_input.update(cx, |input, cx| {
-            input.set_value(chain_id.to_string(), window, cx);
+        let chain_id_focus = chain_id.clone();
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let Some(entity) = view.upgrade() else {
+                return dialog.title("Add token").child("Token form unavailable.");
+            };
+            let (busy, errors) = {
+                let window = entity.read(cx);
+                (window.token_editor_busy, window.token_editor_errors.clone())
+            };
+            let add_view = view.clone();
+            let close_view = view.clone();
+            let on_close_view = view.clone();
+            dialog
+                .w(px(640.0))
+                .title("Add token")
+                .overlay_closable(!busy)
+                .keyboard(!busy)
+                .close_button(!busy)
+                .on_close(move |_, _, cx| {
+                    let _ = on_close_view.update(cx, |view, cx| {
+                        view.token_editor_open = false;
+                        view.token_editor_errors = TokenEditorErrors::default();
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(selectable_label("Add display metadata for a token on a configured network. Adding it requires operating-system authentication.")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .flex_1()
+                                        .min_w(px(150.0))
+                                        .child(div().text_sm().child("Chain ID"))
+                                        .child(
+                                            app_input(&chain_id, cx)
+                                                .aria_label("Chain ID")
+                                                .disabled(busy),
+                                        )
+                                        .when_some(errors.chain_id.clone(), |field, error| {
+                                            field.child(field_error(
+                                                "token-editor-chain-id-error",
+                                                error,
+                                                cx,
+                                            ))
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .flex_1()
+                                        .min_w(px(150.0))
+                                        .child(div().text_sm().child("Symbol"))
+                                        .child(
+                                            app_input(&symbol, cx)
+                                                .aria_label("Token symbol")
+                                                .disabled(busy),
+                                        )
+                                        .when_some(errors.symbol.clone(), |field, error| {
+                                            field.child(field_error(
+                                                "token-editor-symbol-error",
+                                                error,
+                                                cx,
+                                            ))
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .flex_1()
+                                        .min_w(px(150.0))
+                                        .child(div().text_sm().child("Decimals"))
+                                        .child(
+                                            app_input(&decimals, cx)
+                                                .aria_label("Token decimals")
+                                                .disabled(busy),
+                                        )
+                                        .when_some(errors.decimals.clone(), |field, error| {
+                                            field.child(field_error(
+                                                "token-editor-decimals-error",
+                                                error,
+                                                cx,
+                                            ))
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_sm().child("Token address"))
+                                .child(
+                                    app_input(&address, cx)
+                                        .aria_label("Token address")
+                                        .disabled(busy),
+                                )
+                                .when_some(errors.address.clone(), |field, error| {
+                                    field.child(field_error(
+                                        "token-editor-address-error",
+                                        error,
+                                        cx,
+                                    ))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_sm().child("Full name (optional)"))
+                                .child(
+                                    app_input(&name, cx)
+                                        .aria_label("Full token name")
+                                        .disabled(busy),
+                                )
+                                .when_some(errors.name.clone(), |field, error| {
+                                    field.child(field_error(
+                                        "token-editor-name-error",
+                                        error,
+                                        cx,
+                                    ))
+                                }),
+                        )
+                        .when_some(errors.form.clone(), |form, error| {
+                            form.child(field_error("token-editor-form-error", error, cx))
+                        }),
+                )
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            app_button("cancel-add-token")
+                                .label("Cancel")
+                                .disabled(busy)
+                                .on_click(move |_, window, cx| {
+                                    let can_close = close_view
+                                        .update(cx, |view, cx| {
+                                            if view.token_editor_busy {
+                                                return false;
+                                            }
+                                            view.token_editor_open = false;
+                                            view.token_editor_errors =
+                                                TokenEditorErrors::default();
+                                            cx.notify();
+                                            true
+                                        })
+                                        .unwrap_or(false);
+                                    if can_close {
+                                        window.close_dialog(cx);
+                                    }
+                                }),
+                        )
+                        .child(
+                            app_button("confirm-add-token")
+                                .label(if busy {
+                                    "Authenticating…"
+                                } else {
+                                    "Authenticate & add"
+                                })
+                                .primary()
+                                .loading(busy)
+                                .disabled(busy)
+                                .on_click(move |_, _, cx| {
+                                    let _ = add_view.update(cx, |view, cx| {
+                                        view.save_token_editor(cx);
+                                    });
+                                }),
+                        ),
+                )
         });
-        address_input.update(cx, |input, cx| {
-            input.set_value(address.to_checksum(None), window, cx);
-        });
-        symbol_input.update(cx, |input, cx| {
-            input.set_value(token.symbol.clone().unwrap_or_default(), window, cx);
-            input.set_selected_range(0..input.value().len(), cx);
-            input.focus(window, cx);
-        });
-        name_input.update(cx, |input, cx| {
-            input.set_value(token.name.clone().unwrap_or_default(), window, cx);
-        });
-        decimals_input.update(cx, |input, cx| {
-            input.set_value(
-                token
-                    .decimals
-                    .map_or_else(String::new, |value| value.to_string()),
-                window,
-                cx,
-            );
-        });
-        self.token_editor_open = true;
-        self.token_editor_original = Some(token.clone());
-        self.token_editor_errors = TokenEditorErrors::default();
-        self.token_editor_anchor.scroll_to(window, cx);
-        cx.notify();
-    }
-
-    fn close_token_editor(&mut self, cx: &mut Context<Self>) {
-        if self.token_editor_busy {
-            return;
-        }
-        self.token_editor_open = false;
-        self.token_editor_original = None;
-        self.token_editor_errors = TokenEditorErrors::default();
+        chain_id_focus.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
@@ -3869,26 +4460,16 @@ impl WalletWindow {
             cx.notify();
             return;
         };
-        if let Some(original) = self.token_editor_original.as_ref()
-            && let (Ok(original_chain_id), Ok(original_address)) = (
-                original.chain_id.parse::<u64>(),
-                original.address.parse::<alloy::primitives::Address>(),
-            )
-            && (original_chain_id, original_address) != (token.chain_id, token.address)
-        {
-            errors.chain_id = Some("Chain ID cannot change while editing a token.".to_owned());
-            errors.address = Some("Address cannot change while editing a token.".to_owned());
-            self.token_editor_errors = errors;
-            cx.notify();
-            return;
-        }
         match self.cached_networks() {
             Ok(networks)
-                if networks
-                    .iter()
-                    .any(|network| network.chain_id == token.chain_id) => {}
+                if networks.iter().any(|network| {
+                    network.chain_id == token.chain_id && (self.testnet_mode || !network.testnet)
+                }) => {}
             Ok(_) => {
-                errors.chain_id = Some("Choose a chain ID that exists in Networks.".to_owned());
+                errors.chain_id = Some(
+                    "Choose a chain ID currently visible in Networks. Enable testnet mode to add testnet tokens."
+                        .to_owned(),
+                );
                 self.token_editor_errors = errors;
                 cx.notify();
                 return;
@@ -3904,21 +4485,15 @@ impl WalletWindow {
         self.token_editor_errors = TokenEditorErrors::default();
         self.token_editor_busy = true;
         let owner = self.owner.clone();
-        let original = self.token_editor_original.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            match original {
-                Some(original) => owner.replace_token(&original, token).await,
-                None => owner.add_token(token).await,
-            }
-        });
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.add_token(token).await });
         cx.spawn(async move |view, cx| {
             let result = task.await;
-            let _ = view.update(cx, |view, cx| {
+            let _ = view.update_in(cx, |view, window, cx| {
                 view.token_editor_busy = false;
                 match result {
                     Ok(_) => {
                         view.token_editor_open = false;
-                        view.token_editor_original = None;
+                        window.close_dialog(cx);
                         view.reload_tokens(cx);
                         view.reload_desktop_snapshot(cx);
                     }
@@ -3965,10 +4540,7 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        input.update(cx, |input, cx| {
-            input.set_value("", window, cx);
-            input.set_masked(true, window, cx);
-        });
+        input.update(cx, |input, cx| input.set_value("", window, cx));
     }
 
     fn begin_walletconnect_uri(&mut self, uri: &str, cx: &mut Context<Self>) -> Result<()> {
@@ -4019,163 +4591,6 @@ impl WalletWindow {
         Ok(())
     }
 
-    fn connect_scanned_walletconnect_uri(
-        &mut self,
-        uri: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match self.begin_walletconnect_uri(uri, cx) {
-            Ok(()) => {
-                // A scanned URI contains pairing key material. Never copy it
-                // into the visible text field or retain it after pairing has
-                // begun; clear any previously pasted value as well.
-                if let Some(input) = self.walletconnect_uri_input.as_ref() {
-                    input.update(cx, |input, cx| {
-                        input.set_value("", window, cx);
-                        input.set_masked(true, window, cx);
-                    });
-                }
-            }
-            Err(error) => self.set_route_error(
-                Route::WalletConnect,
-                format!("Could not connect to the scanned code: {error:#}"),
-            ),
-        }
-    }
-
-    fn scan_walletconnect_screen(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.walletconnect_scan, WalletConnectScanState::Scanning) {
-            return;
-        }
-        match self.cached_accounts() {
-            Ok([]) => {
-                self.set_route_error(
-                    Route::WalletConnect,
-                    "Create an account before scanning a WalletConnect pairing.",
-                );
-                cx.notify();
-                return;
-            }
-            Err(error) => {
-                self.set_route_error(
-                    Route::WalletConnect,
-                    format!("Could not verify a signing account: {error:#}"),
-                );
-                cx.notify();
-                return;
-            }
-            Ok(_) => {}
-        }
-        if !SystemScreenPicker::supported() {
-            self.set_route_error(
-                Route::WalletConnect,
-                "Screen scanning is not available on this platform.",
-            );
-            cx.notify();
-            return;
-        }
-        self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
-        let generation = self.walletconnect_scan_generation;
-        self.walletconnect_scan = WalletConnectScanState::Scanning;
-        self.clear_route_error(Route::WalletConnect);
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            tokio::task::spawn_blocking(|| scan_screen(&SystemScreenPicker))
-                .await
-                .context("screen scanning task failed")?
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update_in(cx, |view, window, cx| {
-                if view.walletconnect_scan_generation != generation
-                    || view.route != Route::WalletConnect
-                {
-                    return;
-                }
-                match result {
-                    Ok(None) => view.walletconnect_scan = WalletConnectScanState::Idle,
-                    Ok(Some(choices)) if choices.is_empty() => {
-                        view.walletconnect_scan = WalletConnectScanState::Idle;
-                        view.set_route_error(
-                            Route::WalletConnect,
-                            "No valid, unexpired WalletConnect QR code was found.",
-                        );
-                    }
-                    Ok(Some(choices)) if choices.len() == 1 => {
-                        let uri = choices.take(0);
-                        view.walletconnect_scan = WalletConnectScanState::Idle;
-                        match uri {
-                            Ok(uri) => {
-                                view.connect_scanned_walletconnect_uri(&uri, window, cx);
-                            }
-                            Err(error) => view.set_route_error(
-                                Route::WalletConnect,
-                                format!("Could not read the QR code: {error:#}"),
-                            ),
-                        }
-                    }
-                    Ok(Some(mut choices)) => {
-                        let previews = choices
-                            .take_previews()
-                            .into_iter()
-                            .map(render_qr_preview)
-                            .collect::<Result<Vec<_>>>();
-                        match previews {
-                            Ok(previews) => {
-                                view.walletconnect_scan =
-                                    WalletConnectScanState::Choices { choices, previews };
-                            }
-                            Err(error) => {
-                                view.walletconnect_scan = WalletConnectScanState::Idle;
-                                view.set_route_error(
-                                    Route::WalletConnect,
-                                    format!("Could not display QR choices: {error:#}"),
-                                );
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        view.walletconnect_scan = WalletConnectScanState::Idle;
-                        view.set_route_error(
-                            Route::WalletConnect,
-                            format!("Could not scan screen: {error:#}"),
-                        );
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn choose_walletconnect_qr(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
-        let state = std::mem::replace(&mut self.walletconnect_scan, WalletConnectScanState::Idle);
-        let WalletConnectScanState::Choices { choices, .. } = state else {
-            return;
-        };
-        match choices.take(index) {
-            Ok(uri) => self.connect_scanned_walletconnect_uri(&uri, window, cx),
-            Err(error) => self.set_route_error(
-                Route::WalletConnect,
-                format!("Could not read the QR code: {error:#}"),
-            ),
-        }
-        cx.notify();
-    }
-
-    fn cancel_walletconnect_scan(&mut self, cx: &mut Context<Self>) {
-        self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
-        self.walletconnect_scan = WalletConnectScanState::Idle;
-        cx.notify();
-    }
-
     fn disconnect_walletconnect(&mut self, session_id: uuid::Uuid, cx: &mut Context<Self>) {
         let result = self
             .walletconnect
@@ -4198,6 +4613,15 @@ impl WalletWindow {
     }
 
     fn receive_walletconnect_prompt(&mut self, prompt: ProposalPrompt) {
+        if !prompt
+            .choices
+            .iter()
+            .all(|choice| self.review_document_is_visible(&choice.document))
+        {
+            self.queued_reviews
+                .push(QueuedReview::WalletConnect(prompt));
+            return;
+        }
         let Some(QueuedReview::WalletConnect(prompt)) = self.queued_reviews.receive(
             self.active_review.is_some() || self.review_flow.is_in_progress(),
             QueuedReview::WalletConnect(prompt),
@@ -4221,7 +4645,6 @@ impl WalletWindow {
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
-            scroll_interacted: false,
         });
     }
 
@@ -4229,7 +4652,17 @@ impl WalletWindow {
         if self.active_review.is_some() || self.review_flow.is_in_progress() {
             return;
         }
-        match self.queued_reviews.next(self.active_review.is_some()) {
+        let networks = self.cached_networks().unwrap_or_default().to_vec();
+        let testnet_mode = self.testnet_mode;
+        let next = self.queued_reviews.next_where(|review| match review {
+            QueuedReview::Transaction(prompt) => {
+                review_document_is_visible(&prompt.document, &networks, testnet_mode)
+            }
+            QueuedReview::WalletConnect(prompt) => prompt.choices.iter().all(|choice| {
+                review_document_is_visible(&choice.document, &networks, testnet_mode)
+            }),
+        });
+        match next {
             Some(QueuedReview::Transaction(prompt)) => self.activate_transaction_prompt(*prompt),
             Some(QueuedReview::WalletConnect(prompt)) => {
                 self.activate_walletconnect_prompt(prompt);
@@ -4247,7 +4680,7 @@ impl WalletWindow {
         }) {
             Route::WalletConnect
         } else {
-            Route::Reviews
+            Route::Activity
         }
     }
 
@@ -4280,7 +4713,21 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn create_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_account_entry_mode(&mut self, mode: AccountEntryMode, cx: &mut Context<Self>) {
+        if self.account_operation.is_some() || self.account_entry_mode == mode {
+            return;
+        }
+        self.account_entry_mode = mode;
+        self.account_id_error = None;
+        self.private_key_error = None;
+        self.account_status = None;
+        cx.notify();
+    }
+
+    fn create_account(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.account_operation.is_some() {
+            return;
+        }
         let Some(input) = self.account_id_input.as_ref() else {
             return;
         };
@@ -4292,22 +4739,47 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        match self
-            .owner
-            .create_account(&wallet_id, &WalletPolicy::require_approval_for_everything())
-        {
-            Ok(account) => {
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-                self.account_action_errors.remove(&account.id);
-            }
-            Err(error) => {
-                self.account_id_error = Some(format!("Could not create account: {error:#}").into());
-            }
-        }
+        let owner = self.owner.clone();
+        self.account_operation = Some(AccountOperation::Creating);
+        self.account_status = None;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || {
+                owner.create_account(&wallet_id, &WalletPolicy::require_approval_for_everything())
+            })
+            .await
+            .context("account creation task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.account_operation = None;
+                match result {
+                    Ok(account) => {
+                        if let Some(input) = view.account_id_input.as_ref() {
+                            input.update(cx, |input, cx| input.set_value("", window, cx));
+                        }
+                        view.account_action_errors.remove(&account.id);
+                        view.account_status =
+                            Some(format!("Account {} was created.", account.id).into());
+                        view.reload_desktop_snapshot(cx);
+                        view.invalidate_portfolio();
+                    }
+                    Err(error) => {
+                        view.account_id_error =
+                            Some(format!("Could not create account: {error:#}").into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
     fn import_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.account_operation.is_some() {
+            return;
+        }
         let (Some(id_input), Some(key_input)) = (
             self.account_id_input.as_ref(),
             self.private_key_input.as_ref(),
@@ -4335,15 +4807,38 @@ impl WalletWindow {
                 return;
             }
         };
-        match self.owner.import_account(&wallet_id, key) {
-            Ok(account) => {
-                id_input.update(cx, |input, cx| input.set_value("", window, cx));
-                self.account_action_errors.remove(&account.id);
-            }
-            Err(error) => {
-                self.account_id_error = Some(format!("Could not import account: {error:#}").into());
-            }
-        }
+        let owner = self.owner.clone();
+        self.account_operation = Some(AccountOperation::Importing);
+        self.account_status = None;
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            tokio::task::spawn_blocking(move || owner.import_account(&wallet_id, key))
+                .await
+                .context("account import task failed")?
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.account_operation = None;
+                match result {
+                    Ok(account) => {
+                        if let Some(input) = view.account_id_input.as_ref() {
+                            input.update(cx, |input, cx| input.set_value("", window, cx));
+                        }
+                        view.account_action_errors.remove(&account.id);
+                        view.account_status =
+                            Some(format!("Account {} was imported.", account.id).into());
+                        view.reload_desktop_snapshot(cx);
+                        view.invalidate_portfolio();
+                    }
+                    Err(error) => {
+                        view.account_id_error =
+                            Some(format!("Could not import account: {error:#}").into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -4417,19 +4912,27 @@ impl WalletWindow {
             cx.notify();
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(value.to_string()));
+        let clipboard_value = value.to_string();
+        cx.write_to_clipboard(ClipboardItem::new_string(clipboard_value.clone()));
         export.copied = true;
         export.error = None;
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = view.update(cx, |view, cx| {
+                if let Some(export) = view.account_export.as_mut() {
+                    export.copied = false;
+                }
+                cx.notify();
+            });
             cx.background_executor()
-                .timer(PRIVATE_KEY_REVEAL_DURATION)
+                .timer(PRIVATE_KEY_REVEAL_DURATION.saturating_sub(Duration::from_secs(1)))
                 .await;
             cx.update(|cx| {
                 if cx
                     .read_from_clipboard()
                     .and_then(|item| item.text())
                     .as_deref()
-                    == Some(value.as_str())
+                    == Some(clipboard_value.as_str())
                 {
                     cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
                 }
@@ -4468,7 +4971,7 @@ impl WalletWindow {
                             current_policy,
                             proposal: None,
                             validation: None,
-                            mode: PolicyEditorMode::Guided,
+                            mode: PolicyEditorMode::Advanced,
                         });
                         self.reset_guided_policy_rule_form(window, cx);
                         self.policy_action_error = None;
@@ -4561,6 +5064,7 @@ impl WalletWindow {
         cx.notify();
     }
 
+    #[allow(dead_code)] // Re-enabled with the guided editor when that workflow is ready.
     fn set_policy_editor_mode(&mut self, mode: PolicyEditorMode, cx: &mut Context<Self>) {
         let Some(editor) = self.policy_editor.as_mut() else {
             return;
@@ -4802,10 +5306,7 @@ impl WalletWindow {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
                 editor.guided_policy = Ok(policy);
-                self.policy_action_error = Some(
-                    "Danger: this draft automatically signs every call on every chain, including arbitrary calldata and native value. Validate the diff carefully before installing it."
-                        .into(),
-                );
+                self.policy_action_error = None;
                 self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
@@ -5002,7 +5503,6 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
-                    scroll_interacted: false,
                 });
             }
             Err(error) => {
@@ -5150,15 +5650,11 @@ impl WalletWindow {
         if self.legal_gate || matches!(self.portfolio, PortfolioState::Loading) {
             return;
         }
-        let Some(chain_id) = self.portfolio_chain_id else {
-            return;
-        };
         self.portfolio_generation = self.portfolio_generation.wrapping_add(1);
         let generation = self.portfolio_generation;
         self.portfolio = PortfolioState::Loading;
         let owner = self.owner.clone();
-        let task =
-            gpui_tokio::Tokio::spawn_result(cx, async move { owner.portfolio(chain_id).await });
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move { owner.portfolio().await });
         cx.spawn(async move |view, cx| {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
@@ -5166,7 +5662,13 @@ impl WalletWindow {
                     return;
                 }
                 view.portfolio = match result {
-                    Ok(snapshot) => PortfolioState::Ready(snapshot),
+                    Ok(snapshot) => {
+                        view.portfolio_account_index = clamped_portfolio_account_index(
+                            snapshot.accounts.len(),
+                            view.portfolio_account_index,
+                        );
+                        PortfolioState::Ready(snapshot)
+                    }
                     Err(error) => PortfolioState::Failed(
                         format!("Could not load portfolio: {error:#}").into(),
                     ),
@@ -5182,13 +5684,13 @@ impl WalletWindow {
         self.portfolio = PortfolioState::Idle;
     }
 
-    fn select_portfolio_network(&mut self, chain_id: u64, cx: &mut Context<Self>) {
-        if self.portfolio_chain_id == Some(chain_id) {
+    fn select_portfolio_account(&mut self, index: usize, cx: &mut Context<Self>) {
+        let PortfolioState::Ready(snapshot) = &self.portfolio else {
             return;
-        }
-        self.portfolio_chain_id = Some(chain_id);
-        self.invalidate_portfolio();
-        self.refresh_portfolio(cx);
+        };
+        self.portfolio_account_index =
+            clamped_portfolio_account_index(snapshot.accounts.len(), index);
+        cx.notify();
     }
 
     fn current_network_editor_draft(&self, cx: &App) -> Option<NetworkEditorDraft> {
@@ -5269,6 +5771,9 @@ impl WalletWindow {
     }
 
     fn open_new_network_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(focus) = self.network_chain_id_input.clone() else {
+            return;
+        };
         for input in [
             self.network_name_input.as_ref(),
             self.network_display_name_input.as_ref(),
@@ -5285,21 +5790,13 @@ impl WalletWindow {
         ] {
             replace_input_value(input, "", window, cx);
         }
-        replace_input_value(self.network_json_input.as_ref(), "", window, cx);
         self.network_editor_open = true;
         self.network_editor_original = None;
         self.network_editor_disabled = false;
+        self.network_editor_testnet = false;
         self.network_editor_rpc_strategy = RpcStrategy::Ordered;
-        self.network_editor_advanced = false;
         self.network_editor_errors = NetworkEditorErrors::default();
-        self.network_json_error = None;
-        if let Some(input) = self.network_name_input.as_ref() {
-            input.update(cx, |input, cx| input.focus(window, cx));
-        }
-        let anchor = self.network_editor_anchor.clone();
-        cx.on_next_frame(window, move |_, window, cx| {
-            anchor.scroll_to(window, cx);
-        });
+        Self::open_network_editor_modal(&focus, window, cx);
         cx.notify();
     }
 
@@ -5310,17 +5807,64 @@ impl WalletWindow {
         self.network_editor_open = false;
         self.network_editor_original = None;
         self.network_editor_errors = NetworkEditorErrors::default();
-        self.network_json_error = None;
         cx.notify();
+    }
+
+    /// Add and edit intentionally share this dialog. The prepared input state
+    /// and `network_editor_original` determine which operation is performed.
+    fn open_network_editor_modal(
+        focus: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = focus.clone();
+        // Opening on the next frame ensures the dialog observes the freshly
+        // populated edit state and avoids competing with the network card's
+        // click dispatch.
+        cx.on_next_frame(window, move |wallet, window, cx| {
+            if !wallet.network_editor_open {
+                return;
+            }
+            let view = cx.entity().downgrade();
+            window.open_dialog(cx, move |dialog, _, cx| {
+                let Some(entity) = view.upgrade() else {
+                    return dialog.title("Network").child("Network form unavailable.");
+                };
+                let (busy, editing, form, footer) = {
+                    let wallet = entity.read(cx);
+                    (
+                        wallet.network_editor_busy,
+                        wallet.network_editor_original.is_some(),
+                        wallet.render_network_editor_form(&view, cx),
+                        wallet.render_network_editor_footer(&view),
+                    )
+                };
+                let on_close_view = view.clone();
+                dialog
+                    .w(px(760.0))
+                    .max_h(px(720.0))
+                    .title(if editing {
+                        "Edit network"
+                    } else {
+                        "Add custom network"
+                    })
+                    .overlay_closable(!busy)
+                    .keyboard(!busy)
+                    .close_button(!busy)
+                    .on_close(move |_, _, cx| {
+                        let _ = on_close_view.update(cx, |view, cx| {
+                            view.close_network_editor(cx);
+                        });
+                    })
+                    .child(form)
+                    .footer(footer)
+            });
+            focus.update(cx, |input, cx| input.focus(window, cx));
+        });
     }
 
     fn set_network_editor_strategy(&mut self, strategy: RpcStrategy, cx: &mut Context<Self>) {
         self.network_editor_rpc_strategy = strategy;
-        cx.notify();
-    }
-
-    fn toggle_network_advanced_editor(&mut self, cx: &mut Context<Self>) {
-        self.network_editor_advanced = !self.network_editor_advanced;
         cx.notify();
     }
 
@@ -5330,6 +5874,9 @@ impl WalletWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(focus) = self.network_display_name_input.clone() else {
+            return;
+        };
         replace_input_value(
             self.network_name_input.as_ref(),
             network.name.clone(),
@@ -5422,31 +5969,16 @@ impl WalletWindow {
             window,
             cx,
         );
-        match serde_json::to_string_pretty(network) {
-            Ok(document) => {
-                replace_input_value(self.network_json_input.as_ref(), document, window, cx);
-            }
-            Err(error) => {
-                self.network_json_error =
-                    Some(format!("Could not serialize network: {error:#}").into());
-            }
-        }
         self.network_editor_open = true;
         self.network_editor_original = Some(network.clone());
         self.network_editor_disabled = network.disabled;
+        self.network_editor_testnet = network.testnet;
         self.network_editor_rpc_strategy = network.rpc_strategy;
-        self.network_editor_advanced = false;
         self.network_editor_errors = NetworkEditorErrors::default();
-        if let Some(input) = self.network_display_name_input.as_ref() {
-            input.update(cx, |input, cx| {
-                input.set_selected_range(0..input.value().len(), cx);
-                input.focus(window, cx);
-            });
-        }
-        let anchor = self.network_editor_anchor.clone();
-        cx.on_next_frame(window, move |_, window, cx| {
-            anchor.scroll_to(window, cx);
+        focus.update(cx, |input, cx| {
+            input.set_selected_range(0..input.value().len(), cx);
         });
+        Self::open_network_editor_modal(&focus, window, cx);
         cx.notify();
     }
 
@@ -5460,6 +5992,7 @@ impl WalletWindow {
         let (network, errors) = parse_network_editor_draft(
             &draft,
             self.network_editor_disabled,
+            self.network_editor_testnet,
             self.network_editor_rpc_strategy,
         );
         self.network_editor_errors = errors;
@@ -5478,13 +6011,15 @@ impl WalletWindow {
         });
         cx.spawn(async move |view, cx| {
             let result = task.await;
-            let _ = view.update(cx, |view, cx| {
+            let _ = view.update_in(cx, |view, window, cx| {
                 view.network_editor_busy = false;
                 match result {
                     Ok(()) => {
                         view.network_editor_open = false;
                         view.network_editor_original = None;
                         view.network_editor_errors = NetworkEditorErrors::default();
+                        window.close_dialog(cx);
+                        view.reload_desktop_snapshot(cx);
                     }
                     Err(error) => {
                         view.network_editor_errors.form =
@@ -5496,57 +6031,6 @@ impl WalletWindow {
         })
         .detach();
         cx.notify();
-    }
-
-    fn install_network_from_editor(&mut self, cx: &mut Context<Self>) {
-        if self.network_editor_busy {
-            return;
-        }
-        let Some(input) = self.network_json_input.as_ref() else {
-            return;
-        };
-        let network = match serde_json::from_str::<NetworkConfig>(&input.read(cx).value()) {
-            Ok(network) => network,
-            Err(error) => {
-                self.network_json_error = Some(format!("Invalid network JSON: {error:#}").into());
-                cx.notify();
-                return;
-            }
-        };
-        if let Err(error) = ekubo_wallet_core::config::validate_network(&network) {
-            self.network_json_error = Some(format!("Invalid network settings: {error:#}").into());
-            cx.notify();
-            return;
-        }
-        self.network_json_error = None;
-        self.network_editor_busy = true;
-        let owner = self.owner.clone();
-        let original = self.network_editor_original.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            match original {
-                Some(reviewed) => owner.replace_network(&reviewed, network).await,
-                None => owner.add_network(network).await,
-            }
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.network_editor_busy = false;
-                match result {
-                    Ok(()) => {
-                        view.network_json_error = None;
-                        view.network_editor_open = false;
-                        view.network_editor_original = None;
-                    }
-                    Err(error) => {
-                        view.network_json_error =
-                            Some(format!("Network was not saved: {error:#}").into());
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn install_network_preset(&mut self, chain_id: u64, cx: &mut Context<Self>) {
@@ -5571,57 +6055,6 @@ impl WalletWindow {
                     Err(error) => {
                         view.network_preset_error =
                             Some(format!("Could not install the network preset: {error:#}").into());
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn restore_network_preset(&mut self, reviewed: NetworkConfig, cx: &mut Context<Self>) {
-        let name = reviewed.name.clone();
-        if self.network_action_busy.contains(&name) {
-            return;
-        }
-        let Some(preset) = self
-            .network_presets
-            .iter()
-            .find(|profile| profile.config.chain_id == reviewed.chain_id)
-            .map(|profile| profile.config.clone())
-        else {
-            self.network_action_errors
-                .insert(name, "This network has no built-in defaults.".into());
-            cx.notify();
-            return;
-        };
-        // Restoring trusted metadata must not silently change whether the
-        // owner allows the network to be used.
-        let preset = restored_network_configuration(&reviewed, preset);
-        self.network_action_busy.insert(name.clone());
-        self.network_action_errors.remove(&name);
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.replace_network(&reviewed, preset).await
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.network_action_busy.remove(&name);
-                match result {
-                    Ok(()) => {
-                        view.network_action_errors.remove(&name);
-                        view.invalidate_portfolio();
-                    }
-                    Err(error) => {
-                        view.network_action_errors.insert(
-                            name,
-                            format!(
-                                "Defaults were not restored; review the current row and try again: {error:#}"
-                            )
-                            .into(),
-                        );
                     }
                 }
                 cx.notify();
@@ -5677,7 +6110,6 @@ impl WalletWindow {
                     Ok(_) => {
                         view.pending_network_reset = None;
                         view.network_reset_error = None;
-                        view.portfolio_chain_id = None;
                         view.invalidate_portfolio();
                     }
                     Err(error) => {
@@ -5703,15 +6135,11 @@ impl WalletWindow {
         disabled: bool,
         cx: &mut Context<Self>,
     ) {
-        let selected_network = self.portfolio_chain_id == Some(reviewed.chain_id);
         let name = reviewed.name.clone();
         if !self.network_action_busy.insert(name.clone()) {
             return;
         }
         self.network_action_errors.remove(&name);
-        if !disabled && self.pending_network_removal.as_ref() == Some(&reviewed) {
-            self.pending_network_removal = None;
-        }
         let owner = self.owner.clone();
         let action_name = name.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -5728,56 +6156,8 @@ impl WalletWindow {
                         format!("Could not update network: {error:#}").into(),
                     );
                 }
-                if changed && disabled && selected_network {
-                    view.portfolio_chain_id = None;
+                if changed {
                     view.invalidate_portfolio();
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn begin_network_removal(&mut self, reviewed: NetworkConfig, cx: &mut Context<Self>) {
-        self.network_action_errors.remove(&reviewed.name);
-        self.pending_network_removal = Some(reviewed);
-        cx.notify();
-    }
-
-    fn cancel_network_removal(&mut self, cx: &mut Context<Self>) {
-        self.pending_network_removal = None;
-        cx.notify();
-    }
-
-    fn confirm_network_removal(&mut self, reviewed: NetworkConfig, cx: &mut Context<Self>) {
-        if self.pending_network_removal.as_ref() != Some(&reviewed) {
-            return;
-        }
-        let owner = self.owner.clone();
-        let name = reviewed.name.clone();
-        if !self.network_action_busy.insert(name.clone()) {
-            return;
-        }
-        self.network_action_errors.remove(&name);
-        let action_name = name.clone();
-        let task =
-            gpui_tokio::Tokio::spawn_result(
-                cx,
-                async move { owner.remove_network(&reviewed).await },
-            );
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.network_action_busy.remove(&action_name);
-                match result {
-                    Ok(_) => view.pending_network_removal = None,
-                    Err(error) => {
-                        view.network_action_errors.insert(
-                            action_name,
-                            format!("Could not delete network: {error:#}").into(),
-                        );
-                    }
                 }
                 cx.notify();
             });
@@ -5839,6 +6219,15 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn toggle_token_list_import(&mut self, cx: &mut Context<Self>) {
+        if self.token_import_state == TokenImportState::Fetching {
+            return;
+        }
+        self.token_list_import_open = !self.token_list_import_open;
+        self.token_import_error = None;
+        cx.notify();
+    }
+
     fn import_token_list_for_review(&mut self, cx: &mut Context<Self>) {
         if self.token_import_state == TokenImportState::Fetching {
             return;
@@ -5855,7 +6244,19 @@ impl WalletWindow {
                 return;
             }
         };
-        let requested_chains = Vec::new();
+        let requested_chains: Vec<u64> = match self.cached_networks() {
+            Ok(networks) => networks
+                .iter()
+                .filter(|network| !network.disabled && (self.testnet_mode || !network.testnet))
+                .map(|network| network.chain_id)
+                .collect(),
+            Err(error) => {
+                self.token_import_error =
+                    Some(format!("Could not load visible networks: {error:#}").into());
+                cx.notify();
+                return;
+            }
+        };
         let owner = self.owner.clone();
         let proposal_list = self.token_proposal_list.clone();
         self.token_import_state = TokenImportState::Fetching;
@@ -6336,10 +6737,14 @@ impl WalletWindow {
             active.scroll_handle = ScrollHandle::new();
             active.scroll_check_scheduled = false;
             active.scroll_layout_ready = false;
-            active.scroll_interacted = false;
             active.simulation = Some(prompt.simulation);
             active.completion = Some(ActiveReviewCompletion::Transaction(prompt.response));
             active.awaiting_refresh = false;
+            return;
+        }
+        if !self.review_document_is_visible(&prompt.document) {
+            self.queued_reviews
+                .push(QueuedReview::Transaction(Box::new(prompt)));
             return;
         }
         if self.active_review.is_none() && self.review_flow.activate_transaction_prompt() {
@@ -6365,13 +6770,12 @@ impl WalletWindow {
             scroll_handle: ScrollHandle::new(),
             scroll_check_scheduled: false,
             scroll_layout_ready: false,
-            scroll_interacted: false,
         });
     }
 
     fn begin_message_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.active_review.is_some() || self.review_flow.is_in_progress() {
-            self.set_route_error(Route::Reviews, "Finish or close the current review first.");
+            self.set_route_error(Route::Activity, "Finish or close the current review first.");
             cx.notify();
             return;
         }
@@ -6386,13 +6790,12 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
-                    scroll_interacted: false,
                 });
-                self.clear_route_error(Route::Reviews);
+                self.clear_route_error(Route::Activity);
             }
             Err(error) => {
                 self.set_route_error(
-                    Route::Reviews,
+                    Route::Activity,
                     format!("Could not open message review: {error:#}"),
                 );
             }
@@ -6402,7 +6805,7 @@ impl WalletWindow {
 
     fn begin_typed_data_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.active_review.is_some() || self.review_flow.is_in_progress() {
-            self.set_route_error(Route::Reviews, "Finish or close the current review first.");
+            self.set_route_error(Route::Activity, "Finish or close the current review first.");
             cx.notify();
             return;
         }
@@ -6417,13 +6820,12 @@ impl WalletWindow {
                     scroll_handle: ScrollHandle::new(),
                     scroll_check_scheduled: false,
                     scroll_layout_ready: false,
-                    scroll_interacted: false,
                 });
-                self.clear_route_error(Route::Reviews);
+                self.clear_route_error(Route::Activity);
             }
             Err(error) => {
                 self.set_route_error(
-                    Route::Reviews,
+                    Route::Activity,
                     format!("Could not open typed-data review: {error:#}"),
                 );
             }
@@ -6433,11 +6835,11 @@ impl WalletWindow {
 
     fn begin_transaction_review(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if self.active_review.is_some() || !self.review_flow.begin_transaction() {
-            self.set_route_error(Route::Reviews, "Finish or close the current review first.");
+            self.set_route_error(Route::Activity, "Finish or close the current review first.");
             cx.notify();
             return;
         }
-        self.clear_route_error(Route::Reviews);
+        self.clear_route_error(Route::Activity);
         let owner = self.owner.clone();
         let presenter = self.review_presenter.clone();
         let task = gpui_tokio::Tokio::spawn_result(cx, async move {
@@ -6459,12 +6861,12 @@ impl WalletWindow {
                     }
                     view.finish_review_flow();
                     match result {
-                        Ok(_) => view.clear_route_error(Route::Reviews),
+                        Ok(_) => view.clear_route_error(Route::Activity),
                         Err(error) if error.to_string().contains("closed without a decision") => {
-                            view.clear_route_error(Route::Reviews);
+                            view.clear_route_error(Route::Activity);
                         }
                         Err(error) => view
-                            .set_route_error(Route::Reviews, format!("Review failed: {error:#}")),
+                            .set_route_error(Route::Activity, format!("Review failed: {error:#}")),
                     }
                     cx.notify();
                 });
@@ -6477,8 +6879,7 @@ impl WalletWindow {
         let Some(review) = self.active_review.as_mut() else {
             return;
         };
-        if review.scroll_interacted
-            && review.scroll_layout_ready
+        if review.scroll_layout_ready
             && !review.state.approve_enabled()
             && scroll_reached_end(
                 review.scroll_handle.offset().y,
@@ -6521,7 +6922,10 @@ impl WalletWindow {
             (GuiReviewCommand::Refresh, Some(ActiveReviewCompletion::Transaction(response))) => {
                 active.awaiting_refresh = true;
                 if response.send(command).is_err() {
-                    self.set_route_error(Route::Reviews, "The review request is no longer active.");
+                    self.set_route_error(
+                        Route::Activity,
+                        "The review request is no longer active.",
+                    );
                     self.active_review = None;
                 }
             }
@@ -6536,7 +6940,10 @@ impl WalletWindow {
             ) => {
                 wait_for_flow = true;
                 if response.send(command).is_err() {
-                    self.set_route_error(Route::Reviews, "The review request is no longer active.");
+                    self.set_route_error(
+                        Route::Activity,
+                        "The review request is no longer active.",
+                    );
                 }
                 self.active_review = None;
             }
@@ -6548,7 +6955,7 @@ impl WalletWindow {
                 ),
             ) => {
                 self.active_review = None;
-                self.clear_route_error(Route::Reviews);
+                self.clear_route_error(Route::Activity);
             }
             (
                 GuiReviewCommand::Close | GuiReviewCommand::Reject,
@@ -6563,9 +6970,9 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 match owner.reject_message(request_id) {
-                    Ok(_) => self.clear_route_error(Route::Reviews),
+                    Ok(_) => self.clear_route_error(Route::Activity),
                     Err(error) => self.set_route_error(
-                        Route::Reviews,
+                        Route::Activity,
                         format!("Could not reject message: {error:#}"),
                     ),
                 }
@@ -6576,9 +6983,9 @@ impl WalletWindow {
             ) => {
                 self.active_review = None;
                 match owner.reject_typed_data(request_id) {
-                    Ok(_) => self.clear_route_error(Route::Reviews),
+                    Ok(_) => self.clear_route_error(Route::Activity),
                     Err(error) => self.set_route_error(
-                        Route::Reviews,
+                        Route::Activity,
                         format!("Could not reject typed data: {error:#}"),
                     ),
                 }
@@ -6602,9 +7009,9 @@ impl WalletWindow {
                     let _ = view.update(cx, |view, cx| {
                         view.finish_review_flow();
                         match result {
-                            Ok(_) => view.clear_route_error(Route::Reviews),
+                            Ok(_) => view.clear_route_error(Route::Activity),
                             Err(error) => view.set_route_error(
-                                Route::Reviews,
+                                Route::Activity,
                                 format!("Message signing failed: {error:#}"),
                             ),
                         }
@@ -6632,9 +7039,9 @@ impl WalletWindow {
                     let _ = view.update(cx, |view, cx| {
                         view.finish_review_flow();
                         match result {
-                            Ok(_) => view.clear_route_error(Route::Reviews),
+                            Ok(_) => view.clear_route_error(Route::Activity),
                             Err(error) => view.set_route_error(
-                                Route::Reviews,
+                                Route::Activity,
                                 format!("Typed-data signing failed: {error:#}"),
                             ),
                         }
@@ -6713,12 +7120,12 @@ impl WalletWindow {
             (GuiReviewCommand::Refresh, completion) => {
                 active.completion = completion;
                 self.set_route_error(
-                    Route::Reviews,
+                    Route::Activity,
                     "Only transaction reviews can be re-simulated.",
                 );
             }
             (_, None) => {
-                self.set_route_error(Route::Reviews, "The review request is no longer active.");
+                self.set_route_error(Route::Activity, "The review request is no longer active.");
                 self.active_review = None;
             }
         }
@@ -6739,7 +7146,7 @@ impl WalletWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.legal_gate {
+        if self.legal_gate || self.network_editor_open {
             return;
         }
         self.command_palette = !self.command_palette;
@@ -6752,11 +7159,10 @@ impl WalletWindow {
     }
 
     fn set_route(&mut self, route: Route) {
-        reset_route_scroll_if_changed(self.route, route, &self.route_scroll_handle);
-        if route != Route::WalletConnect {
-            self.walletconnect_scan_generation = self.walletconnect_scan_generation.wrapping_add(1);
-            self.walletconnect_scan = WalletConnectScanState::Idle;
+        if self.network_editor_open && route != self.route {
+            return;
         }
+        reset_route_scroll_if_changed(self.route, route, &self.route_scroll_handle);
         self.route = route;
     }
 
@@ -6776,7 +7182,7 @@ impl WalletWindow {
         self.command_palette = false;
         match route {
             NotificationRoute::Review(request_id) => {
-                self.set_route(Route::Reviews);
+                self.set_route(Route::Activity);
                 self.selected_record = None;
                 if self.active_review.is_none() && !self.review_flow.is_in_progress() {
                     self.begin_transaction_review(request_id, cx);
@@ -6807,47 +7213,6 @@ impl WalletWindow {
         );
     }
 
-    fn toggle_network_details(&mut self, name: &str, cx: &mut Context<Self>) {
-        if !self.expanded_networks.remove(name) {
-            self.expanded_networks.insert(name.to_owned());
-        }
-        cx.notify();
-    }
-
-    fn set_detailed_notification_previews(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.notification_preference_busy {
-            return;
-        }
-        self.notification_preference_busy = true;
-        self.clear_route_error(Route::Settings);
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.set_detailed_notification_previews(enabled).await
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.notification_preference_busy = false;
-                match result {
-                    Ok(()) => {
-                        view.detailed_notification_previews
-                            .store(enabled, Ordering::Relaxed);
-                        view.clear_route_error(Route::Settings);
-                    }
-                    Err(error) => {
-                        view.set_route_error(
-                            Route::Settings,
-                            format!("Could not save notification preference: {error:#}"),
-                        );
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn set_appearance_preference(
         &mut self,
         preference: AppearancePreference,
@@ -6874,10 +7239,62 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn set_testnet_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.testnet_mode == enabled {
+            return;
+        }
+        match self.owner.set_testnet_mode(enabled) {
+            Ok(()) => {
+                self.testnet_mode = enabled;
+                self.invalidate_portfolio();
+                if let Ok(networks) = self.cached_networks() {
+                    let networks = networks.to_vec();
+                    if let Some(list) = self.token_list.as_ref() {
+                        list.update(cx, |list, cx| {
+                            list.delegate_mut().replace_networks(&networks, enabled);
+                            cx.notify();
+                        });
+                    }
+                    if let Some(list) = self.token_proposal_list.as_ref() {
+                        let visible = networks
+                            .iter()
+                            .filter(|network| enabled || !network.testnet)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        list.update(cx, |list, cx| {
+                            let delegate = list.delegate_mut();
+                            delegate.replace_networks(&visible);
+                            delegate.clear();
+                            cx.notify();
+                        });
+                    }
+                }
+                if enabled {
+                    self.activate_next_queued_review();
+                    if self.active_review.is_some() {
+                        self.set_route(self.active_review_route());
+                    }
+                }
+                self.clear_route_error(Route::Settings);
+            }
+            Err(error) => self.set_route_error(
+                Route::Settings,
+                format!("Could not save testnet mode: {error:#}"),
+            ),
+        }
+        cx.notify();
+    }
+
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let pending_reviews = self
             .cached_reviews()
-            .map(review_queue_decision_count)
+            .and_then(|queues| {
+                Ok(review_queue_decision_count(
+                    queues,
+                    self.cached_networks()?,
+                    self.testnet_mode,
+                ))
+            })
             .unwrap_or_default();
         let mut menu = div()
             .id("wallet-sidebar")
@@ -6898,22 +7315,21 @@ impl WalletWindow {
                 "sidebar-route-{}",
                 route.label()
             )))
-            .with_size(NAVIGATION_BUTTON_SIZE)
             .w(NAVIGATION_BUTTON_SIZE)
             .h(NAVIGATION_BUTTON_SIZE)
             .ghost()
             .selected(route == self.route)
             .toggled(route == self.route)
-            .disabled(self.legal_gate)
+            .disabled(self.legal_gate || self.network_editor_open)
             .tooltip(format!("{}  {}", route.label(), route.shortcut()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
             }))
             .when(
-                route == Route::Reviews && route == self.route,
+                route == Route::Activity && route == self.route,
                 ButtonVariants::primary,
             );
-            let button = if route == Route::Reviews {
+            let button = if route == Route::Activity {
                 let logo = if cx.theme().is_dark() || route == self.route {
                     self.sidebar_logo_dark.clone()
                 } else {
@@ -6924,7 +7340,7 @@ impl WalletWindow {
                 button.child(Icon::new(route.icon()).size(px(30.0)))
             };
             let button = accessible_button(button, route.label());
-            if route == Route::Reviews {
+            if route == Route::Activity {
                 let count = if pending_reviews > 99 {
                     "99+".to_owned()
                 } else {
@@ -6963,63 +7379,79 @@ impl WalletWindow {
         let mut content = div().flex().flex_col().gap_3();
         match self.cached_reviews() {
             Ok(queues) => {
-                let total = review_queue_decision_count(queues);
+                let total = self.cached_networks().map_or(0, |networks| {
+                    review_queue_decision_count(queues, networks, self.testnet_mode)
+                });
                 if total > 0 {
-                    content = content.child(format!("{total} request(s) need your attention."));
+                    content = content.child(selectable_label(format!(
+                        "{total} request(s) need your attention."
+                    )));
                 }
-                for request in &queues.transactions {
+                for request in queues
+                    .transactions
+                    .iter()
+                    .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
+                {
                     let request_id = request.request_id;
-                    content =
-                        content.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .p_3()
-                                .border_1()
-                                .rounded(cx.theme().radius_lg)
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(format!(
+                    content = content.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .max_w_full()
+                            .p_3()
+                            .border_1()
+                            .rounded(cx.theme().radius_lg)
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(selectable_text(
+                                        format!("review-transaction-title-{request_id}"),
+                                        &format!(
                                             "Transaction · {} · {}",
                                             request.wallet_id, request.network_name
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "{} · {}",
-                                                    request_id, request.created_at
-                                                )),
                                         ),
-                                )
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "review-transaction-{request_id}"
-                                    )))
-                                    .label("Review")
-                                    .primary()
-                                    .disabled(self.review_flow.is_in_progress())
-                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(selectable_text(
+                                                format!("review-transaction-meta-{request_id}"),
+                                                &format!("{} · {}", request_id, request.created_at),
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                app_button(SharedString::from(format!(
+                                    "review-transaction-{request_id}"
+                                )))
+                                .label("Review")
+                                .primary()
+                                .disabled(self.review_flow.is_in_progress())
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
                                         view.begin_transaction_review(request_id, cx);
-                                    })),
-                                ),
-                        );
+                                    },
+                                )),
+                            ),
+                    );
                 }
-                for request in &queues.typed_data {
+                for request in queues
+                    .typed_data
+                    .iter()
+                    .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
+                {
                     let request_id = request.request_id;
                     content =
                         content.child(
@@ -7037,10 +7469,15 @@ impl WalletWindow {
                                 .items_center()
                                 .justify_between()
                                 .gap_3()
-                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
-                                    "Typed data · {} · {} · {}",
-                                    request.wallet_id, request.chain_id, request_id
-                                )))
+                                .child(div().min_w_0().flex_1().whitespace_normal().child(
+                                    selectable_text(
+                                        format!("review-typed-data-title-{request_id}"),
+                                        &format!(
+                                            "Typed data · {} · {} · {}",
+                                            request.wallet_id, request.chain_id, request_id
+                                        ),
+                                    ),
+                                ))
                                 .child(
                                     app_button(SharedString::from(format!(
                                         "review-typed-data-{request_id}"
@@ -7053,39 +7490,49 @@ impl WalletWindow {
                                 ),
                         );
                 }
-                for request in &queues.messages {
+                for request in queues.messages.iter().filter(|request| {
+                    self.chain_id_is_visible(
+                        request
+                            .chain_id
+                            .as_deref()
+                            .and_then(|chain| chain.parse().ok()),
+                    )
+                }) {
                     let request_id = request.request_id;
-                    content =
-                        content.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .p_3()
-                                .border_1()
-                                .rounded(cx.theme().radius_lg)
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
-                                    "Message · {} · {}",
-                                    request.wallet_id, request_id
-                                )))
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "review-message-{request_id}"
-                                    )))
-                                    .label("Review")
-                                    .primary()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.begin_message_review(request_id, cx);
-                                    })),
+                    content = content.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .max_w_full()
+                            .p_3()
+                            .border_1()
+                            .rounded(cx.theme().radius_lg)
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(div().min_w_0().flex_1().whitespace_normal().child(
+                                selectable_text(
+                                    format!("review-message-title-{request_id}"),
+                                    &format!("Message · {} · {}", request.wallet_id, request_id),
                                 ),
-                        );
+                            ))
+                            .child(
+                                app_button(SharedString::from(format!(
+                                    "review-message-{request_id}"
+                                )))
+                                .label("Review")
+                                .primary()
+                                .on_click(cx.listener(
+                                    move |view, _, _, cx| {
+                                        view.begin_message_review(request_id, cx);
+                                    },
+                                )),
+                            ),
+                    );
                 }
                 for proposal in &queues.policy_proposals {
                     let wallet_id = proposal.wallet_id.clone();
@@ -7105,10 +7552,15 @@ impl WalletWindow {
                                 .items_center()
                                 .justify_between()
                                 .gap_3()
-                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
-                                    "Policy proposal · {wallet_id} · revision {}",
-                                    proposal.source_revision
-                                )))
+                                .child(div().min_w_0().flex_1().whitespace_normal().child(
+                                    selectable_text(
+                                        format!("review-policy-title-{wallet_id}"),
+                                        &format!(
+                                            "Policy proposal · {wallet_id} · revision {}",
+                                            proposal.source_revision
+                                        ),
+                                    ),
+                                ))
                                 .child(
                                     app_button(SharedString::from(format!(
                                         "open-policy-proposal-{wallet_id}"
@@ -7122,7 +7574,11 @@ impl WalletWindow {
                                 ),
                         );
                 }
-                for proposal in &queues.network_proposals {
+                for proposal in queues
+                    .network_proposals
+                    .iter()
+                    .filter(|proposal| self.testnet_mode || !proposal.testnet)
+                {
                     let chain_id = proposal.chain_id;
                     content =
                         content.child(
@@ -7140,10 +7596,15 @@ impl WalletWindow {
                                 .items_center()
                                 .justify_between()
                                 .gap_3()
-                                .child(div().min_w_0().flex_1().whitespace_normal().child(format!(
-                                    "Network proposal · {} · chain {chain_id}",
-                                    proposal.name
-                                )))
+                                .child(div().min_w_0().flex_1().whitespace_normal().child(
+                                    selectable_text(
+                                        format!("review-network-title-{chain_id}"),
+                                        &format!(
+                                            "Network proposal · {} · chain {chain_id}",
+                                            proposal.name
+                                        ),
+                                    ),
+                                ))
                                 .child(
                                     app_button(SharedString::from(format!(
                                         "open-network-proposal-{chain_id}"
@@ -7158,41 +7619,45 @@ impl WalletWindow {
                         );
                 }
                 let mut token_groups = std::collections::BTreeMap::<String, usize>::new();
-                for proposal in &queues.token_proposals {
+                for proposal in queues
+                    .token_proposals
+                    .iter()
+                    .filter(|proposal| self.token_proposal_is_visible(proposal))
+                {
                     *token_groups.entry(proposal.source.clone()).or_default() += 1;
                 }
                 for (index, (source, count)) in token_groups.into_iter().enumerate() {
-                    content =
-                        content.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .p_3()
-                                .border_1()
-                                .rounded(cx.theme().radius_lg)
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div().min_w_0().flex_1().whitespace_normal().child(format!(
-                                        "Token proposal · {source} · {count} name(s)"
-                                    )),
-                                )
-                                .child(
-                                    app_button(("open-token-proposal", index))
-                                        .label("Open Tokens")
-                                        .primary()
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.set_route(Route::Tokens);
-                                            cx.notify();
-                                        })),
+                    content = content.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .max_w_full()
+                            .p_3()
+                            .border_1()
+                            .rounded(cx.theme().radius_lg)
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(div().min_w_0().flex_1().whitespace_normal().child(
+                                selectable_text(
+                                    ("review-token-title", index),
+                                    &format!("Token proposal · {source} · {count} name(s)"),
                                 ),
-                        );
+                            ))
+                            .child(
+                                app_button(("open-token-proposal", index))
+                                    .label("Open Tokens")
+                                    .primary()
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.set_route(Route::Tokens);
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
                 }
                 if total == 0 {
                     content = content.child(
@@ -7205,17 +7670,22 @@ impl WalletWindow {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(div().font_semibold().child("No requests waiting"))
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .child(selectable_label("No requests waiting")),
+                            )
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Transactions, messages, typed data, WalletConnect requests, and proposed policy, network, or token changes that need your decision will appear here."),
+                                    .child(selectable_label("Transactions, messages, typed data, WalletConnect requests, and proposed policy, network, or token changes that need your decision will appear here.")),
                             ),
                     );
                 }
             }
             Err(error) => {
-                content = content.child(format!("Reviews unavailable: {error:#}"));
+                content =
+                    content.child(selectable_label(format!("Reviews unavailable: {error:#}")));
             }
         }
         content
@@ -7348,7 +7818,10 @@ impl WalletWindow {
                 }
                 if !item.cancel_transaction_hashes.is_empty() {
                     detail = detail
-                        .child(div().font_semibold().child("Cancellation attempts"))
+                        .child(div().font_semibold().child(selectable_text(
+                            format!("activity-cancellations-title-{request_id}"),
+                            "Cancellation attempts",
+                        )))
                         .children(
                             item.cancel_transaction_hashes
                                 .iter()
@@ -7374,7 +7847,10 @@ impl WalletWindow {
                                     .w_full()
                                     .justify_between()
                                     .gap_2()
-                                    .child(div().font_medium().child("Exact execution plan"))
+                                    .child(div().font_medium().child(selectable_text(
+                                        format!("activity-plan-title-{request_id}"),
+                                        "Exact execution plan",
+                                    )))
                                     .child(copy_button(
                                         format!("copy-execution-plan-{request_id}"),
                                         exact_plan.clone(),
@@ -7478,11 +7954,12 @@ impl WalletWindow {
                         );
                     }
                     Err(error) => {
-                        detail = detail.child(
-                            div()
-                                .text_color(cx.theme().danger)
-                                .child(format!("Exact payload unavailable: {error:#}")),
-                        );
+                        detail = detail.child(div().text_color(cx.theme().danger).child(
+                            selectable_text(
+                                format!("message-payload-error-{request_id}"),
+                                &format!("Exact payload unavailable: {error:#}"),
+                            ),
+                        ));
                     }
                 }
                 detail.into_any_element()
@@ -7564,11 +8041,12 @@ impl WalletWindow {
                         );
                     }
                     Err(error) => {
-                        detail = detail.child(
-                            div()
-                                .text_color(cx.theme().danger)
-                                .child(format!("Exact payload unavailable: {error:#}")),
-                        );
+                        detail = detail.child(div().text_color(cx.theme().danger).child(
+                            selectable_text(
+                                format!("typed-data-payload-error-{request_id}"),
+                                &format!("Exact payload unavailable: {error:#}"),
+                            ),
+                        ));
                     }
                 }
                 detail.into_any_element()
@@ -7576,7 +8054,7 @@ impl WalletWindow {
         }
     }
 
-    fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_activity_history(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
             .rounded(cx.theme().radius_lg)
@@ -7588,8 +8066,20 @@ impl WalletWindow {
             .gap_3();
         let records = match self.cached_activity_records() {
             Ok(records) => records,
-            Err(error) => return panel.child(format!("Activity unavailable: {error:#}")),
+            Err(error) => {
+                return panel.child(selectable_label(format!("Activity unavailable: {error:#}")));
+            }
         };
+        let records = Arc::<[OwnerActivityRecord]>::from(
+            records
+                .iter()
+                .filter(|record| {
+                    !activity_record_is_awaiting_approval(record)
+                        && self.chain_id_is_visible(activity_record_chain_id(record))
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         let items = records.as_ref();
         let selected = self
             .selected_record
@@ -7602,7 +8092,7 @@ impl WalletWindow {
             return panel.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No wallet activity yet."),
+                    .child(selectable_label("No wallet activity yet.")),
             );
         }
         let selected_record = self.selected_record;
@@ -7631,6 +8121,27 @@ impl WalletWindow {
         )
     }
 
+    fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                GroupBox::new()
+                    .id("activity-needs-review")
+                    .outline()
+                    .title("Needs review")
+                    .child(self.render_reviews(cx)),
+            )
+            .child(
+                GroupBox::new()
+                    .id("activity-history")
+                    .outline()
+                    .title("History")
+                    .child(self.render_activity_history(cx)),
+            )
+    }
+
     fn render_settings(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut agents = div().flex().flex_col().gap_1();
         let login_instructions = installed_agent_login_instructions(&self.detected_agents);
@@ -7640,16 +8151,16 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(
+                    .child(selectable_label(
                         "Install the MCP server into a detected agent to see its sign-in command.",
-                    ),
+                    )),
             );
         } else {
             login_commands = login_commands.child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose paired access-token and refresh-session lifetimes."),
+                    .child(selectable_label("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose paired access-token and refresh-session lifetimes.")),
             );
             for instruction in login_instructions {
                 let command = instruction.command.clone();
@@ -7666,16 +8177,18 @@ impl WalletWindow {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(
-                            div()
-                                .font_semibold()
-                                .child(format!("Sign in from {}", instruction.harness)),
-                        )
+                        .child(div().font_semibold().child(selectable_text(
+                            format!("agent-login-title-{}", instruction.harness),
+                            &format!("Sign in from {}", instruction.harness),
+                        )))
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(instruction.location),
+                                .child(selectable_text(
+                                    format!("agent-login-location-{}", instruction.harness),
+                                    instruction.location,
+                                )),
                         )
                         .child(
                             h_flex()
@@ -7706,17 +8219,15 @@ impl WalletWindow {
                                         ),
                                 )
                                 .child(
-                                    app_button(SharedString::from(format!(
-                                        "copy-agent-login-{}",
-                                        instruction.harness
-                                    )))
-                                    .label("Copy")
-                                    .icon(IconName::Copy)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            command_for_copy.clone(),
-                                        ));
-                                    })),
+                                    copy_button(
+                                        SharedString::from(format!(
+                                            "copy-agent-login-{}",
+                                            instruction.harness
+                                        )),
+                                        command_for_copy,
+                                        "Copy agent login command",
+                                    )
+                                    .large(),
                                 ),
                         ),
                 );
@@ -7752,15 +8263,23 @@ impl WalletWindow {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(div().font_semibold().truncate().child(format!(
-                                            "{} · {:?}",
-                                            item.display_name, item.agent_kind
-                                        )))
+                                        .child(div().font_semibold().truncate().child(
+                                            selectable_text(
+                                                format!("managed-agent-title-{client_id}"),
+                                                &format!(
+                                                    "{} · {:?}",
+                                                    item.display_name, item.agent_kind
+                                                ),
+                                            ),
+                                        ))
                                         .child(
                                             div()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child(last_used),
+                                                .child(selectable_text(
+                                                    format!("managed-agent-last-used-{client_id}"),
+                                                    &last_used,
+                                                )),
                                         ),
                                 )
                                 .child(
@@ -7778,7 +8297,10 @@ impl WalletWindow {
                                                 } else {
                                                     cx.theme().muted_foreground
                                                 })
-                                                .child(expiration),
+                                                .child(selectable_text(
+                                                    format!("managed-agent-expiry-{client_id}"),
+                                                    &expiration,
+                                                )),
                                         )
                                         .when(!expired, |actions| {
                                             actions.child(
@@ -7786,8 +8308,6 @@ impl WalletWindow {
                                                     "revoke-agent-{client_id}"
                                                 )))
                                                 .label("Revoke")
-                                                .with_size(COMPACT_CONTROL_HEIGHT)
-                                                .rounded(px(12.0))
                                                 .danger()
                                                 .on_click(cx.listener(move |view, _, _, cx| {
                                                     view.revoke_agent(client_id, cx);
@@ -7803,27 +8323,27 @@ impl WalletWindow {
             managed_agents = managed_agents.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("No authorized agent sessions."),
+                    .child(selectable_label("No authorized agent sessions.")),
             );
         }
         match &self.detected_agents {
             AgentDetectionState::Loading => {
-                agents = agents.child(h_flex().gap_2().child(Spinner::new()).child("Detecting…"));
+                agents = agents.child(
+                    h_flex()
+                        .gap_2()
+                        .child(Spinner::new())
+                        .child(selectable_label("Detecting…")),
+                );
             }
             AgentDetectionState::Failed(error) => {
-                agents = agents.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(format!("Agent detection unavailable: {error}")),
-                );
+                agents = agents.child(div().text_sm().text_color(cx.theme().danger).child(
+                    selectable_label(format!("Agent detection unavailable: {error}")),
+                ));
             }
             AgentDetectionState::Ready(detected) if detected.is_empty() => {
-                agents = agents.child(
-                    div()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("No supported agent installation was detected."),
-                );
+                agents = agents.child(div().text_color(cx.theme().muted_foreground).child(
+                    selectable_label("No supported agent installation was detected."),
+                ));
             }
             AgentDetectionState::Ready(detected) => {
                 for (index, agent) in detected.iter().enumerate() {
@@ -7847,13 +8367,19 @@ impl WalletWindow {
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
-                                                .child(agent.display_name)
+                                                .child(selectable_text(
+                                                    ("detected-agent-name", index),
+                                                    agent.display_name,
+                                                ))
                                                 .child(
                                                     div()
                                                         .text_sm()
                                                         .text_color(cx.theme().muted_foreground)
                                                         .truncate()
-                                                        .child(agent.config_path.clone()),
+                                                        .child(selectable_text(
+                                                            ("detected-agent-path", index),
+                                                            &agent.config_path,
+                                                        )),
                                                 ),
                                         )
                                         .child(
@@ -7866,13 +8392,16 @@ impl WalletWindow {
                                                     div()
                                                         .text_sm()
                                                         .text_color(cx.theme().muted_foreground)
-                                                        .child(if installed {
-                                                            "Automatically managed"
-                                                        } else if config_error.is_some() {
-                                                            "Configuration needs attention"
-                                                        } else {
-                                                            "Not installed"
-                                                        }),
+                                                        .child(selectable_text(
+                                                            ("detected-agent-status", index),
+                                                            if installed {
+                                                                "Automatically managed"
+                                                            } else if config_error.is_some() {
+                                                                "Configuration needs attention"
+                                                            } else {
+                                                                "Not installed"
+                                                            },
+                                                        )),
                                                 )
                                                 .child(
                                                     app_button(SharedString::from(format!(
@@ -7899,9 +8428,12 @@ impl WalletWindow {
                                         ),
                                 )
                                 .when_some(config_error, |row, error| {
-                                    row.child(
-                                        div().text_sm().text_color(cx.theme().danger).child(error),
-                                    )
+                                    row.child(div().text_sm().text_color(cx.theme().danger).child(
+                                        selectable_text(
+                                            format!("detected-agent-error-{index}"),
+                                            &error,
+                                        ),
+                                    ))
                                 }),
                         ),
                     );
@@ -7909,7 +8441,6 @@ impl WalletWindow {
             }
         }
 
-        let detailed = self.detailed_notification_previews.load(Ordering::Relaxed);
         div()
             .flex()
             .flex_col()
@@ -7923,7 +8454,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("System follows your operating-system appearance and updates while the wallet is running."),
+                            .child(selectable_label("System follows your operating-system appearance and updates while the wallet is running.")),
                     )
                     .child(
                         h_flex()
@@ -7989,40 +8520,35 @@ impl WalletWindow {
                     ),
             ))
             .child(settings_section(
-                "Notifications",
+                "Test networks",
                 GroupBox::new()
-                    .id("notification-settings")
+                    .id("testnet-mode-settings")
                     .outline()
                     .child(
                         h_flex()
                             .w_full()
-                            .flex_wrap()
                             .justify_between()
                             .gap_4()
                             .child(
                                 div()
+                                    .min_w_0()
                                     .flex_1()
-                                    .child("Show detailed previews")
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(div().font_medium().child("Testnet mode"))
                                     .child(
                                         div()
                                             .text_sm()
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("Off by default so lock-screen notifications do not expose transaction identifiers."),
+                                            .child(selectable_label("Show configured test networks and their linked balances, tokens, requests, and activity. Testnet mode is off by default.")),
                                     ),
                             )
                             .child(
-                                app_button("detailed-notification-previews")
-                                    .label(if detailed {
-                                        "Disable detailed previews"
-                                    } else {
-                                        "Enable detailed previews"
-                                    })
-                                    .selected(detailed)
-                                    .toggled(detailed)
-                                    .disabled(self.notification_preference_busy)
-                                    .tooltip("Include request identifiers in lifecycle notifications")
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.set_detailed_notification_previews(!detailed, cx);
+                                Switch::new("testnet-mode")
+                                    .checked(self.testnet_mode)
+                                    .on_click(cx.listener(|view, enabled, _, cx| {
+                                        view.set_testnet_mode(*enabled, cx);
                                     })),
                             ),
                     ),
@@ -8056,7 +8582,11 @@ impl WalletWindow {
                     .id("agent-session-settings")
                     .outline()
                     .child(login_commands)
-                    .child(div().font_semibold().child("Authorized sessions"))
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child(selectable_label("Authorized sessions")),
+                    )
                     .child(managed_agents),
             ))
             .child(self.render_updates(cx))
@@ -8064,7 +8594,9 @@ impl WalletWindow {
     }
 
     fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut panel = div()
+        let busy = self.account_operation.is_some();
+        let creating = self.account_entry_mode == AccountEntryMode::Create;
+        let mut form = div()
             .p_4()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -8072,179 +8604,241 @@ impl WalletWindow {
             .bg(cx.theme().secondary)
             .flex()
             .flex_col()
-            .gap_2()
-            .child(div().font_semibold().child("Create or import account"))
+            .gap_3()
+            .child(
+                TabBar::new("account-entry-tabs")
+                    .w_full()
+                    .underline()
+                    .large()
+                    .selected_index(usize::from(!creating))
+                    .child(Tab::new().label("Create account").disabled(busy))
+                    .child(Tab::new().label("Import private key").disabled(busy))
+                    .on_click(cx.listener(|view, index: &usize, _, cx| {
+                        let mode = if *index == 0 {
+                            AccountEntryMode::Create
+                        } else {
+                            AccountEntryMode::Import
+                        };
+                        view.set_account_entry_mode(mode, cx);
+                    })),
+            )
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("New and imported accounts start with a policy that requires review for every transaction."),
+                    .child(selectable_label(if creating {
+                        "The wallet generates and protects a new key. New accounts require review for every transaction."
+                    } else {
+                        "The private key is transferred directly to wallet core and cleared from this form before import begins."
+                    })),
             );
         if let Some(input) = &self.account_id_input {
-            panel = panel
+            form = form
                 .child(
                     div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w(px(180.0))
-                                .flex_1()
-                                .flex_basis(px(320.0))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(div().text_sm().font_medium().child("Account name"))
-                                .child(app_input(input, cx).aria_label("Account name")),
-                        )
-                        .child(
-                            app_button("create-account")
-                                .label("Create")
-                                .primary()
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.create_account(window, cx);
-                                })),
-                        ),
-                )
-                .when_some(self.account_id_error.clone(), |panel, error| {
-                    panel.child(field_error("account-name-error", error, cx))
-                });
-        }
-        if let Some(input) = &self.private_key_input {
-            panel = panel
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w(px(180.0))
-                                .flex_1()
-                                .flex_basis(px(320.0))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(div().text_sm().font_medium().child("Private key"))
-                                .child(
-                                    app_input(input, cx)
-                                        .aria_label("Private key")
-                                        .content_type(InputContentType::Password)
-                                        .mask_toggle(),
-                                ),
-                        )
-                        .child(
-                            app_button("import-account")
-                                .label("Import private key")
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.import_account(window, cx);
-                                })),
-                        ),
-                )
-                .when_some(self.private_key_error.clone(), |panel, error| {
-                    panel.child(field_error("private-key-error", error, cx))
-                });
-        }
-        panel = panel.child(
-            div()
-                .mt_3()
-                .font_semibold()
-                .child("Accounts on this device"),
-        );
-        match self.cached_accounts() {
-            Ok([]) => panel.child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("No accounts yet."),
-            ),
-            Ok(items) => {
-                let item_count = items.len();
-                panel.children(items.iter().enumerate().map(|(index, item)| {
-                    let export_id = item.id.clone();
-                    let removal_id = item.id.clone();
-                    let address = format!("{:#x}", item.address);
-                    let address_for_copy = address.clone();
-                    let address_text_id =
-                        SharedString::from(format!("account-address-{}", item.id));
-                    let address_copy_id =
-                        SharedString::from(format!("copy-account-address-{}", item.id));
-                    let action_error = self.account_action_errors.get(&item.id).cloned();
-                    div()
-                        .py_2()
-                        .when(index + 1 < item_count, |row| {
-                            row.border_b_1().border_color(cx.theme().border)
-                        })
                         .flex()
                         .flex_col()
                         .gap_1()
                         .child(
                             div()
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex_basis(px(260.0))
-                                        .child(
-                                            div().font_semibold().truncate().child(item.id.clone()),
-                                        )
-                                        .child(
-                                            selectable_text(address_text_id, &address)
-                                                .max_w_full()
-                                                .truncate()
-                                                .font_family(MONO_FONT_FAMILY)
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .child(copy_button(
+                                .text_sm()
+                                .font_medium()
+                                .child(selectable_label("Account name")),
+                        )
+                        .child(
+                            app_input(input, cx)
+                                .aria_label("Account name")
+                                .disabled(busy),
+                        ),
+                )
+                .when_some(self.account_id_error.clone(), |form, error| {
+                    form.child(field_error("account-name-error", error, cx))
+                });
+        }
+        if !creating && let Some(input) = &self.private_key_input {
+            form = form
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .child(selectable_label("Private key")),
+                        )
+                        .child(
+                            app_input(input, cx)
+                                .aria_label("Private key")
+                                .content_type(InputContentType::Password)
+                                .mask_toggle()
+                                .disabled(busy),
+                        ),
+                )
+                .when_some(self.private_key_error.clone(), |form, error| {
+                    form.child(field_error("private-key-error", error, cx))
+                });
+        }
+        form = form
+            .child(
+                h_flex()
+                    .gap_2()
+                    .when(busy, |actions| actions.child(Spinner::new().small()))
+                    .child(
+                        app_button(if creating {
+                            "create-account"
+                        } else {
+                            "import-account"
+                        })
+                        .label(match self.account_operation {
+                            Some(AccountOperation::Creating) => "Creating account…",
+                            Some(AccountOperation::Importing) => "Importing account…",
+                            None if creating => "Create account",
+                            None => "Import private key",
+                        })
+                        .primary()
+                        .disabled(busy)
+                        .on_click(cx.listener(
+                            move |view, _, window, cx| {
+                                if creating {
+                                    view.create_account(window, cx);
+                                } else {
+                                    view.import_account(window, cx);
+                                }
+                            },
+                        )),
+                    ),
+            )
+            .when_some(self.account_status.clone(), |form, status| {
+                form.child(
+                    div()
+                        .id("account-operation-status")
+                        .role(Role::Alert)
+                        .text_sm()
+                        .text_color(cx.theme().success)
+                        .child(selectable_label(status)),
+                )
+            });
+
+        let mut accounts = div().flex().flex_col().gap_3().child(
+            div()
+                .font_semibold()
+                .child(selectable_label("Accounts on this device")),
+        );
+        accounts = match self.cached_accounts() {
+            Ok([]) => accounts.child(
+                div()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(selectable_label(
+                        "No accounts are stored on this device yet.",
+                    )),
+            ),
+            Ok(items) => accounts.children(items.iter().map(|item| {
+                let export_id = item.id.clone();
+                let removal_id = item.id.clone();
+                let address = format!("{:#x}", item.address);
+                let address_for_copy = address.clone();
+                let address_text_id = SharedString::from(format!("account-address-{}", item.id));
+                let address_copy_id =
+                    SharedString::from(format!("copy-account-address-{}", item.id));
+                let action_error = self.account_action_errors.get(&item.id).cloned();
+                div()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex_basis(px(260.0))
+                                    .child(div().font_semibold().truncate().child(selectable_text(
+                                        format!("account-name-{}", item.id),
+                                        &item.id,
+                                    )))
+                                    .child(
+                                        selectable_text(address_text_id, &address)
+                                            .max_w_full()
+                                            .truncate()
+                                            .font_family(MONO_FONT_FAMILY)
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        copy_button(
                                             address_copy_id,
                                             address_for_copy,
                                             "Copy account address",
-                                        ))
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "export-account-{export_id}"
-                                            )))
-                                            .label("Export")
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.begin_account_export(export_id.clone(), cx);
-                                            })),
                                         )
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "remove-account-{removal_id}"
-                                            )))
-                                            .label("Remove")
-                                            .danger()
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                view.begin_account_removal(removal_id.clone(), cx);
-                                            })),
+                                        .large(),
+                                    )
+                                    .child(
+                                        app_button(SharedString::from(format!(
+                                            "export-account-{export_id}"
+                                        )))
+                                        .label("Export")
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                view.begin_account_export(export_id.clone(), cx);
+                                            }),
                                         ),
-                                ),
-                        )
-                        .when_some(action_error, |row, error| {
-                            row.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                        })
-                }))
-            }
-            Err(error) => panel.child(
+                                    )
+                                    .child(
+                                        app_button(SharedString::from(format!(
+                                            "remove-account-{removal_id}"
+                                        )))
+                                        .label("Remove")
+                                        .danger()
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                view.begin_account_removal(removal_id.clone(), cx);
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .when_some(action_error, |row, error| {
+                        row.child(div().text_sm().text_color(cx.theme().danger).child(
+                            selectable_text(format!("account-action-error-{}", item.id), &error),
+                        ))
+                    })
+            })),
+            Err(error) => accounts.child(
                 div()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().danger)
                     .text_sm()
                     .text_color(cx.theme().danger)
-                    .child(format!("Accounts unavailable: {error:#}")),
+                    .child(selectable_label(format!("Accounts unavailable: {error:#}"))),
             ),
-        }
+        };
+
+        div().flex().flex_col().gap_4().child(form).child(accounts)
     }
 
     fn render_guided_policy_rule_form(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -8260,15 +8854,15 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().font_semibold().child(format!(
+            .child(div().font_semibold().child(selectable_label(format!(
                 "{} ordered rule",
                 if self.policy_rule_original_index.is_some() {
                     "Edit"
                 } else {
                     "Add"
                 }
-            )))
-            .child("Effect")
+            ))))
+            .child(selectable_label("Effect"))
             .child(
                 div()
                     .flex()
@@ -8308,59 +8902,61 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child("Description (optional)")
+                    .child(selectable_label("Description (optional)"))
                     .child(app_input(input, cx).aria_label("Rule description"))
                     .when_some(self.policy_rule_errors.label.clone(), |field, error| {
                         field.child(field_error("policy-rule-description-error", error, cx))
                     }),
             );
         }
-        form = form.child("Called contract or recipient").child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    app_button("policy-rule-target-any")
-                        .label("Any target")
-                        .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Any)
-                        .when(
-                            self.policy_rule_target_mode == GuidedLiteralMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_target_mode = GuidedLiteralMode::Any;
-                            view.policy_rule_errors.targets = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-target-exact")
-                        .label("Named targets")
-                        .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Exact)
-                        .when(
-                            self.policy_rule_target_mode == GuidedLiteralMode::Exact,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_target_mode = GuidedLiteralMode::Exact;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-target-predicate")
-                        .label("Predicate")
-                        .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Predicate)
-                        .when(
-                            self.policy_rule_target_mode == GuidedLiteralMode::Predicate,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_target_mode = GuidedLiteralMode::Predicate;
-                            cx.notify();
-                        })),
-                ),
-        );
+        form = form
+            .child(selectable_label("Called contract or recipient"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        app_button("policy-rule-target-any")
+                            .label("Any target")
+                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Any)
+                            .when(
+                                self.policy_rule_target_mode == GuidedLiteralMode::Any,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_target_mode = GuidedLiteralMode::Any;
+                                view.policy_rule_errors.targets = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        app_button("policy-rule-target-exact")
+                            .label("Named targets")
+                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Exact)
+                            .when(
+                                self.policy_rule_target_mode == GuidedLiteralMode::Exact,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_target_mode = GuidedLiteralMode::Exact;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        app_button("policy-rule-target-predicate")
+                            .label("Predicate")
+                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Predicate)
+                            .when(
+                                self.policy_rule_target_mode == GuidedLiteralMode::Predicate,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_target_mode = GuidedLiteralMode::Predicate;
+                                cx.notify();
+                            })),
+                    ),
+            );
         if self.policy_rule_target_mode != GuidedLiteralMode::Any
             && let Some(input) = self.policy_rule_targets_input.as_ref()
         {
@@ -8377,7 +8973,7 @@ impl WalletWindow {
                     }),
             );
         }
-        form = form.child("Network chain ID").child(
+        form = form.child(selectable_label("Network chain ID")).child(
             div()
                 .flex()
                 .flex_wrap()
@@ -8437,52 +9033,54 @@ impl WalletWindow {
                     }),
             );
         }
-        form = form.child("Native value on the call").child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    app_button("policy-rule-value-any")
-                        .label("Any value")
-                        .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Any)
-                        .when(
-                            self.policy_rule_value_mode == GuidedLiteralMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_value_mode = GuidedLiteralMode::Any;
-                            view.policy_rule_errors.values = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-value-exact")
-                        .label("Exact wei values")
-                        .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Exact)
-                        .when(
-                            self.policy_rule_value_mode == GuidedLiteralMode::Exact,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_value_mode = GuidedLiteralMode::Exact;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-value-predicate")
-                        .label("Range or predicate")
-                        .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Predicate)
-                        .when(
-                            self.policy_rule_value_mode == GuidedLiteralMode::Predicate,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_value_mode = GuidedLiteralMode::Predicate;
-                            cx.notify();
-                        })),
-                ),
-        );
+        form = form
+            .child(selectable_label("Native value on the call"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        app_button("policy-rule-value-any")
+                            .label("Any value")
+                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Any)
+                            .when(
+                                self.policy_rule_value_mode == GuidedLiteralMode::Any,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_value_mode = GuidedLiteralMode::Any;
+                                view.policy_rule_errors.values = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        app_button("policy-rule-value-exact")
+                            .label("Exact wei values")
+                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Exact)
+                            .when(
+                                self.policy_rule_value_mode == GuidedLiteralMode::Exact,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_value_mode = GuidedLiteralMode::Exact;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        app_button("policy-rule-value-predicate")
+                            .label("Range or predicate")
+                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Predicate)
+                            .when(
+                                self.policy_rule_value_mode == GuidedLiteralMode::Predicate,
+                                ButtonVariants::primary,
+                            )
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.policy_rule_value_mode = GuidedLiteralMode::Predicate;
+                                cx.notify();
+                            })),
+                    ),
+            );
         if self.policy_rule_value_mode != GuidedLiteralMode::Any
             && let Some(input) = self.policy_rule_values_input.as_ref()
         {
@@ -8497,7 +9095,7 @@ impl WalletWindow {
                     }),
             );
         }
-        form = form.child("Calldata").child(
+        form = form.child(selectable_label("Calldata")).child(
             div()
                 .flex()
                 .flex_wrap()
@@ -8553,7 +9151,7 @@ impl WalletWindow {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child("Canonical function signature")
+                        .child(selectable_label("Canonical function signature"))
                         .child(app_input(input, cx).aria_label("Canonical function signature"))
                         .when_some(self.policy_rule_errors.abi.clone(), |field, error| {
                             field.child(field_error("policy-rule-abi-error", error, cx))
@@ -8566,7 +9164,7 @@ impl WalletWindow {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child("Typed argument predicates (JSON object)")
+                        .child(selectable_label("Typed argument predicates (JSON object)"))
                         .child(
                             app_input(input, cx)
                                 .aria_label("Typed argument predicates")
@@ -8576,7 +9174,7 @@ impl WalletWindow {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Use eq/in predicates, or compose any, all, not, each, selector, and length predicates. The signature type-checks every constraint."),
+                                .child(selectable_label("Use eq/in predicates, or compose any, all, not, each, selector, and length predicates. The signature type-checks every constraint.")),
                         )
                         .when_some(self.policy_rule_errors.args.clone(), |field, error| {
                             field.child(field_error("policy-rule-arguments-error", error, cx))
@@ -8624,12 +9222,17 @@ impl WalletWindow {
             .flex_col()
             .gap_4()
             .when_some(self.policy_action_error.clone(), |content, error| {
-                content.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                content.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
+                )
             });
         let accounts = match self.cached_accounts() {
             Ok(accounts) => accounts,
             Err(error) => {
-                return content.child(Alert::error(
+                return content.child(selectable_error_alert(
                     "policy-account-error",
                     format!("Accounts unavailable: {error:#}"),
                 ));
@@ -8656,9 +9259,17 @@ impl WalletWindow {
                         });
                     let applicable = current_revision == Some(proposal.source_revision);
                     let mut changes = div().flex().flex_col().gap_1();
-                    for line in diff_policies(&current_policy, &proposal.policy) {
-                        changes = changes
-                            .child(div().font_family(MONO_FONT_FAMILY).text_sm().child(line));
+                    for (index, line) in diff_policies(&current_policy, &proposal.policy)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        changes =
+                            changes.child(div().font_family(MONO_FONT_FAMILY).text_sm().child(
+                                selectable_text(
+                                    format!("policy-proposal-diff-{}-{index}", proposal.wallet_id),
+                                    &line,
+                                ),
+                            ));
                     }
                     let review_proposal = proposal.clone();
                     let reject_proposal = proposal.clone();
@@ -8680,9 +9291,12 @@ impl WalletWindow {
                                         .items_center()
                                         .justify_between()
                                         .gap_2()
-                                        .child(div().font_semibold().child(format!(
-                                            "{} · based on revision {}",
-                                            proposal.wallet_id, proposal.source_revision
+                                        .child(div().font_semibold().child(selectable_text(
+                                            format!("policy-proposal-title-{}", proposal.wallet_id),
+                                            &format!(
+                                                "{} · based on revision {}",
+                                                proposal.wallet_id, proposal.source_revision
+                                            ),
                                         )))
                                         .child(
                                             div()
@@ -8692,22 +9306,35 @@ impl WalletWindow {
                                                 } else {
                                                     cx.theme().danger
                                                 })
-                                                .child(if applicable {
-                                                    "Ready for review"
-                                                } else {
-                                                    "Superseded by a policy change"
-                                                }),
+                                                .child(selectable_text(
+                                                    format!(
+                                                        "policy-proposal-status-{}",
+                                                        proposal.wallet_id
+                                                    ),
+                                                    if applicable {
+                                                        "Ready for review"
+                                                    } else {
+                                                        "Superseded by a policy change"
+                                                    },
+                                                )),
                                         ),
                                 )
-                                .child(div().text_sm().child(
-                                    ekubo_wallet_core::sanitize::terminal_safe_multiline(
+                                .child(div().text_sm().child(selectable_text(
+                                    format!("policy-proposal-rationale-{}", proposal.wallet_id),
+                                    &ekubo_wallet_core::sanitize::terminal_safe_multiline(
                                         &proposal.rationale,
                                     ),
-                                ))
+                                )))
                                 .when_some(current_error, |card, error| {
-                                    card.child(
-                                        div().text_sm().text_color(cx.theme().danger).child(error),
-                                    )
+                                    card.child(div().text_sm().text_color(cx.theme().danger).child(
+                                        selectable_text(
+                                            format!(
+                                                "policy-proposal-current-error-{}",
+                                                proposal.wallet_id
+                                            ),
+                                            &error,
+                                        ),
+                                    ))
                                 })
                                 .child(changes)
                                 .child(
@@ -8755,7 +9382,7 @@ impl WalletWindow {
             }
             Ok(_) => {}
             Err(error) => {
-                content = content.child(Alert::error(
+                content = content.child(selectable_error_alert(
                     "policy-proposal-error",
                     format!("Policy proposals unavailable: {error:#}"),
                 ));
@@ -8767,7 +9394,9 @@ impl WalletWindow {
                     .id("policy-empty")
                     .outline()
                     .title("Signing policies")
-                    .child("Create an account before configuring signing permissions.")
+                    .child(selectable_label(
+                        "Create an account before configuring signing permissions.",
+                    ))
                     .child(
                         app_button("policy-go-to-accounts")
                             .label("Go to Accounts")
@@ -8780,31 +9409,38 @@ impl WalletWindow {
             );
         }
 
-        let selected_wallet = self
-            .policy_editor
-            .as_ref()
-            .map(|editor| editor.wallet_id.as_str());
-        let mut account_picker = div().flex().flex_wrap().gap_2();
-        for account in accounts {
-            let wallet_id = account.id.clone();
-            let selected = selected_wallet == Some(wallet_id.as_str());
-            account_picker = account_picker.child(
-                app_button(SharedString::from(format!("policy-wallet-{wallet_id}")))
-                    .label(wallet_id.clone())
-                    .toggled(selected)
-                    .when(selected, ButtonVariants::primary)
-                    .on_click(cx.listener(move |view, _, window, cx| {
-                        view.open_policy_editor(&wallet_id, window, cx);
-                    })),
+        if accounts.len() > 1 {
+            let account_labels = accounts
+                .iter()
+                .map(|account| account.id.clone())
+                .collect::<Vec<_>>();
+            let selected_index = self
+                .policy_editor
+                .as_ref()
+                .and_then(|editor| {
+                    account_labels
+                        .iter()
+                        .position(|account| account == &editor.wallet_id)
+                })
+                .unwrap_or_default();
+            let switch_accounts = account_labels.clone();
+            content = content.child(
+                GroupBox::new()
+                    .id("policy-account-picker")
+                    .outline()
+                    .title("Account")
+                    .child(account_switcher(
+                        "policy-account-tabs",
+                        &account_labels,
+                        selected_index,
+                        cx.listener(move |view, index: &usize, window, cx| {
+                            if let Some(wallet_id) = switch_accounts.get(*index) {
+                                view.open_policy_editor(wallet_id, window, cx);
+                            }
+                        }),
+                    )),
             );
         }
-        content = content.child(
-            GroupBox::new()
-                .id("policy-account-picker")
-                .outline()
-                .title("Account")
-                .child(account_picker),
-        );
 
         let (Some(editor), Some(input)) =
             (self.policy_editor.as_ref(), self.policy_json_input.as_ref())
@@ -8816,11 +9452,17 @@ impl WalletWindow {
                     .border_1()
                     .border_color(cx.theme().border)
                     .text_color(cx.theme().muted_foreground)
-                    .child("Select an account to inspect its exact policy document."),
+                    .child(selectable_label(
+                        "Select an account to inspect its exact policy document.",
+                    )),
             );
         };
 
         let current_document = input.read(cx).value();
+        let allow_anything_draft = serde_json::from_str(current_document.as_ref())
+            .ok()
+            .and_then(|value| WalletPolicy::parse(value).ok())
+            .is_some_and(|policy| policy == WalletPolicy::allow_anything());
         let validated = editor
             .validation
             .as_ref()
@@ -8844,44 +9486,18 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3()
-            .child(
-                div()
-                    .font_semibold()
-                    .child(format!("{} policy", editor.wallet_id)),
-            )
+            .child(div().font_semibold().child(selectable_text(
+                format!("policy-editor-title-{}", editor.wallet_id),
+                &format!("{} policy", editor.wallet_id),
+            )))
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(revision),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        app_button("policy-guided-mode")
-                            .label("Guided")
-                            .toggled(editor.mode == PolicyEditorMode::Guided)
-                            .when(
-                                editor.mode == PolicyEditorMode::Guided,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.set_policy_editor_mode(PolicyEditorMode::Guided, cx);
-                            })),
-                    )
-                    .child(
-                        app_button("policy-advanced-mode")
-                            .label("Advanced JSON")
-                            .toggled(editor.mode == PolicyEditorMode::Advanced)
-                            .when(
-                                editor.mode == PolicyEditorMode::Advanced,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.set_policy_editor_mode(PolicyEditorMode::Advanced, cx);
-                            })),
-                    ),
+                    .child(selectable_text(
+                        format!("policy-editor-revision-{}", editor.wallet_id),
+                        &revision,
+                    )),
             )
             .when_some(
                 editor
@@ -8889,27 +9505,51 @@ impl WalletWindow {
                     .as_ref()
                     .and_then(|validation| validation.as_ref().err().cloned()),
                 |panel, error| {
-                    panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    panel.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(selectable_label(error)),
+                    )
                 },
             );
         match editor.mode {
             PolicyEditorMode::Advanced => {
-                editor_panel = editor_panel.child(
-                    div()
+                editor_panel = editor_panel
+                    .child(
+                        div()
                         .id("policy-json-editor-input")
                         .flex_1()
                         .min_h(px(320.0))
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().text_sm().font_medium().child("Policy JSON"))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .child(selectable_label("Policy JSON")),
+                        )
                         .child(
                             app_input(input, cx)
                                 .aria_label("Policy JSON")
                                 .w_full()
                                 .h_full(),
                         ),
-                );
+                    )
+                    .when(allow_anything_draft, |panel| {
+                        panel.child(
+                            div()
+                                .id("policy-unrestricted-warning")
+                                .role(Role::Alert)
+                                .p_3()
+                                .rounded(cx.theme().radius_lg)
+                                .border_1()
+                                .border_color(cx.theme().danger)
+                                .text_color(cx.theme().danger)
+                                .child(selectable_label("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value.")),
+                        )
+                    });
             }
             PolicyEditorMode::Guided => match &editor.guided_policy {
                 Err(error) => {
@@ -8917,21 +9557,10 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().danger)
-                            .child(error.clone()),
+                            .child(selectable_label(error.clone())),
                     );
                 }
                 Ok(policy) => {
-                    if policy == &WalletPolicy::allow_anything() {
-                        editor_panel = editor_panel.child(
-                            div()
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().danger)
-                                .text_color(cx.theme().danger)
-                                .child("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value."),
-                        );
-                    }
                     let mut rule_cards = div().flex().flex_col().gap_2();
                     for (rule_index, rule) in policy.rules.iter().enumerate() {
                         let mut controls = h_flex().gap_2();
@@ -8979,20 +9608,29 @@ impl WalletWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(div().font_semibold().child(format!(
-                                    "{}. {}",
-                                    rule_index + 1,
-                                    match rule.effect {
-                                        Effect::Allow => "Allow",
-                                        Effect::Deny => "Deny",
-                                    }
+                                .child(div().font_semibold().child(selectable_text(
+                                    ("policy-rule-title", rule_index),
+                                    &format!(
+                                        "{}. {}",
+                                        rule_index + 1,
+                                        match rule.effect {
+                                            Effect::Allow => "Allow",
+                                            Effect::Deny => "Deny",
+                                        }
+                                    ),
                                 )))
-                                .child(div().min_w_0().text_sm().child(rule.describe()))
+                                .child(div().min_w_0().text_sm().child(selectable_text(
+                                    ("policy-rule-description", rule_index),
+                                    &rule.describe(),
+                                )))
                                 .child(
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("The first matching rule decides this call."),
+                                        .child(selectable_text(
+                                            ("policy-rule-match-description", rule_index),
+                                            "The first matching rule decides this call.",
+                                        )),
                                 )
                                 .child(
                                     controls
@@ -9027,7 +9665,9 @@ impl WalletWindow {
                     if policy.rules.is_empty() {
                         rule_cards =
                             rule_cards.child(div().text_color(cx.theme().muted_foreground).child(
-                                "No rules. Every transaction request will need your approval.",
+                                selectable_label(
+                                    "No rules. Every transaction request will need your approval.",
+                                ),
                             ));
                     }
                     editor_panel = editor_panel
@@ -9047,59 +9687,85 @@ impl WalletWindow {
                 }
             },
         }
-        editor_panel = editor_panel.child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    app_button("reset-policy-draft")
-                        .label("Reset to review everything")
-                        .disabled(self.policy_installing)
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.reset_policy_editor(window, cx);
-                        })),
-                )
-                .child(
-                    app_button("disable-signing-policy-draft")
-                        .label("Disable transaction signing")
-                        .disabled(self.policy_installing)
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.apply_disable_signing_policy(window, cx);
-                        })),
-                )
-                .child(
-                    app_button("allow-anything-policy-draft")
-                        .icon(IconName::TriangleAlert)
-                        .label("Allow anything")
-                        .danger()
-                        .disabled(self.policy_installing)
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.apply_allow_anything_policy(window, cx);
-                        })),
-                )
-                .child(
-                    app_button("validate-policy-draft")
-                        .label("Validate and preview diff")
-                        .disabled(self.policy_installing)
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.validate_policy_editor(window, cx);
-                        })),
-                )
-                .child(
-                    app_button("install-policy-draft")
-                        .label(if self.policy_installing {
-                            "Authenticating…"
-                        } else {
-                            "Install policy"
-                        })
-                        .primary()
-                        .disabled(self.policy_installing || !reviewed_exact_document)
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.install_policy_editor(cx);
-                        })),
-                ),
-        );
+        editor_panel = editor_panel
+            .child(
+                GroupBox::new()
+                    .id("policy-presets")
+                    .outline()
+                    .title("Policy presets")
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                app_button("reset-policy-draft")
+                                    .label("Review every transaction")
+                                    .disabled(self.policy_installing)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.reset_policy_editor(window, cx);
+                                    })),
+                            )
+                            .child(
+                                app_button("disable-signing-policy-draft")
+                                    .label("Disable transaction signing")
+                                    .disabled(self.policy_installing)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.apply_disable_signing_policy(window, cx);
+                                    })),
+                            )
+                            .child(
+                                app_button("allow-anything-policy-draft")
+                                    .icon(IconName::TriangleAlert)
+                                    .label("Allow anything")
+                                    .disabled(self.policy_installing)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.apply_allow_anything_policy(window, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                GroupBox::new()
+                    .id("policy-preview-workflow")
+                    .outline()
+                    .title("Review changes")
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(selectable_label("Preview and review the computed permission changes before installation. Install remains unavailable until the preview matches this exact JSON document.")),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label(match editor.validation.as_ref() {
+                                Some(Ok(_)) if reviewed_exact_document => {
+                                    "The computed permission changes below match this draft."
+                                }
+                                Some(Ok(_)) => {
+                                    "This draft changed after its last preview. Refresh the computed changes."
+                                }
+                                Some(Err(_)) => {
+                                    "Fix the JSON validation error, then preview its permission changes."
+                                }
+                                None => "Review the computed permission changes before you can install this policy.",
+                            })),
+                    )
+                    .child(
+                        app_button("validate-policy-draft")
+                            .label(if reviewed_exact_document {
+                                "Refresh preview"
+                            } else {
+                                "Preview changes"
+                            })
+                            .when(!reviewed_exact_document, ButtonVariants::primary)
+                            .disabled(self.policy_installing)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.validate_policy_editor(window, cx);
+                            })),
+                    ),
+            );
         content = content.child(editor_panel);
 
         match editor.validation.as_ref() {
@@ -9114,24 +9780,41 @@ impl WalletWindow {
                             .bg(cx.theme().secondary)
                             .font_family(MONO_FONT_FAMILY)
                             .text_sm()
-                            .child(line.clone()),
+                            .child(selectable_text(
+                                ("policy-diff-line", index),
+                                line,
+                            )),
                     );
                 }
                 content.child(
                     GroupBox::new()
                         .id("policy-permission-diff")
                         .outline()
-                        .title("Permission changes")
+                        .title("Computed permission changes")
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Installing requires operating-system authentication and rechecks the policy revision immediately before the write."),
+                                .child(selectable_label("Installing requires operating-system authentication and rechecks the policy revision immediately before the write.")),
                         )
-                        .child(changes),
+                        .child(changes)
+                        .child(
+                            app_button("install-policy-draft")
+                                .label(if self.policy_installing {
+                                    "Authenticating…"
+                                } else {
+                                    "Authenticate & install"
+                                })
+                                .primary()
+                                .loading(self.policy_installing)
+                                .disabled(self.policy_installing)
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.install_policy_editor(cx);
+                                })),
+                        ),
                 )
             }
-            Some(Ok(_)) => content.child(Alert::warning(
+            Some(Ok(_)) => content.child(selectable_warning_alert(
                 "policy-diff-stale",
                 "The document changed after validation. Validate it again to refresh the permission diff.",
             )),
@@ -9140,25 +9823,21 @@ impl WalletWindow {
     }
 
     fn render_legal(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let license_url = application_license_url();
         let panel = GroupBox::new()
             .id("legal-and-version")
             .outline()
-            .child(format!("Version {BUILD_VERSION}"))
-            .child("Copyright © 2026 Ekubo, Inc.")
+            .compact()
+            .child(selectable_label(format!("Version {BUILD_VERSION}")))
             .child(
                 h_flex()
                     .w_full()
                     .justify_between()
-                    .child("Licensed under FSL-1.1-MIT")
-                    .child(
-                        app_button("review-license")
-                            .label("View")
-                            .tooltip("View the license for this exact source revision on GitHub")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.open_url(&license_url);
-                            })),
-                    ),
+                    .child(selectable_label("Copyright © 2026 Ekubo, Inc."))
+                    .child(app_button("review-license").label("View license").on_click(
+                        cx.listener(|view, _, _, cx| {
+                            view.open_legal_review(LegalDocument::ApplicationLicense, cx);
+                        }),
+                    )),
             );
         let panel =
             match self.cached_legal_status() {
@@ -9168,10 +9847,10 @@ impl WalletWindow {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(format!(
+                            .child(selectable_label(format!(
                                 "Terms of Service · {}",
                                 legal_acceptance_label(&status.terms_of_service)
-                            ))
+                            )))
                             .child(
                                 app_button("review-terms")
                                     .label("View")
@@ -9185,10 +9864,10 @@ impl WalletWindow {
                             .flex()
                             .items_center()
                             .justify_between()
-                            .child(format!(
+                            .child(selectable_label(format!(
                                 "Privacy Policy · {}",
                                 legal_acceptance_label(&status.privacy_policy)
-                            ))
+                            )))
                             .child(app_button("review-privacy").label("View").on_click(
                                 cx.listener(|view, _, _, cx| {
                                     view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
@@ -9199,14 +9878,16 @@ impl WalletWindow {
                         h_flex()
                             .w_full()
                             .justify_between()
-                            .child("Third-Party Licenses")
+                            .child(selectable_label("Third-Party Licenses"))
                             .child(app_button("review-licenses").label("View").on_click(
                                 cx.listener(|view, _, _, cx| {
                                     view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
                                 }),
                             )),
                     ),
-                Err(error) => panel.child(format!("Legal status unavailable: {error:#}")),
+                Err(error) => panel.child(selectable_label(format!(
+                    "Legal status unavailable: {error:#}"
+                ))),
             };
         settings_section("About Ekubo Wallet", panel)
     }
@@ -9218,7 +9899,6 @@ impl WalletWindow {
             Ok(_) => None,
         };
         let account_unavailable = account_error.is_some();
-        let scan_running = matches!(self.walletconnect_scan, WalletConnectScanState::Scanning);
         let mut panel = div()
             .p_4()
             .rounded(cx.theme().radius_lg)
@@ -9228,16 +9908,26 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_lg().font_medium().child("Connect a dapp"))
+            .child(
+                div()
+                    .text_lg()
+                    .font_medium()
+                    .child(selectable_label("Connect a dapp")),
+            )
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Paste a WalletConnect v2 URI or scan a QR code already visible on this Mac. Pairings stay in memory and disconnect when you explicitly Quit."),
+                    .child(selectable_label("Paste a WalletConnect v2 URI copied from the dapp. Pairings stay in memory and disconnect when you explicitly Quit.")),
             );
         if let Some(input) = self.walletconnect_uri_input.as_ref() {
             panel = panel
-                .child(div().text_sm().font_medium().child("Pairing URI"))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .child(selectable_label("Pairing URI")),
+                )
                 .child(
                     div()
                         .flex()
@@ -9248,8 +9938,6 @@ impl WalletWindow {
                             div().min_w(px(220.0)).flex_1().child(
                                 app_input(input, cx)
                                     .aria_label("WalletConnect pairing URI")
-                                    .content_type(InputContentType::Password)
-                                    .mask_toggle()
                                     .w_full(),
                             ),
                         )
@@ -9261,97 +9949,22 @@ impl WalletWindow {
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.connect_walletconnect(window, cx);
                                 })),
-                        )
-                        .when(SystemScreenPicker::supported(), |row| {
-                            row.child(
-                                app_button("scan-walletconnect")
-                                    .label(if scan_running {
-                                        "Waiting for selection…"
-                                    } else {
-                                        "Scan QR on screen"
-                                    })
-                                    .loading(scan_running)
-                                    .disabled(account_unavailable)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.scan_walletconnect_screen(cx);
-                                    })),
-                            )
-                        }),
+                        ),
                 );
             if let Some(error) = account_error {
-                panel = panel.child(div().text_sm().text_color(cx.theme().danger).child(error));
-            }
-        }
-        match &self.walletconnect_scan {
-            WalletConnectScanState::Idle => {}
-            WalletConnectScanState::Scanning => {
                 panel = panel.child(
-                    h_flex()
-                        .gap_2()
-                        .child(Spinner::new())
-                        .child("Choose a screen area or window in the macOS picker."),
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
                 );
-            }
-            WalletConnectScanState::Choices { previews, .. } => {
-                let mut choices = div()
-                    .p_3()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child("Several WalletConnect codes were found. Choose one to connect.")
-                    .child(
-                        app_button("cancel-walletconnect-scan")
-                            .label("Cancel")
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.cancel_walletconnect_scan(cx);
-                            })),
-                    );
-                let mut previews_row = div().flex().flex_wrap().gap_3();
-                for (index, preview) in previews.iter().enumerate() {
-                    previews_row =
-                        previews_row.child(
-                            div()
-                                .p_2()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    img(preview.clone())
-                                        .w(px(160.0))
-                                        .h(px(160.0))
-                                        .object_fit(ObjectFit::Contain),
-                                )
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "choose-walletconnect-qr-{index}"
-                                    )))
-                                    .label(format!("Use QR {}", index + 1))
-                                    .primary()
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.choose_walletconnect_qr(index, window, cx);
-                                    })),
-                                ),
-                        );
-                }
-                choices = choices.child(previews_row);
-                panel = panel.child(choices);
             }
         }
         if self.walletconnect_sessions.is_empty() {
-            return panel.child("No active WalletConnect sessions.");
+            return panel.child(selectable_label("No active WalletConnect sessions."));
         }
         panel.children(self.walletconnect_sessions.iter().cloned().map(|session| {
             let session_id = session.id;
-            let pairing_topic = session.pairing_topic.clone();
-            let pairing_topic_for_copy = pairing_topic.clone();
             div()
                 .w_full()
                 .min_w_0()
@@ -9371,50 +9984,32 @@ impl WalletWindow {
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .truncate()
-                                .font_medium()
-                                .child(format!(
+                        .child(div().w_full().min_w_0().truncate().font_medium().child(
+                            selectable_text(
+                                format!("walletconnect-session-title-{session_id}"),
+                                &format!(
                                     "{} · {:?}",
                                     session.dapp_name.as_deref().unwrap_or("Pairing"),
                                     session.status
-                                )),
-                        )
+                                ),
+                            ),
+                        ))
                         .child(
                             div()
                                 .min_w_0()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(format!("{} active request(s)", session.active_requests)),
-                        )
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .gap_2()
-                                .child(
-                                    selectable_text(
-                                        SharedString::from(format!(
-                                            "walletconnect-topic-{session_id}"
-                                        )),
-                                        &format!("Topic {pairing_topic}"),
-                                    )
-                                    .min_w_0()
-                                    .flex_1()
-                                    .font_family(MONO_FONT_FAMILY)
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .truncate(),
-                                )
-                                .child(copy_button(
-                                    SharedString::from(format!(
-                                        "copy-walletconnect-topic-{session_id}"
-                                    )),
-                                    pairing_topic_for_copy,
-                                    "Copy pairing topic",
+                                .child(selectable_text(
+                                    format!("walletconnect-session-requests-{session_id}"),
+                                    &format!(
+                                        "{} active {}",
+                                        session.active_requests,
+                                        if session.active_requests == 1 {
+                                            "request"
+                                        } else {
+                                            "requests"
+                                        }
+                                    ),
                                 )),
                         )
                         .when_some(session.last_error, |column, error| {
@@ -9423,7 +10018,10 @@ impl WalletWindow {
                                     .whitespace_normal()
                                     .text_sm()
                                     .text_color(cx.theme().danger)
-                                    .child(format!("Connection error: {error}")),
+                                    .child(selectable_text(
+                                        format!("walletconnect-error-{session_id}"),
+                                        &format!("Connection error: {error}"),
+                                    )),
                             )
                         }),
                 )
@@ -9439,18 +10037,7 @@ impl WalletWindow {
         }))
     }
 
-    fn render_network_editor(&self, cx: &mut Context<Self>) -> gpui::Div {
-        if !self.network_editor_open {
-            return div().child(
-                app_button("open-custom-network-editor")
-                    .label("Add custom network")
-                    .primary()
-                    .icon(IconName::Plus)
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.open_new_network_editor(window, cx);
-                    })),
-            );
-        }
+    fn render_network_editor_form(&self, view: &WeakEntity<Self>, cx: &App) -> gpui::Div {
         let Some(name) = self.network_name_input.as_ref() else {
             return div();
         };
@@ -9499,7 +10086,10 @@ impl WalletWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().text_sm().font_medium().child(label))
+                .child(div().text_sm().font_medium().child(selectable_text(
+                    format!("network-editor-label-{label}"),
+                    label,
+                )))
                 .child(
                     app_input(input, cx)
                         .aria_label(label)
@@ -9513,25 +10103,32 @@ impl WalletWindow {
                     ))
                 })
         };
-        let mut panel = GroupBox::new()
-            .id("guided-network-editor")
-            .outline()
-            .title(if editing {
-                "Edit network"
-            } else {
-                "Add custom network"
-            })
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_4()
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("RPC endpoints provide balances and transaction simulations. The wallet validates every field, verifies the live chain ID, then requires owner authentication before saving to the encrypted database."),
+                    .child(selectable_label("RPC endpoints provide balances and transaction simulations. The wallet validates every field, verifies the live chain ID, then requires owner authentication before saving to the encrypted database.")),
             )
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .gap_3()
+                    .child(field(
+                        if editing {
+                            "Chain ID (fixed)"
+                        } else {
+                            "Chain ID"
+                        },
+                        chain_id,
+                        self.network_editor_errors.chain_id.clone(),
+                        editing,
+                    ))
                     .child(field(
                         "Internal name",
                         name,
@@ -9543,12 +10140,6 @@ impl WalletWindow {
                         display_name,
                         self.network_editor_errors.display_name.clone(),
                         false,
-                    ))
-                    .child(field(
-                        "Chain ID",
-                        chain_id,
-                        self.network_editor_errors.chain_id.clone(),
-                        false,
                     )),
             )
             .child(field(
@@ -9558,6 +10149,41 @@ impl WalletWindow {
                 false,
             ))
             .child(
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_sm().font_medium().child("Test network"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label("Hide this network and its linked balances, tokens, requests, and activity unless testnet mode is enabled.")),
+                            ),
+                    )
+                    .child(
+                        Switch::new("network-editor-testnet")
+                            .checked(self.network_editor_testnet)
+                            .disabled(busy)
+                            .on_click({
+                                let view = view.clone();
+                                move |checked, _, cx| {
+                                    let _ = view.update(cx, |wallet, cx| {
+                                        wallet.network_editor_testnet = *checked;
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    ),
+            )
+            .child(
                 div()
                     .flex()
                     .flex_col()
@@ -9565,7 +10191,9 @@ impl WalletWindow {
                     .child(
                         div()
                             .text_sm()
-                            .child("RPC URLs (one per line, comma-separated)"),
+                            .child(selectable_label(
+                                "RPC URLs (one per line, comma-separated)",
+                            )),
                     )
                     .child(
                         app_input(rpc_urls, cx)
@@ -9583,16 +10211,25 @@ impl WalletWindow {
                     .flex_wrap()
                     .items_center()
                     .gap_2()
-                    .child(div().text_sm().child("Endpoint order"))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(selectable_label("Endpoint order")),
+                    )
                     .child(
                         app_button("network-strategy-ordered")
                             .label("Configured order")
                             .selected(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
                             .toggled(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
                             .disabled(busy)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.set_network_editor_strategy(RpcStrategy::Ordered, cx);
-                            })),
+                            .on_click({
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    let _ = view.update(cx, |view, cx| {
+                                        view.set_network_editor_strategy(RpcStrategy::Ordered, cx);
+                                    });
+                                }
+                            }),
                     )
                     .child(
                         app_button("network-strategy-random")
@@ -9600,23 +10237,24 @@ impl WalletWindow {
                             .selected(self.network_editor_rpc_strategy == RpcStrategy::Random)
                             .toggled(self.network_editor_rpc_strategy == RpcStrategy::Random)
                             .disabled(busy)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.set_network_editor_strategy(RpcStrategy::Random, cx);
-                            })),
+                            .on_click({
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    let _ = view.update(cx, |view, cx| {
+                                        view.set_network_editor_strategy(RpcStrategy::Random, cx);
+                                    });
+                                }
+                            }),
                     ),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(match self.network_editor_rpc_strategy {
-                        RpcStrategy::Ordered => {
-                            "Endpoints are tried from top to bottom; failures continue to the next URL."
-                        }
-                        RpcStrategy::Random => {
-                            "Endpoints are shuffled for each request; failures continue through that shuffled list."
-                        }
-                    }),
+                    .child(selectable_label(match self.network_editor_rpc_strategy {
+                        RpcStrategy::Ordered => "Endpoints are tried from top to bottom; failures continue to the next URL.",
+                        RpcStrategy::Random => "Endpoints are shuffled for each request; failures continue through that shuffled list.",
+                    })),
             )
             .child(
                 div()
@@ -9636,7 +10274,11 @@ impl WalletWindow {
                         false,
                     )),
             )
-            .child(div().font_semibold().child("Native currency (optional)"))
+            .child(
+                div()
+                    .font_semibold()
+                    .child(selectable_label("Native currency (optional)")),
+            )
             .child(
                 div()
                     .flex()
@@ -9670,93 +10312,54 @@ impl WalletWindow {
             .when_some(self.network_editor_errors.form.clone(), |panel, error| {
                 panel.child(field_error("network-editor-form-error", error, cx))
             })
+    }
+
+    fn render_network_editor_footer(&self, view: &WeakEntity<Self>) -> DialogFooter {
+        let busy = self.network_editor_busy;
+        DialogFooter::new()
+            .pt_2()
+            .flex_wrap()
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        app_button("save-guided-network")
-                            .label(if busy {
-                                "Verifying & authenticating…"
-                            } else {
-                                "Verify, authenticate & save"
-                            })
-                            .primary()
-                            .disabled(busy)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.save_network_editor(cx);
-                            })),
-                    )
-                    .child(
-                        app_button("cancel-guided-network")
-                            .label("Cancel")
-                            .disabled(busy)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.close_network_editor(cx);
-                            })),
-                    )
-                    .child(
-                        app_button("toggle-advanced-network-json")
-                            .label(if self.network_editor_advanced {
-                                "Hide advanced JSON"
-                            } else {
-                                "Advanced JSON"
-                            })
-                            .disabled(busy)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.toggle_network_advanced_editor(cx);
-                            })),
-                    ),
-            );
-        if self.network_editor_advanced
-            && let Some(input) = self.network_json_input.as_ref()
-        {
-            panel = panel.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if editing {
-                                "Advanced mode replaces the exact network row you opened with this complete object. If that row changed elsewhere, saving stops and asks you to review it again."
-                            } else {
-                                "Advanced mode creates this complete object. It will not overwrite an existing chain or conflicting identifier."
-                            }),
-                    )
-                    .child(div().text_sm().font_medium().child("Complete network JSON"))
-                    .child(
-                        app_input(input, cx)
-                            .aria_label("Complete network JSON")
-                            .h(px(320.0))
-                            .disabled(busy),
-                    )
-                    .when_some(self.network_json_error.clone(), |panel, error| {
-                        panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                app_button("cancel-guided-network")
+                    .label("Cancel")
+                    .disabled(busy)
+                    .on_click({
+                        let view = view.clone();
+                        move |_, window, cx| {
+                            let can_close = view
+                                .update(cx, |view, cx| {
+                                    if view.network_editor_busy {
+                                        return false;
+                                    }
+                                    view.close_network_editor(cx);
+                                    true
+                                })
+                                .unwrap_or(false);
+                            if can_close {
+                                window.close_dialog(cx);
+                            }
+                        }
+                    }),
+            )
+            .child(
+                app_button("save-guided-network")
+                    .label(if busy {
+                        "Verifying & authenticating…"
+                    } else {
+                        "Verify, authenticate & save"
                     })
-                    .child(
-                        app_button("install-network-json")
-                            .label(if busy {
-                                "Verifying & authenticating…"
-                            } else {
-                                "Verify, authenticate & install JSON"
-                            })
-                            .disabled(busy)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.install_network_from_editor(cx);
-                            })),
-                    ),
-            );
-        }
-        div().child(
-            div()
-                .id("network-editor-anchor")
-                .anchor_scroll(Some(self.network_editor_anchor.clone()))
-                .child(panel),
-        )
+                    .primary()
+                    .loading(busy)
+                    .disabled(busy)
+                    .on_click({
+                        let view = view.clone();
+                        move |_, _, cx| {
+                            let _ = view.update(cx, |view, cx| {
+                                view.save_network_editor(cx);
+                            });
+                        }
+                    }),
+            )
     }
 
     #[allow(dead_code)]
@@ -9768,16 +10371,18 @@ impl WalletWindow {
         let mut registry = div().flex().flex_col().gap_4();
         if let Some(search) = self.network_preset_search_input.as_ref() {
             let query = search.read(cx).value().to_string();
-            let matches =
-                network_presets_for_display(self.network_presets.as_ref(), configured, &query, 10);
+            let matches = network_presets_for_display(
+                self.network_presets.as_ref(),
+                configured,
+                &query,
+                10,
+                self.testnet_mode,
+            );
             let mut rows = div().flex().flex_col().gap_2();
             if matches.is_empty() {
-                rows = rows.child(
-                    div()
-                        .py_3()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("No built-in network preset matches this search."),
-                );
+                rows = rows.child(div().py_3().text_color(cx.theme().muted_foreground).child(
+                    selectable_label("No built-in network preset matches this search."),
+                ));
             }
             for profile in matches {
                 let chain_id = profile.config.chain_id;
@@ -9805,7 +10410,10 @@ impl WalletWindow {
                             .font_family(MONO_FONT_FAMILY)
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(url.to_string()),
+                            .child(selectable_text(
+                                format!("network-preset-{chain_id}-rpc-text-{index}"),
+                                url.as_str(),
+                            )),
                     );
                 }
                 rows = rows.child(
@@ -9831,20 +10439,26 @@ impl WalletWindow {
                                         .min_w_0()
                                         .flex_1()
                                         .flex_basis(px(220.0))
-                                        .child(div().font_semibold().child(title))
+                                        .child(div().font_semibold().child(selectable_text(
+                                            format!("network-preset-title-{chain_id}"),
+                                            &title,
+                                        )))
                                         .child(
                                             div()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "{} · chain {}{}",
-                                                    profile.config.name,
-                                                    chain_id,
-                                                    if profile.is_testnet {
-                                                        " · testnet"
-                                                    } else {
-                                                        ""
-                                                    }
+                                                .child(selectable_text(
+                                                    format!("network-preset-metadata-{chain_id}"),
+                                                    &format!(
+                                                        "{} · chain {}{}",
+                                                        profile.config.name,
+                                                        chain_id,
+                                                        if profile.config.testnet {
+                                                            " · testnet"
+                                                        } else {
+                                                            ""
+                                                        }
+                                                    ),
                                                 )),
                                         ),
                                 )
@@ -9876,15 +10490,18 @@ impl WalletWindow {
                                 } else {
                                     cx.theme().muted_foreground
                                 })
-                                .child(if profile.simulate_endpoints == 0 {
-                                    "No bundled endpoint currently supports the simulation method required for signing. Install only for read access, then configure a compatible RPC."
-                                        .to_owned()
-                                } else {
-                                    format!(
-                                        "{} measured simulation endpoint(s) · {} fork-capable endpoint(s)",
-                                        profile.simulate_endpoints, profile.fork_endpoints
-                                    )
-                                }),
+                                .child(selectable_text(
+                                    format!("network-preset-capabilities-{chain_id}"),
+                                    &if profile.simulate_endpoints == 0 {
+                                        "No bundled endpoint currently supports the simulation method required for signing. Install only for read access, then configure a compatible RPC."
+                                            .to_owned()
+                                    } else {
+                                        format!(
+                                            "{} measured simulation endpoint(s) · {} fork-capable endpoint(s)",
+                                            profile.simulate_endpoints, profile.fork_endpoints
+                                        )
+                                    },
+                                )),
                         )
                         .child(rpc_urls),
                 );
@@ -9898,7 +10515,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Search the bundled registry instead of finding RPC URLs yourself. The wallet verifies the chain ID before asking you to authenticate the change. RPC URLs are shown in full because they supply security-sensitive simulation results."),
+                            .child(selectable_label("Search the bundled registry instead of finding RPC URLs yourself. The wallet verifies the chain ID before asking you to authenticate the change. RPC URLs are shown in full because they supply security-sensitive simulation results.")),
                     )
                     .child(
                         app_input(search, cx)
@@ -9906,13 +10523,18 @@ impl WalletWindow {
                             .cleanable(true),
                     )
                     .when_some(self.network_preset_error.clone(), |panel, error| {
-                        panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        panel.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().danger)
+                                .child(selectable_label(error)),
+                        )
                     })
                     .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Showing up to 10 matches."),
+                            .child(selectable_label("Showing up to 10 matches.")),
                     )
                     .child(rows),
             );
@@ -9931,13 +10553,18 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!(
+                    .child(selectable_label(format!(
                         "Replace every configured network with fresh copies of the {} built-in defaults. Accounts, policies, tokens, and activity are untouched.",
                         defaults.len()
-                    )),
+                    ))),
             )
             .when_some(self.network_reset_error.clone(), |panel, error| {
-                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
+                )
             })
             .when(pending.is_none(), |panel| {
                 panel.child(
@@ -9961,8 +10588,12 @@ impl WalletWindow {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(div().font_semibold().child("Confirm complete network reset"))
-                            .child(if discarded.is_empty() {
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .child(selectable_label("Confirm complete network reset")),
+                            )
+                            .child(selectable_label(if discarded.is_empty() {
                                 "The configured rows already match the shipped defaults. Resetting will still restore their shipped enabled/disabled state and exact RPC lists."
                                     .to_owned()
                             } else {
@@ -9970,7 +10601,7 @@ impl WalletWindow {
                                     "Custom or modified configuration will be discarded for: {}.",
                                     discarded.join(", ")
                                 )
-                            })
+                            }))
                             .child(
                                 div()
                                     .flex()
@@ -10005,10 +10636,13 @@ impl WalletWindow {
 
     fn render_networks(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_4();
-        match self
-            .cached_reviews()
-            .map(|reviews| reviews.network_proposals.as_slice())
-        {
+        match self.cached_reviews().map(|reviews| {
+            reviews
+                .network_proposals
+                .iter()
+                .filter(|proposal| self.testnet_mode || !proposal.testnet)
+                .collect::<Vec<_>>()
+        }) {
             Ok(proposals) if !proposals.is_empty() => {
                 let mut rows = div().flex().flex_col().gap_3();
                 for proposal in proposals {
@@ -10031,9 +10665,9 @@ impl WalletWindow {
                                     .w_full()
                                     .justify_between()
                                     .gap_3()
-                                    .child(div().font_semibold().child(format!(
-                                        "{} · chain {}",
-                                        proposal.name, proposal.chain_id
+                                    .child(div().font_semibold().child(selectable_text(
+                                        format!("network-proposal-title-{}", proposal.chain_id),
+                                        &format!("{} · chain {}", proposal.name, proposal.chain_id),
                                     )))
                                     .child(
                                         div()
@@ -10076,7 +10710,10 @@ impl WalletWindow {
                                     .bg(cx.theme().secondary)
                                     .font_family(MONO_FONT_FAMILY)
                                     .text_sm()
-                                    .child(exact),
+                                    .child(selectable_code_text(
+                                        format!("network-proposal-document-{}", proposal.chain_id),
+                                        &exact,
+                                    )),
                             ),
                     );
                 }
@@ -10089,14 +10726,14 @@ impl WalletWindow {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("The wallet contacts the proposed RPC and verifies its chain ID before authentication or installation."),
+                                .child(selectable_label("The wallet contacts the proposed RPC and verifies its chain ID before authentication or installation.")),
                         )
                         .when_some(self.network_proposal_error.clone(), |group, error| {
                             group.child(
                                 div()
                                     .text_sm()
                                     .text_color(cx.theme().danger)
-                                    .child(error),
+                                    .child(selectable_label(error)),
                             )
                         })
                         .child(rows),
@@ -10104,59 +10741,52 @@ impl WalletWindow {
             }
             Ok(_) => {}
             Err(error) => {
-                content = content.child(Alert::error(
+                content = content.child(selectable_error_alert(
                     "network-proposals-error",
                     format!("Network proposals unavailable: {error:#}"),
                 ));
             }
         }
-        content = content.child(self.render_network_editor(cx));
-        match self.cached_networks() {
-            Ok(networks) => {
-                content.children(networks_for_display(networks).into_iter().map(|network| {
-                    let name = network.name.clone();
-                    let edit = network.clone();
-                    let details_name = name.clone();
-                    let toggle_network = network.clone();
-                    let remove_network = network.clone();
-                    let confirm_remove_network = network.clone();
-                    let disabled = network.disabled;
-                    let expanded = self.expanded_networks.contains(&name);
-                    let busy = self.network_action_busy.contains(&name);
-                    let restore = self
-                        .network_presets
-                        .iter()
-                        .find(|profile| profile.config.chain_id == network.chain_id)
-                        .filter(|profile| profile.config != *network)
-                        .map(|_| network.clone());
-                    let confirming_removal = self.pending_network_removal.as_ref() == Some(network);
-                    let action_error = self.network_action_errors.get(&name).cloned();
-                    let exact = serde_json::to_string_pretty(&network)
-                        .unwrap_or_else(|error| format!("Could not serialize network: {error:#}"));
-                    div()
-                        .p_4()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            h_flex()
-                                .flex_wrap()
-                                .items_start()
-                                .w_full()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(
+        content = content.child(
+            app_button("open-custom-network-editor")
+                .label("Add custom network")
+                .primary()
+                .icon(IconName::Plus)
+                .disabled(self.network_editor_open)
+                .on_click(cx.listener(|view, _, window, cx| {
+                    cx.stop_propagation();
+                    view.open_new_network_editor(window, cx);
+                })),
+        );
+        content = match self.cached_networks() {
+            Ok(networks) => content.children(
+                networks_for_display(networks, self.testnet_mode)
+                    .into_iter()
+                    .map(|network| {
+                        let name = network.name.clone();
+                        let edit = network.clone();
+                        let toggle_network = network.clone();
+                        let disabled = network.disabled;
+                        let busy = self.network_action_busy.contains(&name);
+                        let action_error = self.network_action_errors.get(&name).cloned();
+                        div()
+                            .p_4()
+                            .rounded(cx.theme().radius_lg)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                h_flex()
+                                    .flex_wrap()
+                                    .items_start()
+                                    .w_full()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div().min_w_0().flex_1().flex().flex_col().gap_2().child(
                                             div()
                                                 .flex()
                                                 .flex_wrap()
@@ -10167,20 +10797,30 @@ impl WalletWindow {
                                                         .min_w_0()
                                                         .font_semibold()
                                                         .truncate()
-                                                        .child(
+                                                        .child(selectable_text(
+                                                            format!("network-title-{name}"),
                                                             network
                                                                 .display_name
-                                                                .clone()
-                                                                .unwrap_or_else(|| name.clone()),
-                                                        ),
+                                                                .as_deref()
+                                                                .unwrap_or(&name),
+                                                        )),
                                                 )
                                                 .child(
                                                     div()
                                                         .text_sm()
                                                         .text_color(cx.theme().muted_foreground)
-                                                        .child(format!(
-                                                            "{} · chain {}",
-                                                            name, network.chain_id,
+                                                        .child(selectable_text(
+                                                            format!("network-metadata-{name}"),
+                                                            &format!(
+                                                                "{} · chain {}{}",
+                                                                name,
+                                                                network.chain_id,
+                                                                if network.testnet {
+                                                                    " · testnet"
+                                                                } else {
+                                                                    ""
+                                                                },
+                                                            ),
                                                         )),
                                                 )
                                                 .child(
@@ -10203,325 +10843,140 @@ impl WalletWindow {
                                                         } else {
                                                             cx.theme().primary_foreground
                                                         })
-                                                        .child(if disabled {
-                                                            "Disabled"
-                                                        } else {
-                                                            "Enabled"
-                                                        }),
-                                                ),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .flex_wrap()
-                                                .gap_2()
-                                                .child(
-                                                    app_button(SharedString::from(format!(
-                                                        "inspect-network-{name}"
-                                                    )))
-                                                    .label(if expanded {
-                                                        "Hide configuration"
-                                                    } else {
-                                                        "Show configuration"
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |view, _, _, cx| {
-                                                            view.toggle_network_details(
-                                                                &details_name,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                )
-                                                .child(
-                                                    app_button(SharedString::from(format!(
-                                                        "toggle-network-{name}"
-                                                    )))
-                                                    .label(if busy {
-                                                        "Authenticating…"
-                                                    } else if disabled {
-                                                        "Enable"
-                                                    } else {
-                                                        "Disable"
-                                                    })
-                                                    .disabled(busy)
-                                                    .on_click(cx.listener(
-                                                        move |view, _, _, cx| {
-                                                            view.set_network_disabled(
-                                                                toggle_network.clone(),
-                                                                !disabled,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                )
-                                                .when_some(restore, |actions, reviewed| {
-                                                    actions.child(
-                                                        app_button(SharedString::from(format!(
-                                                            "restore-network-{name}"
-                                                        )))
-                                                        .label("Restore defaults")
-                                                        .tooltip("Restore this network's bundled configuration")
-                                                        .disabled(busy)
-                                                        .on_click(cx.listener(
-                                                            move |view, _, _, cx| {
-                                                                view.restore_network_preset(
-                                                                    reviewed.clone(),
-                                                                    cx,
-                                                                );
+                                                        .child(selectable_text(
+                                                            format!("network-status-{name}"),
+                                                            if disabled {
+                                                                "Disabled"
+                                                            } else {
+                                                                "Enabled"
                                                             },
                                                         )),
-                                                    )
-                                                }),
+                                                ),
                                         ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .flex_none()
-                                        .gap_2()
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "edit-network-{name}"
-                                            )))
-                                            .icon(IconName::Settings2)
-                                            .label("Edit")
-                                            .ghost()
-                                            .tooltip("Edit network")
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.edit_network(&edit, window, cx);
-                                            })),
-                                        )
-                                        .when(network_can_be_removed(network), |buttons| {
-                                            buttons.child(
-                                                app_button(SharedString::from(format!(
-                                                    "delete-network-{name}"
-                                                )))
-                                                .icon(IconName::Delete)
-                                                .label("Delete")
-                                                .ghost()
-                                                .tooltip("Delete disabled network")
-                                                .danger()
-                                                .disabled(busy || confirming_removal)
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.begin_network_removal(
-                                                        remove_network.clone(),
-                                                        cx,
-                                                    );
-                                                })),
-                                            )
-                                        }),
-                                ),
-                        )
-                        .when(expanded, |card| {
-                            card.child(
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
+                                    )
                                     .child(
                                         h_flex()
-                                            .w_full()
-                                            .justify_between()
+                                            .flex_none()
                                             .gap_2()
-                                            .child(div().font_medium().child("Exact configuration"))
-                                            .child(copy_button(
-                                                SharedString::from(format!(
-                                                    "copy-network-configuration-{name}"
+                                            .child(accessible_button(
+                                                app_button(SharedString::from(format!(
+                                                    "edit-network-{name}"
+                                                )))
+                                                .icon(Icon::default().path(PENCIL_ICON))
+                                                .label("Edit")
+                                                .tooltip("Edit network")
+                                                .disabled(busy)
+                                                .on_click(cx.listener(
+                                                    move |view, _, window, cx| {
+                                                        cx.stop_propagation();
+                                                        view.edit_network(&edit, window, cx);
+                                                    },
                                                 )),
-                                                exact.clone(),
-                                                "Copy exact network configuration",
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "network-configuration-scroll-{name}"
-                                            )))
-                                            .max_w_full()
-                                            .overflow_x_scroll()
-                                            .p_3()
-                                            .rounded(cx.theme().radius)
-                                            .bg(cx.theme().muted)
-                                            .child(selectable_code_text(
-                                                SharedString::from(format!(
-                                                    "network-configuration-{name}"
-                                                )),
-                                                &exact,
-                                            )),
-                                    ),
-                            )
-                        })
-                        .when(confirming_removal, |card| {
-                            card.child(
-                                div()
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .border_1()
-                                    .border_color(cx.theme().danger)
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_color(cx.theme().danger)
-                                            .child(format!(
-                                                "Delete {name}? Its trusted RPC configuration will be removed from the encrypted wallet database."
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_wrap()
-                                            .gap_2()
+                                                "Edit network",
+                                            ))
                                             .child(
                                                 app_button(SharedString::from(format!(
-                                                    "confirm-delete-network-{name}"
+                                                    "toggle-network-{name}"
                                                 )))
                                                 .label(if busy {
                                                     "Authenticating…"
+                                                } else if disabled {
+                                                    "Enable"
                                                 } else {
-                                                    "Authenticate & delete"
+                                                    "Disable"
                                                 })
-                                                .danger()
                                                 .disabled(busy)
-                                                .on_click(cx.listener(
-                                                    move |view, _, _, cx| {
-                                                        view.confirm_network_removal(
-                                                            confirm_remove_network.clone(),
-                                                            cx,
-                                                        );
-                                                    },
-                                                )),
-                                            )
-                                            .child(
-                                                app_button(SharedString::from(format!(
-                                                    "cancel-delete-network-{name}"
-                                                )))
-                                                .label("Cancel")
-                                                .disabled(busy)
-                                                .on_click(cx.listener(|view, _, _, cx| {
-                                                    view.cancel_network_removal(cx);
+                                                .on_click(cx.listener(move |view, _, _, cx| {
+                                                    view.set_network_disabled(
+                                                        toggle_network.clone(),
+                                                        !disabled,
+                                                        cx,
+                                                    );
                                                 })),
                                             ),
                                     ),
                             )
-                        })
-                        .when_some(action_error, |card, error| {
-                            card.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child(error),
-                            )
-                        })
-                }))
-            }
-            Err(error) => content.child(Alert::error(
+                            .when_some(action_error, |card, error| {
+                                card.child(div().text_sm().text_color(cx.theme().danger).child(
+                                    selectable_text(format!("network-action-error-{name}"), &error),
+                                ))
+                            })
+                    }),
+            ),
+            Err(error) => content.child(selectable_error_alert(
                 "network-list-error",
                 format!("Networks unavailable: {error:#}"),
             )),
-        }
+        };
+        content
     }
 
     fn render_portfolio(&self, cx: &mut Context<Self>) -> gpui::Div {
         // Rendering and scrolling must never open SQLCipher or consult the OS
         // credential store. The background snapshot already owns the exact
-        // configured rows needed by this picker.
-        let enabled_networks = self
+        // configured rows needed by this view.
+        let enabled_network_count = self
             .cached_networks()
             .unwrap_or_default()
             .iter()
-            .filter(|network| !network.disabled)
-            .collect::<Vec<_>>();
-        let selected_network_name = self.portfolio_chain_id.and_then(|selected| {
-            enabled_networks
-                .iter()
-                .find(|network| network.chain_id == selected)
-                .map(|network| {
-                    network
-                        .display_name
-                        .as_deref()
-                        .unwrap_or(&network.name)
-                        .to_owned()
-                })
-        });
-        let mut network_picker = div().flex().flex_wrap().gap_2();
-        for network in &enabled_networks {
-            let chain_id = network.chain_id;
-            network_picker = network_picker.child(
-                app_button(SharedString::from(format!("portfolio-network-{chain_id}")))
-                    .label(
-                        network
-                            .display_name
-                            .as_deref()
-                            .unwrap_or(&network.name)
-                            .to_owned(),
-                    )
-                    .toggled(self.portfolio_chain_id == Some(chain_id))
-                    .when(
-                        self.portfolio_chain_id == Some(chain_id),
-                        ButtonVariants::primary,
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.select_portfolio_network(chain_id, cx);
-                    })),
-            );
-        }
-        let mut content = div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                GroupBox::new()
-                    .id("portfolio-network-picker")
-                    .outline()
-                    .title("Portfolio network")
-                    .child(network_picker),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div().font_semibold().child(
-                                    selected_network_name
-                                        .unwrap_or_else(|| "Select a network".to_owned()),
+            .filter(|network| !network.disabled && (self.testnet_mode || !network.testnet))
+            .count();
+        let mut content = div().flex().flex_col().gap_4().child(
+            div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .font_semibold()
+                                .child(selectable_label("Balances across enabled networks")),
+                        )
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_1()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(selectable_label("Only non-zero balances are shown."))
+                                .child(
+                                    app_button("portfolio-manage-tokens")
+                                        .label("Missing a token? Add it in Tokens")
+                                        .link()
+                                        .h(px(28.0))
+                                        .px_1()
+                                        .text_sm()
+                                        .font_normal()
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.set_route(Route::Tokens);
+                                            cx.notify();
+                                        })),
                                 ),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Only non-zero balances are shown"),
-                            ),
-                    )
-                    .child(
-                        app_button("refresh-portfolio")
-                            .label(if matches!(self.portfolio, PortfolioState::Loading) {
-                                "Refreshing…"
-                            } else {
-                                "Refresh"
-                            })
-                            .disabled(
-                                self.portfolio_chain_id.is_none()
-                                    || matches!(self.portfolio, PortfolioState::Loading),
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.refresh_portfolio(cx);
-                            })),
-                    ),
-            );
-        if self.portfolio_chain_id.is_none() {
+                        ),
+                )
+                .child(
+                    app_button("refresh-portfolio")
+                        .label(if matches!(self.portfolio, PortfolioState::Loading) {
+                            "Refreshing…"
+                        } else {
+                            "Refresh"
+                        })
+                        .disabled(
+                            enabled_network_count == 0
+                                || matches!(self.portfolio, PortfolioState::Loading),
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.refresh_portfolio(cx);
+                        })),
+                ),
+        );
+        if enabled_network_count == 0 {
             return content.child(
                 div()
                     .p_5()
@@ -10529,7 +10984,9 @@ impl WalletWindow {
                     .border_1()
                     .border_color(cx.theme().border)
                     .text_color(cx.theme().muted_foreground)
-                    .child("Select an enabled network to load balances."),
+                    .child(selectable_label(
+                        "Enable a network to load account balances.",
+                    )),
             );
         }
         match &self.portfolio {
@@ -10543,11 +11000,12 @@ impl WalletWindow {
                         h_flex()
                             .gap_2()
                             .child(Spinner::new())
-                            .child("Loading account balances…"),
+                            .child(selectable_label("Loading account balances…")),
                     ),
             ),
             PortfolioState::Failed(error) => content.child(
-                Alert::error("portfolio-error", error.clone()).title("Portfolio unavailable"),
+                selectable_error_alert("portfolio-error", error.clone())
+                    .title("Portfolio unavailable"),
             ),
             PortfolioState::Ready(snapshot) if snapshot.accounts.is_empty() => content.child(
                 div()
@@ -10559,8 +11017,14 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(div().font_semibold().child("Create your first account"))
-                    .child("A wallet account is required before there are balances to show.")
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child(selectable_label("Create your first account")),
+                    )
+                    .child(selectable_label(
+                        "A wallet account is required before there are balances to show.",
+                    ))
                     .child(
                         app_button("portfolio-create-account")
                             .label("Go to Accounts")
@@ -10572,234 +11036,283 @@ impl WalletWindow {
                     ),
             ),
             PortfolioState::Ready(snapshot) => {
-                let mut shown_accounts = 0_usize;
-                for account in &snapshot.accounts {
-                    let wallet_address = account.wallet.address.to_checksum(None);
-                    let wallet_address_for_copy = wallet_address.clone();
-                    let mut networks = div().flex().flex_wrap().gap_3();
-                    let mut shown = false;
-                    for item in &account.networks {
-                        if item.result.as_ref().is_ok_and(|portfolio| {
-                            portfolio.native_balance == "0" && portfolio.tokens.is_empty()
-                        }) {
-                            continue;
-                        }
-                        shown = true;
-                        let network_name = item
-                            .network
-                            .display_name
-                            .as_deref()
-                            .unwrap_or(&item.network.name);
-                        let mut card = div()
-                            .w_full()
-                            .min_w_0()
-                            .flex_1()
-                            .p_3()
-                            .rounded(cx.theme().radius_lg)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(div().font_semibold().child(network_name.to_owned()))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("Chain {}", item.network.chain_id)),
-                            );
-                        card = match &item.result {
-                            Ok(portfolio) => {
-                                let native = item.network.native_currency.as_ref();
-                                let native_balance = format_asset_balance(
-                                    &portfolio.native_balance,
-                                    native.map(|currency| currency.decimals),
-                                    native.map(|currency| currency.symbol.as_str()),
-                                    "wei",
-                                );
-                                let has_native = portfolio.native_balance != "0";
-                                let asset_count = portfolio.tokens.len() + usize::from(has_native);
-                                let mut asset_index = 0_usize;
-                                let mut balances = div().flex().flex_col().gap_2();
-                                if has_native {
-                                    let row_index = asset_index;
-                                    asset_index += 1;
-                                    balances = balances.child(
-                                        div()
-                                            .w_full()
-                                            .min_w_0()
-                                            .py_2()
-                                            .when(row_index + 1 < asset_count, |row| {
-                                                row.border_b_1().border_color(cx.theme().border)
-                                            })
-                                            .flex()
-                                            .flex_wrap()
-                                            .justify_between()
-                                            .gap_3()
-                                            .child("Native")
-                                            .child(
-                                                selectable_text(
-                                                    SharedString::from(format!(
-                                                        "portfolio-native-balance-{}-{}",
-                                                        account.wallet.id, item.network.chain_id
-                                                    )),
-                                                    &native_balance,
-                                                )
-                                                .min_w_0()
-                                                .flex_1()
-                                                .truncate()
-                                                .font_family(MONO_FONT_FAMILY)
-                                                .text_sm(),
-                                            ),
-                                    );
-                                }
-                                for token in &portfolio.tokens {
-                                    let row_index = asset_index;
-                                    asset_index += 1;
-                                    let label = token
-                                        .symbol
-                                        .as_deref()
-                                        .unwrap_or(token.address.as_str())
-                                        .to_owned();
-                                    let balance = format_asset_balance(
-                                        &token.balance,
-                                        token.decimals,
-                                        token.symbol.as_deref(),
-                                        "base units",
-                                    );
-                                    balances = balances.child(
-                                        div()
-                                            .w_full()
-                                            .min_w_0()
-                                            .py_2()
-                                            .when(row_index + 1 < asset_count, |row| {
-                                                row.border_b_1().border_color(cx.theme().border)
-                                            })
-                                            .flex()
-                                            .flex_wrap()
-                                            .justify_between()
-                                            .gap_3()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .child(div().truncate().child(label))
-                                                    .child(
-                                                        selectable_text(
-                                                            SharedString::from(format!(
-                                                                "portfolio-token-address-{}-{}-{}",
-                                                                account.wallet.id,
-                                                                item.network.chain_id,
-                                                                token.address
-                                                            )),
-                                                            &token.address,
-                                                        )
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .text_xs()
-                                                        .font_family(MONO_FONT_FAMILY)
-                                                        .text_color(cx.theme().muted_foreground),
-                                                    ),
-                                            )
-                                            .child(
-                                                selectable_text(
-                                                    SharedString::from(format!(
-                                                        "portfolio-token-balance-{}-{}-{}",
-                                                        account.wallet.id,
-                                                        item.network.chain_id,
-                                                        token.address
-                                                    )),
-                                                    &balance,
-                                                )
-                                                .flex_none()
-                                                .font_family(MONO_FONT_FAMILY)
-                                                .text_sm(),
-                                            ),
-                                    );
-                                }
-                                card.child(balances)
-                            }
-                            Err(error) => card.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().danger)
-                                    .child(error.clone()),
-                            ),
-                        };
-                        networks = networks.child(card);
-                    }
-                    if shown {
-                        shown_accounts += 1;
-                        content = content.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .p_4()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .justify_between()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .child(
-                                                    div()
-                                                        .font_semibold()
-                                                        .truncate()
-                                                        .child(account.wallet.id.clone()),
-                                                )
-                                                .child(
-                                                    selectable_text(
-                                                        SharedString::from(format!(
-                                                            "portfolio-account-address-{}",
-                                                            account.wallet.id
-                                                        )),
-                                                        &wallet_address,
-                                                    )
-                                                    .font_family(MONO_FONT_FAMILY)
-                                                    .w_full()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().muted_foreground),
-                                                ),
-                                        )
-                                        .child(copy_button(
-                                            SharedString::from(format!(
-                                                "copy-portfolio-address-{}",
-                                                account.wallet.id
-                                            )),
-                                            wallet_address_for_copy.clone(),
-                                            "Copy account address",
-                                        )),
-                                )
-                                .child(networks),
-                        );
-                    }
-                }
-                if shown_accounts == 0 {
+                let selected_index = clamped_portfolio_account_index(
+                    snapshot.accounts.len(),
+                    self.portfolio_account_index,
+                );
+                if snapshot.accounts.len() > 1 {
+                    let account_labels = snapshot
+                        .accounts
+                        .iter()
+                        .map(|account| account.wallet.id.clone())
+                        .collect::<Vec<_>>();
                     content = content.child(
-                        div()
-                            .p_5()
-                            .rounded(cx.theme().radius_lg)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .text_color(cx.theme().muted_foreground)
-                            .child("No non-zero balances were found on this network."),
+                        GroupBox::new()
+                            .id("portfolio-account-picker")
+                            .outline()
+                            .title("Account")
+                            .child(account_switcher(
+                                "portfolio-account-tabs",
+                                &account_labels,
+                                selected_index,
+                                cx.listener(|view, index: &usize, _, cx| {
+                                    view.select_portfolio_account(*index, cx);
+                                }),
+                            )),
                     );
                 }
+
+                let account = &snapshot.accounts[selected_index];
+                let rows = portfolio_balance_rows(account);
+                let failures = account
+                    .networks
+                    .iter()
+                    .filter_map(|item| {
+                        item.result.as_ref().err().map(|error| {
+                            (
+                                item.network.chain_id,
+                                item.network
+                                    .display_name
+                                    .as_deref()
+                                    .unwrap_or(&item.network.name)
+                                    .to_owned(),
+                                error,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let wallet_address = account.wallet.address.to_checksum(None);
+                let wallet_address_for_copy = wallet_address.clone();
+                let row_count = rows.len();
+                let mut balances = div().w_full().min_w_0().flex().flex_col();
+                for (index, row) in rows.into_iter().enumerate() {
+                    let address = row.asset_address.clone();
+                    let token_identity =
+                        match (row.token_name.as_deref(), row.token_symbol.as_deref()) {
+                            (Some(name), Some(symbol)) if name != symbol => {
+                                format!("{name} ({symbol})")
+                            }
+                            (Some(name), _) => name.to_owned(),
+                            (_, Some(symbol)) => symbol.to_owned(),
+                            _ if row.native => "Native asset".to_owned(),
+                            _ => "Unlabeled token".to_owned(),
+                        };
+                    let identity = div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            selectable_text(
+                                format!(
+                                    "portfolio-asset-token-{}-{}-{address}",
+                                    account.wallet.id, row.chain_id
+                                ),
+                                &token_identity,
+                            )
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .font_medium(),
+                        );
+                    let mut metadata = h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_text(
+                            SharedString::from(format!(
+                                "portfolio-asset-network-{}-{}-{address}",
+                                account.wallet.id, row.chain_id
+                            )),
+                            &format!(
+                                "{} · Chain ID {}{}",
+                                row.network_name,
+                                row.chain_id,
+                                if row.native {
+                                    " · Native asset"
+                                } else {
+                                    " ·"
+                                },
+                            ),
+                        ));
+                    if !row.native {
+                        let address_label = if address.len() > 22 {
+                            format!("{}…{}", &address[..12], &address[address.len() - 8..])
+                        } else {
+                            address.clone()
+                        };
+                        metadata = metadata.child(match row.explorer_url {
+                            Some(explorer_url) => app_button(SharedString::from(format!(
+                                "portfolio-token-explorer-{}-{}-{address}",
+                                account.wallet.id, row.chain_id
+                            )))
+                            .label(address_label)
+                            .link()
+                            .h(px(26.0))
+                            .min_w_0()
+                            .px_0()
+                            .text_sm()
+                            .font_family(MONO_FONT_FAMILY)
+                            .tooltip(address.clone())
+                            .on_click(move |_, _, cx| cx.open_url(&explorer_url))
+                            .into_any_element(),
+                            None => selectable_text(
+                                SharedString::from(format!(
+                                    "portfolio-asset-address-{}-{}-{address}",
+                                    account.wallet.id, row.chain_id
+                                )),
+                                &address_label,
+                            )
+                            .min_w_0()
+                            .truncate()
+                            .font_family(MONO_FONT_FAMILY)
+                            .into_any_element(),
+                        });
+                    }
+                    balances = balances.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .py_3()
+                            .when(index + 1 < row_count, |row| {
+                                row.border_b_1().border_color(cx.theme().border)
+                            })
+                            .flex()
+                            .flex_wrap()
+                            .items_start()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .min_w(px(260.0))
+                                    .flex_1()
+                                    .flex_basis(px(320.0))
+                                    .child(identity)
+                                    .child(metadata),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(180.0))
+                                    .flex_1()
+                                    .flex_basis(px(220.0))
+                                    .flex()
+                                    .flex_col()
+                                    .items_end()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(selectable_label("Balance")),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "portfolio-balance-scroll-{}-{}-{address}",
+                                                account.wallet.id, row.chain_id
+                                            )))
+                                            .w_full()
+                                            .min_w_0()
+                                            .max_w_full()
+                                            .overflow_x_scroll()
+                                            .text_right()
+                                            .font_family(MONO_FONT_FAMILY)
+                                            .text_lg()
+                                            .font_semibold()
+                                            .child(selectable_text(
+                                                SharedString::from(format!(
+                                                    "portfolio-asset-balance-{}-{}-{address}",
+                                                    account.wallet.id, row.chain_id
+                                                )),
+                                                &row.balance,
+                                            )),
+                                    ),
+                            ),
+                    );
+                }
+                if row_count == 0 {
+                    balances = balances.child(
+                        div()
+                            .py_4()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label("No balances.")),
+                    );
+                }
+                for (chain_id, network_name, error) in failures {
+                    balances = balances.child(
+                        div()
+                            .w_full()
+                            .py_2()
+                            .text_sm()
+                            .text_color(cx.theme().danger)
+                            .child(selectable_text(
+                                format!("portfolio-error-{}-{chain_id}", account.wallet.id),
+                                &format!("{network_name} · Chain {chain_id}: {error}"),
+                            )),
+                    );
+                }
+                content = content.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .p_4()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .min_w_0()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(div().font_semibold().truncate().child(
+                                            selectable_text(
+                                                format!(
+                                                    "portfolio-account-name-{}",
+                                                    account.wallet.id
+                                                ),
+                                                &account.wallet.id,
+                                            ),
+                                        ))
+                                        .child(
+                                            selectable_text(
+                                                SharedString::from(format!(
+                                                    "portfolio-account-address-{}",
+                                                    account.wallet.id
+                                                )),
+                                                &wallet_address,
+                                            )
+                                            .font_family(MONO_FONT_FAMILY)
+                                            .w_full()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground),
+                                        ),
+                                )
+                                .child(
+                                    copy_button(
+                                        SharedString::from(format!(
+                                            "copy-portfolio-address-{}",
+                                            account.wallet.id
+                                        )),
+                                        wallet_address_for_copy,
+                                        "Copy account address",
+                                    )
+                                    .large(),
+                                ),
+                        )
+                        .child(balances),
+                );
                 content
             }
         }
@@ -10831,211 +11344,42 @@ impl WalletWindow {
             .min_h(px(320.0))
             .gap_3()
             .when_some(self.token_proposal_error.clone(), |content, error| {
-                content.child(div().text_sm().text_color(cx.theme().danger).child(error))
-            });
-        if self.token_editor_open {
-            if let (Some(chain_id), Some(address), Some(symbol), Some(name), Some(decimals)) = (
-                self.token_chain_id_input.as_ref(),
-                self.token_address_input.as_ref(),
-                self.token_symbol_input.as_ref(),
-                self.token_name_input.as_ref(),
-                self.token_decimals_input.as_ref(),
-            ) {
-                let editing = self.token_editor_original.is_some();
-                let busy = self.token_editor_busy;
-                content = content.child(
+                content.child(
                     div()
-                        .id("token-editor-anchor")
-                        .anchor_scroll(Some(self.token_editor_anchor.clone()))
-                        .child(
-                            GroupBox::new()
-                                .id("token-editor")
-                                .outline()
-                                .title(if editing { "Edit token" } else { "Add token" })
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(if editing {
-                                            "Correct the owner-authored name, symbol, or decimals. Chain ID and address identify the row and cannot be changed."
-                                        } else {
-                                            "Add display metadata for an address on a configured network. Saving requires operating-system authentication."
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_3()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .flex_1()
-                                                .min_w(px(150.0))
-                                                .child(div().text_sm().child("Chain ID"))
-                                                .child(
-                                                    app_input(chain_id, cx)
-                                                        .aria_label("Chain ID")
-                                                        .disabled(editing || busy),
-                                                )
-                                                .when_some(
-                                                    self.token_editor_errors.chain_id.clone(),
-                                                    |field, error| {
-                                                        field.child(field_error(
-                                                            "token-editor-chain-id-error",
-                                                            error,
-                                                            cx,
-                                                        ))
-                                                    },
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .flex_1()
-                                                .min_w(px(150.0))
-                                                .child(div().text_sm().child("Symbol"))
-                                                .child(
-                                                    app_input(symbol, cx)
-                                                        .aria_label("Token symbol")
-                                                        .disabled(busy),
-                                                )
-                                                .when_some(
-                                                    self.token_editor_errors.symbol.clone(),
-                                                    |field, error| {
-                                                        field.child(field_error(
-                                                            "token-editor-symbol-error",
-                                                            error,
-                                                            cx,
-                                                        ))
-                                                    },
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .gap_1()
-                                                .flex_1()
-                                                .min_w(px(150.0))
-                                                .child(div().text_sm().child("Decimals"))
-                                                .child(
-                                                    app_input(decimals, cx)
-                                                        .aria_label("Token decimals")
-                                                        .disabled(busy),
-                                                )
-                                                .when_some(
-                                                    self.token_editor_errors.decimals.clone(),
-                                                    |field, error| {
-                                                        field.child(field_error(
-                                                            "token-editor-decimals-error",
-                                                            error,
-                                                            cx,
-                                                        ))
-                                                    },
-                                                ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(div().text_sm().child("Token address"))
-                                        .child(
-                                            app_input(address, cx)
-                                                .aria_label("Token address")
-                                                .disabled(editing || busy),
-                                        )
-                                        .when_some(
-                                            self.token_editor_errors.address.clone(),
-                                            |field, error| {
-                                                field.child(field_error(
-                                                    "token-editor-address-error",
-                                                    error,
-                                                    cx,
-                                                ))
-                                            },
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(div().text_sm().child("Full name (optional)"))
-                                        .child(
-                                            app_input(name, cx)
-                                                .aria_label("Full token name")
-                                                .disabled(busy),
-                                        )
-                                        .when_some(
-                                            self.token_editor_errors.name.clone(),
-                                            |field, error| {
-                                                field.child(field_error(
-                                                    "token-editor-name-error",
-                                                    error,
-                                                    cx,
-                                                ))
-                                            },
-                                        ),
-                                )
-                                .when_some(
-                                    self.token_editor_errors.form.clone(),
-                                    |panel, error| {
-                                        panel.child(field_error(
-                                            "token-editor-form-error",
-                                            error,
-                                            cx,
-                                        ))
-                                    },
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            app_button("save-token-editor")
-                                                .label(if busy {
-                                                    "Authenticating…"
-                                                } else if editing {
-                                                    "Authenticate & save"
-                                                } else {
-                                                    "Authenticate & add"
-                                                })
-                                                .primary()
-                                                .disabled(busy)
-                                                .on_click(cx.listener(|view, _, _, cx| {
-                                                    view.save_token_editor(cx);
-                                                })),
-                                        )
-                                        .child(
-                                            app_button("close-token-editor")
-                                                .label("Cancel")
-                                                .disabled(busy)
-                                                .on_click(cx.listener(|view, _, _, cx| {
-                                                    view.close_token_editor(cx);
-                                                })),
-                                        ),
-                                ),
-                        ),
-                );
-            }
-        } else {
-            content = content.child(
-                app_button("open-token-editor")
-                    .label("Add token")
-                    .primary()
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.open_new_token_editor(window, cx);
-                    })),
-            );
-        }
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
+                )
+            });
+        content = content.child(
+            app_button("open-token-editor")
+                .label("Add token")
+                .primary()
+                .disabled(self.token_editor_open)
+                .on_click(cx.listener(|view, _, window, cx| {
+                    view.open_new_token_editor(window, cx);
+                })),
+        );
         if let Some(input) = self.token_list_url_input.as_ref() {
             content = content.child(
+                app_button("toggle-owner-token-list-import")
+                    .label(if self.token_list_import_open {
+                        "Close token-list import"
+                    } else {
+                        "Import a published token list…"
+                    })
+                    .icon(if self.token_list_import_open {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .disabled(self.token_import_state == TokenImportState::Fetching)
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.toggle_token_list_import(cx);
+                    })),
+            );
+            if self.token_list_import_open {
+                content = content.child(
                 GroupBox::new()
                     .id("owner-token-list-import")
                     .outline()
@@ -11044,18 +11388,19 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Fetch a public HTTPS token-list JSON for all enabled networks. Nothing is trusted until you inspect and accept the exact resulting list below."),
+                            .child(selectable_label("Fetch a public HTTPS token-list JSON for all enabled networks. Nothing is trusted until you inspect and accept the exact resulting list below.")),
                     )
                     .child(
                         div()
                             .text_sm()
                             .font_medium()
-                            .child("Published token-list URL"),
+                            .child(selectable_label("Published token-list URL")),
                     )
                     .child(
                         h_flex()
                             .w_full()
                             .flex_wrap()
+                            .items_end()
                             .gap_2()
                             .child(
                                 div().flex_1().min_w(px(220.0)).child(
@@ -11083,28 +11428,49 @@ impl WalletWindow {
                                     })),
                             ),
                     )
+                    .when(
+                        self.token_import_state == TokenImportState::Fetching,
+                        |group| {
+                            group.child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Spinner::new().small())
+                                    .child(selectable_label(
+                                        "Fetching and validating the published list…",
+                                    )),
+                            )
+                        },
+                    )
                     .when_some(self.token_import_error.clone(), |group, error| {
                         group.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(error),
+                            selectable_error_alert("token-list-import-error", error)
+                                .title("Token list could not be fetched"),
                         )
                     })
                     .when_some(self.token_import_status.clone(), |group, status| {
                         group.child(
                             div()
+                                .id("token-list-import-status")
+                                .role(Role::Alert)
+                                .p_3()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().success)
                                 .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(status),
+                                .text_color(cx.theme().success)
+                                .child(selectable_label(status)),
                         )
                     }),
-            );
+                );
+            }
         }
-        match self
-            .cached_reviews()
-            .map(|reviews| reviews.token_proposals.as_slice())
-        {
+        match self.cached_reviews().map(|reviews| {
+            reviews
+                .token_proposals
+                .iter()
+                .filter(|proposal| self.token_proposal_is_visible(proposal))
+                .collect::<Vec<_>>()
+        }) {
             Ok(proposals) if !proposals.is_empty() => {
                 let mut grouped = std::collections::BTreeMap::<String, Vec<TokenProposal>>::new();
                 for proposal in proposals {
@@ -11162,7 +11528,7 @@ impl WalletWindow {
             }
             Ok(_) => {}
             Err(error) => {
-                content = content.child(Alert::error(
+                content = content.child(selectable_error_alert(
                     "token-proposals-error",
                     format!("Token proposals unavailable: {error:#}"),
                 ));
@@ -11229,7 +11595,9 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(format!("Showing {visible} of {total} token(s)")),
+                    .child(selectable_label(format!(
+                        "Showing {visible} of {total} token(s)"
+                    ))),
             )
             .child(
                 List::new(list)
@@ -11252,7 +11620,7 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child("Ekubo Wallet does not download or install updates. Open the latest release in your browser and install it through your operating system."),
+                    .child(selectable_label("Ekubo Wallet does not download or install updates. Open the latest release in your browser and install it through your operating system.")),
             )
             .child(
                 app_button("open-latest-release")
@@ -11270,7 +11638,7 @@ impl WalletWindow {
                 h_flex()
                     .gap_2()
                     .child(Spinner::new())
-                    .child("Checking the latest published version…"),
+                    .child(selectable_label("Checking the latest published version…")),
             ),
             ReleaseDisplayState::Ready(check) => panel
                 .child(
@@ -11282,7 +11650,7 @@ impl WalletWindow {
                         )),
                 )
                 .when(check.update_available, |panel| {
-                    panel.child("A newer release is available.")
+                    panel.child(selectable_label("A newer release is available."))
                 })
                 .child(
                     app_button("recheck-latest-release")
@@ -11290,7 +11658,11 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
             ReleaseDisplayState::Failed(error) => panel
-                .child(div().text_color(cx.theme().danger).child(error.clone()))
+                .child(
+                    div()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error.clone())),
+                )
                 .child(
                     app_button("retry-latest-release")
                         .label("Try again")
@@ -11316,7 +11688,6 @@ impl WalletWindow {
             Route::Tokens => self.render_tokens(cx),
             Route::WalletConnect => self.render_walletconnect(cx),
             Route::Settings => self.render_settings(cx),
-            Route::Reviews => self.render_reviews(cx),
         }
     }
 
@@ -11766,10 +12137,7 @@ impl WalletWindow {
                     .min_h_0()
                     .track_scroll(&active.scroll_handle)
                     .overflow_y_scrollbar()
-                    .on_scroll_wheel(cx.listener(|view, _, window, cx| {
-                        if let Some(review) = view.active_review.as_mut() {
-                            review.scroll_interacted = true;
-                        }
+                    .on_scroll_wheel(cx.listener(|_, _, window, cx| {
                         cx.defer_in(window, |view, _, cx| {
                             view.update_review_scroll_state(cx);
                         });
@@ -11942,9 +12310,10 @@ impl WalletWindow {
                                     .bg(cx.theme().muted)
                                     .text_color(cx.theme().muted_foreground)
                             })
-                            .child(selectable_text(
+                            .child(selectable_legal_text(
                                 SharedString::from(format!("legal-row-{document_title}-{index}")),
                                 row.text.as_ref(),
+                                row.link_url.as_deref(),
                             ));
                         line.into_any_element()
                     })
@@ -11991,7 +12360,12 @@ impl WalletWindow {
                     .child(document),
             )
             .when_some(review.error.clone(), |panel, error| {
-                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                panel.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
+                )
             })
             .when(review.acceptance_required, |panel| {
                 panel.child(
@@ -12053,9 +12427,14 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_xl().font_semibold().child("Export private key"))
-            .child(format!("Account: {}", export.wallet_id))
-            .child("Anyone with this key has full control of the account. Never paste it into a website, chat, issue, log, or agent prompt.")
+            .child(
+                div()
+                    .text_xl()
+                    .font_semibold()
+                    .child(selectable_label("Export private key")),
+            )
+            .child(selectable_label(format!("Account: {}", export.wallet_id)))
+            .child(selectable_label("Anyone with this key has full control of the account. Never paste it into a website, chat, issue, log, or agent prompt."))
             .when_some(visible.as_ref(), |panel, value| {
                 panel.child(
                     div()
@@ -12067,18 +12446,17 @@ impl WalletWindow {
                 )
             })
             .when(export.lease.is_some() && visible.is_none(), |panel| {
-                panel.child("The 30-second reveal expired and the key is concealed.")
+                panel.child(selectable_label(
+                    "The 30-second reveal expired and the key is concealed.",
+                ))
             })
-            .when(export.copied, |panel| {
+            .when_some(export.error.clone(), |panel, error| {
                 panel.child(
                     div()
                         .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Copied explicitly. After 30 seconds, the wallet clears the clipboard only if it still contains this exact key."),
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label(error)),
                 )
-            })
-            .when_some(export.error.clone(), |panel, error| {
-                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
             })
             .child(
                 div()
@@ -12114,6 +12492,12 @@ impl WalletWindow {
                             .when(visible.is_some(), |buttons| {
                                 buttons.child(
                                     app_button("copy-account-export")
+                                        .w(px(112.0))
+                                        .icon(if export.copied {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Copy
+                                        })
                                         .label(if export.copied { "Copied" } else { "Copy" })
                                         .disabled(export.copied)
                                         .on_click(cx.listener(|view, _, _, cx| {
@@ -12135,7 +12519,7 @@ impl WalletWindow {
                 .gap_2()
                 .text_color(cx.theme().muted_foreground)
                 .child(Spinner::new())
-                .child("Loading wallet data…")
+                .child(selectable_label("Loading wallet data…"))
         } else {
             self.route_panel(cx)
         };
@@ -12183,7 +12567,7 @@ impl WalletWindow {
                     .gap_4()
                     .when_some(self.desktop_snapshot_error.clone(), |content, error| {
                         content.child(
-                            Alert::error("desktop-snapshot-error", error)
+                            selectable_error_alert("desktop-snapshot-error", error)
                                 .title("Wallet data unavailable"),
                         )
                     })
@@ -12191,7 +12575,7 @@ impl WalletWindow {
                         self.route_errors.get(&self.route).cloned(),
                         |content, error| {
                             content.child(
-                                Alert::error(
+                                selectable_error_alert(
                                     SharedString::from(format!(
                                         "route-error-{}",
                                         self.route.label()
@@ -12241,11 +12625,24 @@ impl Render for WalletWindow {
                 self.update_review_scroll_state(cx);
             } else if !review.scroll_check_scheduled {
                 review.scroll_check_scheduled = true;
-                cx.on_next_frame(window, move |view, _, cx| {
+                cx.on_next_frame(window, move |view, window, cx| {
                     if let Some(review) = view.active_review.as_mut() {
                         review.scroll_layout_ready = true;
                     }
                     view.update_review_scroll_state(cx);
+                    if view
+                        .active_review
+                        .as_ref()
+                        .is_some_and(|review| !review.state.approve_enabled())
+                    {
+                        // Scroll geometry may settle one frame after the
+                        // content first renders. Recheck once so a document
+                        // that already fits never asks for a meaningless
+                        // scroll gesture.
+                        cx.on_next_frame(window, |view, _, cx| {
+                            view.update_review_scroll_state(cx);
+                        });
+                    }
                 });
             }
         }
@@ -12267,10 +12664,23 @@ impl Render for WalletWindow {
         }
         if self.route == Route::Overview
             && !self.legal_gate
-            && self.portfolio_chain_id.is_some()
             && matches!(self.portfolio, PortfolioState::Idle)
         {
             self.refresh_portfolio(cx);
+        }
+        if self.route == Route::Policies
+            && !self.legal_gate
+            && self.policy_editor.is_none()
+            && self.policy_action_error.is_none()
+        {
+            let default_wallet = self
+                .cached_accounts()
+                .ok()
+                .and_then(|accounts| accounts.first())
+                .map(|account| account.id.clone());
+            if let Some(wallet_id) = default_wallet {
+                self.open_policy_editor(&wallet_id, window, cx);
+            }
         }
         div()
             .key_context("Wallet")
@@ -12300,6 +12710,37 @@ impl Render for WalletWindow {
             .when(self.account_export.is_some(), |view| {
                 view.child(self.render_account_security_overlay(cx))
             })
+    }
+}
+
+/// Hosts the component library's overlay layers outside `WalletWindow`.
+/// Dialog builders may read the wallet entity while this separate entity is
+/// rendering, avoiding both an omitted layer and a re-entrant entity read.
+struct ComponentLayerHost {
+    content: AnyView,
+}
+
+impl ComponentLayerHost {
+    fn new(content: impl Into<AnyView>) -> Self {
+        Self {
+            content: content.into(),
+        }
+    }
+}
+
+impl Render for ComponentLayerHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sheet_layer = Root::render_sheet_layer(window, cx);
+        let dialog_layer = Root::render_dialog_layer(window, cx);
+        let notification_layer = Root::render_notification_layer(window, cx);
+
+        div()
+            .relative()
+            .size_full()
+            .child(self.content.clone())
+            .children(sheet_layer)
+            .children(dialog_layer)
+            .children(notification_layer)
     }
 }
 
@@ -12343,17 +12784,17 @@ const fn interface_interaction_palette(dark: bool) -> InterfaceInteractionPalett
         button_hover: if dark { 0x373737 } else { 0xe5e4e4 },
         button_active: if dark { 0x261b34 } else { 0xf3e7fe },
         button_foreground: if dark { 0xffffff } else { 0x101010 },
-        // Figma specifies off-purple for the primary fill. Its white-label
-        // example falls below AA, so the application pairs the exact brand
-        // fill with Ekubo black instead of inventing a darker purple.
-        primary: 0x9d5af2,
-        primary_hover: 0xb174ff,
-        primary_active: 0x9d5af2,
-        primary_foreground: 0x101010,
-        danger: 0xeb1e74,
-        danger_hover: 0xf04488,
-        danger_active: 0xeb1e74,
-        danger_foreground: 0x101010,
+        // Primary and destructive actions use white labels in both themes;
+        // dark mode uses deeper brand companions so every state retains AA
+        // contrast without the visually awkward near-black label treatment.
+        primary: 0x7a36d2,
+        primary_hover: if dark { 0x8b4ade } else { 0x6828b9 },
+        primary_active: if dark { 0x6828b9 } else { 0x57209e },
+        primary_foreground: 0xffffff,
+        danger: 0xb5124f,
+        danger_hover: if dark { 0xc51b5b } else { 0x9d0f44 },
+        danger_active: if dark { 0x9d0f44 } else { 0x850b39 },
+        danger_foreground: 0xffffff,
         success: 0x26e7ad,
         success_hover: 0x48f2be,
         success_active: 0x26e7ad,
@@ -12451,6 +12892,7 @@ fn apply_interface_palette(cx: &mut App) {
     colors.list_hover = surface_hover;
     colors.muted = muted;
     colors.muted_foreground = muted_foreground;
+    colors.overlay = gpui::black().opacity(if dark { 0.30 } else { 0.15 });
     colors.popover = surface;
     colors.popover_foreground = foreground;
     colors.info = semantic_primary;
@@ -12539,12 +12981,10 @@ fn show_wallet_window(
         view.token_name_input = None;
         view.token_decimals_input = None;
         view.token_editor_open = false;
-        view.token_editor_original = None;
         view.token_list_generation = view.token_list_generation.wrapping_add(1);
         view.account_id_input = None;
         view.private_key_input = None;
         view.walletconnect_uri_input = None;
-        view.network_json_input = None;
         view.network_name_input = None;
         view.network_display_name_input = None;
         view.network_aliases_input = None;
@@ -12574,7 +13014,7 @@ fn show_wallet_window(
         view.network_proposal_busy = false;
         cx.notify();
     });
-    let root_view = wallet_view.clone();
+    let wallet_content = wallet_view.clone();
     let window_handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(960.0), px(650.0)), cx)),
@@ -12583,7 +13023,8 @@ fn show_wallet_window(
         },
         |window, cx| {
             window.set_window_title(&format!("Ekubo Wallet {BUILD_VERSION}"));
-            cx.new(|cx| Root::new(root_view, window, cx))
+            let layer_host = cx.new(|_| ComponentLayerHost::new(wallet_content));
+            cx.new(|cx| Root::new(layer_host, window, cx))
         },
     )?;
     window_handle.update(cx, |_, window, _| window.activate_window())?;
@@ -12637,12 +13078,11 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 PlatformTray::new(dark_appearance(cx.window_appearance())).ok(),
             ));
             let initial_agents = owner.clients().map_or(0, |clients| clients.len());
-            let initial_pending_reviews = owner
-                .reviews(None)
-                .map_or(0, |queues| review_queue_decision_count(&queues));
-            let detailed_notification_previews = Arc::new(AtomicBool::new(
-                owner.detailed_notification_previews().unwrap_or(false),
-            ));
+            let initial_networks = owner.networks().unwrap_or_default();
+            let initial_testnet_mode = owner.testnet_mode().unwrap_or(false);
+            let initial_pending_reviews = owner.reviews(None).map_or(0, |queues| {
+                review_queue_decision_count(&queues, &initial_networks, initial_testnet_mode)
+            });
             if let Some(tray) = tray.borrow_mut().as_mut() {
                 tray.update(&TraySnapshot {
                     pending_reviews: initial_pending_reviews,
@@ -12706,7 +13146,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                     review_presenter.clone(),
                     walletconnect.clone(),
                     walletconnect_presenter.clone(),
-                    detailed_notification_previews.clone(),
                     tray.clone(),
                     cx,
                 )
@@ -12862,10 +13301,16 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 let sessions = walletconnect
                                     .lock()
                                     .map_or_else(|_| Vec::new(), |manager| manager.sessions());
+                                let networks = owner.networks().unwrap_or_default();
+                                let testnet_mode = owner.testnet_mode().unwrap_or(false);
                                 (
-                                    owner
-                                        .reviews(None)
-                                        .map_or(0, |queues| review_queue_decision_count(&queues)),
+                                    owner.reviews(None).map_or(0, |queues| {
+                                        review_queue_decision_count(
+                                            &queues,
+                                            &networks,
+                                            testnet_mode,
+                                        )
+                                    }),
                                     owner.clients().map_or(0, |clients| clients.len()),
                                     sessions,
                                 )
@@ -12956,15 +13401,23 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 tokio::sync::mpsc::unbounded_channel();
             let notification_service = PlatformNotificationService::new(notification_clicks);
             let mut domain_events = events.subscribe();
-            let notification_previews = detailed_notification_previews.clone();
+            let notification_owner = owner.clone();
             gpui_tokio::Tokio::spawn(cx, async move {
                 loop {
                     match domain_events.recv().await {
                         Ok(event) => {
-                            let preferences = NotificationPreferences {
-                                detailed_previews: notification_previews.load(Ordering::Relaxed),
-                            };
-                            if let Some(notification) = notification_for(&event, preferences) {
+                            let preferences = NotificationPreferences;
+                            let owner = notification_owner.clone();
+                            let visible = tokio::task::spawn_blocking(move || {
+                                transaction_notification_is_visible(&owner, &event).then_some(event)
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            if let Some(notification) = visible
+                                .as_ref()
+                                .and_then(|event| notification_for(event, preferences))
+                            {
                                 notification_service.show(notification);
                             }
                         }
@@ -13027,12 +13480,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         *guard = Some(server);
                     }
                     if let Some(tray) = status_tray.borrow_mut().as_mut() {
-                        tray.update(&TraySnapshot {
-                            pending_reviews: 0,
-                            mcp_online: true,
-                            connected_agents: initial_agents,
-                            walletconnect_sessions: 0,
-                        });
+                        tray.set_mcp_online(true);
                     }
                     wallet_view.update(cx, |view, cx| {
                         view.mcp_status = format!("MCP online at {address}/mcp").into();

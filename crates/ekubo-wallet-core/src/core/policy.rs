@@ -522,10 +522,6 @@ pub const CALL_NOT_ALLOWED_CODE: &str = "call_not_allowed";
 /// transfers were allowlisted.
 pub const DELEGATION_REPLACED_CODE: &str = "delegation_replaced";
 
-/// A token named by a policy rule did not answer either display-only balance
-/// probe, so the review may have no balance-change row for it. This is a
-/// simulation warning, never an authorization input.
-
 /// This plan's EIP-7702 authorization would give the account a delegation it
 /// does not currently have.
 ///

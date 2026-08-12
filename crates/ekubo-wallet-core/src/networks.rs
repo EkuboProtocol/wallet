@@ -49,7 +49,6 @@ pub struct NetworkProfile {
     pub config: NetworkConfig,
     /// Whether a fresh configuration starts with this network.
     pub is_default: bool,
-    pub is_testnet: bool,
     /// How many of this chain's endpoints answered the `eth_simulateV1`
     /// request that signing depends on. Zero means the wallet can read this
     /// chain but cannot simulate, and so will not sign on it, until the owner
@@ -108,6 +107,7 @@ pub(crate) fn parse(document: &str) -> Result<Vec<NetworkProfile>> {
                 config: NetworkConfig {
                     name: chain.name,
                     disabled: false,
+                    testnet: chain.testnet,
                     display_name: chain.display_name,
                     aliases: chain.aliases,
                     chain_id: chain.chain_id,
@@ -151,7 +151,6 @@ pub(crate) fn parse(document: &str) -> Result<Vec<NetworkProfile>> {
                         })?,
                 },
                 is_default: chain.is_default,
-                is_testnet: chain.testnet,
                 simulate_endpoints: chain.simulate_endpoints,
                 fork_endpoints: chain.fork_endpoints,
             };

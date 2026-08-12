@@ -397,3 +397,15 @@ fn appearance_defaults_to_system_and_persists_in_the_encrypted_store() {
         AppearancePreference::Light
     );
 }
+
+#[test]
+fn testnet_mode_defaults_off_and_persists_in_the_encrypted_store() {
+    let mut store = store(37);
+    assert!(!store.testnet_mode().unwrap());
+
+    store.set_testnet_mode(true).unwrap();
+    assert!(store.testnet_mode().unwrap());
+
+    store.set_testnet_mode(false).unwrap();
+    assert!(!store.testnet_mode().unwrap());
+}

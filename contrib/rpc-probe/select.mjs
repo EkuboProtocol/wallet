@@ -29,6 +29,17 @@ const alchemy = JSON.parse(
   readFileSync(new URL("./alchemy-chains.json", import.meta.url), "utf8"),
 );
 const ALCHEMY_MAINNETS = new Set(Object.keys(alchemy.mainnets).map(Number));
+// The testnets paired with the wallet's primary supported ecosystems. They
+// ship disabled and remain invisible until the owner enables testnet mode.
+const DEFAULT_TESTNETS = new Set([
+  10200, // Gnosis Chiado
+  46630, // Robinhood Chain Testnet
+  80069, // Berachain Bepolia
+  84532, // Base Sepolia
+  421614, // Arbitrum Sepolia
+  763373, // Ink Sepolia
+  11155420, // OP Sepolia
+]);
 const curated = JSON.parse(readFileSync(new URL("./curated.json", import.meta.url), "utf8")).chains;
 
 const results = readFileSync(join(dir, "probe-results.jsonl"), "utf8")
@@ -218,8 +229,10 @@ for (const chain of candidates) {
     // A default is a network the wallet configures for an owner who never
     // asked for it, so the bar is higher than "it answered a probe": it is
     // the set Alchemy serves, which is the closest available proxy for the
-    // chains people actually hold value on.
-    default: ALCHEMY_MAINNETS.has(chain.chainId),
+    // chains people actually hold value on, plus the explicitly maintained
+    // testnets used to exercise those ecosystems before production.
+    default:
+      ALCHEMY_MAINNETS.has(chain.chainId) || DEFAULT_TESTNETS.has(chain.chainId),
     testnet: Boolean(meta.testnet),
     native_currency: meta.nativeCurrency
       ? {
@@ -278,7 +291,9 @@ const stats = {
   defaults: chains.filter((chain) => chain.default).length,
   chainsWithSimulation: chains.filter((chain) => chain.simulate_endpoints > 0).length,
   endpoints: chains.reduce((total, chain) => total + chain.rpc_urls.length, 0),
-  alchemyCovered: chains.filter((chain) => chain.default).length,
+  alchemyCovered: chains.filter(
+    (chain) => chain.default && !chain.testnet,
+  ).length,
   alchemyTotal: ALCHEMY_MAINNETS.size,
 };
 

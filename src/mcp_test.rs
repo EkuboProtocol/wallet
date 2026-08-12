@@ -692,6 +692,7 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
             display_name: "Untrusted Test".into(),
             aliases: vec!["untrusted-testnet".into()],
             chain_id: "999999".into(),
+            testnet: true,
             // Nothing listens here, so reaching it at all fails slowly and
             // with a connection error rather than the conflict below.
             rpc_urls: vec!["http://127.0.0.1:9".parse().unwrap()],
@@ -726,6 +727,7 @@ fn proposing_a_network_tolerates_a_call_that_omits_aliases() {
         "name": "untrusted",
         "display_name": "Untrusted Test",
         "chain_id": "999999",
+        "testnet": true,
         "rpc_urls": ["http://127.0.0.1:9"],
         "max_gas_limit": "30000000",
         "native_currency": {
@@ -747,6 +749,7 @@ fn add_network_input(rpc_url: &str) -> AddNetworkInput {
         display_name: "Untrusted Test".into(),
         aliases: vec![],
         chain_id: "999999".into(),
+        testnet: true,
         rpc_urls: vec![rpc_url.parse().unwrap()],
         rpc_strategy: None,
         max_gas_limit: "30000000".into(),

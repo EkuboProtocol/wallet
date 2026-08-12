@@ -343,6 +343,7 @@ fn stub_network(address: SocketAddr) -> NetworkConfig {
     NetworkConfig {
         name: "stubnet".into(),
         disabled: false,
+        testnet: false,
         display_name: Some("Stub Network".into()),
         aliases: Vec::new(),
         chain_id: CHAIN_ID,

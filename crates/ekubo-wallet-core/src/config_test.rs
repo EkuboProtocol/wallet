@@ -47,6 +47,27 @@ fn default_networks_have_unique_chain_ids_and_identifiers() {
 }
 
 #[test]
+fn known_chain_classification_cannot_be_spoofed_by_any_network_mutator() {
+    let ethereum = default_networks()
+        .into_iter()
+        .find(|network| network.chain_id == 1)
+        .unwrap();
+    let mut mislabeled = ethereum.clone();
+    mislabeled.testnet = true;
+
+    let add_error = add_configured_network(&mut Vec::new(), mislabeled.clone()).unwrap_err();
+    assert!(add_error.to_string().contains("classified as a mainnet"));
+
+    let mut configured = vec![ethereum];
+    let replace_error = replace_configured_network(&mut configured, mislabeled).unwrap_err();
+    assert!(
+        replace_error
+            .to_string()
+            .contains("classified as a mainnet")
+    );
+}
+
+#[test]
 fn disabled_networks_are_not_resolvable_for_wallet_activity() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
@@ -107,45 +128,7 @@ fn network_mutations_require_network_scoped_owner_authorization() {
 }
 
 #[test]
-fn network_deletion_requires_an_owner_authorized_disable_first() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = ConfigStore::new(directory.path());
-    let authorized = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
-    let ethereum = store
-        .load()
-        .unwrap()
-        .networks
-        .into_iter()
-        .find(|network| network.name == "ethereum")
-        .unwrap();
-
-    assert!(store.remove_network(&ethereum, &authorized).is_err());
-    assert!(
-        store
-            .load()
-            .unwrap()
-            .networks
-            .iter()
-            .any(|network| network.name == "ethereum" && !network.disabled)
-    );
-
-    let disabled = store
-        .set_network_disabled(&ethereum, true, &authorized)
-        .unwrap();
-    let removed = store.remove_network(&disabled, &authorized).unwrap();
-    assert_eq!(removed.name, "ethereum");
-    assert!(
-        store
-            .load()
-            .unwrap()
-            .networks
-            .iter()
-            .all(|network| network.name != "ethereum")
-    );
-}
-
-#[test]
-fn network_toggle_and_delete_refuse_a_stale_reviewed_row() {
+fn network_toggle_refuses_a_stale_reviewed_row() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path());
     let authorization = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
@@ -178,24 +161,6 @@ fn network_toggle_and_delete_refuse_a_stale_reviewed_row() {
             .find(|network| network.chain_id == edited.chain_id),
         Some(edited.clone())
     );
-
-    let disabled = store
-        .set_network_disabled(&edited, true, &authorization)
-        .unwrap();
-    let mut changed_disabled = disabled.clone();
-    changed_disabled.rpc_strategy = RpcStrategy::Random;
-    store
-        .replace_network(&disabled, changed_disabled.clone(), &authorization)
-        .unwrap();
-
-    assert!(
-        store
-            .remove_network(&disabled, &authorization)
-            .unwrap_err()
-            .to_string()
-            .contains("changed while removal was being authenticated")
-    );
-    assert!(store.load().unwrap().networks.contains(&changed_disabled));
 }
 
 #[test]
@@ -501,6 +466,7 @@ fn the_default_strategy_is_optional_and_not_written() {
     let stored: crate::config::NetworkConfig = serde_json::from_value(serde_json::json!({
         "name": "custom",
         "disabled": false,
+        "testnet": false,
         "chain_id": 1,
         "rpc_urls": ["https://custom.example.invalid/rpc"],
     }))

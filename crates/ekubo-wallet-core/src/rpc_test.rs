@@ -146,6 +146,7 @@ fn network_with(chain_id: u64, rpc_urls: Vec<Url>) -> NetworkConfig {
     NetworkConfig {
         name: "failovernet".into(),
         disabled: false,
+        testnet: false,
         display_name: None,
         aliases: Vec::new(),
         chain_id,

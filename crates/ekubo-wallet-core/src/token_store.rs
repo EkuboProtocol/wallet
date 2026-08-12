@@ -1089,6 +1089,8 @@ pub struct PortfolioToken {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub decimals: Option<u8>,
     /// Raw balance in the token's smallest unit, as a decimal string.
     pub balance: String,
@@ -1167,6 +1169,7 @@ pub async fn read_portfolio(
             Some(PortfolioToken {
                 address: token.address.clone(),
                 symbol: token.symbol.clone(),
+                name: token.name.clone(),
                 decimals: token.decimals,
                 balance: balance.to_string(),
             })

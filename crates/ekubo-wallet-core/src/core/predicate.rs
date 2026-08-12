@@ -498,13 +498,13 @@ impl Predicate {
             (Self::Eq(left), Self::In(right)) => right.contains(left),
             (Self::In(left), Self::In(right)) => left.is_subset(right),
             (Self::In(left), Self::Eq(right)) => left.len() == 1 && left.contains(right),
-            (Self::Lt(left), Self::Lt(right)) | (Self::Lt(left), Self::Lte(right)) => {
+            (Self::Lt(left), Self::Lt(right) | Self::Lte(right)) => {
                 decimal_literal_cmp(left, right)
                     .is_some_and(|order| order != std::cmp::Ordering::Greater)
             }
             (Self::Lte(left), Self::Lte(right)) => decimal_literal_cmp(left, right)
                 .is_some_and(|order| order != std::cmp::Ordering::Greater),
-            (Self::Gt(left), Self::Gt(right)) | (Self::Gt(left), Self::Gte(right)) => {
+            (Self::Gt(left), Self::Gt(right) | Self::Gte(right)) => {
                 decimal_literal_cmp(left, right)
                     .is_some_and(|order| order != std::cmp::Ordering::Less)
             }
@@ -550,8 +550,14 @@ impl Predicate {
                 }
             }
             Self::Not(inner) => inner.literals(into),
-            Self::Lt(_) | Self::Lte(_) | Self::Gt(_) | Self::Gte(_) => {}
-            Self::AnyValue | Self::Selector(_) | Self::Each(_) | Self::Length(_) => {}
+            Self::Lt(_)
+            | Self::Lte(_)
+            | Self::Gt(_)
+            | Self::Gte(_)
+            | Self::AnyValue
+            | Self::Selector(_)
+            | Self::Each(_)
+            | Self::Length(_) => {}
         }
     }
 
