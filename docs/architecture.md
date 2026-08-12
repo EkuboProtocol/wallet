@@ -11,7 +11,7 @@ WalletConnect. It issues two compile-time capabilities:
 Background work runs on the Tokio executor bridged into GPUI. Domain events
 carry proposal, review, transaction, configuration, connection, and service
 changes back to focused GPUI entities. The desktop shell has routes for
-Overview, Reviews, Activity, Accounts, Policies, Networks, Tokens,
+Overview, Reviews, Inbox, Accounts, Policies, Networks, Tokens,
 WalletConnect, Settings, and Updates. Agent management and Legal/Version live
 inside Settings.
 

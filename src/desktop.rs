@@ -4,7 +4,8 @@ use crate::{
     assets::{PENCIL_ICON, WalletAssets},
     authority::{
         ApplicationAuthority, ExportLease, OwnerActivityRecord, OwnerApi, OwnerPortfolioAccount,
-        OwnerPortfolioSnapshot, OwnerReviewQueues, PRIVATE_KEY_REVEAL_DURATION,
+        OwnerPortfolioSnapshot, OwnerReviewQueues, OwnerTransactionInspection,
+        PRIVATE_KEY_REVEAL_DURATION,
     },
     gui_review::{GuiReviewCommand, GuiReviewPresenter, GuiReviewPrompt},
     http_server::McpHttpServer,
@@ -72,7 +73,10 @@ use std::{
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
-actions!(ekubo_wallet, [OpenCommandPalette, CloseOverlay, Quit]);
+actions!(
+    ekubo_wallet,
+    [OpenCommandPalette, CloseOverlay, HideApplication, Quit]
+);
 
 const UI_FONT_FAMILY: &str = "Suisse Intl";
 const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
@@ -838,7 +842,7 @@ impl Route {
     const fn label(self) -> &'static str {
         match self {
             Self::Overview => "Portfolio",
-            Self::Activity => "Activity",
+            Self::Activity => "Inbox",
             Self::Accounts => "Accounts",
             Self::Policies => "Policies",
             Self::Networks => "Networks",
@@ -978,6 +982,7 @@ pub struct WalletWindow {
     selected_record: Option<uuid::Uuid>,
     activity_busy: BTreeSet<uuid::Uuid>,
     activity_feedback: BTreeMap<uuid::Uuid, ActivityFeedback>,
+    activity_inspections: BTreeMap<uuid::Uuid, ActivityInspectionState>,
     active_review: Option<ActiveReview>,
     queued_reviews: SerialQueue<QueuedReview>,
     review_flow: ReviewFlowState,
@@ -1467,6 +1472,13 @@ struct ActivityFeedback {
     error: bool,
 }
 
+#[derive(Clone)]
+enum ActivityInspectionState {
+    Loading,
+    Ready(Box<OwnerTransactionInspection>),
+    Failed(SharedString),
+}
+
 fn activity_record_is_awaiting_approval(record: &OwnerActivityRecord) -> bool {
     match record {
         OwnerActivityRecord::Transaction(item) => item.status == PendingStatus::AwaitingApproval,
@@ -1630,11 +1642,10 @@ fn render_activity_row(
                             app_button(SharedString::from(format!(
                                 "inspect-transaction-{request_id}"
                             )))
-                            .label("Inspect")
+                            .label(if selected { "Hide details" } else { "Inspect" })
                             .on_click(move |_, _, cx| {
                                 let _ = inspect_editor.update(cx, |view, cx| {
-                                    view.selected_record = Some(request_id);
-                                    cx.notify();
+                                    view.inspect_transaction(request_id, cx);
                                 });
                             }),
                         )
@@ -1742,11 +1753,10 @@ fn render_activity_row(
                         .gap_2()
                         .child(
                             app_button(SharedString::from(format!("inspect-message-{request_id}")))
-                                .label("Inspect")
+                                .label(if selected { "Hide details" } else { "Inspect" })
                                 .on_click(move |_, _, cx| {
                                     let _ = inspect_editor.update(cx, |view, cx| {
-                                        view.selected_record = Some(request_id);
-                                        cx.notify();
+                                        view.toggle_activity_detail(request_id, cx);
                                     });
                                 }),
                         )
@@ -1804,11 +1814,10 @@ fn render_activity_row(
                             app_button(SharedString::from(format!(
                                 "inspect-typed-data-{request_id}"
                             )))
-                            .label("Inspect")
+                            .label(if selected { "Hide details" } else { "Inspect" })
                             .on_click(move |_, _, cx| {
                                 let _ = inspect_editor.update(cx, |view, cx| {
-                                    view.selected_record = Some(request_id);
-                                    cx.notify();
+                                    view.toggle_activity_detail(request_id, cx);
                                 });
                             }),
                         )
@@ -3592,6 +3601,7 @@ impl WalletWindow {
             selected_record: None,
             activity_busy: BTreeSet::new(),
             activity_feedback: BTreeMap::new(),
+            activity_inspections: BTreeMap::new(),
             active_review: None,
             queued_reviews: SerialQueue::default(),
             review_flow: ReviewFlowState::Ready,
@@ -6430,6 +6440,55 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn toggle_activity_detail(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.selected_record = if self.selected_record == Some(request_id) {
+            None
+        } else {
+            Some(request_id)
+        };
+        cx.notify();
+    }
+
+    fn inspect_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        if self.selected_record == Some(request_id) {
+            self.selected_record = None;
+            cx.notify();
+            return;
+        }
+        self.selected_record = Some(request_id);
+        if self.activity_inspections.contains_key(&request_id) {
+            cx.notify();
+        } else {
+            self.load_transaction_inspection(request_id, cx);
+        }
+    }
+
+    fn load_transaction_inspection(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
+        self.activity_inspections
+            .insert(request_id, ActivityInspectionState::Loading);
+        let owner = self.owner.clone();
+        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
+            owner.transaction_inspection(request_id).await
+        });
+        cx.spawn(async move |view, cx| {
+            let result = task.await;
+            let _ = view.update(cx, |view, cx| {
+                view.activity_inspections.insert(
+                    request_id,
+                    match result {
+                        Ok(inspection) => ActivityInspectionState::Ready(Box::new(inspection)),
+                        Err(error) => ActivityInspectionState::Failed(
+                            format!("Could not inspect transaction: {error:#}").into(),
+                        ),
+                    },
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn refresh_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if !self.activity_busy.insert(request_id) {
             return;
@@ -7191,6 +7250,7 @@ impl WalletWindow {
             NotificationRoute::Activity(request_id) => {
                 self.set_route(Route::Activity);
                 self.selected_record = Some(request_id);
+                self.load_transaction_inspection(request_id, cx);
             }
         }
         cx.notify();
@@ -7698,7 +7758,6 @@ impl WalletWindow {
     ) -> gpui::AnyElement {
         let request_id = record.request_id();
         let header = |title: &'static str, status: String| {
-            let heading = format!("{title} · {status} · {request_id}");
             div()
                 .w_full()
                 .min_w_0()
@@ -7708,14 +7767,50 @@ impl WalletWindow {
                 .justify_between()
                 .gap_4()
                 .child(
-                    selectable_text(
-                        SharedString::from(format!("activity-heading-{request_id}")),
-                        &heading,
-                    )
-                    .min_w_0()
-                    .flex_1()
-                    .whitespace_normal()
-                    .font_semibold(),
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(
+                                    selectable_text(
+                                        SharedString::from(format!(
+                                            "activity-heading-{request_id}"
+                                        )),
+                                        title,
+                                    )
+                                    .text_lg()
+                                    .font_semibold(),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .bg(cx.theme().secondary)
+                                        .text_sm()
+                                        .font_medium()
+                                        .child(status),
+                                ),
+                        )
+                        .child(
+                            selectable_text(
+                                SharedString::from(format!(
+                                    "activity-heading-request-{request_id}"
+                                )),
+                                &request_id.to_string(),
+                            )
+                            .min_w_0()
+                            .truncate()
+                            .font_family(MONO_FONT_FAMILY)
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground),
+                        ),
                 )
                 .child(
                     app_button(SharedString::from(format!(
@@ -7730,149 +7825,207 @@ impl WalletWindow {
         };
         match record {
             OwnerActivityRecord::Transaction(item) => {
-                let exact_plan = serde_json::to_string_pretty(&item.execution_plan)
-                    .unwrap_or_else(|_| "Exact execution plan could not be rendered.".into());
-                let mut detail = GroupBox::new()
+                let mut detail = div()
                     .id(SharedString::from(format!("activity-detail-{request_id}")))
-                    .outline()
-                    .title("Transaction details")
-                    .child(header("Transaction", format!("{:?}", item.status)))
-                    .child(selectable_text(
-                        format!("activity-account-{request_id}"),
-                        &format!("Account: {}", item.wallet_id),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-network-{request_id}"),
-                        &format!("Network: {} · chain {}", item.network_name, item.chain_id),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-times-{request_id}"),
-                        &format!(
-                            "Created: {} · updated: {}",
-                            item.created_at, item.updated_at
-                        ),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-policy-revision-{request_id}"),
-                        &format!("Policy revision: {}", item.policy_revision),
-                    ))
-                    .child(copyable_value(
-                        format!("activity-plan-digest-{request_id}"),
-                        "Plan digest",
-                        item.digest.clone(),
-                    ));
-                if let Some(source) = item.plan_source.as_ref() {
-                    detail = detail.child(selectable_text(
-                        format!("activity-plan-source-{request_id}"),
-                        &format!("Plan source: {source}"),
-                    ));
-                }
-                if let Some(review_digest) = item.review_digest.as_ref() {
-                    detail = detail.child(copyable_value(
-                        format!("activity-review-digest-{request_id}"),
-                        "Review digest",
-                        review_digest.clone(),
-                    ));
-                }
-                for (label, value) in [
-                    ("Signed hash", item.signed_transaction_hash.as_ref()),
-                    ("Broadcast hash", item.broadcast_transaction_hash.as_ref()),
-                    ("Block", item.block_number.as_ref()),
-                ] {
-                    if let Some(value) = value {
-                        detail = detail.child(copyable_value(
-                            format!(
-                                "activity-{}-{request_id}",
-                                label.to_ascii_lowercase().replace(' ', "-")
-                            ),
-                            label,
-                            value.clone(),
-                        ));
+                    .w_full()
+                    .min_w_0()
+                    .mb_4()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(header("Transaction receipt", format!("{:?}", item.status)));
+                match self.activity_inspections.get(&request_id) {
+                    Some(ActivityInspectionState::Loading) => {
+                        detail = detail.child(
+                            h_flex()
+                                .gap_2()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(Spinner::new())
+                                .child(selectable_label(
+                                    "Reading the execution plan and querying the mined receipt…",
+                                )),
+                        );
+                    }
+                    Some(ActivityInspectionState::Failed(error)) => {
+                        detail =
+                            detail
+                                .child(selectable_error_alert(
+                                    format!("transaction-inspection-error-{request_id}"),
+                                    error.clone(),
+                                ))
+                                .child(
+                                    app_button(SharedString::from(format!(
+                                        "retry-transaction-inspection-{request_id}"
+                                    )))
+                                    .label("Retry inspection")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.load_transaction_inspection(request_id, cx);
+                                    })),
+                                );
+                    }
+                    Some(ActivityInspectionState::Ready(inspection)) => {
+                        let document = &inspection.document;
+                        detail =
+                            detail
+                                .child(
+                                    selectable_text(
+                                        format!("transaction-inspection-summary-{request_id}"),
+                                        &document.request.summary,
+                                    )
+                                    .text_color(cx.theme().muted_foreground)
+                                    .whitespace_normal(),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .when_some(
+                                            item.broadcast_transaction_hash
+                                                .as_ref()
+                                                .or(item.signed_transaction_hash.as_ref())
+                                                .and_then(|hash| {
+                                                    item.chain_id.parse::<u64>().ok().and_then(
+                                                        |chain_id| {
+                                                            self.cached_networks().ok().and_then(
+                                                                |networks| {
+                                                                    block_explorer_transaction_url(
+                                                                        networks, chain_id, hash,
+                                                                    )
+                                                                },
+                                                            )
+                                                        },
+                                                    )
+                                                }),
+                                            |buttons, explorer_url| {
+                                                buttons.child(
+                                                    app_button(SharedString::from(format!(
+                                                        "open-transaction-explorer-{request_id}"
+                                                    )))
+                                                    .label("Open in block explorer")
+                                                    .on_click(move |_, _, cx| {
+                                                        cx.open_url(&explorer_url);
+                                                    }),
+                                                )
+                                            },
+                                        )
+                                        .child(
+                                            app_button(SharedString::from(format!(
+                                                "refresh-transaction-inspection-{request_id}"
+                                            )))
+                                            .label(if inspection.receipt_loaded {
+                                                "Refresh receipt"
+                                            } else {
+                                                "Check for receipt"
+                                            })
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.load_transaction_inspection(request_id, cx);
+                                            })),
+                                        ),
+                                );
+                        for (index, section) in document.request.sections.iter().enumerate() {
+                            detail = detail.child(Self::render_review_section(
+                                section,
+                                &format!("activity-{request_id}-{index}"),
+                                cx,
+                            ));
+                        }
+                        if !document.request.warnings.is_empty() {
+                            detail = detail.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .text_color(cx.theme().warning)
+                                            .child(Icon::new(IconName::TriangleAlert).small())
+                                            .child(div().font_semibold().child("Important notes")),
+                                    )
+                                    .children(document.request.warnings.iter().enumerate().map(
+                                        |(index, warning)| {
+                                            div()
+                                                .p_3()
+                                                .rounded(cx.theme().radius_lg)
+                                                .border_1()
+                                                .border_color(cx.theme().warning)
+                                                .child(selectable_text(
+                                                    format!(
+                                                        "activity-warning-{request_id}-{index}"
+                                                    ),
+                                                    warning,
+                                                ))
+                                        },
+                                    )),
+                            );
+                        }
+                        if !document.request.facts.is_empty() {
+                            detail = detail.child(Self::render_review_section(
+                                &ApprovalSection {
+                                    kind: ApprovalSectionKind::Details,
+                                    heading: "Lifecycle details".to_owned(),
+                                    facts: document.request.facts.clone(),
+                                },
+                                &format!("activity-{request_id}-lifecycle"),
+                                cx,
+                            ));
+                        }
+                        if let Some(exact_plan) = document.exact_payloads.first() {
+                            detail = detail.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div().font_medium().child("Exact execution plan"),
+                                            )
+                                            .child(copy_button(
+                                                format!("copy-execution-plan-{request_id}"),
+                                                exact_plan.clone(),
+                                                "Copy exact execution plan",
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_h(px(320.0))
+                                            .overflow_y_scrollbar()
+                                            .p_3()
+                                            .rounded(cx.theme().radius_lg)
+                                            .bg(cx.theme().secondary)
+                                            .child(selectable_code_text(
+                                                format!("execution-plan-{request_id}"),
+                                                exact_plan,
+                                            )),
+                                    ),
+                            );
+                        }
+                    }
+                    None => {
+                        detail = detail.child(
+                            app_button(SharedString::from(format!(
+                                "load-transaction-inspection-{request_id}"
+                            )))
+                            .label("Load transaction details")
+                            .on_click(cx.listener(
+                                move |view, _, _, cx| {
+                                    view.load_transaction_inspection(request_id, cx);
+                                },
+                            )),
+                        );
                     }
                 }
-                if let Some(hash) = item
-                    .broadcast_transaction_hash
-                    .as_ref()
-                    .or(item.signed_transaction_hash.as_ref())
-                    && let Ok(chain_id) = item.chain_id.parse::<u64>()
-                    && let Ok(networks) = self.cached_networks()
-                    && let Some(explorer_url) =
-                        block_explorer_transaction_url(networks, chain_id, hash)
-                {
-                    detail = detail.child(
-                        app_button(SharedString::from(format!(
-                            "open-transaction-explorer-{request_id}"
-                        )))
-                        .label("View transaction in block explorer")
-                        .on_click(move |_, _, cx| cx.open_url(&explorer_url)),
-                    );
-                }
-                if let Some(fee) = item.mined_fee.as_ref() {
-                    detail = detail.child(selectable_text(
-                        format!("activity-mined-fee-{request_id}"),
-                        &format!(
-                            "Mined fee: {} wei · {} gas at {} wei/gas",
-                            fee.transaction_fee_wei, fee.gas_used, fee.effective_gas_price
-                        ),
-                    ));
-                }
-                if !item.cancel_transaction_hashes.is_empty() {
-                    detail = detail
-                        .child(div().font_semibold().child(selectable_text(
-                            format!("activity-cancellations-title-{request_id}"),
-                            "Cancellation attempts",
-                        )))
-                        .children(
-                            item.cancel_transaction_hashes
-                                .iter()
-                                .cloned()
-                                .enumerate()
-                                .map(|(index, hash)| {
-                                    copyable_value(
-                                        format!("activity-cancel-hash-{request_id}-{index}"),
-                                        "Cancellation transaction hash",
-                                        hash,
-                                    )
-                                }),
-                        );
-                }
-                detail
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(div().font_medium().child(selectable_text(
-                                        format!("activity-plan-title-{request_id}"),
-                                        "Exact execution plan",
-                                    )))
-                                    .child(copy_button(
-                                        format!("copy-execution-plan-{request_id}"),
-                                        exact_plan.clone(),
-                                        "Copy exact execution plan",
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .max_h(px(360.0))
-                                    .overflow_y_scrollbar()
-                                    .p_3()
-                                    .rounded(cx.theme().radius_lg)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .bg(cx.theme().secondary)
-                                    .child(selectable_code_text(
-                                        format!("execution-plan-{request_id}"),
-                                        &exact_plan,
-                                    )),
-                            ),
-                    )
-                    .into_any_element()
+                detail.into_any_element()
             }
             OwnerActivityRecord::Message(item) => {
                 let document = self.cached_message_document(request_id);
@@ -8067,7 +8220,7 @@ impl WalletWindow {
         let records = match self.cached_activity_records() {
             Ok(records) => records,
             Err(error) => {
-                return panel.child(selectable_label(format!("Activity unavailable: {error:#}")));
+                return panel.child(selectable_label(format!("Inbox unavailable: {error:#}")));
             }
         };
         let records = Arc::<[OwnerActivityRecord]>::from(
@@ -8081,44 +8234,39 @@ impl WalletWindow {
                 .collect::<Vec<_>>(),
         );
         let items = records.as_ref();
-        let selected = self
-            .selected_record
-            .and_then(|request_id| items.iter().find(|item| item.request_id() == request_id));
-        let mut panel = panel;
-        if let Some(item) = selected {
-            panel = panel.child(self.render_activity_detail(item, cx));
-        }
         if items.is_empty() {
             return panel.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("No wallet activity yet.")),
+                    .child(selectable_label("No Inbox history yet.")),
             );
         }
         let selected_record = self.selected_record;
         let busy = Arc::new(self.activity_busy.clone());
         let feedback = Arc::new(self.activity_feedback.clone());
         let editor = cx.entity().downgrade();
-        panel.child(
-            uniform_list("activity-records", records.len(), move |range, _, cx| {
-                range
-                    .map(|index| {
-                        let record = &records[index];
-                        let request_id = record.request_id();
-                        render_activity_row(
-                            record,
-                            selected_record == Some(request_id),
-                            busy.contains(&request_id),
-                            feedback.get(&request_id).cloned(),
-                            editor.clone(),
-                            cx,
-                        )
-                    })
-                    .collect()
-            })
+        let mut rows = div()
+            .id("activity-records")
             .w_full()
-            .h(px(580.0)),
-        )
+            .min_w_0()
+            .flex()
+            .flex_col();
+        for record in items {
+            let request_id = record.request_id();
+            let selected = selected_record == Some(request_id);
+            rows = rows.child(render_activity_row(
+                record,
+                selected,
+                busy.contains(&request_id),
+                feedback.get(&request_id).cloned(),
+                editor.clone(),
+                cx,
+            ));
+            if selected {
+                rows = rows.child(self.render_activity_detail(record, cx));
+            }
+        }
+        panel.child(rows)
     }
 
     fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -8135,7 +8283,7 @@ impl WalletWindow {
             )
             .child(
                 GroupBox::new()
-                    .id("activity-history")
+                    .id("inbox-history")
                     .outline()
                     .title("History")
                     .child(self.render_activity_history(cx)),
@@ -9533,6 +9681,7 @@ impl WalletWindow {
                         .child(
                             app_input(input, cx)
                                 .aria_label("Policy JSON")
+                                .font_family(MONO_FONT_FAMILY)
                                 .w_full()
                                 .h_full(),
                         ),
@@ -10781,7 +10930,7 @@ impl WalletWindow {
                             .child(
                                 h_flex()
                                     .flex_wrap()
-                                    .items_start()
+                                    .items_center()
                                     .w_full()
                                     .justify_between()
                                     .gap_3()
@@ -11081,8 +11230,6 @@ impl WalletWindow {
                         })
                     })
                     .collect::<Vec<_>>();
-                let wallet_address = account.wallet.address.to_checksum(None);
-                let wallet_address_for_copy = wallet_address.clone();
                 let row_count = rows.len();
                 let mut balances = div().w_full().min_w_0().flex().flex_col();
                 for (index, row) in rows.into_iter().enumerate() {
@@ -11116,10 +11263,12 @@ impl WalletWindow {
                             .truncate()
                             .font_medium(),
                         );
-                    let mut metadata = h_flex()
+                    let mut metadata = div()
                         .w_full()
                         .min_w_0()
-                        .gap_1()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
                         .child(selectable_text(
@@ -11128,14 +11277,9 @@ impl WalletWindow {
                                 account.wallet.id, row.chain_id
                             )),
                             &format!(
-                                "{} · Chain ID {}{}",
+                                "{}{}",
                                 row.network_name,
-                                row.chain_id,
-                                if row.native {
-                                    " · Native asset"
-                                } else {
-                                    " ·"
-                                },
+                                if row.native { " · Native asset" } else { "" },
                             ),
                         ));
                     if !row.native {
@@ -11151,11 +11295,14 @@ impl WalletWindow {
                             )))
                             .label(address_label)
                             .link()
-                            .h(px(26.0))
+                            .h(px(22.0))
+                            .max_w_full()
                             .min_w_0()
                             .px_0()
-                            .text_sm()
+                            .text_xs()
+                            .font_normal()
                             .font_family(MONO_FONT_FAMILY)
+                            .text_color(cx.theme().muted_foreground)
                             .tooltip(address.clone())
                             .on_click(move |_, _, cx| cx.open_url(&explorer_url))
                             .into_any_element(),
@@ -11168,7 +11315,9 @@ impl WalletWindow {
                             )
                             .min_w_0()
                             .truncate()
+                            .text_xs()
                             .font_family(MONO_FONT_FAMILY)
+                            .text_color(cx.theme().muted_foreground)
                             .into_any_element(),
                         });
                     }
@@ -11181,54 +11330,64 @@ impl WalletWindow {
                                 row.border_b_1().border_color(cx.theme().border)
                             })
                             .flex()
-                            .flex_wrap()
-                            .items_start()
-                            .gap_3()
+                            .flex_col()
+                            .gap_1()
                             .child(
                                 div()
-                                    .min_w(px(260.0))
-                                    .flex_1()
-                                    .flex_basis(px(320.0))
-                                    .child(identity)
-                                    .child(metadata),
-                            )
-                            .child(
-                                div()
-                                    .min_w(px(180.0))
-                                    .flex_1()
-                                    .flex_basis(px(220.0))
+                                    .w_full()
+                                    .min_w_0()
                                     .flex()
-                                    .flex_col()
-                                    .items_end()
+                                    .flex_wrap()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap_3()
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(selectable_label("Balance")),
+                                            .min_w(px(180.0))
+                                            .flex_1()
+                                            .flex_basis(px(260.0))
+                                            .child(identity),
                                     )
                                     .child(
                                         div()
-                                            .id(SharedString::from(format!(
-                                                "portfolio-balance-scroll-{}-{}-{address}",
-                                                account.wallet.id, row.chain_id
-                                            )))
-                                            .w_full()
                                             .min_w_0()
                                             .max_w_full()
-                                            .overflow_x_scroll()
-                                            .text_right()
-                                            .font_family(MONO_FONT_FAMILY)
-                                            .text_lg()
-                                            .font_semibold()
-                                            .child(selectable_text(
-                                                SharedString::from(format!(
-                                                    "portfolio-asset-balance-{}-{}-{address}",
-                                                    account.wallet.id, row.chain_id
-                                                )),
-                                                &row.balance,
-                                            )),
+                                            .flex_none()
+                                            .flex()
+                                            .flex_col()
+                                            .items_end()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(selectable_label("Balance")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "portfolio-balance-scroll-{}-{}-{address}",
+                                                        account.wallet.id, row.chain_id
+                                                    )))
+                                                    .max_w_full()
+                                                    .overflow_x_scroll()
+                                                    .text_right()
+                                                    .font_family(MONO_FONT_FAMILY)
+                                                    .text_lg()
+                                                    .font_semibold()
+                                                    .child(
+                                                        selectable_text(
+                                                            SharedString::from(format!(
+                                                                "portfolio-asset-balance-{}-{}-{address}",
+                                                                account.wallet.id, row.chain_id
+                                                            )),
+                                                            &row.balance,
+                                                        )
+                                                        .whitespace_nowrap(),
+                                                    ),
+                                            ),
                                     ),
-                            ),
+                            )
+                            .child(metadata),
                     );
                 }
                 if row_count == 0 {
@@ -11264,53 +11423,6 @@ impl WalletWindow {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .justify_between()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .child(div().font_semibold().truncate().child(
-                                            selectable_text(
-                                                format!(
-                                                    "portfolio-account-name-{}",
-                                                    account.wallet.id
-                                                ),
-                                                &account.wallet.id,
-                                            ),
-                                        ))
-                                        .child(
-                                            selectable_text(
-                                                SharedString::from(format!(
-                                                    "portfolio-account-address-{}",
-                                                    account.wallet.id
-                                                )),
-                                                &wallet_address,
-                                            )
-                                            .font_family(MONO_FONT_FAMILY)
-                                            .w_full()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground),
-                                        ),
-                                )
-                                .child(
-                                    copy_button(
-                                        SharedString::from(format!(
-                                            "copy-portfolio-address-{}",
-                                            account.wallet.id
-                                        )),
-                                        wallet_address_for_copy,
-                                        "Copy account address",
-                                    )
-                                    .large(),
-                                ),
-                        )
                         .child(balances),
                 );
                 content
@@ -11773,7 +11885,9 @@ impl WalletWindow {
                 );
         }
 
-        let exact_value = matches!(fact.label.as_str(), "Address" | "Sender" | "Target");
+        let exact_value = matches!(fact.label.as_str(), "Address" | "Sender" | "Target")
+            || fact.label.ends_with(" hash")
+            || fact.label.ends_with(" digest");
         div()
             .min_w_0()
             .flex()
@@ -13102,6 +13216,8 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 KeyBinding::new("ctrl-k", OpenCommandPalette, None),
                 KeyBinding::new("escape", CloseOverlay, Some("Wallet")),
                 #[cfg(target_os = "macos")]
+                KeyBinding::new("cmd-h", HideApplication, None),
+                #[cfg(target_os = "macos")]
                 KeyBinding::new("cmd-q", Quit, None),
                 #[cfg(not(target_os = "macos"))]
                 KeyBinding::new("ctrl-q", Quit, None),
@@ -13119,6 +13235,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 None,
             ));
             cx.bind_keys(key_bindings);
+            cx.on_action(|_: &HideApplication, cx| cx.hide());
             cx.on_action(|_: &Quit, cx| cx.quit());
             let shutdown_server = server_slot.clone();
             let shutdown_walletconnect = walletconnect.clone();
@@ -13207,6 +13324,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                 loop {
                     let changed = match view_events.recv().await {
                         Ok(event) => {
+                            let transaction_request = match &event.kind {
+                                crate::events::DomainEventKind::Transaction {
+                                    request_id, ..
+                                } => Some(*request_id),
+                                _ => None,
+                            };
                             let agent_connection_changed = matches!(
                                 &event.kind,
                                 crate::events::DomainEventKind::AgentConnectionChanged { .. }
@@ -13259,6 +13382,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                     }
                                     if snapshot_changed {
                                         view.reload_desktop_snapshot(cx);
+                                    }
+                                    if let Some(request_id) = transaction_request {
+                                        view.activity_inspections.remove(&request_id);
+                                        if view.selected_record == Some(request_id) {
+                                            view.load_transaction_inspection(request_id, cx);
+                                        }
                                     }
                                 });
                             }

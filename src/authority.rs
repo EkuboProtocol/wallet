@@ -4,11 +4,14 @@ use crate::{
     events::{DomainEventKind, EventBus},
     mcp::{GlobalAgentQuota, WalletMcpServer},
 };
-use alloy::primitives::Address;
+use alloy::primitives::{Address, B256, U256, keccak256};
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use ekubo_wallet_core::{
-    approval::{ApprovalKind, ApprovalRequest, ReviewDocument, ReviewPresenter},
+    approval::{
+        ApprovalKind, ApprovalRequest, ApprovalSectionKind, ReviewDocument, ReviewPresenter,
+    },
+    approval_summary::{TokenMetadataMap, format_fixed_point, interpret_steps, plan_token_targets},
     config::{ConfigStore, NetworkConfig, WalletConfig, WalletMetadata},
     core::policy::WalletPolicy,
     custody::{CustodyService, OsKeyStore, PrivateKeyMaterial},
@@ -30,7 +33,7 @@ use ekubo_wallet_core::{
     plan_fetch::{FetchPolicy, fetch_token_list_url},
     policy_store::{PolicyProposal, PolicyStore, StoredPolicy},
     reconcile::{attempt_cancellation, reconcile_record, submit_claimed},
-    rpc::transaction_known,
+    rpc::{ReceiptDetails, transaction_known, transaction_receipt_details},
     token_store::{
         ListedToken, MAX_PORTFOLIO_TOKENS, Portfolio, ProposalSource, ProposalSummary, StoredToken,
         TokenProposal, TokenStore, read_portfolio,
@@ -87,6 +90,420 @@ pub struct OwnerTokenListImport {
 pub struct OwnerTransactionAction {
     pub record: PendingTransaction,
     pub broadcast: Option<BroadcastResult>,
+}
+
+/// A human-readable, read-only inspection of one transaction lifecycle row.
+///
+/// The document is authored from the encrypted execution plan, owner-confirmed
+/// token metadata, and (when available) the mined receipt. Receipt lookup does
+/// not mutate wallet state or grant any capability.
+#[derive(Clone, Debug)]
+pub struct OwnerTransactionInspection {
+    pub document: ReviewDocument,
+    pub receipt_loaded: bool,
+    pub receipt_error: Option<String>,
+}
+
+const MAX_DISPLAYED_RECEIPT_EVENTS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReceiptTokenFlow {
+    incoming: U256,
+    outgoing: U256,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReceiptEffect {
+    label: String,
+    amount: String,
+    detail: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ReceiptPresentation {
+    effects: Vec<ReceiptEffect>,
+    events: Vec<(String, String)>,
+    decoded: usize,
+}
+
+fn topic_address(topic: B256) -> Address {
+    Address::from_slice(&topic.as_slice()[12..])
+}
+
+fn trusted_token_label(address: Address, metadata: &TokenMetadataMap) -> String {
+    metadata
+        .get(&address)
+        .and_then(|token| token.symbol.as_deref())
+        .map_or_else(
+            || format!("{address:#x} (unlisted token)"),
+            |symbol| format!("{symbol} ({address:#x})"),
+        )
+}
+
+fn token_amount(amount: U256, address: Address, metadata: &TokenMetadataMap) -> String {
+    let display = metadata.get(&address).cloned().unwrap_or_default();
+    display.decimals.map_or_else(
+        || format!("{amount} base units"),
+        |decimals| {
+            let amount = format_fixed_point(&amount.to_string(), decimals);
+            display
+                .symbol
+                .map_or(amount.clone(), |symbol| format!("{amount} {symbol}"))
+        },
+    )
+}
+
+fn signed_token_amount(
+    incoming: U256,
+    outgoing: U256,
+    address: Address,
+    metadata: &TokenMetadataMap,
+) -> String {
+    let (sign, magnitude) = if incoming >= outgoing {
+        ("+", incoming - outgoing)
+    } else {
+        ("-", outgoing - incoming)
+    };
+    format!("{sign}{}", token_amount(magnitude, address, metadata))
+}
+
+fn native_amount(value: U256, network: &NetworkConfig) -> String {
+    let Some(currency) = network.native_currency.as_ref() else {
+        return format!("{value} wei");
+    };
+    format!(
+        "{} {}",
+        format_fixed_point(&value.to_string(), currency.decimals),
+        currency.symbol
+    )
+}
+
+fn calldata_summary(data: &[u8]) -> String {
+    if data.is_empty() {
+        "none".to_owned()
+    } else {
+        format!(
+            "{} bytes; selector 0x{}",
+            data.len(),
+            hex::encode(&data[..data.len().min(4)])
+        )
+    }
+}
+
+/// Decode the small set of standard receipt events whose meaning is stable
+/// across contracts. Token names and decimal scales still come only from the
+/// owner-confirmed token database; the contract is never trusted to name
+/// itself.
+fn receipt_presentation(
+    wallet: Address,
+    receipt: &ReceiptDetails,
+    metadata: &TokenMetadataMap,
+) -> ReceiptPresentation {
+    let transfer = keccak256("Transfer(address,address,uint256)");
+    let approval = keccak256("Approval(address,address,uint256)");
+    let approval_for_all = keccak256("ApprovalForAll(address,address,bool)");
+    let transfer_single = keccak256("TransferSingle(address,address,address,uint256,uint256)");
+    let mut flows = std::collections::BTreeMap::<Address, ReceiptTokenFlow>::new();
+    let mut events = Vec::new();
+    let mut decoded = 0usize;
+
+    for log in &receipt.logs {
+        let Some(signature) = log.topics.first().copied() else {
+            continue;
+        };
+        if signature == transfer && log.topics.len() == 3 && log.data.len() == 32 {
+            let from = topic_address(log.topics[1]);
+            let to = topic_address(log.topics[2]);
+            let amount = U256::from_be_slice(&log.data);
+            decoded += 1;
+            if from == wallet || to == wallet {
+                let flow = flows.entry(log.address).or_default();
+                if from == wallet {
+                    flow.outgoing = flow.outgoing.saturating_add(amount);
+                }
+                if to == wallet {
+                    flow.incoming = flow.incoming.saturating_add(amount);
+                }
+                events.push((
+                    "Token transfer".to_owned(),
+                    format!(
+                        "{} from {from:#x} to {to:#x}",
+                        token_amount(amount, log.address, metadata)
+                    ),
+                ));
+            }
+        } else if signature == transfer && log.topics.len() == 4 && log.data.is_empty() {
+            let from = topic_address(log.topics[1]);
+            let to = topic_address(log.topics[2]);
+            let token_id = U256::from_be_slice(log.topics[3].as_slice());
+            decoded += 1;
+            if from == wallet || to == wallet {
+                events.push((
+                    "NFT transfer".to_owned(),
+                    format!(
+                        "{} token #{token_id} from {from:#x} to {to:#x}",
+                        trusted_token_label(log.address, metadata)
+                    ),
+                ));
+            }
+        } else if signature == approval && log.topics.len() == 3 && log.data.len() == 32 {
+            let owner = topic_address(log.topics[1]);
+            let spender = topic_address(log.topics[2]);
+            decoded += 1;
+            if owner == wallet {
+                events.push((
+                    "Token approval".to_owned(),
+                    format!(
+                        "Allowed {spender:#x} to spend {}",
+                        token_amount(U256::from_be_slice(&log.data), log.address, metadata)
+                    ),
+                ));
+            }
+        } else if signature == approval_for_all && log.topics.len() == 3 && log.data.len() == 32 {
+            let owner = topic_address(log.topics[1]);
+            let operator = topic_address(log.topics[2]);
+            decoded += 1;
+            if owner == wallet {
+                let enabled = U256::from_be_slice(&log.data) != U256::ZERO;
+                events.push((
+                    "Collection approval".to_owned(),
+                    format!(
+                        "{} operator access for {operator:#x} on {}",
+                        if enabled { "Enabled" } else { "Removed" },
+                        trusted_token_label(log.address, metadata)
+                    ),
+                ));
+            }
+        } else if signature == transfer_single && log.topics.len() == 4 && log.data.len() == 64 {
+            let from = topic_address(log.topics[2]);
+            let to = topic_address(log.topics[3]);
+            decoded += 1;
+            if from == wallet || to == wallet {
+                let token_id = U256::from_be_slice(&log.data[..32]);
+                let amount = U256::from_be_slice(&log.data[32..]);
+                events.push((
+                    "Multi-token transfer".to_owned(),
+                    format!(
+                        "{amount} of token #{token_id} on {} from {from:#x} to {to:#x}",
+                        trusted_token_label(log.address, metadata)
+                    ),
+                ));
+            }
+        }
+    }
+
+    let effects = flows
+        .into_iter()
+        .map(|(token, flow)| ReceiptEffect {
+            label: trusted_token_label(token, metadata),
+            amount: signed_token_amount(flow.incoming, flow.outgoing, token, metadata),
+            detail: format!(
+                "Receipt Transfer events: {} in, {} out",
+                token_amount(flow.incoming, token, metadata),
+                token_amount(flow.outgoing, token, metadata)
+            ),
+        })
+        .collect();
+    ReceiptPresentation {
+        effects,
+        events,
+        decoded,
+    }
+}
+
+async fn transaction_inspection_document(
+    pending: &PendingTransaction,
+    wallet: Address,
+    network: &NetworkConfig,
+    metadata: &TokenMetadataMap,
+    transaction_hash: Option<&str>,
+    receipt: Option<&ReceiptDetails>,
+    receipt_error: Option<&str>,
+) -> Result<ReviewDocument> {
+    let summary = match receipt {
+        Some(receipt) if receipt.succeeded => {
+            "This transaction was mined successfully. Receipt-derived asset movements and decoded events are shown before the original calls."
+        }
+        Some(_) => {
+            "This transaction was mined but reverted. No state changes from its calls were committed; the network fee was still paid."
+        }
+        None => {
+            "This lifecycle record has no readable mined receipt yet. The original calls are decoded below so the request remains understandable."
+        }
+    };
+    let mut request = ApprovalRequest::new(ApprovalKind::Transaction, "Transaction", summary)
+        .fact("Status", format!("{:?}", pending.status))
+        .fact("Account", &pending.wallet_id)
+        .fact("Network", &pending.network_name)
+        .fact("Chain ID", &pending.chain_id)
+        .fact("Sender", format!("{wallet:#x}"))
+        .fact(
+            "Plan source",
+            pending
+                .plan_source
+                .as_deref()
+                .unwrap_or("constructed locally by this wallet"),
+        )
+        .fact("Created", pending.created_at.to_string())
+        .fact("Last updated", pending.updated_at.to_string())
+        .fact("Policy revision", pending.policy_revision.to_string())
+        .fact("Plan digest", &pending.digest);
+    request.id = pending.request_id;
+    if let Some(hash) = transaction_hash {
+        request = request.fact("Transaction hash", hash);
+    }
+
+    request = request.section_kind(
+        ApprovalSectionKind::Effects,
+        "Receipt-derived wallet changes",
+    );
+    if let Some(receipt) = receipt {
+        let presentation = receipt_presentation(wallet, receipt, metadata);
+        if receipt.succeeded {
+            if presentation.effects.is_empty() {
+                request = request.fact(
+                    "Result",
+                    "No wallet-directed ERC-20 Transfer events were present in this receipt.",
+                );
+            } else {
+                for effect in presentation.effects {
+                    request = request
+                        .fact(effect.label, effect.amount)
+                        .fact("", effect.detail);
+                }
+            }
+        } else {
+            request = request.fact(
+                "Result",
+                "Reverted — the calls committed no token or permission changes.",
+            );
+        }
+        request = request.fact(
+            "Network fee",
+            format!(
+                "-{}",
+                native_amount(
+                    U256::from(receipt.gas_used)
+                        .saturating_mul(U256::from(receipt.effective_gas_price)),
+                    network,
+                )
+            ),
+        );
+
+        request = request.section_kind(ApprovalSectionKind::Details, "Decoded receipt events");
+        if presentation.events.is_empty() {
+            request = request.fact(
+                "Result",
+                "No wallet-relevant standard transfer or approval events were decoded.",
+            );
+        } else {
+            for (label, value) in presentation
+                .events
+                .into_iter()
+                .take(MAX_DISPLAYED_RECEIPT_EVENTS)
+            {
+                request = request.fact(label, value);
+            }
+        }
+        request = request.fact(
+            "Coverage",
+            if receipt.logs.len() > MAX_DISPLAYED_RECEIPT_EVENTS {
+                format!(
+                    "Decoded {} of {} receipt logs; showing up to {MAX_DISPLAYED_RECEIPT_EVENTS} wallet-relevant events.",
+                    presentation.decoded,
+                    receipt.logs.len()
+                )
+            } else {
+                format!(
+                    "Decoded {} of {} receipt logs.",
+                    presentation.decoded,
+                    receipt.logs.len()
+                )
+            },
+        );
+        if !receipt.logs.is_empty() {
+            request = request.warning("Standard token events are decoded locally from the receipt. They are useful evidence, but unusual contracts can omit or emit misleading events, so this is not a complete archival state diff.");
+        }
+    } else {
+        request = request.fact("Receipt", "Not available");
+    }
+
+    let interpretations = interpret_steps(&pending.execution_plan.ordered_steps, metadata).await;
+    for (step, interpretation) in pending
+        .execution_plan
+        .ordered_steps
+        .iter()
+        .zip(interpretations)
+    {
+        request = request
+            .section_kind(ApprovalSectionKind::Action, format!("Call {}", step.step))
+            .fact(
+                "What it does",
+                interpretation.description.unwrap_or_else(|| {
+                    "Unrecognized contract call — verify the target and exact calldata.".to_owned()
+                }),
+            )
+            .fact("Target", format!("{:#x}", step.transaction.to))
+            .fact(
+                "Native value",
+                native_amount(
+                    step.transaction
+                        .value
+                        .as_str()
+                        .parse::<U256>()
+                        .unwrap_or_default(),
+                    network,
+                ),
+            )
+            .fact("Execution", format!("{:?}", step.kind));
+        for detail in interpretation.details {
+            request = request.fact("·", detail);
+        }
+        request = request.fact("Calldata", calldata_summary(&step.transaction.data));
+        for warning in interpretation.warnings {
+            request = request.warning(warning);
+        }
+    }
+
+    if let Some(receipt) = receipt {
+        request = request
+            .section_kind(ApprovalSectionKind::Fees, "Mined receipt")
+            .fact(
+                "Outcome",
+                if receipt.succeeded {
+                    "Succeeded"
+                } else {
+                    "Reverted"
+                },
+            )
+            .fact("Block", receipt.block_number.to_string())
+            .fact("Block hash", format!("{:#x}", receipt.block_hash))
+            .fact("Gas used", receipt.gas_used.to_string())
+            .fact(
+                "Effective gas price",
+                format!("{} wei", receipt.effective_gas_price),
+            )
+            .fact(
+                "Actual network fee",
+                native_amount(
+                    U256::from(receipt.gas_used)
+                        .saturating_mul(U256::from(receipt.effective_gas_price)),
+                    network,
+                ),
+            );
+    }
+    if let Some(error) = receipt_error {
+        request = request.warning(format!(
+            "The latest receipt lookup failed: {error}. Retry inspection to query another configured RPC."
+        ));
+    }
+    if let Some(review_digest) = pending.review_digest.as_deref() {
+        request = request.fact("Review digest", review_digest);
+    }
+
+    let exact_plan = serde_json::to_string_pretty(&pending.execution_plan)
+        .context("failed to render exact execution plan")?;
+    Ok(ReviewDocument::from_request(request, vec![exact_plan]))
 }
 
 /// One durable owner-visible activity record. Signature requests remain in
@@ -729,6 +1146,82 @@ impl OwnerApi {
 
     pub fn transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
         PendingStore::production(self.config.data_dir())?.get(request_id)
+    }
+
+    /// Build the owner-facing transaction view from the encrypted lifecycle
+    /// row and, when the chain has one, its complete mined receipt.
+    pub async fn transaction_inspection(
+        &self,
+        request_id: Uuid,
+    ) -> Result<OwnerTransactionInspection> {
+        let pending = self.transaction(request_id)?;
+        let chain_id = pending
+            .chain_id
+            .parse::<u64>()
+            .context("stored transaction chain ID is invalid")?;
+        let network = self.config.network_by_chain_id(&pending.chain_id)?;
+        let wallet = self.config.wallet(&pending.wallet_id)?;
+
+        let mut candidates = Vec::new();
+        if pending.status == PendingStatus::Cancelled {
+            candidates.extend(pending.cancel_transaction_hashes.iter().rev().cloned());
+        }
+        if let Some(hash) = pending
+            .broadcast_transaction_hash
+            .as_ref()
+            .or(pending.signed_transaction_hash.as_ref())
+        {
+            candidates.push(hash.clone());
+        }
+        candidates.dedup();
+
+        let mut receipt = None;
+        let mut receipt_hash = None;
+        let mut receipt_error = None;
+        for hash in &candidates {
+            match transaction_receipt_details(&network, hash).await {
+                Ok(Some(details)) => {
+                    receipt = Some(details);
+                    receipt_hash = Some(hash.clone());
+                    receipt_error = None;
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    receipt_error = Some(ekubo_wallet_core::sanitize::stripped_capped(
+                        &format!("{error:#}"),
+                        500,
+                    ));
+                }
+            }
+        }
+
+        let mut token_targets = plan_token_targets(&pending.execution_plan.ordered_steps)
+            .await
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(receipt) = &receipt {
+            token_targets.extend(receipt.logs.iter().map(|log| log.address));
+        }
+        let metadata = TokenStore::production(self.config.data_dir())?
+            .display_metadata(chain_id, &token_targets.into_iter().collect::<Vec<_>>())?;
+        let document = transaction_inspection_document(
+            &pending,
+            wallet.address,
+            &network,
+            &metadata,
+            receipt_hash
+                .as_deref()
+                .or_else(|| candidates.first().map(String::as_str)),
+            receipt.as_ref(),
+            receipt_error.as_deref(),
+        )
+        .await?;
+        Ok(OwnerTransactionInspection {
+            document,
+            receipt_loaded: receipt.is_some(),
+            receipt_error,
+        })
     }
 
     /// Reconcile one lifecycle row against its configured network. This is a

@@ -487,7 +487,7 @@ fn command_palette_reaches_every_desktop_route() {
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
     assert_eq!(Route::ALL.first(), Some(&Route::Activity));
-    assert_eq!(Route::Activity.label(), "Activity");
+    assert_eq!(Route::Activity.label(), "Inbox");
     assert_eq!(Route::Overview.label(), "Portfolio");
     assert!(NAVIGATION_RAIL_WIDTH >= px(80.0));
     assert!(NAVIGATION_BUTTON_SIZE >= px(52.0));

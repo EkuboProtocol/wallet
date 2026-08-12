@@ -1,5 +1,9 @@
 use super::*;
 use ekubo_wallet_core::policy_store::DatabaseKey;
+use ekubo_wallet_core::{
+    approval_summary::{TokenMetadata, TokenMetadataMap},
+    rpc::{ReceiptDetails, ReceiptLog},
+};
 
 #[test]
 fn owner_management_can_find_disabled_configured_chains() {
@@ -11,6 +15,53 @@ fn owner_management_can_find_disabled_configured_chains() {
 
     assert!(contains_configured_chain(&config, chain_id));
     assert!(!contains_configured_chain(&config, u64::MAX));
+}
+
+fn address_topic(address: Address) -> B256 {
+    let mut bytes = [0_u8; 32];
+    bytes[12..].copy_from_slice(address.as_slice());
+    B256::from(bytes)
+}
+
+#[test]
+fn receipt_presentation_aggregates_wallet_transfers_with_trusted_metadata() {
+    let wallet = Address::repeat_byte(0x11);
+    let sender = Address::repeat_byte(0x22);
+    let token = Address::repeat_byte(0x33);
+    let amount = U256::from(1_250_000_u64);
+    let receipt = ReceiptDetails {
+        succeeded: true,
+        block_number: 10,
+        block_hash: B256::repeat_byte(0x44),
+        gas_used: 21_000,
+        effective_gas_price: 2,
+        logs: vec![ReceiptLog {
+            address: token,
+            topics: vec![
+                keccak256("Transfer(address,address,uint256)"),
+                address_topic(sender),
+                address_topic(wallet),
+            ],
+            data: amount.to_be_bytes::<32>().to_vec(),
+        }],
+    };
+    let metadata = TokenMetadataMap::from([(
+        token,
+        TokenMetadata {
+            symbol: Some("USDC".into()),
+            decimals: Some(6),
+        },
+    )]);
+
+    let presentation = receipt_presentation(wallet, &receipt, &metadata);
+
+    assert_eq!(presentation.decoded, 1);
+    assert_eq!(presentation.effects.len(), 1);
+    assert_eq!(presentation.effects[0].label, format!("USDC ({token:#x})"));
+    assert_eq!(presentation.effects[0].amount, "+1.25 USDC");
+    assert_eq!(presentation.events.len(), 1);
+    assert!(presentation.events[0].1.contains("1.25 USDC"));
+    assert!(presentation.events[0].1.contains(&format!("{sender:#x}")));
 }
 
 #[test]
