@@ -179,3 +179,85 @@ fn macos_picker_output_is_decoded_with_bounded_png_dimensions() {
     );
     assert_eq!(decoded.rgba.as_slice(), original.rgba.as_slice());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_picker_uses_a_private_named_file_and_removes_it_after_decoding() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let original = qr_frame(&[pairing_uri("77", "88")]);
+    let image =
+        image::RgbaImage::from_raw(original.width, original.height, original.rgba.clone()).unwrap();
+    let mut encoded = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let mut capture_path = None;
+    let mut capture_directory = None;
+
+    let decoded = capture_macos_screen_with(|path| {
+        assert!(path.is_file());
+        assert!(!path.to_string_lossy().starts_with("/dev/fd/"));
+        let directory = path.parent().unwrap();
+        assert_eq!(
+            std::fs::metadata(directory)?.permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o077, 0);
+        capture_path = Some(path.to_owned());
+        capture_directory = Some(directory.to_owned());
+        // ScreenCaptureKit is allowed to replace the directory entry. The
+        // production reader must reopen it and restore private permissions.
+        std::fs::remove_file(path)?;
+        std::fs::write(path, encoded.get_ref())?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+        Ok(true)
+    })
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        (decoded.width, decoded.height),
+        (original.width, original.height)
+    );
+    assert_eq!(decoded.rgba.as_slice(), original.rgba.as_slice());
+    assert!(!capture_path.unwrap().exists());
+    assert!(!capture_directory.unwrap().exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_picker_refuses_a_replaced_symlink() {
+    let result = capture_macos_screen_with(|path| {
+        let decoy = path.with_file_name("decoy.png");
+        std::fs::write(&decoy, b"not a capture")?;
+        std::fs::remove_file(path)?;
+        std::os::unix::fs::symlink(decoy, path)?;
+        Ok(true)
+    });
+    let Err(error) = result else {
+        panic!("a symlink must not be accepted as a screen capture");
+    };
+    assert!(error.to_string().contains("securely open"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_picker_cancellation_and_empty_capture_do_not_decode() {
+    assert!(
+        capture_macos_screen_with(|path| {
+            assert!(path.is_file());
+            Ok(false)
+        })
+        .unwrap()
+        .is_none()
+    );
+    let result = capture_macos_screen_with(|path| {
+        assert!(path.is_file());
+        Ok(true)
+    });
+    let Err(error) = result else {
+        panic!("an empty successful capture must be rejected");
+    };
+    assert!(error.to_string().contains("returned no image"));
+}

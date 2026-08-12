@@ -37,24 +37,25 @@ use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
-    App, ClipboardItem, Context, Entity, FocusHandle, KeyBinding, MouseButton, ObjectFit, QuitMode,
-    Render, RenderImage, ScrollAnchor, ScrollHandle, SharedString, Subscription, Task,
+    App, ClipboardItem, Context, ElementId, Entity, FocusHandle, Interactivity, KeyBinding,
+    MouseButton, ObjectFit, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle,
     WindowOptions, actions, div, img, prelude::*, px, size, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme, Colorize, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root,
-    Selectable, Sizable, StyledExt, Theme, ThemeMode, ThemeTokens, WindowExt as _,
+    ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
+    Sizable, StyledExt, Theme, ThemeMode, ThemeTokens, WindowExt as _,
     alert::Alert,
     button::{Button, ButtonVariant, ButtonVariants},
     dialog::DialogButtonProps,
     group_box::{GroupBox, GroupBoxVariants as _},
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputContentType, InputEvent, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
     scroll::ScrollableElement,
     spinner::Spinner,
-    switch::Switch,
+    text::TextView,
 };
 use std::{
     borrow::Cow,
@@ -75,8 +76,167 @@ const UI_FONT_FAMILY: &str = "Suisse Intl";
 const MONO_FONT_FAMILY: &str = "Suisse Intl Mono";
 const NAVIGATION_RAIL_WIDTH: gpui::Pixels = px(80.0);
 const NAVIGATION_BUTTON_SIZE: gpui::Pixels = px(52.0);
+const CONTROL_HEIGHT: gpui::Pixels = px(44.0);
+const COMPACT_CONTROL_HEIGHT: gpui::Pixels = px(40.0);
+const CONTROL_RADIUS: gpui::Pixels = px(14.0);
+const SURFACE_RADIUS: gpui::Pixels = px(16.0);
 const REPOSITORY_URL: &str = "https://github.com/EkuboProtocol/wallet";
 const LATEST_RELEASE_URL: &str = "https://github.com/EkuboProtocol/wallet/releases/latest";
+
+fn app_button(id: impl Into<ElementId>) -> Button {
+    Button::new(id)
+        .with_size(CONTROL_HEIGHT)
+        .rounded(CONTROL_RADIUS)
+        .font_medium()
+}
+
+/// The component button exposes a stable accessibility ID but not an explicit
+/// label for icon-only controls. This thin wrapper applies a screen-reader name
+/// to the same underlying focusable button without changing its visual layout.
+#[derive(IntoElement)]
+struct AccessibleButton(Button);
+
+impl InteractiveElement for AccessibleButton {
+    fn interactivity(&mut self) -> &mut Interactivity {
+        self.0.interactivity()
+    }
+}
+
+impl StatefulInteractiveElement for AccessibleButton {}
+
+impl RenderOnce for AccessibleButton {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        self.0
+    }
+}
+
+fn accessible_button(button: Button, label: impl Into<SharedString>) -> AccessibleButton {
+    AccessibleButton(button).aria_label(label)
+}
+
+fn app_input(state: &Entity<InputState>, cx: &App) -> Input {
+    // The upstream medium control is only 32px tall. Large inputs meet the
+    // 44px interaction target; the surface override matches the Figma field
+    // fill while leaving the component's focus border intact.
+    Input::new(state).large().bg(cx.theme().secondary)
+}
+
+fn field_error(
+    id: impl Into<ElementId>,
+    message: impl Into<SharedString>,
+    cx: &App,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .role(Role::Alert)
+        .text_sm()
+        .text_color(cx.theme().danger)
+        .child(message.into())
+}
+
+fn copy_button(
+    id: impl Into<ElementId>,
+    value: String,
+    accessibility_label: impl Into<SharedString>,
+) -> Button {
+    let accessibility_label = accessibility_label.into();
+    app_button(id)
+        .with_size(COMPACT_CONTROL_HEIGHT)
+        .rounded(px(12.0))
+        .ghost()
+        .icon(IconName::Copy)
+        .label("Copy")
+        .tooltip(accessibility_label.clone())
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+        })
+}
+
+fn markdown_escape_plain_text(value: &str) -> SharedString {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(
+            character,
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '#'
+                | '+'
+                | '-'
+                | '.'
+                | '!'
+                | '|'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.into()
+}
+
+fn selectable_text(id: impl Into<ElementId>, value: &str) -> TextView {
+    TextView::markdown(id, markdown_escape_plain_text(value)).selectable(true)
+}
+
+fn markdown_fenced_code(value: &str) -> SharedString {
+    let longest_run = value
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat(longest_run.saturating_add(1).max(3));
+    format!("{fence}text\n{value}\n{fence}").into()
+}
+
+fn selectable_code_text(id: impl Into<ElementId>, value: &str) -> TextView {
+    TextView::markdown(id, markdown_fenced_code(value)).selectable(true)
+}
+
+fn copyable_value(id: impl Into<SharedString>, label: &'static str, value: String) -> gpui::Div {
+    let id = id.into();
+    let text_id = SharedString::from(format!("{id}-text"));
+    let button_id = SharedString::from(format!("{id}-copy"));
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(div().text_sm().font_medium().child(label))
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    selectable_text(text_id, &value)
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .font_family(MONO_FONT_FAMILY)
+                        .text_sm(),
+                )
+                .child(copy_button(button_id, value, format!("Copy {label}"))),
+        )
+}
+
+fn primary_enter(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::PressEnter {
+            secondary: false,
+            shift: false
+        }
+    )
+}
 
 fn application_license_url() -> String {
     if BUILD_COMMIT.is_empty() {
@@ -154,7 +314,7 @@ fn settings_section(title: &'static str, content: impl IntoElement) -> gpui::Div
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().text_lg().font_semibold().child(title))
+        .child(div().text_lg().font_medium().child(title))
         .child(content)
 }
 
@@ -497,6 +657,7 @@ pub struct WalletWindow {
     command_palette: bool,
     command_palette_list: Option<Entity<ListState<RouteListDelegate>>>,
     command_palette_subscription: Option<Subscription>,
+    form_input_subscriptions: Vec<Subscription>,
     token_list: Option<Entity<ListState<TokenListDelegate>>>,
     token_proposal_list: Option<Entity<ListState<TokenProposalListDelegate>>>,
     token_list_url_input: Option<Entity<InputState>>,
@@ -1062,7 +1223,7 @@ fn render_activity_row(
                         .flex_wrap()
                         .gap_2()
                         .child(
-                            Button::new(SharedString::from(format!(
+                            app_button(SharedString::from(format!(
                                 "inspect-transaction-{request_id}"
                             )))
                             .label("Inspect")
@@ -1075,7 +1236,7 @@ fn render_activity_row(
                         )
                         .when(actions.refresh, |buttons| {
                             buttons.child(
-                                Button::new(SharedString::from(format!(
+                                app_button(SharedString::from(format!(
                                     "refresh-transaction-{request_id}"
                                 )))
                                 .label(if busy { "Working…" } else { "Refresh" })
@@ -1089,7 +1250,7 @@ fn render_activity_row(
                         })
                         .when(actions.send, |buttons| {
                             buttons.child(
-                                Button::new(SharedString::from(format!(
+                                app_button(SharedString::from(format!(
                                     "rebroadcast-transaction-{request_id}"
                                 )))
                                 .label(if status == PendingStatus::Signed {
@@ -1107,7 +1268,7 @@ fn render_activity_row(
                         })
                         .when(actions.cancel, |buttons| {
                             buttons.child(
-                                Button::new(SharedString::from(format!(
+                                app_button(SharedString::from(format!(
                                     "cancel-transaction-{request_id}"
                                 )))
                                 .label(if status == PendingStatus::Cancelling {
@@ -1130,7 +1291,7 @@ fn render_activity_row(
                         })
                         .when(actions.discard, |buttons| {
                             buttons.child(
-                                Button::new(SharedString::from(format!("discard-{request_id}")))
+                                app_button(SharedString::from(format!("discard-{request_id}")))
                                     .label("Discard unsent signature")
                                     .danger()
                                     .disabled(busy)
@@ -1173,20 +1334,18 @@ fn render_activity_row(
                     h_flex()
                         .gap_2()
                         .child(
-                            Button::new(SharedString::from(format!(
-                                "inspect-message-{request_id}"
-                            )))
-                            .label("Inspect")
-                            .on_click(move |_, _, cx| {
-                                let _ = inspect_editor.update(cx, |view, cx| {
-                                    view.selected_record = Some(request_id);
-                                    cx.notify();
-                                });
-                            }),
+                            app_button(SharedString::from(format!("inspect-message-{request_id}")))
+                                .label("Inspect")
+                                .on_click(move |_, _, cx| {
+                                    let _ = inspect_editor.update(cx, |view, cx| {
+                                        view.selected_record = Some(request_id);
+                                        cx.notify();
+                                    });
+                                }),
                         )
                         .when(item.status == MessageStatus::AwaitingApproval, |buttons| {
                             buttons.child(
-                                Button::new(SharedString::from(format!(
+                                app_button(SharedString::from(format!(
                                     "review-message-activity-{request_id}"
                                 )))
                                 .label("Review")
@@ -1229,7 +1388,7 @@ fn render_activity_row(
                     h_flex()
                         .gap_2()
                         .child(
-                            Button::new(SharedString::from(format!(
+                            app_button(SharedString::from(format!(
                                 "inspect-typed-data-{request_id}"
                             )))
                             .label("Inspect")
@@ -1244,7 +1403,7 @@ fn render_activity_row(
                             item.status == TypedDataStatus::AwaitingApproval,
                             |buttons| {
                                 buttons.child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "review-typed-data-activity-{request_id}"
                                     )))
                                     .label("Review")
@@ -1266,13 +1425,14 @@ fn render_activity_row(
         let mut card_container = div()
             .size_full()
             .p_3()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(if selected {
                 cx.theme().primary
             } else {
                 cx.theme().border
             })
+            .bg(cx.theme().secondary)
             .flex()
             .flex_col()
             .justify_center()
@@ -2210,13 +2370,14 @@ impl ListDelegate for TokenListDelegate {
             .zip(address)
             .and_then(|identity| self.action_errors.get(&identity).cloned());
         let row_id = format!("token-{}-{}", token.chain_id, token.address);
+        let address_text_id = SharedString::from(format!("{row_id}-address"));
         let mut actions = div().flex().flex_col().flex_none().gap_1();
         if pending_removal {
             let confirm_state = state.clone();
             let owner = self.owner.clone();
             actions = actions
                 .child(
-                    Button::new(("confirm-remove-token", index.row))
+                    app_button(("confirm-remove-token", index.row))
                         .label(if removing {
                             "Authenticating…"
                         } else {
@@ -2286,7 +2447,7 @@ impl ListDelegate for TokenListDelegate {
                         }),
                 )
                 .child(
-                    Button::new(("cancel-remove-token", index.row))
+                    app_button(("cancel-remove-token", index.row))
                         .label("Cancel")
                         .disabled(removing)
                         .on_click({
@@ -2302,11 +2463,11 @@ impl ListDelegate for TokenListDelegate {
         } else {
             actions = actions
                 .child(
-                    Button::new(("edit-token", index.row))
+                    app_button(("edit-token", index.row))
                         .icon(Icon::default().path(PENCIL_ICON))
+                        .label("Edit")
                         .ghost()
                         .tooltip("Edit token")
-                        .accessibility_id("Edit token")
                         .disabled(chain_id.zip(address).is_none() || removing)
                         .on_click(move |_, window, cx| {
                             let _ = editor.update(cx, |view, cx| {
@@ -2315,11 +2476,11 @@ impl ListDelegate for TokenListDelegate {
                         }),
                 )
                 .child(
-                    Button::new(("remove-token", index.row))
+                    app_button(("remove-token", index.row))
                         .icon(Icon::default().path(TRASH_ICON))
+                        .label("Delete")
                         .ghost()
                         .tooltip("Delete token")
-                        .accessibility_id("Delete token")
                         .danger()
                         .disabled(chain_id.zip(address).is_none() || removing)
                         .on_click(move |_, _, cx| {
@@ -2396,12 +2557,11 @@ impl ListDelegate for TokenListDelegate {
                                                 ),
                                         )
                                         .child(
-                                            div()
+                                            selectable_text(address_text_id, &token.address)
                                                 .font_family(MONO_FONT_FAMILY)
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .truncate()
-                                                .child(token.address.clone()),
+                                                .truncate(),
                                         )
                                         .child(
                                             div()
@@ -2475,6 +2635,7 @@ impl ListDelegate for TokenProposalListDelegate {
     ) -> Option<Self::Item> {
         let proposal = self.proposals.get(index.row)?;
         let token = &proposal.token;
+        let token_address = token.address.to_checksum(None);
         let network_name = self
             .network_names
             .get(&token.chain_id)
@@ -2509,12 +2670,11 @@ impl ListDelegate for TokenProposalListDelegate {
                                 ),
                         )
                         .child(
-                            div()
+                            selectable_text(("token-proposal-address", index.row), &token_address)
                                 .font_family(MONO_FONT_FAMILY)
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .truncate()
-                                .child(token.address.to_checksum(None)),
+                                .truncate(),
                         )
                         .child(
                             div()
@@ -2949,6 +3109,7 @@ impl WalletWindow {
             command_palette: false,
             command_palette_list: None,
             command_palette_subscription: None,
+            form_input_subscriptions: Vec::new(),
             token_list: None,
             token_proposal_list: None,
             token_list_url_input: None,
@@ -3146,9 +3307,19 @@ impl WalletWindow {
             }
         }
         if self.token_list_url_input.is_none() {
-            self.token_list_url_input = Some(cx.new(|cx| {
+            let input = cx.new(|cx| {
                 InputState::new(window, cx).placeholder("https://tokens.example.org/tokens.json")
-            }));
+            });
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |view, _, event: &InputEvent, _, cx| {
+                    if primary_enter(event) {
+                        view.import_token_list_for_review(cx);
+                    }
+                },
+            ));
+            self.token_list_url_input = Some(input);
         }
         if self.token_chain_id_input.is_none() {
             self.token_chain_id_input =
@@ -3169,24 +3340,66 @@ impl WalletWindow {
                 Some(cx.new(|cx| InputState::new(window, cx).placeholder("USD Coin (optional)")));
         }
         if self.token_decimals_input.is_none() {
-            self.token_decimals_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder("18")));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("18"));
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |view, _, event: &InputEvent, _, cx| {
+                    if primary_enter(event) && view.token_editor_open {
+                        view.save_token_editor(cx);
+                    }
+                },
+            ));
+            self.token_decimals_input = Some(input);
         }
         if self.account_id_input.is_none() {
-            self.account_id_input = Some(cx.new(|cx| {
+            let input = cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Account name, for example primary")
-            }));
+            });
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |view, _, event: &InputEvent, window, cx| {
+                    if primary_enter(event) {
+                        view.create_account(window, cx);
+                    }
+                },
+            ));
+            self.account_id_input = Some(input);
         }
         if self.private_key_input.is_none() {
-            self.private_key_input = Some(cx.new(|cx| {
+            let input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("0x-prefixed 32-byte private key")
                     .masked(true)
-            }));
+            });
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |view, _, event: &InputEvent, window, cx| {
+                    if primary_enter(event) {
+                        view.import_account(window, cx);
+                    }
+                },
+            ));
+            self.private_key_input = Some(input);
         }
         if self.walletconnect_uri_input.is_none() {
-            self.walletconnect_uri_input =
-                Some(cx.new(|cx| InputState::new(window, cx).placeholder("wc: pairing URI")));
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("wc: pairing URI")
+                    .masked(true)
+            });
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |view, _, event: &InputEvent, window, cx| {
+                    if primary_enter(event) {
+                        view.connect_walletconnect(window, cx);
+                    }
+                },
+            ));
+            self.walletconnect_uri_input = Some(input);
         }
         if self.network_json_input.is_none() {
             self.network_json_input = Some(cx.new(|cx| {
@@ -3256,10 +3469,18 @@ impl WalletWindow {
             }));
         }
         if self.network_documentation_url_input.is_none() {
-            self.network_documentation_url_input =
-                Some(cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("Optional documentation URL")
-                }));
+            let input =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Optional documentation URL"));
+            self.form_input_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |view, _, event: &InputEvent, _, cx| {
+                    if primary_enter(event) && view.network_editor_open {
+                        view.save_network_editor(cx);
+                    }
+                },
+            ));
+            self.network_documentation_url_input = Some(input);
         }
         if self.policy_json_input.is_none() {
             self.policy_json_input = Some(cx.new(|cx| {
@@ -3744,7 +3965,10 @@ impl WalletWindow {
             cx.notify();
             return;
         }
-        input.update(cx, |input, cx| input.set_value("", window, cx));
+        input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_masked(true, window, cx);
+        });
     }
 
     fn begin_walletconnect_uri(&mut self, uri: &str, cx: &mut Context<Self>) -> Result<()> {
@@ -3793,6 +4017,31 @@ impl WalletWindow {
         .detach();
         cx.notify();
         Ok(())
+    }
+
+    fn connect_scanned_walletconnect_uri(
+        &mut self,
+        uri: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.begin_walletconnect_uri(uri, cx) {
+            Ok(()) => {
+                // A scanned URI contains pairing key material. Never copy it
+                // into the visible text field or retain it after pairing has
+                // begun; clear any previously pasted value as well.
+                if let Some(input) = self.walletconnect_uri_input.as_ref() {
+                    input.update(cx, |input, cx| {
+                        input.set_value("", window, cx);
+                        input.set_masked(true, window, cx);
+                    });
+                }
+            }
+            Err(error) => self.set_route_error(
+                Route::WalletConnect,
+                format!("Could not connect to the scanned code: {error:#}"),
+            ),
+        }
     }
 
     fn scan_walletconnect_screen(&mut self, cx: &mut Context<Self>) {
@@ -3857,13 +4106,7 @@ impl WalletWindow {
                         view.walletconnect_scan = WalletConnectScanState::Idle;
                         match uri {
                             Ok(uri) => {
-                                if let Some(input) = view.walletconnect_uri_input.as_ref() {
-                                    input.update(cx, |input, cx| {
-                                        input.set_value(uri.as_str(), window, cx);
-                                        input.focus(window, cx);
-                                    });
-                                }
-                                view.clear_route_error(Route::WalletConnect);
+                                view.connect_scanned_walletconnect_uri(&uri, window, cx);
                             }
                             Err(error) => view.set_route_error(
                                 Route::WalletConnect,
@@ -3918,15 +4161,7 @@ impl WalletWindow {
             return;
         };
         match choices.take(index) {
-            Ok(uri) => {
-                if let Some(input) = self.walletconnect_uri_input.as_ref() {
-                    input.update(cx, |input, cx| {
-                        input.set_value(uri.as_str(), window, cx);
-                        input.focus(window, cx);
-                    });
-                }
-                self.clear_route_error(Route::WalletConnect);
-            }
+            Ok(uri) => self.connect_scanned_walletconnect_uri(&uri, window, cx),
             Err(error) => self.set_route_error(
                 Route::WalletConnect,
                 format!("Could not read the QR code: {error:#}"),
@@ -4088,7 +4323,10 @@ impl WalletWindow {
             return;
         }
         let secret = zeroize::Zeroizing::new(key_input.read(cx).value().trim().to_owned());
-        key_input.update(cx, |input, cx| input.set_value("", window, cx));
+        key_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.set_masked(true, window, cx);
+        });
         let key = match PrivateKeyMaterial::from_hex(&secret) {
             Ok(key) => key,
             Err(error) => {
@@ -6638,7 +6876,7 @@ impl WalletWindow {
             .items_center()
             .gap_2();
         for route in Route::ALL {
-            let button = Button::new(SharedString::from(format!(
+            let button = app_button(SharedString::from(format!(
                 "sidebar-route-{}",
                 route.label()
             )))
@@ -6647,8 +6885,8 @@ impl WalletWindow {
             .h(NAVIGATION_BUTTON_SIZE)
             .ghost()
             .selected(route == self.route)
+            .toggled(route == self.route)
             .disabled(self.legal_gate)
-            .accessibility_id(route.label())
             .tooltip(format!("{}  {}", route.label(), route.shortcut()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
@@ -6667,6 +6905,7 @@ impl WalletWindow {
             } else {
                 button.child(Icon::new(route.icon()).size(px(30.0)))
             };
+            let button = accessible_button(button, route.label());
             if route == Route::Reviews {
                 let count = if pending_reviews > 99 {
                     "99+".to_owned()
@@ -6720,8 +6959,9 @@ impl WalletWindow {
                                 .max_w_full()
                                 .p_3()
                                 .border_1()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_wrap()
                                 .items_center()
@@ -6749,7 +6989,7 @@ impl WalletWindow {
                                         ),
                                 )
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "review-transaction-{request_id}"
                                     )))
                                     .label("Review")
@@ -6771,8 +7011,9 @@ impl WalletWindow {
                                 .max_w_full()
                                 .p_3()
                                 .border_1()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_wrap()
                                 .items_center()
@@ -6783,7 +7024,7 @@ impl WalletWindow {
                                     request.wallet_id, request.chain_id, request_id
                                 )))
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "review-typed-data-{request_id}"
                                     )))
                                     .label("Review")
@@ -6804,8 +7045,9 @@ impl WalletWindow {
                                 .max_w_full()
                                 .p_3()
                                 .border_1()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_wrap()
                                 .items_center()
@@ -6816,7 +7058,7 @@ impl WalletWindow {
                                     request.wallet_id, request_id
                                 )))
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "review-message-{request_id}"
                                     )))
                                     .label("Review")
@@ -6837,8 +7079,9 @@ impl WalletWindow {
                                 .max_w_full()
                                 .p_3()
                                 .border_1()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_wrap()
                                 .items_center()
@@ -6849,7 +7092,7 @@ impl WalletWindow {
                                     proposal.source_revision
                                 )))
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "open-policy-proposal-{wallet_id}"
                                     )))
                                     .label("Open Policies")
@@ -6871,8 +7114,9 @@ impl WalletWindow {
                                 .max_w_full()
                                 .p_3()
                                 .border_1()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_wrap()
                                 .items_center()
@@ -6883,7 +7127,7 @@ impl WalletWindow {
                                     proposal.name
                                 )))
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "open-network-proposal-{chain_id}"
                                     )))
                                     .label("Open Networks")
@@ -6908,8 +7152,9 @@ impl WalletWindow {
                                 .max_w_full()
                                 .p_3()
                                 .border_1()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_wrap()
                                 .items_center()
@@ -6921,7 +7166,7 @@ impl WalletWindow {
                                     )),
                                 )
                                 .child(
-                                    Button::new(("open-token-proposal", index))
+                                    app_button(("open-token-proposal", index))
                                         .label("Open Tokens")
                                         .primary()
                                         .on_click(cx.listener(|view, _, _, cx| {
@@ -6935,9 +7180,10 @@ impl WalletWindow {
                     content = content.child(
                         div()
                             .p_5()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_1()
                             .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -6964,17 +7210,27 @@ impl WalletWindow {
     ) -> gpui::AnyElement {
         let request_id = record.request_id();
         let header = |title: &'static str, status: String| {
-            h_flex()
+            let heading = format!("{title} · {status} · {request_id}");
+            div()
                 .w_full()
+                .min_w_0()
+                .flex()
+                .flex_wrap()
+                .items_center()
                 .justify_between()
                 .gap_4()
                 .child(
-                    div()
-                        .font_semibold()
-                        .child(format!("{title} · {status} · {request_id}")),
+                    selectable_text(
+                        SharedString::from(format!("activity-heading-{request_id}")),
+                        &heading,
+                    )
+                    .min_w_0()
+                    .flex_1()
+                    .whitespace_normal()
+                    .font_semibold(),
                 )
                 .child(
-                    Button::new(SharedString::from(format!(
+                    app_button(SharedString::from(format!(
                         "close-activity-detail-{request_id}"
                     )))
                     .label("Close")
@@ -6993,34 +7249,42 @@ impl WalletWindow {
                     .outline()
                     .title("Transaction details")
                     .child(header("Transaction", format!("{:?}", item.status)))
-                    .child(format!("Account: {}", item.wallet_id))
-                    .child(format!(
-                        "Network: {} · chain {}",
-                        item.network_name, item.chain_id
+                    .child(selectable_text(
+                        format!("activity-account-{request_id}"),
+                        &format!("Account: {}", item.wallet_id),
                     ))
-                    .child(format!(
-                        "Created: {} · updated: {}",
-                        item.created_at, item.updated_at
+                    .child(selectable_text(
+                        format!("activity-network-{request_id}"),
+                        &format!("Network: {} · chain {}", item.network_name, item.chain_id),
                     ))
-                    .child(format!("Policy revision: {}", item.policy_revision))
-                    .child(
-                        div().child("Plan digest").child(
-                            div()
-                                .font_family(MONO_FONT_FAMILY)
-                                .child(item.digest.clone()),
+                    .child(selectable_text(
+                        format!("activity-times-{request_id}"),
+                        &format!(
+                            "Created: {} · updated: {}",
+                            item.created_at, item.updated_at
                         ),
-                    );
+                    ))
+                    .child(selectable_text(
+                        format!("activity-policy-revision-{request_id}"),
+                        &format!("Policy revision: {}", item.policy_revision),
+                    ))
+                    .child(copyable_value(
+                        format!("activity-plan-digest-{request_id}"),
+                        "Plan digest",
+                        item.digest.clone(),
+                    ));
                 if let Some(source) = item.plan_source.as_ref() {
-                    detail = detail.child(format!("Plan source: {source}"));
+                    detail = detail.child(selectable_text(
+                        format!("activity-plan-source-{request_id}"),
+                        &format!("Plan source: {source}"),
+                    ));
                 }
                 if let Some(review_digest) = item.review_digest.as_ref() {
-                    detail = detail.child(
-                        div().child("Review digest").child(
-                            div()
-                                .font_family(MONO_FONT_FAMILY)
-                                .child(review_digest.clone()),
-                        ),
-                    );
+                    detail = detail.child(copyable_value(
+                        format!("activity-review-digest-{request_id}"),
+                        "Review digest",
+                        review_digest.clone(),
+                    ));
                 }
                 for (label, value) in [
                     ("Signed hash", item.signed_transaction_hash.as_ref()),
@@ -7028,11 +7292,14 @@ impl WalletWindow {
                     ("Block", item.block_number.as_ref()),
                 ] {
                     if let Some(value) = value {
-                        detail = detail.child(
-                            div()
-                                .child(label)
-                                .child(div().font_family(MONO_FONT_FAMILY).child(value.clone())),
-                        );
+                        detail = detail.child(copyable_value(
+                            format!(
+                                "activity-{}-{request_id}",
+                                label.to_ascii_lowercase().replace(' ', "-")
+                            ),
+                            label,
+                            value.clone(),
+                        ));
                     }
                 }
                 if let Some(hash) = item
@@ -7045,7 +7312,7 @@ impl WalletWindow {
                         block_explorer_transaction_url(networks, chain_id, hash)
                 {
                     detail = detail.child(
-                        Button::new(SharedString::from(format!(
+                        app_button(SharedString::from(format!(
                             "open-transaction-explorer-{request_id}"
                         )))
                         .label("View transaction in block explorer")
@@ -7053,34 +7320,63 @@ impl WalletWindow {
                     );
                 }
                 if let Some(fee) = item.mined_fee.as_ref() {
-                    detail = detail.child(format!(
-                        "Mined fee: {} wei · {} gas at {} wei/gas",
-                        fee.transaction_fee_wei, fee.gas_used, fee.effective_gas_price
+                    detail = detail.child(selectable_text(
+                        format!("activity-mined-fee-{request_id}"),
+                        &format!(
+                            "Mined fee: {} wei · {} gas at {} wei/gas",
+                            fee.transaction_fee_wei, fee.gas_used, fee.effective_gas_price
+                        ),
                     ));
                 }
                 if !item.cancel_transaction_hashes.is_empty() {
-                    detail =
-                        detail
-                            .child(div().font_semibold().child("Cancellation attempts"))
-                            .children(item.cancel_transaction_hashes.iter().cloned().map(|hash| {
-                                div().font_family(MONO_FONT_FAMILY).text_sm().child(hash)
-                            }));
+                    detail = detail
+                        .child(div().font_semibold().child("Cancellation attempts"))
+                        .children(
+                            item.cancel_transaction_hashes
+                                .iter()
+                                .cloned()
+                                .enumerate()
+                                .map(|(index, hash)| {
+                                    copyable_value(
+                                        format!("activity-cancel-hash-{request_id}-{index}"),
+                                        "Cancellation transaction hash",
+                                        hash,
+                                    )
+                                }),
+                        );
                 }
                 detail
                     .child(
-                        div().child("Exact execution plan").child(
-                            div()
-                                .max_h(px(360.0))
-                                .overflow_y_scrollbar()
-                                .p_3()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .font_family(MONO_FONT_FAMILY)
-                                .text_sm()
-                                .whitespace_normal()
-                                .child(exact_plan),
-                        ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .gap_2()
+                                    .child(div().font_medium().child("Exact execution plan"))
+                                    .child(copy_button(
+                                        format!("copy-execution-plan-{request_id}"),
+                                        exact_plan.clone(),
+                                        "Copy exact execution plan",
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .max_h(px(360.0))
+                                    .overflow_y_scrollbar()
+                                    .p_3()
+                                    .rounded(cx.theme().radius_lg)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().secondary)
+                                    .child(selectable_code_text(
+                                        format!("execution-plan-{request_id}"),
+                                        &exact_plan,
+                                    )),
+                            ),
                     )
                     .into_any_element()
             }
@@ -7091,53 +7387,77 @@ impl WalletWindow {
                     .outline()
                     .title("Message signature details")
                     .child(header("Message signature", format!("{:?}", item.status)))
-                    .child(format!("Account: {}", item.wallet_id))
-                    .child(format!(
-                        "Chain context: {}",
-                        item.chain_id.as_deref().unwrap_or("Not specified")
+                    .child(selectable_text(
+                        format!("activity-message-account-{request_id}"),
+                        &format!("Account: {}", item.wallet_id),
                     ))
-                    .child(format!(
-                        "Requester: {}",
-                        item.requester.as_deref().unwrap_or("Unknown requester")
-                    ))
-                    .child(format!(
-                        "Created: {} · updated: {}",
-                        item.created_at, item.updated_at
-                    ))
-                    .child(
-                        div().child("Digest").child(
-                            div()
-                                .font_family(MONO_FONT_FAMILY)
-                                .child(item.digest.clone()),
+                    .child(selectable_text(
+                        format!("activity-message-chain-{request_id}"),
+                        &format!(
+                            "Chain context: {}",
+                            item.chain_id.as_deref().unwrap_or("Not specified")
                         ),
-                    );
+                    ))
+                    .child(selectable_text(
+                        format!("activity-message-requester-{request_id}"),
+                        &format!(
+                            "Requester: {}",
+                            item.requester.as_deref().unwrap_or("Unknown requester")
+                        ),
+                    ))
+                    .child(selectable_text(
+                        format!("activity-message-times-{request_id}"),
+                        &format!(
+                            "Created: {} · updated: {}",
+                            item.created_at, item.updated_at
+                        ),
+                    ))
+                    .child(copyable_value(
+                        format!("activity-message-digest-{request_id}"),
+                        "Digest",
+                        item.digest.clone(),
+                    ));
                 if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
-                    detail = detail.child(format!("Decision recorded: {decided_at}"));
+                    detail = detail.child(selectable_text(
+                        format!("activity-message-decision-{request_id}"),
+                        &format!("Decision recorded: {decided_at}"),
+                    ));
                 }
                 if let Some(signature) = item.signature.as_ref() {
-                    detail = detail.child(
-                        div()
-                            .child("Signature")
-                            .child(div().font_family(MONO_FONT_FAMILY).child(signature.clone())),
-                    );
+                    detail = detail.child(copyable_value(
+                        format!("activity-message-signature-{request_id}"),
+                        "Signature",
+                        signature.clone(),
+                    ));
                 }
                 match document {
                     Ok(document) => {
-                        detail = detail.children(document.exact_payloads.iter().cloned().map(
-                            |payload| {
-                                div()
-                                    .max_h(px(360.0))
-                                    .overflow_y_scrollbar()
-                                    .p_3()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .font_family(MONO_FONT_FAMILY)
-                                    .text_sm()
-                                    .whitespace_normal()
-                                    .child(payload)
-                            },
-                        ));
+                        detail = detail.children(
+                            document.exact_payloads.iter().cloned().enumerate().map(
+                                |(index, payload)| {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(h_flex().w_full().justify_end().child(copy_button(
+                                            format!("copy-message-payload-{request_id}-{index}"),
+                                            payload.clone(),
+                                            "Copy exact message payload",
+                                        )))
+                                        .max_h(px(360.0))
+                                        .overflow_y_scrollbar()
+                                        .p_3()
+                                        .rounded(cx.theme().radius_lg)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .bg(cx.theme().secondary)
+                                        .child(selectable_code_text(
+                                            format!("message-payload-{request_id}-{index}"),
+                                            &payload,
+                                        ))
+                                },
+                            ),
+                        );
                     }
                     Err(error) => {
                         detail = detail.child(
@@ -7156,50 +7476,74 @@ impl WalletWindow {
                     .outline()
                     .title("Typed-data signature details")
                     .child(header("Typed-data signature", format!("{:?}", item.status)))
-                    .child(format!("Account: {}", item.wallet_id))
-                    .child(format!("Chain: {}", item.chain_id))
-                    .child(format!(
-                        "Requester: {}",
-                        item.requester.as_deref().unwrap_or("Unknown requester")
+                    .child(selectable_text(
+                        format!("activity-typed-data-account-{request_id}"),
+                        &format!("Account: {}", item.wallet_id),
                     ))
-                    .child(format!(
-                        "Created: {} · updated: {}",
-                        item.created_at, item.updated_at
+                    .child(selectable_text(
+                        format!("activity-typed-data-chain-{request_id}"),
+                        &format!("Chain: {}", item.chain_id),
                     ))
-                    .child(
-                        div().child("Digest").child(
-                            div()
-                                .font_family(MONO_FONT_FAMILY)
-                                .child(item.digest.clone()),
+                    .child(selectable_text(
+                        format!("activity-typed-data-requester-{request_id}"),
+                        &format!(
+                            "Requester: {}",
+                            item.requester.as_deref().unwrap_or("Unknown requester")
                         ),
-                    );
+                    ))
+                    .child(selectable_text(
+                        format!("activity-typed-data-times-{request_id}"),
+                        &format!(
+                            "Created: {} · updated: {}",
+                            item.created_at, item.updated_at
+                        ),
+                    ))
+                    .child(copyable_value(
+                        format!("activity-typed-data-digest-{request_id}"),
+                        "Digest",
+                        item.digest.clone(),
+                    ));
                 if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
-                    detail = detail.child(format!("Decision recorded: {decided_at}"));
+                    detail = detail.child(selectable_text(
+                        format!("activity-typed-data-decision-{request_id}"),
+                        &format!("Decision recorded: {decided_at}"),
+                    ));
                 }
                 if let Some(signature) = item.signature.as_ref() {
-                    detail = detail.child(
-                        div()
-                            .child("Signature")
-                            .child(div().font_family(MONO_FONT_FAMILY).child(signature.clone())),
-                    );
+                    detail = detail.child(copyable_value(
+                        format!("activity-typed-data-signature-{request_id}"),
+                        "Signature",
+                        signature.clone(),
+                    ));
                 }
                 match document {
                     Ok(document) => {
-                        detail = detail.children(document.exact_payloads.iter().cloned().map(
-                            |payload| {
-                                div()
-                                    .max_h(px(360.0))
-                                    .overflow_y_scrollbar()
-                                    .p_3()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .font_family(MONO_FONT_FAMILY)
-                                    .text_sm()
-                                    .whitespace_normal()
-                                    .child(payload)
-                            },
-                        ));
+                        detail = detail.children(
+                            document.exact_payloads.iter().cloned().enumerate().map(
+                                |(index, payload)| {
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .child(h_flex().w_full().justify_end().child(copy_button(
+                                            format!("copy-typed-data-payload-{request_id}-{index}"),
+                                            payload.clone(),
+                                            "Copy exact typed-data payload",
+                                        )))
+                                        .max_h(px(360.0))
+                                        .overflow_y_scrollbar()
+                                        .p_3()
+                                        .rounded(cx.theme().radius_lg)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .bg(cx.theme().secondary)
+                                        .child(selectable_code_text(
+                                            format!("typed-data-payload-{request_id}-{index}"),
+                                            &payload,
+                                        ))
+                                },
+                            ),
+                        );
                     }
                     Err(error) => {
                         detail = detail.child(
@@ -7217,9 +7561,10 @@ impl WalletWindow {
     fn render_activity(&self, cx: &mut Context<Self>) -> gpui::Div {
         let panel = div()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
             .flex()
             .flex_col()
             .gap_3();
@@ -7299,6 +7644,7 @@ impl WalletWindow {
                         .rounded(cx.theme().radius)
                         .border_1()
                         .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -7330,10 +7676,19 @@ impl WalletWindow {
                                         .font_family(MONO_FONT_FAMILY)
                                         .text_sm()
                                         .overflow_hidden()
-                                        .child(command),
+                                        .child(
+                                            selectable_text(
+                                                SharedString::from(format!(
+                                                    "agent-login-command-{}",
+                                                    instruction.harness
+                                                )),
+                                                &command,
+                                            )
+                                            .truncate(),
+                                        ),
                                 )
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "copy-agent-login-{}",
                                         instruction.harness
                                     )))
@@ -7409,11 +7764,12 @@ impl WalletWindow {
                                         )
                                         .when(!expired, |actions| {
                                             actions.child(
-                                                Button::new(SharedString::from(format!(
+                                                app_button(SharedString::from(format!(
                                                     "revoke-agent-{client_id}"
                                                 )))
                                                 .label("Revoke")
-                                                .small()
+                                                .with_size(COMPACT_CONTROL_HEIGHT)
+                                                .rounded(px(12.0))
                                                 .danger()
                                                 .on_click(cx.listener(move |view, _, _, cx| {
                                                     view.revoke_agent(client_id, cx);
@@ -7483,7 +7839,10 @@ impl WalletWindow {
                                                 ),
                                         )
                                         .child(
-                                            h_flex()
+                                            div()
+                                                .flex()
+                                                .flex_wrap()
+                                                .items_center()
                                                 .gap_3()
                                                 .child(
                                                     div()
@@ -7498,7 +7857,7 @@ impl WalletWindow {
                                                         }),
                                                 )
                                                 .child(
-                                                    Button::new(SharedString::from(format!(
+                                                    app_button(SharedString::from(format!(
                                                         "install-detected-agent-{index}"
                                                     )))
                                                     .label(if installed {
@@ -7553,9 +7912,13 @@ impl WalletWindow {
                             .flex_wrap()
                             .gap_2()
                             .child(
-                                Button::new("appearance-system")
+                                app_button("appearance-system")
                                     .label("System")
                                     .selected(
+                                        self.appearance_preference
+                                            == AppearancePreference::System,
+                                    )
+                                    .toggled(
                                         self.appearance_preference
                                             == AppearancePreference::System,
                                     )
@@ -7568,9 +7931,13 @@ impl WalletWindow {
                                     })),
                             )
                             .child(
-                                Button::new("appearance-light")
+                                app_button("appearance-light")
                                     .label("Light")
                                     .selected(
+                                        self.appearance_preference
+                                            == AppearancePreference::Light,
+                                    )
+                                    .toggled(
                                         self.appearance_preference
                                             == AppearancePreference::Light,
                                     )
@@ -7583,9 +7950,13 @@ impl WalletWindow {
                                     })),
                             )
                             .child(
-                                Button::new("appearance-dark")
+                                app_button("appearance-dark")
                                     .label("Dark")
                                     .selected(
+                                        self.appearance_preference
+                                            == AppearancePreference::Dark,
+                                    )
+                                    .toggled(
                                         self.appearance_preference
                                             == AppearancePreference::Dark,
                                     )
@@ -7622,12 +7993,18 @@ impl WalletWindow {
                                     ),
                             )
                             .child(
-                                Switch::new("detailed-notification-previews")
-                                    .checked(detailed)
+                                app_button("detailed-notification-previews")
+                                    .label(if detailed {
+                                        "Disable detailed previews"
+                                    } else {
+                                        "Enable detailed previews"
+                                    })
+                                    .selected(detailed)
+                                    .toggled(detailed)
                                     .disabled(self.notification_preference_busy)
                                     .tooltip("Include request identifiers in lifecycle notifications")
-                                    .on_click(cx.listener(|view, checked, _, cx| {
-                                        view.set_detailed_notification_previews(*checked, cx);
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.set_detailed_notification_previews(!detailed, cx);
                                     })),
                             ),
                     ),
@@ -7638,7 +8015,7 @@ impl WalletWindow {
                     .id("detected-agent-settings")
                     .outline()
                     .child(
-                        Button::new("reinstall-all-detected-agents")
+                        app_button("reinstall-all-detected-agents")
                             .label(if self.agent_reinstall == AgentReinstallState::Running {
                                 "Reinstalling…"
                             } else {
@@ -7671,9 +8048,10 @@ impl WalletWindow {
     fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut panel = div()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
             .flex()
             .flex_col()
             .gap_2()
@@ -7696,10 +8074,14 @@ impl WalletWindow {
                                 .min_w(px(180.0))
                                 .flex_1()
                                 .flex_basis(px(320.0))
-                                .child(Input::new(input)),
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_sm().font_medium().child("Account name"))
+                                .child(app_input(input, cx).aria_label("Account name")),
                         )
                         .child(
-                            Button::new("create-account")
+                            app_button("create-account")
                                 .label("Create")
                                 .primary()
                                 .on_click(cx.listener(|view, _, window, cx| {
@@ -7708,7 +8090,7 @@ impl WalletWindow {
                         ),
                 )
                 .when_some(self.account_id_error.clone(), |panel, error| {
-                    panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    panel.child(field_error("account-name-error", error, cx))
                 });
         }
         if let Some(input) = &self.private_key_input {
@@ -7723,10 +8105,19 @@ impl WalletWindow {
                                 .min_w(px(180.0))
                                 .flex_1()
                                 .flex_basis(px(320.0))
-                                .child(Input::new(input).mask_toggle()),
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_sm().font_medium().child("Private key"))
+                                .child(
+                                    app_input(input, cx)
+                                        .aria_label("Private key")
+                                        .content_type(InputContentType::Password)
+                                        .mask_toggle(),
+                                ),
                         )
                         .child(
-                            Button::new("import-account")
+                            app_button("import-account")
                                 .label("Import private key")
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.import_account(window, cx);
@@ -7734,7 +8125,7 @@ impl WalletWindow {
                         ),
                 )
                 .when_some(self.private_key_error.clone(), |panel, error| {
-                    panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    panel.child(field_error("private-key-error", error, cx))
                 });
         }
         panel = panel.child(
@@ -7754,6 +8145,12 @@ impl WalletWindow {
                 panel.children(items.iter().enumerate().map(|(index, item)| {
                     let export_id = item.id.clone();
                     let removal_id = item.id.clone();
+                    let address = format!("{:#x}", item.address);
+                    let address_for_copy = address.clone();
+                    let address_text_id =
+                        SharedString::from(format!("account-address-{}", item.id));
+                    let address_copy_id =
+                        SharedString::from(format!("copy-account-address-{}", item.id));
                     let action_error = self.account_action_errors.get(&item.id).cloned();
                     div()
                         .py_2()
@@ -7778,13 +8175,12 @@ impl WalletWindow {
                                             div().font_semibold().truncate().child(item.id.clone()),
                                         )
                                         .child(
-                                            div()
+                                            selectable_text(address_text_id, &address)
                                                 .max_w_full()
                                                 .truncate()
                                                 .font_family(MONO_FONT_FAMILY)
                                                 .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!("{:#x}", item.address)),
+                                                .text_color(cx.theme().muted_foreground),
                                         ),
                                 )
                                 .child(
@@ -7793,8 +8189,13 @@ impl WalletWindow {
                                         .flex()
                                         .flex_wrap()
                                         .gap_2()
+                                        .child(copy_button(
+                                            address_copy_id,
+                                            address_for_copy,
+                                            "Copy account address",
+                                        ))
                                         .child(
-                                            Button::new(SharedString::from(format!(
+                                            app_button(SharedString::from(format!(
                                                 "export-account-{export_id}"
                                             )))
                                             .label("Export")
@@ -7803,7 +8204,7 @@ impl WalletWindow {
                                             })),
                                         )
                                         .child(
-                                            Button::new(SharedString::from(format!(
+                                            app_button(SharedString::from(format!(
                                                 "remove-account-{removal_id}"
                                             )))
                                             .label("Remove")
@@ -7834,9 +8235,10 @@ impl WalletWindow {
         }
         let mut form = div()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
             .flex()
             .flex_col()
             .gap_3()
@@ -7850,11 +8252,14 @@ impl WalletWindow {
             )))
             .child("Effect")
             .child(
-                h_flex()
+                div()
+                    .flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(
-                        Button::new("policy-rule-allow")
+                        app_button("policy-rule-allow")
                             .label("Allow automatically")
+                            .toggled(self.policy_rule_effect == GuidedRuleEffect::Allow)
                             .when(
                                 self.policy_rule_effect == GuidedRuleEffect::Allow,
                                 ButtonVariants::primary,
@@ -7865,9 +8270,10 @@ impl WalletWindow {
                             })),
                     )
                     .child(
-                        Button::new("policy-rule-deny")
+                        app_button("policy-rule-deny")
                             .label("Deny without review")
                             .danger()
+                            .toggled(self.policy_rule_effect == GuidedRuleEffect::Deny)
                             .when(
                                 self.policy_rule_effect == GuidedRuleEffect::Deny,
                                 ButtonVariants::primary,
@@ -7885,55 +8291,58 @@ impl WalletWindow {
                     .flex_col()
                     .gap_1()
                     .child("Description (optional)")
-                    .child(Input::new(input))
+                    .child(app_input(input, cx).aria_label("Rule description"))
                     .when_some(self.policy_rule_errors.label.clone(), |field, error| {
-                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        field.child(field_error("policy-rule-description-error", error, cx))
                     }),
             );
         }
-        form = form
-            .child("Called contract or recipient")
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("policy-rule-target-any")
-                            .label("Any target")
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Any;
-                                view.policy_rule_errors.targets = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("policy-rule-target-exact")
-                            .label("Named targets")
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Exact;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                Button::new("policy-rule-target-predicate")
-                    .label("Predicate")
-                    .when(
-                        self.policy_rule_target_mode == GuidedLiteralMode::Predicate,
-                        ButtonVariants::primary,
-                    )
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.policy_rule_target_mode = GuidedLiteralMode::Predicate;
-                        cx.notify();
-                    })),
-            );
+        form = form.child("Called contract or recipient").child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    app_button("policy-rule-target-any")
+                        .label("Any target")
+                        .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Any)
+                        .when(
+                            self.policy_rule_target_mode == GuidedLiteralMode::Any,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_target_mode = GuidedLiteralMode::Any;
+                            view.policy_rule_errors.targets = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    app_button("policy-rule-target-exact")
+                        .label("Named targets")
+                        .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Exact)
+                        .when(
+                            self.policy_rule_target_mode == GuidedLiteralMode::Exact,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_target_mode = GuidedLiteralMode::Exact;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    app_button("policy-rule-target-predicate")
+                        .label("Predicate")
+                        .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Predicate)
+                        .when(
+                            self.policy_rule_target_mode == GuidedLiteralMode::Predicate,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_target_mode = GuidedLiteralMode::Predicate;
+                            cx.notify();
+                        })),
+                ),
+        );
         if self.policy_rule_target_mode != GuidedLiteralMode::Any
             && let Some(input) = self.policy_rule_targets_input.as_ref()
         {
@@ -7942,55 +8351,60 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(Input::new(input))
+                    .child(
+                        app_input(input, cx).aria_label("Called contract or recipient constraint"),
+                    )
                     .when_some(self.policy_rule_errors.targets.clone(), |field, error| {
-                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        field.child(field_error("policy-rule-targets-error", error, cx))
                     }),
             );
         }
-        form = form
-            .child("Network chain ID")
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("policy-rule-chain-any")
-                            .label("Any network")
-                            .when(
-                                self.policy_rule_chain_mode == GuidedLiteralMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_chain_mode = GuidedLiteralMode::Any;
-                                view.policy_rule_errors.chain_ids = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("policy-rule-chain-exact")
-                            .label("Specific chain IDs")
-                            .when(
-                                self.policy_rule_chain_mode == GuidedLiteralMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_chain_mode = GuidedLiteralMode::Exact;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                Button::new("policy-rule-chain-predicate")
-                    .label("Predicate")
-                    .when(
-                        self.policy_rule_chain_mode == GuidedLiteralMode::Predicate,
-                        ButtonVariants::primary,
-                    )
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.policy_rule_chain_mode = GuidedLiteralMode::Predicate;
-                        cx.notify();
-                    })),
-            );
+        form = form.child("Network chain ID").child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    app_button("policy-rule-chain-any")
+                        .label("Any network")
+                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Any)
+                        .when(
+                            self.policy_rule_chain_mode == GuidedLiteralMode::Any,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_chain_mode = GuidedLiteralMode::Any;
+                            view.policy_rule_errors.chain_ids = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    app_button("policy-rule-chain-exact")
+                        .label("Specific chain IDs")
+                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Exact)
+                        .when(
+                            self.policy_rule_chain_mode == GuidedLiteralMode::Exact,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_chain_mode = GuidedLiteralMode::Exact;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    app_button("policy-rule-chain-predicate")
+                        .label("Predicate")
+                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Predicate)
+                        .when(
+                            self.policy_rule_chain_mode == GuidedLiteralMode::Predicate,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_chain_mode = GuidedLiteralMode::Predicate;
+                            cx.notify();
+                        })),
+                ),
+        );
         if self.policy_rule_chain_mode != GuidedLiteralMode::Any
             && let Some(input) = self.policy_rule_chain_ids_input.as_ref()
         {
@@ -7999,55 +8413,58 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(Input::new(input))
+                    .child(app_input(input, cx).aria_label("Network chain ID constraint"))
                     .when_some(self.policy_rule_errors.chain_ids.clone(), |field, error| {
-                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        field.child(field_error("policy-rule-chain-ids-error", error, cx))
                     }),
             );
         }
-        form = form
-            .child("Native value on the call")
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("policy-rule-value-any")
-                            .label("Any value")
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Any;
-                                view.policy_rule_errors.values = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("policy-rule-value-exact")
-                            .label("Exact wei values")
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Exact;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                Button::new("policy-rule-value-predicate")
-                    .label("Range or predicate")
-                    .when(
-                        self.policy_rule_value_mode == GuidedLiteralMode::Predicate,
-                        ButtonVariants::primary,
-                    )
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.policy_rule_value_mode = GuidedLiteralMode::Predicate;
-                        cx.notify();
-                    })),
-            );
+        form = form.child("Native value on the call").child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    app_button("policy-rule-value-any")
+                        .label("Any value")
+                        .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Any)
+                        .when(
+                            self.policy_rule_value_mode == GuidedLiteralMode::Any,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_value_mode = GuidedLiteralMode::Any;
+                            view.policy_rule_errors.values = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    app_button("policy-rule-value-exact")
+                        .label("Exact wei values")
+                        .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Exact)
+                        .when(
+                            self.policy_rule_value_mode == GuidedLiteralMode::Exact,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_value_mode = GuidedLiteralMode::Exact;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    app_button("policy-rule-value-predicate")
+                        .label("Range or predicate")
+                        .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Predicate)
+                        .when(
+                            self.policy_rule_value_mode == GuidedLiteralMode::Predicate,
+                            ButtonVariants::primary,
+                        )
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.policy_rule_value_mode = GuidedLiteralMode::Predicate;
+                            cx.notify();
+                        })),
+                ),
+        );
         if self.policy_rule_value_mode != GuidedLiteralMode::Any
             && let Some(input) = self.policy_rule_values_input.as_ref()
         {
@@ -8056,9 +8473,9 @@ impl WalletWindow {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(Input::new(input))
+                    .child(app_input(input, cx).aria_label("Native value constraint"))
                     .when_some(self.policy_rule_errors.values.clone(), |field, error| {
-                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        field.child(field_error("policy-rule-values-error", error, cx))
                     }),
             );
         }
@@ -8068,8 +8485,9 @@ impl WalletWindow {
                 .flex_wrap()
                 .gap_2()
                 .child(
-                    Button::new("policy-rule-calldata-any")
+                    app_button("policy-rule-calldata-any")
                         .label("Any calldata")
+                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Any)
                         .when(
                             self.policy_rule_calldata_mode == GuidedCalldataMode::Any,
                             ButtonVariants::primary,
@@ -8082,8 +8500,9 @@ impl WalletWindow {
                         })),
                 )
                 .child(
-                    Button::new("policy-rule-calldata-empty")
+                    app_button("policy-rule-calldata-empty")
                         .label("Empty calldata")
+                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Empty)
                         .when(
                             self.policy_rule_calldata_mode == GuidedCalldataMode::Empty,
                             ButtonVariants::primary,
@@ -8096,8 +8515,9 @@ impl WalletWindow {
                         })),
                 )
                 .child(
-                    Button::new("policy-rule-calldata-selector")
+                    app_button("policy-rule-calldata-selector")
                         .label("ABI function")
+                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Selector)
                         .when(
                             self.policy_rule_calldata_mode == GuidedCalldataMode::Selector,
                             ButtonVariants::primary,
@@ -8116,9 +8536,9 @@ impl WalletWindow {
                         .flex_col()
                         .gap_1()
                         .child("Canonical function signature")
-                        .child(Input::new(input))
+                        .child(app_input(input, cx).aria_label("Canonical function signature"))
                         .when_some(self.policy_rule_errors.abi.clone(), |field, error| {
-                            field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                            field.child(field_error("policy-rule-abi-error", error, cx))
                         }),
                 );
             }
@@ -8129,7 +8549,11 @@ impl WalletWindow {
                         .flex_col()
                         .gap_1()
                         .child("Typed argument predicates (JSON object)")
-                        .child(Input::new(input).w_full())
+                        .child(
+                            app_input(input, cx)
+                                .aria_label("Typed argument predicates")
+                                .w_full(),
+                        )
                         .child(
                             div()
                                 .text_sm()
@@ -8137,19 +8561,22 @@ impl WalletWindow {
                                 .child("Use eq/in predicates, or compose any, all, not, each, selector, and length predicates. The signature type-checks every constraint."),
                         )
                         .when_some(self.policy_rule_errors.args.clone(), |field, error| {
-                            field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                            field.child(field_error("policy-rule-arguments-error", error, cx))
                         }),
                 );
             }
         }
         form.when_some(self.policy_rule_errors.form.clone(), |form, error| {
-            form.child(div().text_sm().text_color(cx.theme().danger).child(error))
+            form.child(field_error("policy-rule-form-error", error, cx))
         })
         .child(
-            h_flex()
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
                 .gap_2()
                 .child(
-                    Button::new("save-guided-policy-rule")
+                    app_button("save-guided-policy-rule")
                         .label(if self.policy_rule_original_index.is_some() {
                             "Save rule draft"
                         } else {
@@ -8162,7 +8589,7 @@ impl WalletWindow {
                         })),
                 )
                 .child(
-                    Button::new("cancel-guided-policy-rule")
+                    app_button("cancel-guided-policy-rule")
                         .label("Cancel")
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.reset_guided_policy_rule_form(window, cx);
@@ -8221,9 +8648,10 @@ impl WalletWindow {
                         proposal_list.child(
                             div()
                                 .p_3()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_1()
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_col()
                                 .gap_2()
@@ -8270,7 +8698,7 @@ impl WalletWindow {
                                         .flex_wrap()
                                         .gap_2()
                                         .child(
-                                            Button::new(SharedString::from(format!(
+                                            app_button(SharedString::from(format!(
                                                 "review-policy-proposal-{}",
                                                 proposal.wallet_id
                                             )))
@@ -8286,7 +8714,7 @@ impl WalletWindow {
                                             })),
                                         )
                                         .child(
-                                            Button::new(SharedString::from(format!(
+                                            app_button(SharedString::from(format!(
                                                 "reject-policy-proposal-{}",
                                                 proposal.wallet_id
                                             )))
@@ -8323,7 +8751,7 @@ impl WalletWindow {
                     .title("Signing policies")
                     .child("Create an account before configuring signing permissions.")
                     .child(
-                        Button::new("policy-go-to-accounts")
+                        app_button("policy-go-to-accounts")
                             .label("Go to Accounts")
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -8343,8 +8771,9 @@ impl WalletWindow {
             let wallet_id = account.id.clone();
             let selected = selected_wallet == Some(wallet_id.as_str());
             account_picker = account_picker.child(
-                Button::new(SharedString::from(format!("policy-wallet-{wallet_id}")))
+                app_button(SharedString::from(format!("policy-wallet-{wallet_id}")))
                     .label(wallet_id.clone())
+                    .toggled(selected)
                     .when(selected, ButtonVariants::primary)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.open_policy_editor(&wallet_id, window, cx);
@@ -8365,7 +8794,7 @@ impl WalletWindow {
             return content.child(
                 div()
                     .p_5()
-                    .rounded_lg()
+                    .rounded(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
                     .text_color(cx.theme().muted_foreground)
@@ -8390,9 +8819,10 @@ impl WalletWindow {
             .flex_1()
             .min_h(px(420.0))
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
             .flex()
             .flex_col()
             .gap_3()
@@ -8411,8 +8841,9 @@ impl WalletWindow {
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new("policy-guided-mode")
+                        app_button("policy-guided-mode")
                             .label("Guided")
+                            .toggled(editor.mode == PolicyEditorMode::Guided)
                             .when(
                                 editor.mode == PolicyEditorMode::Guided,
                                 ButtonVariants::primary,
@@ -8422,8 +8853,9 @@ impl WalletWindow {
                             })),
                     )
                     .child(
-                        Button::new("policy-advanced-mode")
+                        app_button("policy-advanced-mode")
                             .label("Advanced JSON")
+                            .toggled(editor.mode == PolicyEditorMode::Advanced)
                             .when(
                                 editor.mode == PolicyEditorMode::Advanced,
                                 ButtonVariants::primary,
@@ -8449,7 +8881,16 @@ impl WalletWindow {
                         .id("policy-json-editor-input")
                         .flex_1()
                         .min_h(px(320.0))
-                        .child(Input::new(input).w_full().h_full()),
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_sm().font_medium().child("Policy JSON"))
+                        .child(
+                            app_input(input, cx)
+                                .aria_label("Policy JSON")
+                                .w_full()
+                                .h_full(),
+                        ),
                 );
             }
             PolicyEditorMode::Guided => match &editor.guided_policy {
@@ -8466,7 +8907,7 @@ impl WalletWindow {
                         editor_panel = editor_panel.child(
                             div()
                                 .p_3()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_1()
                                 .border_color(cx.theme().danger)
                                 .text_color(cx.theme().danger)
@@ -8479,7 +8920,7 @@ impl WalletWindow {
                         if rule_index > 0 {
                             controls =
                                 controls.child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "move-policy-rule-up-{rule_index}"
                                     )))
                                     .label("Move up")
@@ -8496,7 +8937,7 @@ impl WalletWindow {
                         if rule_index + 1 < policy.rules.len() {
                             controls =
                                 controls.child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "move-policy-rule-down-{rule_index}"
                                     )))
                                     .label("Move down")
@@ -8513,9 +8954,10 @@ impl WalletWindow {
                         rule_cards = rule_cards.child(
                             div()
                                 .p_3()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_1()
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_col()
                                 .gap_2()
@@ -8537,7 +8979,7 @@ impl WalletWindow {
                                 .child(
                                     controls
                                         .child(
-                                            Button::new(SharedString::from(format!(
+                                            app_button(SharedString::from(format!(
                                                 "edit-policy-rule-{rule_index}"
                                             )))
                                             .label("Edit")
@@ -8550,7 +8992,7 @@ impl WalletWindow {
                                             })),
                                         )
                                         .child(
-                                            Button::new(SharedString::from(format!(
+                                            app_button(SharedString::from(format!(
                                                 "remove-policy-rule-{rule_index}"
                                             )))
                                             .label("Remove")
@@ -8578,7 +9020,7 @@ impl WalletWindow {
                                 .outline()
                                 .title("Ordered rules")
                                 .child(rule_cards)
-                                .child(Button::new("add-policy-rule").label("Add rule").on_click(
+                                .child(app_button("add-policy-rule").label("Add rule").on_click(
                                     cx.listener(|view, _, window, cx| {
                                         view.begin_guided_policy_rule(None, window, cx);
                                     }),
@@ -8593,7 +9035,7 @@ impl WalletWindow {
                 .flex_wrap()
                 .gap_2()
                 .child(
-                    Button::new("reset-policy-draft")
+                    app_button("reset-policy-draft")
                         .label("Reset to review everything")
                         .disabled(self.policy_installing)
                         .on_click(cx.listener(|view, _, window, cx| {
@@ -8601,7 +9043,7 @@ impl WalletWindow {
                         })),
                 )
                 .child(
-                    Button::new("disable-signing-policy-draft")
+                    app_button("disable-signing-policy-draft")
                         .label("Disable transaction signing")
                         .disabled(self.policy_installing)
                         .on_click(cx.listener(|view, _, window, cx| {
@@ -8609,7 +9051,7 @@ impl WalletWindow {
                         })),
                 )
                 .child(
-                    Button::new("allow-anything-policy-draft")
+                    app_button("allow-anything-policy-draft")
                         .icon(IconName::TriangleAlert)
                         .label("Allow anything")
                         .danger()
@@ -8619,7 +9061,7 @@ impl WalletWindow {
                         })),
                 )
                 .child(
-                    Button::new("validate-policy-draft")
+                    app_button("validate-policy-draft")
                         .label("Validate and preview diff")
                         .disabled(self.policy_installing)
                         .on_click(cx.listener(|view, _, window, cx| {
@@ -8627,7 +9069,7 @@ impl WalletWindow {
                         })),
                 )
                 .child(
-                    Button::new("install-policy-draft")
+                    app_button("install-policy-draft")
                         .label(if self.policy_installing {
                             "Authenticating…"
                         } else {
@@ -8692,7 +9134,7 @@ impl WalletWindow {
                     .justify_between()
                     .child("Licensed under FSL-1.1-MIT")
                     .child(
-                        Button::new("review-license")
+                        app_button("review-license")
                             .label("View")
                             .tooltip("View the license for this exact source revision on GitHub")
                             .on_click(cx.listener(move |_, _, _, cx| {
@@ -8712,11 +9154,13 @@ impl WalletWindow {
                                 "Terms of Service · {}",
                                 legal_acceptance_label(&status.terms_of_service)
                             ))
-                            .child(Button::new("review-terms").label("View").on_click(
-                                cx.listener(|view, _, _, cx| {
-                                    view.open_legal_review(LegalDocument::TermsOfService, cx);
-                                }),
-                            )),
+                            .child(
+                                app_button("review-terms")
+                                    .label("View")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.open_legal_review(LegalDocument::TermsOfService, cx);
+                                    })),
+                            ),
                     )
                     .child(
                         div()
@@ -8727,7 +9171,7 @@ impl WalletWindow {
                                 "Privacy Policy · {}",
                                 legal_acceptance_label(&status.privacy_policy)
                             ))
-                            .child(Button::new("review-privacy").label("View").on_click(
+                            .child(app_button("review-privacy").label("View").on_click(
                                 cx.listener(|view, _, _, cx| {
                                     view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
                                 }),
@@ -8738,7 +9182,7 @@ impl WalletWindow {
                             .w_full()
                             .justify_between()
                             .child("Third-Party Licenses")
-                            .child(Button::new("review-licenses").label("View").on_click(
+                            .child(app_button("review-licenses").label("View").on_click(
                                 cx.listener(|view, _, _, cx| {
                                     view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
                                 }),
@@ -8759,44 +9203,63 @@ impl WalletWindow {
         let scan_running = matches!(self.walletconnect_scan, WalletConnectScanState::Scanning);
         let mut panel = div()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
             .flex()
             .flex_col()
             .gap_3()
-            .child("Pairings are in memory only and disconnect when you explicitly Quit.");
-        if let Some(input) = self.walletconnect_uri_input.as_ref() {
-            panel = panel.child(
+            .child(div().text_lg().font_medium().child("Connect a dapp"))
+            .child(
                 div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(Input::new(input).flex_1())
-                    .child(
-                        Button::new("connect-walletconnect")
-                            .label("Connect")
-                            .primary()
-                            .disabled(account_unavailable)
-                            .on_click(cx.listener(|view, _, window, cx| {
-                                view.connect_walletconnect(window, cx);
-                            })),
-                    )
-                    .when(SystemScreenPicker::supported(), |row| {
-                        row.child(
-                            Button::new("scan-walletconnect")
-                                .label(if scan_running {
-                                    "Waiting for selection…"
-                                } else {
-                                    "Scan Screen"
-                                })
-                                .disabled(account_unavailable || scan_running)
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.scan_walletconnect_screen(cx);
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Paste a WalletConnect v2 URI or scan a QR code already visible on this Mac. Pairings stay in memory and disconnect when you explicitly Quit."),
+            );
+        if let Some(input) = self.walletconnect_uri_input.as_ref() {
+            panel = panel
+                .child(div().text_sm().font_medium().child("Pairing URI"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_end()
+                        .gap_2()
+                        .child(
+                            div().min_w(px(220.0)).flex_1().child(
+                                app_input(input, cx)
+                                    .aria_label("WalletConnect pairing URI")
+                                    .content_type(InputContentType::Password)
+                                    .mask_toggle()
+                                    .w_full(),
+                            ),
+                        )
+                        .child(
+                            app_button("connect-walletconnect")
+                                .label("Connect")
+                                .primary()
+                                .disabled(account_unavailable)
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.connect_walletconnect(window, cx);
                                 })),
                         )
-                    }),
-            );
+                        .when(SystemScreenPicker::supported(), |row| {
+                            row.child(
+                                app_button("scan-walletconnect")
+                                    .label(if scan_running {
+                                        "Waiting for selection…"
+                                    } else {
+                                        "Scan QR on screen"
+                                    })
+                                    .loading(scan_running)
+                                    .disabled(account_unavailable)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.scan_walletconnect_screen(cx);
+                                    })),
+                            )
+                        }),
+                );
             if let Some(error) = account_error {
                 panel = panel.child(div().text_sm().text_color(cx.theme().danger).child(error));
             }
@@ -8814,15 +9277,16 @@ impl WalletWindow {
             WalletConnectScanState::Choices { previews, .. } => {
                 let mut choices = div()
                     .p_3()
-                    .rounded_lg()
+                    .rounded(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
                     .flex()
                     .flex_col()
                     .gap_3()
                     .child("Several WalletConnect codes were found. Choose one to connect.")
                     .child(
-                        Button::new("cancel-walletconnect-scan")
+                        app_button("cancel-walletconnect-scan")
                             .label("Cancel")
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.cancel_walletconnect_scan(cx);
@@ -8834,9 +9298,10 @@ impl WalletWindow {
                         previews_row.child(
                             div()
                                 .p_2()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_1()
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_col()
                                 .gap_2()
@@ -8847,7 +9312,7 @@ impl WalletWindow {
                                         .object_fit(ObjectFit::Contain),
                                 )
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "choose-walletconnect-qr-{index}"
                                     )))
                                     .label(format!("Use QR {}", index + 1))
@@ -8867,13 +9332,16 @@ impl WalletWindow {
         }
         panel.children(self.walletconnect_sessions.iter().cloned().map(|session| {
             let session_id = session.id;
+            let pairing_topic = session.pairing_topic.clone();
+            let pairing_topic_for_copy = pairing_topic.clone();
             div()
                 .w_full()
                 .min_w_0()
                 .p_3()
-                .rounded_lg()
+                .rounded(cx.theme().radius_lg)
                 .border_1()
                 .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
                 .flex()
                 .flex_wrap()
                 .items_center()
@@ -8885,11 +9353,18 @@ impl WalletWindow {
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .child(format!(
-                            "{} · {:?}",
-                            session.dapp_name.as_deref().unwrap_or("Pairing"),
-                            session.status
-                        ))
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .truncate()
+                                .font_medium()
+                                .child(format!(
+                                    "{} · {:?}",
+                                    session.dapp_name.as_deref().unwrap_or("Pairing"),
+                                    session.status
+                                )),
+                        )
                         .child(
                             div()
                                 .min_w_0()
@@ -8898,21 +9373,44 @@ impl WalletWindow {
                                 .child(format!("{} active request(s)", session.active_requests)),
                         )
                         .child(
-                            div()
+                            h_flex()
                                 .w_full()
                                 .min_w_0()
-                                .font_family(MONO_FONT_FAMILY)
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .truncate()
-                                .child(format!("Topic {}", session.pairing_topic)),
+                                .gap_2()
+                                .child(
+                                    selectable_text(
+                                        SharedString::from(format!(
+                                            "walletconnect-topic-{session_id}"
+                                        )),
+                                        &format!("Topic {pairing_topic}"),
+                                    )
+                                    .min_w_0()
+                                    .flex_1()
+                                    .font_family(MONO_FONT_FAMILY)
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate(),
+                                )
+                                .child(copy_button(
+                                    SharedString::from(format!(
+                                        "copy-walletconnect-topic-{session_id}"
+                                    )),
+                                    pairing_topic_for_copy,
+                                    "Copy pairing topic",
+                                )),
                         )
                         .when_some(session.last_error, |column, error| {
-                            column.child(format!("Connection error: {error}"))
+                            column.child(
+                                div()
+                                    .whitespace_normal()
+                                    .text_sm()
+                                    .text_color(cx.theme().danger)
+                                    .child(format!("Connection error: {error}")),
+                            )
                         }),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("disconnect-wc-{session_id}")))
+                    app_button(SharedString::from(format!("disconnect-wc-{session_id}")))
                         .flex_none()
                         .label("Disconnect")
                         .danger()
@@ -8926,7 +9424,7 @@ impl WalletWindow {
     fn render_network_editor(&self, cx: &mut Context<Self>) -> gpui::Div {
         if !self.network_editor_open {
             return div().child(
-                Button::new("open-custom-network-editor")
+                app_button("open-custom-network-editor")
                     .label("Add custom network")
                     .primary()
                     .icon(IconName::Plus)
@@ -8983,10 +9481,18 @@ impl WalletWindow {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .child(div().text_sm().child(label))
-                .child(Input::new(input).disabled(disabled || busy))
+                .child(div().text_sm().font_medium().child(label))
+                .child(
+                    app_input(input, cx)
+                        .aria_label(label)
+                        .disabled(disabled || busy),
+                )
                 .when_some(error, |field, error| {
-                    field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                    field.child(field_error(
+                        SharedString::from(format!("network-editor-error-{label}")),
+                        error,
+                        cx,
+                    ))
                 })
         };
         let mut panel = GroupBox::new()
@@ -9043,9 +9549,14 @@ impl WalletWindow {
                             .text_sm()
                             .child("RPC URLs (one per line, comma-separated)"),
                     )
-                    .child(Input::new(rpc_urls).disabled(busy).h(px(132.0)))
+                    .child(
+                        app_input(rpc_urls, cx)
+                            .aria_label("RPC URLs")
+                            .disabled(busy)
+                            .h(px(132.0)),
+                    )
                     .when_some(self.network_editor_errors.rpc_urls.clone(), |field, error| {
-                        field.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        field.child(field_error("network-editor-rpc-urls-error", error, cx))
                     }),
             )
             .child(
@@ -9056,18 +9567,20 @@ impl WalletWindow {
                     .gap_2()
                     .child(div().text_sm().child("Endpoint order"))
                     .child(
-                        Button::new("network-strategy-ordered")
+                        app_button("network-strategy-ordered")
                             .label("Configured order")
                             .selected(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
+                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
                             .disabled(busy)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.set_network_editor_strategy(RpcStrategy::Ordered, cx);
                             })),
                     )
                     .child(
-                        Button::new("network-strategy-random")
+                        app_button("network-strategy-random")
                             .label("Random each request")
                             .selected(self.network_editor_rpc_strategy == RpcStrategy::Random)
+                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Random)
                             .disabled(busy)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.set_network_editor_strategy(RpcStrategy::Random, cx);
@@ -9116,7 +9629,7 @@ impl WalletWindow {
                     .child(field("Decimals", native_decimals, None, false)),
             )
             .when_some(self.network_editor_errors.native_currency.clone(), |panel, error| {
-                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                panel.child(field_error("network-editor-native-currency-error", error, cx))
             })
             .child(
                 div()
@@ -9137,7 +9650,7 @@ impl WalletWindow {
                     )),
             )
             .when_some(self.network_editor_errors.form.clone(), |panel, error| {
-                panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                panel.child(field_error("network-editor-form-error", error, cx))
             })
             .child(
                 div()
@@ -9145,7 +9658,7 @@ impl WalletWindow {
                     .flex_wrap()
                     .gap_2()
                     .child(
-                        Button::new("save-guided-network")
+                        app_button("save-guided-network")
                             .label(if busy {
                                 "Verifying & authenticating…"
                             } else {
@@ -9158,7 +9671,7 @@ impl WalletWindow {
                             })),
                     )
                     .child(
-                        Button::new("cancel-guided-network")
+                        app_button("cancel-guided-network")
                             .label("Cancel")
                             .disabled(busy)
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -9166,7 +9679,7 @@ impl WalletWindow {
                             })),
                     )
                     .child(
-                        Button::new("toggle-advanced-network-json")
+                        app_button("toggle-advanced-network-json")
                             .label(if self.network_editor_advanced {
                                 "Hide advanced JSON"
                             } else {
@@ -9196,12 +9709,18 @@ impl WalletWindow {
                                 "Advanced mode creates this complete object. It will not overwrite an existing chain or conflicting identifier."
                             }),
                     )
-                    .child(Input::new(input).h(px(320.0)).disabled(busy))
+                    .child(div().text_sm().font_medium().child("Complete network JSON"))
+                    .child(
+                        app_input(input, cx)
+                            .aria_label("Complete network JSON")
+                            .h(px(320.0))
+                            .disabled(busy),
+                    )
                     .when_some(self.network_json_error.clone(), |panel, error| {
                         panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
                     })
                     .child(
-                        Button::new("install-network-json")
+                        app_button("install-network-json")
                             .label(if busy {
                                 "Verifying & authenticating…"
                             } else {
@@ -9274,9 +9793,10 @@ impl WalletWindow {
                 rows = rows.child(
                     div()
                         .p_3()
-                        .rounded_lg()
+                        .rounded(cx.theme().radius_lg)
                         .border_1()
                         .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -9311,7 +9831,7 @@ impl WalletWindow {
                                         ),
                                 )
                                 .child(
-                                    Button::new(SharedString::from(format!(
+                                    app_button(SharedString::from(format!(
                                         "install-network-preset-{chain_id}"
                                     )))
                                     .label(if installing {
@@ -9362,7 +9882,11 @@ impl WalletWindow {
                             .text_color(cx.theme().muted_foreground)
                             .child("Search the bundled registry instead of finding RPC URLs yourself. The wallet verifies the chain ID before asking you to authenticate the change. RPC URLs are shown in full because they supply security-sensitive simulation results."),
                     )
-                    .child(Input::new(search).cleanable(true))
+                    .child(
+                        app_input(search, cx)
+                            .aria_label("Search built-in network presets")
+                            .cleanable(true),
+                    )
                     .when_some(self.network_preset_error.clone(), |panel, error| {
                         panel.child(div().text_sm().text_color(cx.theme().danger).child(error))
                     })
@@ -9399,7 +9923,7 @@ impl WalletWindow {
             })
             .when(pending.is_none(), |panel| {
                 panel.child(
-                    Button::new("prepare-network-reset")
+                    app_button("prepare-network-reset")
                         .label("Review reset")
                         .danger()
                         .disabled(self.network_preset_busy.is_some() || self.network_reset_busy)
@@ -9413,7 +9937,7 @@ impl WalletWindow {
                     .child(
                         div()
                             .p_3()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_1()
                             .border_color(cx.theme().danger)
                             .flex()
@@ -9435,7 +9959,7 @@ impl WalletWindow {
                                     .flex_wrap()
                                     .gap_2()
                                     .child(
-                                        Button::new("confirm-network-reset")
+                                        app_button("confirm-network-reset")
                                             .label(if self.network_reset_busy {
                                                 "Authenticating…"
                                             } else {
@@ -9448,7 +9972,7 @@ impl WalletWindow {
                                             })),
                                     )
                                     .child(
-                                        Button::new("cancel-network-reset")
+                                        app_button("cancel-network-reset")
                                             .label("Cancel")
                                             .disabled(self.network_reset_busy)
                                             .on_click(cx.listener(|view, _, _, cx| {
@@ -9477,9 +10001,10 @@ impl WalletWindow {
                     rows = rows.child(
                         div()
                             .p_3()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_1()
                             .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -9498,7 +10023,7 @@ impl WalletWindow {
                                             .flex_wrap()
                                             .gap_2()
                                             .child(
-                                                Button::new(SharedString::from(format!(
+                                                app_button(SharedString::from(format!(
                                                     "accept-network-proposal-{}",
                                                     proposal.chain_id
                                                 )))
@@ -9513,7 +10038,7 @@ impl WalletWindow {
                                                 })),
                                             )
                                             .child(
-                                                Button::new(SharedString::from(format!(
+                                                app_button(SharedString::from(format!(
                                                     "reject-network-proposal-{}",
                                                     proposal.chain_id
                                                 )))
@@ -9592,9 +10117,10 @@ impl WalletWindow {
                         .unwrap_or_else(|error| format!("Could not serialize network: {error:#}"));
                     div()
                         .p_4()
-                        .rounded_lg()
+                        .rounded(cx.theme().radius_lg)
                         .border_1()
                         .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -9671,7 +10197,7 @@ impl WalletWindow {
                                                 .flex_wrap()
                                                 .gap_2()
                                                 .child(
-                                                    Button::new(SharedString::from(format!(
+                                                    app_button(SharedString::from(format!(
                                                         "inspect-network-{name}"
                                                     )))
                                                     .label(if expanded {
@@ -9689,7 +10215,7 @@ impl WalletWindow {
                                                     )),
                                                 )
                                                 .child(
-                                                    Button::new(SharedString::from(format!(
+                                                    app_button(SharedString::from(format!(
                                                         "toggle-network-{name}"
                                                     )))
                                                     .label(if busy {
@@ -9712,7 +10238,7 @@ impl WalletWindow {
                                                 )
                                                 .when_some(restore, |actions, reviewed| {
                                                     actions.child(
-                                                        Button::new(SharedString::from(format!(
+                                                        app_button(SharedString::from(format!(
                                                             "restore-network-{name}"
                                                         )))
                                                         .label("Restore defaults")
@@ -9735,13 +10261,13 @@ impl WalletWindow {
                                         .flex_none()
                                         .gap_2()
                                         .child(
-                                            Button::new(SharedString::from(format!(
+                                            app_button(SharedString::from(format!(
                                                 "edit-network-{name}"
                                             )))
                                             .icon(IconName::Settings2)
+                                            .label("Edit")
                                             .ghost()
                                             .tooltip("Edit network")
-                                            .accessibility_id("Edit network")
                                             .disabled(busy)
                                             .on_click(cx.listener(move |view, _, window, cx| {
                                                 view.edit_network(&edit, window, cx);
@@ -9749,13 +10275,13 @@ impl WalletWindow {
                                         )
                                         .when(network_can_be_removed(network), |buttons| {
                                             buttons.child(
-                                                Button::new(SharedString::from(format!(
+                                                app_button(SharedString::from(format!(
                                                     "delete-network-{name}"
                                                 )))
                                                 .icon(IconName::Delete)
+                                                .label("Delete")
                                                 .ghost()
                                                 .tooltip("Delete disabled network")
-                                                .accessibility_id("Delete disabled network")
                                                 .danger()
                                                 .disabled(busy || confirming_removal)
                                                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -9771,14 +10297,42 @@ impl WalletWindow {
                         .when(expanded, |card| {
                             card.child(
                                 div()
-                                    .max_w_full()
-                                    .overflow_x_hidden()
-                                    .p_3()
-                                    .rounded(cx.theme().radius)
-                                    .bg(cx.theme().secondary)
-                                    .font_family(MONO_FONT_FAMILY)
-                                    .text_sm()
-                                    .child(exact),
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(div().font_medium().child("Exact configuration"))
+                                            .child(copy_button(
+                                                SharedString::from(format!(
+                                                    "copy-network-configuration-{name}"
+                                                )),
+                                                exact.clone(),
+                                                "Copy exact network configuration",
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!(
+                                                "network-configuration-scroll-{name}"
+                                            )))
+                                            .max_w_full()
+                                            .overflow_x_scroll()
+                                            .p_3()
+                                            .rounded(cx.theme().radius)
+                                            .bg(cx.theme().muted)
+                                            .child(selectable_code_text(
+                                                SharedString::from(format!(
+                                                    "network-configuration-{name}"
+                                                )),
+                                                &exact,
+                                            )),
+                                    ),
                             )
                         })
                         .when(confirming_removal, |card| {
@@ -9804,7 +10358,7 @@ impl WalletWindow {
                                             .flex_wrap()
                                             .gap_2()
                                             .child(
-                                                Button::new(SharedString::from(format!(
+                                                app_button(SharedString::from(format!(
                                                     "confirm-delete-network-{name}"
                                                 )))
                                                 .label(if busy {
@@ -9824,7 +10378,7 @@ impl WalletWindow {
                                                 )),
                                             )
                                             .child(
-                                                Button::new(SharedString::from(format!(
+                                                app_button(SharedString::from(format!(
                                                     "cancel-delete-network-{name}"
                                                 )))
                                                 .label("Cancel")
@@ -9879,7 +10433,7 @@ impl WalletWindow {
         for network in &enabled_networks {
             let chain_id = network.chain_id;
             network_picker = network_picker.child(
-                Button::new(SharedString::from(format!("portfolio-network-{chain_id}")))
+                app_button(SharedString::from(format!("portfolio-network-{chain_id}")))
                     .label(
                         network
                             .display_name
@@ -9887,6 +10441,7 @@ impl WalletWindow {
                             .unwrap_or(&network.name)
                             .to_owned(),
                     )
+                    .toggled(self.portfolio_chain_id == Some(chain_id))
                     .when(
                         self.portfolio_chain_id == Some(chain_id),
                         ButtonVariants::primary,
@@ -9933,7 +10488,7 @@ impl WalletWindow {
                             ),
                     )
                     .child(
-                        Button::new("refresh-portfolio")
+                        app_button("refresh-portfolio")
                             .label(if matches!(self.portfolio, PortfolioState::Loading) {
                                 "Refreshing…"
                             } else {
@@ -9952,7 +10507,7 @@ impl WalletWindow {
             return content.child(
                 div()
                     .p_5()
-                    .rounded_lg()
+                    .rounded(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
                     .text_color(cx.theme().muted_foreground)
@@ -9963,7 +10518,7 @@ impl WalletWindow {
             PortfolioState::Idle | PortfolioState::Loading => content.child(
                 div()
                     .p_5()
-                    .rounded_lg()
+                    .rounded(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
                     .child(
@@ -9979,16 +10534,17 @@ impl WalletWindow {
             PortfolioState::Ready(snapshot) if snapshot.accounts.is_empty() => content.child(
                 div()
                     .p_5()
-                    .rounded_lg()
+                    .rounded(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
                     .flex()
                     .flex_col()
                     .gap_3()
                     .child(div().font_semibold().child("Create your first account"))
                     .child("A wallet account is required before there are balances to show.")
                     .child(
-                        Button::new("portfolio-create-account")
+                        app_button("portfolio-create-account")
                             .label("Go to Accounts")
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -10000,6 +10556,8 @@ impl WalletWindow {
             PortfolioState::Ready(snapshot) => {
                 let mut shown_accounts = 0_usize;
                 for account in &snapshot.accounts {
+                    let wallet_address = account.wallet.address.to_checksum(None);
+                    let wallet_address_for_copy = wallet_address.clone();
                     let mut networks = div().flex().flex_wrap().gap_3();
                     let mut shown = false;
                     for item in &account.networks {
@@ -10019,9 +10577,10 @@ impl WalletWindow {
                             .min_w_0()
                             .flex_1()
                             .p_3()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_1()
                             .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
                             .flex()
                             .flex_col()
                             .gap_2()
@@ -10062,13 +10621,18 @@ impl WalletWindow {
                                             .gap_3()
                                             .child("Native")
                                             .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .truncate()
-                                                    .font_family(MONO_FONT_FAMILY)
-                                                    .text_sm()
-                                                    .child(native_balance),
+                                                selectable_text(
+                                                    SharedString::from(format!(
+                                                        "portfolio-native-balance-{}-{}",
+                                                        account.wallet.id, item.network.chain_id
+                                                    )),
+                                                    &native_balance,
+                                                )
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .font_family(MONO_FONT_FAMILY)
+                                                .text_sm(),
                                             ),
                                     );
                                 }
@@ -10104,22 +10668,36 @@ impl WalletWindow {
                                                     .flex_1()
                                                     .child(div().truncate().child(label))
                                                     .child(
-                                                        div()
-                                                            .w_full()
-                                                            .min_w_0()
-                                                            .truncate()
-                                                            .text_xs()
-                                                            .font_family(MONO_FONT_FAMILY)
-                                                            .text_color(cx.theme().muted_foreground)
-                                                            .child(token.address.clone()),
+                                                        selectable_text(
+                                                            SharedString::from(format!(
+                                                                "portfolio-token-address-{}-{}-{}",
+                                                                account.wallet.id,
+                                                                item.network.chain_id,
+                                                                token.address
+                                                            )),
+                                                            &token.address,
+                                                        )
+                                                        .w_full()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_xs()
+                                                        .font_family(MONO_FONT_FAMILY)
+                                                        .text_color(cx.theme().muted_foreground),
                                                     ),
                                             )
                                             .child(
-                                                div()
-                                                    .flex_none()
-                                                    .font_family(MONO_FONT_FAMILY)
-                                                    .text_sm()
-                                                    .child(balance),
+                                                selectable_text(
+                                                    SharedString::from(format!(
+                                                        "portfolio-token-balance-{}-{}-{}",
+                                                        account.wallet.id,
+                                                        item.network.chain_id,
+                                                        token.address
+                                                    )),
+                                                    &balance,
+                                                )
+                                                .flex_none()
+                                                .font_family(MONO_FONT_FAMILY)
+                                                .text_sm(),
                                             ),
                                     );
                                 }
@@ -10141,33 +10719,53 @@ impl WalletWindow {
                                 .w_full()
                                 .min_w_0()
                                 .p_4()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_1()
                                 .border_color(cx.theme().border)
+                                .bg(cx.theme().secondary)
                                 .flex()
                                 .flex_col()
                                 .gap_3()
                                 .child(
-                                    div()
+                                    h_flex()
                                         .w_full()
                                         .min_w_0()
+                                        .justify_between()
+                                        .gap_2()
                                         .child(
                                             div()
                                                 .min_w_0()
-                                                .font_semibold()
-                                                .truncate()
-                                                .child(account.wallet.id.clone()),
+                                                .flex_1()
+                                                .child(
+                                                    div()
+                                                        .font_semibold()
+                                                        .truncate()
+                                                        .child(account.wallet.id.clone()),
+                                                )
+                                                .child(
+                                                    selectable_text(
+                                                        SharedString::from(format!(
+                                                            "portfolio-account-address-{}",
+                                                            account.wallet.id
+                                                        )),
+                                                        &wallet_address,
+                                                    )
+                                                    .font_family(MONO_FONT_FAMILY)
+                                                    .w_full()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().muted_foreground),
+                                                ),
                                         )
-                                        .child(
-                                            div()
-                                                .font_family(MONO_FONT_FAMILY)
-                                                .w_full()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(account.wallet.address.to_checksum(None)),
-                                        ),
+                                        .child(copy_button(
+                                            SharedString::from(format!(
+                                                "copy-portfolio-address-{}",
+                                                account.wallet.id
+                                            )),
+                                            wallet_address_for_copy.clone(),
+                                            "Copy account address",
+                                        )),
                                 )
                                 .child(networks),
                         );
@@ -10177,7 +10775,7 @@ impl WalletWindow {
                     content = content.child(
                         div()
                             .p_5()
-                            .rounded_lg()
+                            .rounded(cx.theme().radius_lg)
                             .border_1()
                             .border_color(cx.theme().border)
                             .text_color(cx.theme().muted_foreground)
@@ -10260,18 +10858,18 @@ impl WalletWindow {
                                                 .min_w(px(150.0))
                                                 .child(div().text_sm().child("Chain ID"))
                                                 .child(
-                                                    Input::new(chain_id)
+                                                    app_input(chain_id, cx)
+                                                        .aria_label("Chain ID")
                                                         .disabled(editing || busy),
                                                 )
                                                 .when_some(
                                                     self.token_editor_errors.chain_id.clone(),
                                                     |field, error| {
-                                                        field.child(
-                                                            div()
-                                                                .text_sm()
-                                                                .text_color(cx.theme().danger)
-                                                                .child(error),
-                                                        )
+                                                        field.child(field_error(
+                                                            "token-editor-chain-id-error",
+                                                            error,
+                                                            cx,
+                                                        ))
                                                     },
                                                 ),
                                         )
@@ -10283,16 +10881,19 @@ impl WalletWindow {
                                                 .flex_1()
                                                 .min_w(px(150.0))
                                                 .child(div().text_sm().child("Symbol"))
-                                                .child(Input::new(symbol).disabled(busy))
+                                                .child(
+                                                    app_input(symbol, cx)
+                                                        .aria_label("Token symbol")
+                                                        .disabled(busy),
+                                                )
                                                 .when_some(
                                                     self.token_editor_errors.symbol.clone(),
                                                     |field, error| {
-                                                        field.child(
-                                                            div()
-                                                                .text_sm()
-                                                                .text_color(cx.theme().danger)
-                                                                .child(error),
-                                                        )
+                                                        field.child(field_error(
+                                                            "token-editor-symbol-error",
+                                                            error,
+                                                            cx,
+                                                        ))
                                                     },
                                                 ),
                                         )
@@ -10304,16 +10905,19 @@ impl WalletWindow {
                                                 .flex_1()
                                                 .min_w(px(150.0))
                                                 .child(div().text_sm().child("Decimals"))
-                                                .child(Input::new(decimals).disabled(busy))
+                                                .child(
+                                                    app_input(decimals, cx)
+                                                        .aria_label("Token decimals")
+                                                        .disabled(busy),
+                                                )
                                                 .when_some(
                                                     self.token_editor_errors.decimals.clone(),
                                                     |field, error| {
-                                                        field.child(
-                                                            div()
-                                                                .text_sm()
-                                                                .text_color(cx.theme().danger)
-                                                                .child(error),
-                                                        )
+                                                        field.child(field_error(
+                                                            "token-editor-decimals-error",
+                                                            error,
+                                                            cx,
+                                                        ))
                                                     },
                                                 ),
                                         ),
@@ -10324,16 +10928,19 @@ impl WalletWindow {
                                         .flex_col()
                                         .gap_1()
                                         .child(div().text_sm().child("Token address"))
-                                        .child(Input::new(address).disabled(editing || busy))
+                                        .child(
+                                            app_input(address, cx)
+                                                .aria_label("Token address")
+                                                .disabled(editing || busy),
+                                        )
                                         .when_some(
                                             self.token_editor_errors.address.clone(),
                                             |field, error| {
-                                                field.child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().danger)
-                                                        .child(error),
-                                                )
+                                                field.child(field_error(
+                                                    "token-editor-address-error",
+                                                    error,
+                                                    cx,
+                                                ))
                                             },
                                         ),
                                 )
@@ -10343,35 +10950,37 @@ impl WalletWindow {
                                         .flex_col()
                                         .gap_1()
                                         .child(div().text_sm().child("Full name (optional)"))
-                                        .child(Input::new(name).disabled(busy))
+                                        .child(
+                                            app_input(name, cx)
+                                                .aria_label("Full token name")
+                                                .disabled(busy),
+                                        )
                                         .when_some(
                                             self.token_editor_errors.name.clone(),
                                             |field, error| {
-                                                field.child(
-                                                    div()
-                                                        .text_sm()
-                                                        .text_color(cx.theme().danger)
-                                                        .child(error),
-                                                )
+                                                field.child(field_error(
+                                                    "token-editor-name-error",
+                                                    error,
+                                                    cx,
+                                                ))
                                             },
                                         ),
                                 )
                                 .when_some(
                                     self.token_editor_errors.form.clone(),
                                     |panel, error| {
-                                        panel.child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().danger)
-                                                .child(error),
-                                        )
+                                        panel.child(field_error(
+                                            "token-editor-form-error",
+                                            error,
+                                            cx,
+                                        ))
                                     },
                                 )
                                 .child(
                                     h_flex()
                                         .gap_2()
                                         .child(
-                                            Button::new("save-token-editor")
+                                            app_button("save-token-editor")
                                                 .label(if busy {
                                                     "Authenticating…"
                                                 } else if editing {
@@ -10386,7 +10995,7 @@ impl WalletWindow {
                                                 })),
                                         )
                                         .child(
-                                            Button::new("close-token-editor")
+                                            app_button("close-token-editor")
                                                 .label("Cancel")
                                                 .disabled(busy)
                                                 .on_click(cx.listener(|view, _, _, cx| {
@@ -10399,7 +11008,7 @@ impl WalletWindow {
             }
         } else {
             content = content.child(
-                Button::new("open-token-editor")
+                app_button("open-token-editor")
                     .label("Add token")
                     .primary()
                     .on_click(cx.listener(|view, _, window, cx| {
@@ -10420,12 +11029,26 @@ impl WalletWindow {
                             .child("Fetch a public HTTPS token-list JSON for all enabled networks. Nothing is trusted until you inspect and accept the exact resulting list below."),
                     )
                     .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child("Published token-list URL"),
+                    )
+                    .child(
                         h_flex()
                             .w_full()
+                            .flex_wrap()
                             .gap_2()
-                            .child(div().flex_1().min_w_0().child(Input::new(input)))
                             .child(
-                                Button::new("import-owner-token-list")
+                                div().flex_1().min_w(px(220.0)).child(
+                                    app_input(input, cx)
+                                        .aria_label("Published token-list URL")
+                                        .content_type(InputContentType::Url)
+                                        .w_full(),
+                                ),
+                            )
+                            .child(
+                                app_button("import-owner-token-list")
                                     .label(
                                         if self.token_import_state == TokenImportState::Fetching {
                                             "Fetching…"
@@ -10483,6 +11106,7 @@ impl WalletWindow {
                             .rounded(cx.theme().radius)
                             .border_1()
                             .border_color(cx.theme().border)
+                            .bg(cx.theme().secondary)
                             .flex()
                             .items_center()
                             .justify_between()
@@ -10496,8 +11120,9 @@ impl WalletWindow {
                                 ),
                             )
                             .child(
-                                Button::new(("review-token-proposal-group", index))
+                                app_button(("review-token-proposal-group", index))
                                     .label(if selected { "Reviewing" } else { "Review" })
+                                    .toggled(selected)
                                     .when(selected, ButtonVariants::primary)
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.review_token_proposal_group(
@@ -10554,7 +11179,7 @@ impl WalletWindow {
                             .flex_wrap()
                             .gap_2()
                             .child(
-                                Button::new("accept-token-proposal-group")
+                                app_button("accept-token-proposal-group")
                                     .label(if self.token_proposal_busy {
                                         "Working…"
                                     } else if viewed_to_end {
@@ -10569,7 +11194,7 @@ impl WalletWindow {
                                     })),
                             )
                             .child(
-                                Button::new("reject-token-proposal-group")
+                                app_button("reject-token-proposal-group")
                                     .label("Reject exact list")
                                     .danger()
                                     .disabled(self.token_proposal_busy)
@@ -10612,14 +11237,14 @@ impl WalletWindow {
                     .child("Ekubo Wallet does not download or install updates. Open the latest release in your browser and install it through your operating system."),
             )
             .child(
-                Button::new("open-latest-release")
+                app_button("open-latest-release")
                     .label("View latest release")
                     .primary()
                     .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
             );
         panel = match &self.release_state {
             ReleaseDisplayState::Idle => panel.child(
-                Button::new("check-latest-release")
+                app_button("check-latest-release")
                     .label("Check latest version")
                     .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
             ),
@@ -10642,14 +11267,14 @@ impl WalletWindow {
                     panel.child("A newer release is available.")
                 })
                 .child(
-                    Button::new("recheck-latest-release")
+                    app_button("recheck-latest-release")
                         .label("Check again")
                         .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
             ReleaseDisplayState::Failed(error) => panel
                 .child(div().text_color(cx.theme().danger).child(error.clone()))
                 .child(
-                    Button::new("retry-latest-release")
+                    app_button("retry-latest-release")
                         .label("Try again")
                         .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
@@ -10680,15 +11305,18 @@ impl WalletWindow {
     fn render_review_fact(
         fact: &ApprovalFact,
         section_kind: ApprovalSectionKind,
+        section_id: &str,
+        index: usize,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let fact_id = SharedString::from(format!("review-fact-{section_id}-{index}"));
         if section_kind == ApprovalSectionKind::Effects {
             if fact.label.is_empty() {
-                return div()
-                    .pl_3()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(fact.value.clone());
+                return div().pl_3().child(
+                    selectable_text(fact_id, &fact.value)
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
+                );
             }
             let amount_color = if fact.value.trim_start().starts_with('-') {
                 cx.theme().danger
@@ -10713,27 +11341,28 @@ impl WalletWindow {
                         .child(div().font_semibold().child(asset))
                         .when_some(exact_asset, |asset, exact| {
                             asset.child(
-                                div()
-                                    .min_w_0()
-                                    .max_w_full()
-                                    .truncate()
-                                    .font_family(MONO_FONT_FAMILY)
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(exact),
+                                selectable_text(
+                                    SharedString::from(format!("{fact_id}-asset")),
+                                    &exact,
+                                )
+                                .min_w_0()
+                                .max_w_full()
+                                .truncate()
+                                .font_family(MONO_FONT_FAMILY)
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground),
                             )
                         }),
                 )
                 .child(
-                    div()
+                    selectable_text(SharedString::from(format!("{fact_id}-amount")), &fact.value)
                         .min_w_0()
                         .flex_1()
                         .flex_basis(px(240.0))
                         .text_lg()
                         .font_semibold()
                         .text_color(amount_color)
-                        .whitespace_normal()
-                        .child(fact.value.clone()),
+                        .whitespace_normal(),
                 );
         }
 
@@ -10748,7 +11377,11 @@ impl WalletWindow {
                         .text_color(cx.theme().muted_foreground)
                         .child("HUMAN-READABLE INTERPRETATION"),
                 )
-                .child(div().text_lg().font_semibold().child(fact.value.clone()));
+                .child(
+                    selectable_text(fact_id, &fact.value)
+                        .text_lg()
+                        .font_semibold(),
+                );
         }
 
         let exact_value = matches!(fact.label.as_str(), "Address" | "Sender" | "Target");
@@ -10771,16 +11404,19 @@ impl WalletWindow {
                     }),
             )
             .child(
-                div()
+                selectable_text(fact_id, &fact.value)
                     .min_w_0()
                     .flex_1()
                     .text_sm()
-                    .when(exact_value, |value| value.font_family(MONO_FONT_FAMILY))
-                    .child(fact.value.clone()),
+                    .when(exact_value, |value| value.font_family(MONO_FONT_FAMILY)),
             )
     }
 
-    fn render_review_section(section: &ApprovalSection, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_review_section(
+        section: &ApprovalSection,
+        section_id: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let (icon, heading_color) = match section.kind {
             ApprovalSectionKind::Effects => (IconName::Star, cx.theme().foreground),
             ApprovalSectionKind::Action => (IconName::Inspector, cx.theme().foreground),
@@ -10791,7 +11427,7 @@ impl WalletWindow {
             .w_full()
             .min_w_0()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
@@ -10805,12 +11441,9 @@ impl WalletWindow {
                     .child(Icon::new(icon).small())
                     .child(div().font_semibold().child(section.heading.clone())),
             )
-            .children(
-                section
-                    .facts
-                    .iter()
-                    .map(|fact| Self::render_review_fact(fact, section.kind, cx)),
-            )
+            .children(section.facts.iter().enumerate().map(|(index, fact)| {
+                Self::render_review_fact(fact, section.kind, section_id, index, cx)
+            }))
     }
 
     fn render_review_simulation(
@@ -10848,7 +11481,7 @@ impl WalletWindow {
         div()
             .w_full()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(color)
             .flex()
@@ -10890,26 +11523,29 @@ impl WalletWindow {
             .flex_col()
             .gap_4()
             .child(
-                div()
-                    .text_2xl()
-                    .font_semibold()
-                    .child(document.request.title.clone()),
+                selectable_text(("review-title", generation), &document.request.title)
+                    .text_3xl()
+                    .font_medium(),
             )
             .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(document.request.summary.clone()),
+                selectable_text(("review-summary", generation), &document.request.summary)
+                    .text_color(cx.theme().muted_foreground),
             );
 
         if let Some(simulation) = &active.simulation {
             review_body = review_body.child(Self::render_review_simulation(simulation, cx));
         }
 
-        for section in review_sections_for_display(document)
+        for (index, section) in review_sections_for_display(document)
             .into_iter()
             .filter(|section| section.kind == ApprovalSectionKind::Effects)
+            .enumerate()
         {
-            review_body = review_body.child(Self::render_review_section(section, cx));
+            review_body = review_body.child(Self::render_review_section(
+                section,
+                &format!("{generation}-effects-{index}"),
+                cx,
+            ));
         }
 
         if !document.request.warnings.is_empty() {
@@ -10933,10 +11569,15 @@ impl WalletWindow {
                                     "review-warning-{generation}-{index}"
                                 )))
                                 .p_3()
-                                .rounded_lg()
+                                .rounded(cx.theme().radius_lg)
                                 .border_1()
                                 .border_color(cx.theme().warning)
-                                .child(warning.clone())
+                                .child(selectable_text(
+                                    SharedString::from(format!(
+                                        "review-warning-text-{generation}-{index}"
+                                    )),
+                                    warning,
+                                ))
                         },
                     )),
             );
@@ -10948,28 +11589,32 @@ impl WalletWindow {
             ..
         }) = active.completion.as_ref()
         {
-            review_body = review_body
-                .child(div().mt_2().font_semibold().child("Account to expose"))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .children(choices.iter().enumerate().map(|(index, choice)| {
-                            Button::new(SharedString::from(format!("wc-account-{index}")))
+            review_body =
+                review_body
+                    .child(div().mt_2().font_semibold().child("Account to expose"))
+                    .child(div().flex().flex_wrap().gap_2().children(
+                        choices.iter().enumerate().map(|(index, choice)| {
+                            app_button(SharedString::from(format!("wc-account-{index}")))
                                 .label(choice.account.id.clone())
+                                .toggled(index == *selected_account)
                                 .when(index == *selected_account, ButtonVariants::primary)
                                 .on_click(cx.listener(move |view, _, _, cx| {
                                     view.select_walletconnect_account(index, cx);
                                 }))
-                        })),
-                );
+                        }),
+                    ));
         }
 
-        for section in review_sections_for_display(document)
+        for (index, section) in review_sections_for_display(document)
             .into_iter()
             .filter(|section| section.kind != ApprovalSectionKind::Effects)
+            .enumerate()
         {
-            review_body = review_body.child(Self::render_review_section(section, cx));
+            review_body = review_body.child(Self::render_review_section(
+                section,
+                &format!("{generation}-section-{index}"),
+                cx,
+            ));
         }
 
         if !document.request.facts.is_empty() {
@@ -10978,7 +11623,11 @@ impl WalletWindow {
                 heading: "Request details".to_owned(),
                 facts: document.request.facts.clone(),
             };
-            review_body = review_body.child(Self::render_review_section(&context, cx));
+            review_body = review_body.child(Self::render_review_section(
+                &context,
+                &format!("{generation}-request-details"),
+                cx,
+            ));
         }
 
         if exact_data_required {
@@ -10987,9 +11636,10 @@ impl WalletWindow {
                     div()
                         .w_full()
                         .p_4()
-                        .rounded_lg()
+                        .rounded(cx.theme().radius_lg)
                         .border_1()
                         .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
                         .flex()
                         .flex_col()
                         .gap_2()
@@ -11019,11 +11669,24 @@ impl WalletWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_2()
-                                .child(div().font_semibold().child(if index == 0 {
-                                    "Execution plan JSON".to_owned()
-                                } else {
-                                    format!("Action {index} exact calldata")
-                                }))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(div().font_semibold().child(if index == 0 {
+                                            "Execution plan JSON".to_owned()
+                                        } else {
+                                            format!("Action {index} exact calldata")
+                                        }))
+                                        .child(copy_button(
+                                            SharedString::from(format!(
+                                                "copy-review-payload-{generation}-{index}"
+                                            )),
+                                            payload.clone(),
+                                            "Copy exact review data",
+                                        )),
+                                )
                                 .child(
                                     div()
                                         .id(SharedString::from(format!(
@@ -11033,14 +11696,16 @@ impl WalletWindow {
                                         .min_w_0()
                                         .overflow_x_scroll()
                                         .p_3()
-                                        .rounded_lg()
+                                        .rounded(cx.theme().radius_lg)
                                         .border_1()
                                         .border_color(cx.theme().border)
-                                        .bg(cx.theme().secondary)
-                                        .font_family(MONO_FONT_FAMILY)
-                                        .text_sm()
-                                        .whitespace_normal()
-                                        .child(payload.clone()),
+                                        .bg(cx.theme().muted)
+                                        .child(selectable_code_text(
+                                            SharedString::from(format!(
+                                                "review-payload-text-{generation}-{index}"
+                                            )),
+                                            payload,
+                                        )),
                                 )
                         }),
                 );
@@ -11051,7 +11716,7 @@ impl WalletWindow {
             .min_h_0()
             .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -11102,7 +11767,7 @@ impl WalletWindow {
                     .justify_between()
                     .items_center()
                     .child(
-                        Button::new(("review-refresh", generation))
+                        app_button(("review-refresh", generation))
                             .label("Re-simulate")
                             .loading(active.awaiting_refresh)
                             .disabled(active.awaiting_refresh || !can_refresh)
@@ -11113,6 +11778,7 @@ impl WalletWindow {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_2()
                             .when(!approve_enabled, |buttons| {
@@ -11124,7 +11790,7 @@ impl WalletWindow {
                                 )
                             })
                             .child(
-                                Button::new(("review-select-reject", generation))
+                                app_button(("review-select-reject", generation))
                                     .label(if walletconnect_connection {
                                         "Decline connection"
                                     } else {
@@ -11136,7 +11802,7 @@ impl WalletWindow {
                                     })),
                             )
                             .child(
-                                Button::new(("review-select-approve", generation))
+                                app_button(("review-select-approve", generation))
                                     .label(if walletconnect_connection {
                                         "Authenticate & connect"
                                     } else {
@@ -11163,7 +11829,7 @@ impl WalletWindow {
             .inset_0()
             .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -11195,14 +11861,14 @@ impl WalletWindow {
                     .justify_end()
                     .gap_2()
                     .child(
-                        Button::new("cancel-agent-install")
+                        app_button("cancel-agent-install")
                             .label("Cancel")
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.cancel_agent_install(cx);
                             })),
                     )
                     .child(
-                        Button::new("confirm-agent-install")
+                        app_button("confirm-agent-install")
                             .label("Apply")
                             .primary()
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -11256,7 +11922,10 @@ impl WalletWindow {
                                     .bg(cx.theme().muted)
                                     .text_color(cx.theme().muted_foreground)
                             })
-                            .child(row.text.clone());
+                            .child(selectable_text(
+                                SharedString::from(format!("legal-row-{document_title}-{index}")),
+                                row.text.as_ref(),
+                            ));
                         line.into_any_element()
                     })
                     .collect::<Vec<_>>()
@@ -11270,7 +11939,7 @@ impl WalletWindow {
             .min_h_0()
             .on_mouse_down(MouseButton::Left, |_, _, _| {})
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -11322,7 +11991,7 @@ impl WalletWindow {
                                 }),
                         )
                         .child(
-                            Button::new("accept-legal")
+                            app_button("accept-legal")
                                 .label("Accept")
                                 .primary()
                                 .disabled(!viewed_to_end)
@@ -11334,9 +12003,8 @@ impl WalletWindow {
             })
             .when(!review.acceptance_required, |panel| {
                 panel.child(
-                    Button::new("close-legal-review")
+                    app_button("close-legal-review")
                         .label("Close")
-                        .large()
                         .primary()
                         .w_full()
                         .on_click(cx.listener(|view, _, _, cx| {
@@ -11357,7 +12025,7 @@ impl WalletWindow {
             .absolute()
             .inset_4()
             .p_4()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -11397,7 +12065,7 @@ impl WalletWindow {
                     .flex()
                     .justify_between()
                     .child(
-                        Button::new("close-account-export")
+                        app_button("close-account-export")
                             .label("Close")
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.account_export = None;
@@ -11410,7 +12078,7 @@ impl WalletWindow {
                             .gap_2()
                             .when(export.lease.is_none(), |buttons| {
                                 buttons.child(
-                                    Button::new("authenticate-account-export")
+                                    app_button("authenticate-account-export")
                                         .label(if export.authenticating {
                                             "Authenticating…"
                                         } else {
@@ -11425,7 +12093,7 @@ impl WalletWindow {
                             })
                             .when(visible.is_some(), |buttons| {
                                 buttons.child(
-                                    Button::new("copy-account-export")
+                                    app_button("copy-account-export")
                                         .label(if export.copied { "Copied" } else { "Copy" })
                                         .disabled(export.copied)
                                         .on_click(cx.listener(|view, _, _, cx| {
@@ -11468,7 +12136,15 @@ impl WalletWindow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_2xl().font_semibold().child(self.route.label()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_3xl()
+                            .font_medium()
+                            .child(self.route.label()),
+                    )
                     .when(self.desktop_snapshot_loading, |header| {
                         header.child(Spinner::new().small())
                     }),
@@ -11486,13 +12162,24 @@ impl WalletWindow {
                     .flex_col()
                     .gap_4()
                     .when_some(self.desktop_snapshot_error.clone(), |content, error| {
-                        content.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        content.child(
+                            Alert::error("desktop-snapshot-error", error)
+                                .title("Wallet data unavailable"),
+                        )
                     })
                     .when_some(
                         self.route_errors.get(&self.route).cloned(),
                         |content, error| {
-                            content
-                                .child(div().text_sm().text_color(cx.theme().danger).child(error))
+                            content.child(
+                                Alert::error(
+                                    SharedString::from(format!(
+                                        "route-error-{}",
+                                        self.route.label()
+                                    )),
+                                    error,
+                                )
+                                .title("Action could not be completed"),
+                            )
                         },
                     )
                     .child(route_panel),
@@ -11507,7 +12194,7 @@ impl WalletWindow {
             .w(px(420.0))
             .max_h(px(460.0))
             .p_3()
-            .rounded_lg()
+            .rounded(cx.theme().radius_lg)
             .shadow_lg()
             .border_1()
             .border_color(cx.theme().border)
@@ -11619,6 +12306,14 @@ struct InterfaceInteractionPalette {
     danger_hover: u32,
     danger_active: u32,
     danger_foreground: u32,
+    success: u32,
+    success_hover: u32,
+    success_active: u32,
+    success_foreground: u32,
+    warning: u32,
+    warning_hover: u32,
+    warning_active: u32,
+    warning_foreground: u32,
 }
 
 #[allow(clippy::unreadable_literal)] // Six-digit literals are RGB colors from the interface palette.
@@ -11628,16 +12323,25 @@ const fn interface_interaction_palette(dark: bool) -> InterfaceInteractionPalett
         button_hover: if dark { 0x373737 } else { 0xe5e4e4 },
         button_active: if dark { 0x261b34 } else { 0xf3e7fe },
         button_foreground: if dark { 0xffffff } else { 0x101010 },
-        // Keep off-purple for accents. Small white labels need the darker
-        // Ekubo purple to meet AA contrast in every interaction state.
-        primary: 0x661cc4,
-        primary_hover: 0x752ccf,
-        primary_active: 0x4c1396,
-        primary_foreground: 0xffffff,
-        danger: 0xc0165b,
-        danger_hover: 0xd11868,
-        danger_active: 0x981047,
-        danger_foreground: 0xffffff,
+        // Figma specifies off-purple for the primary fill. Its white-label
+        // example falls below AA, so the application pairs the exact brand
+        // fill with Ekubo black instead of inventing a darker purple.
+        primary: 0x9d5af2,
+        primary_hover: 0xb174ff,
+        primary_active: 0x9d5af2,
+        primary_foreground: 0x101010,
+        danger: 0xeb1e74,
+        danger_hover: 0xf04488,
+        danger_active: 0xeb1e74,
+        danger_foreground: 0x101010,
+        success: 0x26e7ad,
+        success_hover: 0x48f2be,
+        success_active: 0x26e7ad,
+        success_foreground: 0x101010,
+        warning: 0xdf7b32,
+        warning_hover: 0xf08d42,
+        warning_active: 0xdf7b32,
+        warning_foreground: 0x101010,
     }
 }
 
@@ -11646,21 +12350,22 @@ fn apply_interface_palette(cx: &mut App) {
     let dark = Theme::global(cx).is_dark();
     let color = |hex: u32| -> gpui::Hsla { gpui::rgb(hex).into() };
     let interaction = interface_interaction_palette(dark);
-    let (background, surface, hover, border, muted, foreground, muted_foreground) = if dark {
+    let (background, surface, surface_hover, border, muted, foreground, muted_foreground) = if dark
+    {
         (
             color(0x101010),
             color(0x1d1d1d),
+            color(0x171717),
             color(0x373737),
-            color(0x373737),
-            color(0x272727),
+            color(0x171717),
             color(0xffffff),
             color(0x878787),
         )
     } else {
         (
-            color(0xffffff),
+            color(0xfafafa),
             color(0xf6f6f9),
-            color(0xe5e4e4),
+            color(0xffffff),
             color(0xe5e4e4),
             color(0xf6f6f9),
             color(0x101010),
@@ -11670,17 +12375,27 @@ fn apply_interface_palette(cx: &mut App) {
     let accent = color(0x9d5af2);
     let primary = color(interaction.primary);
     let primary_active = color(interaction.primary_active);
-    let danger = color(interaction.danger);
-    let success = color(0x26e8ad);
-    let warning = color(0xdf7b32);
+    let button_danger = color(interaction.danger);
+    let button_success = color(interaction.success);
+    let button_warning = color(interaction.warning);
+    // Semantic colors are also used as small text on the page background.
+    // The light-theme variants are darker accessibility companions to the
+    // exact brand fills used by buttons and badges.
+    let semantic_primary = color(if dark { 0xb174ff } else { 0x7a36d2 });
+    let danger = color(if dark { 0xeb1e74 } else { 0xc0165b });
+    let success = color(if dark { 0x26e7ad } else { 0x08775a });
+    let warning = color(if dark { 0xdf7b32 } else { 0x94501e });
     let theme = Theme::global_mut(cx);
+    theme.radius = CONTROL_RADIUS;
+    theme.radius_lg = SURFACE_RADIUS;
     let colors = &mut theme.colors;
     colors.background = background;
     colors.foreground = foreground;
     colors.border = border;
-    colors.accent = hover;
+    colors.accent = surface_hover;
     colors.accent_foreground = foreground;
     colors.accordion = surface;
+    colors.caret = accent;
     colors.button = color(interaction.button);
     colors.button_active = color(interaction.button_active);
     colors.button_foreground = color(interaction.button_foreground);
@@ -11693,18 +12408,18 @@ fn apply_interface_palette(cx: &mut App) {
     colors.button_secondary_active = color(interaction.button_active);
     colors.button_secondary_foreground = color(interaction.button_foreground);
     colors.button_secondary_hover = color(interaction.button_hover);
-    colors.button_danger = danger;
+    colors.button_danger = button_danger;
     colors.button_danger_active = color(interaction.danger_active);
     colors.button_danger_foreground = color(interaction.danger_foreground);
     colors.button_danger_hover = color(interaction.danger_hover);
-    colors.button_success = success;
-    colors.button_success_active = success.mix_oklab(background, 0.25);
-    colors.button_success_foreground = color(0x101010);
-    colors.button_success_hover = success.mix_oklab(background, 0.12);
-    colors.button_warning = warning;
-    colors.button_warning_active = warning.mix_oklab(background, 0.25);
-    colors.button_warning_foreground = color(0x101010);
-    colors.button_warning_hover = warning.mix_oklab(background, 0.12);
+    colors.button_success = button_success;
+    colors.button_success_active = color(interaction.success_active);
+    colors.button_success_foreground = color(interaction.success_foreground);
+    colors.button_success_hover = color(interaction.success_hover);
+    colors.button_warning = button_warning;
+    colors.button_warning_active = color(interaction.warning_active);
+    colors.button_warning_foreground = color(interaction.warning_foreground);
+    colors.button_warning_hover = color(interaction.warning_hover);
     colors.group_box = surface;
     colors.group_box_foreground = foreground;
     colors.input = border;
@@ -11713,20 +12428,29 @@ fn apply_interface_palette(cx: &mut App) {
     colors.list_active_border = accent;
     colors.list_even = surface;
     colors.list_head = muted;
-    colors.list_hover = hover;
+    colors.list_hover = surface_hover;
     colors.muted = muted;
     colors.muted_foreground = muted_foreground;
     colors.popover = surface;
     colors.popover_foreground = foreground;
+    colors.info = semantic_primary;
+    colors.info_active = semantic_primary;
+    colors.info_foreground = background;
+    colors.info_hover = semantic_primary;
+    colors.link = semantic_primary;
+    colors.link_active = semantic_primary;
+    colors.link_hover = color(if dark { 0xc49bff } else { 0x661cc4 });
     colors.primary = primary;
     colors.primary_active = primary_active;
     colors.primary_foreground = color(interaction.primary_foreground);
     colors.primary_hover = color(interaction.primary_hover);
+    colors.progress_bar = accent;
     colors.ring = accent;
     colors.secondary = surface;
     colors.secondary_active = color(interaction.button_active);
     colors.secondary_foreground = foreground;
-    colors.secondary_hover = hover;
+    colors.secondary_hover = surface_hover;
+    colors.selection = accent.opacity(0.35);
     colors.sidebar = surface;
     colors.sidebar_accent = color(interaction.button_active);
     colors.sidebar_accent_foreground = foreground;
@@ -11735,11 +12459,11 @@ fn apply_interface_palette(cx: &mut App) {
     colors.sidebar_primary = primary;
     colors.sidebar_primary_foreground = color(interaction.primary_foreground);
     colors.danger = danger;
-    colors.danger_foreground = color(0xffffff);
+    colors.danger_foreground = background;
     colors.success = success;
-    colors.success_foreground = color(0x101010);
+    colors.success_foreground = background;
     colors.warning = warning;
-    colors.warning_foreground = color(0x101010);
+    colors.warning_foreground = background;
     theme.tokens = ThemeTokens::from(&theme.colors);
 }
 
@@ -11784,6 +12508,7 @@ fn show_wallet_window(
         view.command_palette = false;
         view.command_palette_list = None;
         view.command_palette_subscription = None;
+        view.form_input_subscriptions.clear();
         view.appearance_subscription = None;
         view.token_list = None;
         view.token_proposal_list = None;

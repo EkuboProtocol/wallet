@@ -11,8 +11,10 @@ use std::{
 };
 #[cfg(target_os = "macos")]
 use std::{
+    fs,
     io::{Cursor, Read, Seek},
-    os::fd::AsRawFd,
+    os::unix::fs::PermissionsExt as _,
+    path::Path,
     process::{Command, Stdio},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -240,54 +242,111 @@ impl SystemScreenPicker {
 impl ScreenPicker for SystemScreenPicker {
     #[cfg(target_os = "macos")]
     fn capture_once(&self) -> Result<Option<CapturedFrame>> {
-        // `screencapture`/ImageIO needs seekable output; stdout is a pipe and
-        // silently produced no usable image on current macOS. An unnamed
-        // tempfile is seekable but has no directory entry, so captured pixels
-        // are never saved at a path, cached, or left for another process to
-        // discover. Clear close-on-exec only for this descriptor so the picker
-        // can open its `/dev/fd` alias, then close it with the child.
-        let mut capture = tempfile::tempfile().context("could not allocate ephemeral capture")?;
-        let fd = capture.as_raw_fd();
-        let mut flags = rustix::io::fcntl_getfd(&capture)
-            .context("could not inspect ephemeral capture descriptor")?;
-        flags.remove(rustix::io::FdFlags::CLOEXEC);
-        rustix::io::fcntl_setfd(&capture, flags)
-            .context("could not share ephemeral capture descriptor with the picker")?;
-        let target = format!("/dev/fd/{fd}");
-        let output = Command::new("/usr/sbin/screencapture")
-            .args(["-i", "-x", "-t", "png", &target])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .context("could not open the macOS screen picker")?;
-        if !output.status.success() {
-            return Ok(None);
-        }
-        capture
-            .rewind()
-            .context("could not rewind screen capture")?;
-        let mut encoded = Vec::new();
-        capture
-            .take(u64::try_from(MAX_CAPTURE_BYTES + 1)?)
-            .read_to_end(&mut encoded)
-            .context("could not read selected screen capture")?;
-        if encoded.is_empty() {
-            return Ok(None);
-        }
-        ensure!(
-            encoded.len() <= MAX_CAPTURE_BYTES,
-            "selected screen capture is too large"
-        );
-        let result = decode_png_capture(&encoded);
-        encoded.zeroize();
-        result.map(Some)
+        capture_macos_screen_with(run_macos_screen_picker)
     }
 
     #[cfg(not(target_os = "macos"))]
     fn capture_once(&self) -> Result<Option<CapturedFrame>> {
         anyhow::bail!("screen scanning is not available on this platform")
     }
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_screen_picker(target: &Path) -> Result<bool> {
+    let output = Command::new("/usr/sbin/screencapture")
+        // `-U` presents the familiar interactive toolbar instead of leaving
+        // users to discover an invisible crosshair mode. `-d` lets macOS show
+        // capture-permission failures as well as returning them below.
+        .args(["-i", "-U", "-d", "-x", "-t", "png"])
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .context("could not open the macOS screen picker")?;
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let message = String::from_utf8_lossy(&output.stderr);
+    let message = message.trim();
+    if message.is_empty() {
+        // Escape/cancel exits without an image or diagnostic.
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "macOS screen picker failed: {}",
+        ekubo_wallet_core::sanitize::stripped_capped(message, 512)
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn capture_macos_screen_with(
+    launch: impl FnOnce(&Path) -> Result<bool>,
+) -> Result<Option<CapturedFrame>> {
+    // `screencapture` delegates through macOS services, so a `/dev/fd` path
+    // names the wrong process's descriptor and can yield no image. Give it a
+    // real randomized path inside a mode-0700 directory instead. The image is
+    // mode 0600, read immediately, and removed with the directory on return.
+    let directory = tempfile::Builder::new()
+        .prefix("ekubo-wallet-qr-")
+        .tempdir()
+        .context("could not allocate private screen-capture directory")?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+        .context("could not protect the screen-capture directory")?;
+    let capture_guard = tempfile::Builder::new()
+        .prefix("capture-")
+        .suffix(".png")
+        .tempfile_in(directory.path())
+        .context("could not allocate ephemeral screen capture")?;
+    capture_guard
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .context("could not protect the screen-capture file")?;
+    let capture_path = capture_guard.path().to_owned();
+    if !launch(&capture_path)? {
+        return Ok(None);
+    }
+
+    // Reopen by name because ScreenCaptureKit may replace the directory entry
+    // instead of writing through the inode we created. NOFOLLOW makes the
+    // regular-file check atomic with opening, even against another same-user
+    // process that discovers the private temporary directory.
+    let capture_fd = rustix::fs::open(
+        &capture_path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .context("could not securely open the selected screen capture")?;
+    rustix::fs::fchmod(&capture_fd, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR)
+        .context("could not protect the completed screen capture")?;
+    let mut captured_file = fs::File::from(capture_fd);
+    let capture_metadata = captured_file
+        .metadata()
+        .context("could not inspect selected screen capture")?;
+    ensure!(
+        capture_metadata.file_type().is_file(),
+        "the screen picker returned an invalid file"
+    );
+    let capture_size = capture_metadata.len();
+    ensure!(capture_size > 0, "the screen picker returned no image");
+    ensure!(
+        capture_size <= u64::try_from(MAX_CAPTURE_BYTES)?,
+        "selected screen capture is too large"
+    );
+    captured_file
+        .rewind()
+        .context("could not rewind screen capture")?;
+    let mut encoded = Zeroizing::new(Vec::with_capacity(usize::try_from(capture_size)?));
+    captured_file
+        .take(u64::try_from(MAX_CAPTURE_BYTES + 1)?)
+        .read_to_end(&mut encoded)
+        .context("could not read selected screen capture")?;
+    ensure!(
+        encoded.len() <= MAX_CAPTURE_BYTES,
+        "selected screen capture is too large"
+    );
+    decode_png_capture(&encoded).map(Some)
 }
 
 #[cfg(target_os = "macos")]

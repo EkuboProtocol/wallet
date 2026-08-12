@@ -627,6 +627,12 @@ fn every_button_interaction_state_has_aa_text_contrast_in_both_themes() {
             (palette.danger, palette.danger_foreground),
             (palette.danger_hover, palette.danger_foreground),
             (palette.danger_active, palette.danger_foreground),
+            (palette.success, palette.success_foreground),
+            (palette.success_hover, palette.success_foreground),
+            (palette.success_active, palette.success_foreground),
+            (palette.warning, palette.warning_foreground),
+            (palette.warning_hover, palette.warning_foreground),
+            (palette.warning_active, palette.warning_foreground),
         ] {
             assert!(
                 contrast_ratio(background, foreground) >= 4.5,
@@ -634,6 +640,61 @@ fn every_button_interaction_state_has_aa_text_contrast_in_both_themes() {
             );
         }
     }
+}
+
+#[test]
+#[allow(clippy::unreadable_literal)]
+fn interaction_palette_uses_the_figma_brand_colors() {
+    for dark in [false, true] {
+        let palette = interface_interaction_palette(dark);
+        assert_eq!(palette.primary, 0x9d5af2);
+        assert_eq!(palette.primary_hover, 0xb174ff);
+        assert_eq!(palette.primary_foreground, 0x101010);
+        assert_eq!(palette.danger, 0xeb1e74);
+        assert_eq!(palette.success, 0x26e7ad);
+        assert_eq!(palette.warning, 0xdf7b32);
+    }
+}
+
+#[test]
+fn shared_controls_meet_the_application_interaction_targets() {
+    assert_eq!(CONTROL_HEIGHT, px(44.0));
+    assert_eq!(COMPACT_CONTROL_HEIGHT, px(40.0));
+    assert_eq!(CONTROL_RADIUS, px(14.0));
+    assert_eq!(SURFACE_RADIUS, px(16.0));
+}
+
+#[test]
+fn selectable_plain_text_escapes_markdown_without_changing_visible_content() {
+    assert_eq!(
+        markdown_escape_plain_text("Account_#1 [0xabc].").as_ref(),
+        r"Account\_\#1 \[0xabc\]\."
+    );
+}
+
+#[test]
+fn selectable_code_uses_a_fence_longer_than_embedded_backticks() {
+    let value = "before ``` after";
+    let markdown = markdown_fenced_code(value);
+    assert!(markdown.starts_with("````text\n"));
+    assert!(markdown.contains(value));
+    assert!(markdown.ends_with("\n````"));
+}
+
+#[test]
+fn only_plain_enter_submits_a_single_line_form() {
+    assert!(primary_enter(&InputEvent::PressEnter {
+        secondary: false,
+        shift: false,
+    }));
+    assert!(!primary_enter(&InputEvent::PressEnter {
+        secondary: true,
+        shift: false,
+    }));
+    assert!(!primary_enter(&InputEvent::PressEnter {
+        secondary: false,
+        shift: true,
+    }));
 }
 
 #[test]
