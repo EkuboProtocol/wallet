@@ -26,6 +26,10 @@ jobs:
       # No per-chain overrides: this job exists to prove the endpoints that
       # actually ship still work.
       EKUBO_WALLET_LIVE_RPC_TESTS: "1"
+      # The RPC assertions need overflow checks, not debug symbols. Keeping
+      # these artifacts small prevents the GPUI dependency graph from
+      # exhausting the hosted runner while linking the follow-up unit test.
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,4 +49,6 @@ jobs:
         run: cargo test --locked --all-features --test live_networks -- --nocapture --test-threads=1
 
       - name: Run the ignored live unit tests
-        run: cargo test --locked --all-features live_ -- --ignored --nocapture
+        # Restrict Cargo to the library harness. A name filter alone also
+        # links every unrelated integration-test binary before filtering it.
+        run: cargo test --locked --all-features --lib live_ -- --ignored --nocapture
