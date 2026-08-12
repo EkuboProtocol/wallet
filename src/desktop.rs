@@ -2930,7 +2930,7 @@ impl ListDelegate for TokenListDelegate {
                 let state = state.clone();
                 let removal_token = removal_token.clone();
                 let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-                    owner.remove_token(&removal_token).await
+                    owner.remove_token(&removal_token)
                 });
                 cx.spawn(async move |cx| {
                     let result = task.await;

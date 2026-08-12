@@ -609,23 +609,21 @@ impl TokenStore {
         Ok(inserted)
     }
 
-    /// Forget one confirmed token. Returns whether a row was removed.
+    /// Forget one confirmed token after it was presented to the owner.
     ///
     /// Removing a name is fail-safe in a way adding one is not: the wallet
     /// falls back to displaying the bare address, which is the conservative
-    /// thing to show. That is why this needs the owner's confirmation in the
-    /// native UI but not the credential-store authentication that replacing a
-    /// policy does — nothing here can cause something to be signed.
+    /// thing to show. The native UI action is sufficient confirmation; unlike
+    /// adding or replacing trusted metadata, removal does not need operating-
+    /// system human-presence authentication because nothing here can cause
+    /// something to be signed or make an untrusted label appear trustworthy.
+    /// The exact reviewed row is part of the delete predicate so a concurrent
+    /// metadata change must be shown to the owner before it can be removed.
     ///
     /// It exists because a new database now arrives holding thousands of
     /// seeded names, and an owner who disagrees with one of them had no way to
     /// say so.
-    pub fn remove_authorized(
-        &mut self,
-        reviewed: &StoredToken,
-        authorization: &OwnerAuthorization,
-    ) -> Result<()> {
-        authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
+    pub fn remove_reviewed(&mut self, reviewed: &StoredToken) -> Result<()> {
         let (chain_id, address) = stored_token_identity(reviewed)?;
         let removed = self.database.connection.execute(
             "DELETE FROM tokens
@@ -644,7 +642,7 @@ impl TokenStore {
         )?;
         ensure!(
             removed == 1,
-            "token {} on chain {} changed while removal was being authenticated; review the current metadata",
+            "token {} on chain {} changed after it was reviewed; review the current metadata",
             address.to_checksum(None),
             chain_id
         );

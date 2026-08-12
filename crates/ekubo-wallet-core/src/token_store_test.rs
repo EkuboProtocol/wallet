@@ -559,23 +559,13 @@ fn confirming_token_proposals_installs_and_consumes_the_exact_reviewed_rows() {
 }
 
 #[test]
-fn confirmed_token_mutations_require_token_metadata_authorization() {
+fn reviewed_token_removal_does_not_require_human_presence() {
     let (_directory, mut store) = store();
     let address = Address::repeat_byte(0x42);
     let reviewed = store.add(&usdc(1, address), "owner list").unwrap();
 
-    let wrong = crate::human_presence::OwnerAuthorization::for_test(
-        crate::human_presence::OwnerAuthorizationScope::NetworkSettings,
-    );
-    assert!(store.remove_authorized(&reviewed, &wrong).is_err());
-    assert!(store.get(1, address).unwrap().is_some());
-
-    let token_authorization = crate::human_presence::OwnerAuthorization::for_test(
-        crate::human_presence::OwnerAuthorizationScope::TokenMetadata,
-    );
-    store
-        .remove_authorized(&reviewed, &token_authorization)
-        .unwrap();
+    store.remove_reviewed(&reviewed).unwrap();
+    assert!(store.get(1, address).unwrap().is_none());
 }
 
 #[test]
@@ -685,7 +675,7 @@ fn owner_authorized_token_create_rejects_an_empty_sanitized_symbol() {
 }
 
 #[test]
-fn owner_authorized_token_removal_refuses_a_row_changed_after_review() {
+fn reviewed_token_removal_refuses_a_row_changed_after_review() {
     let (_directory, mut store) = store();
     let address = Address::repeat_byte(0x42);
     let reviewed = store.add(&usdc(1, address), "original list").unwrap();
@@ -706,13 +696,13 @@ fn owner_authorized_token_removal_refuses_a_row_changed_after_review() {
 
     assert!(
         store
-            .remove_authorized(&reviewed, &authorization)
+            .remove_reviewed(&reviewed)
             .unwrap_err()
             .to_string()
-            .contains("changed while removal was being authenticated")
+            .contains("changed after it was reviewed")
     );
     assert_eq!(store.get(1, address).unwrap(), Some(changed.clone()));
-    store.remove_authorized(&changed, &authorization).unwrap();
+    store.remove_reviewed(&changed).unwrap();
     assert!(store.get(1, address).unwrap().is_none());
 }
 

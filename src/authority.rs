@@ -1690,7 +1690,7 @@ impl OwnerApi {
         Ok(stored)
     }
 
-    pub async fn remove_token(&self, reviewed: &StoredToken) -> Result<()> {
+    pub fn remove_token(&self, reviewed: &StoredToken) -> Result<()> {
         let chain_id = reviewed
             .chain_id
             .parse::<u64>()
@@ -1699,13 +1699,7 @@ impl OwnerApi {
             contains_configured_chain(&self.config.load()?, chain_id),
             "chain {chain_id} is not a configured network"
         );
-        let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
-        ensure!(
-            contains_configured_chain(&self.config.load()?, chain_id),
-            "chain {chain_id} was removed during authentication"
-        );
-        TokenStore::production(self.config.data_dir())?
-            .remove_authorized(reviewed, &authorization)?;
+        TokenStore::production(self.config.data_dir())?.remove_reviewed(reviewed)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
     }
