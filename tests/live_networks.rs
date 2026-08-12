@@ -729,9 +729,9 @@ live_matrix! {
     robinhood_testnet => 46630,
     berachain_bepolia => 80069,
     base_sepolia => 84532,
-    arbitrum_sepolia => 421614,
-    ink_sepolia => 763373,
-    optimism_sepolia => 11155420,
+    arbitrum_sepolia => 421_614,
+    ink_sepolia => 763_373,
+    optimism_sepolia => 11_155_420,
 }
 
 /// Failover, proven against a real chain rather than a stub.
