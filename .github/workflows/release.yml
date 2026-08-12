@@ -87,6 +87,13 @@ jobs:
           security list-keychains -d user -s "$keychain_path"
           security find-identity -v -p codesigning "$keychain_path" | grep -F "$APPLE_CODESIGN_IDENTITY"
 
+          # cargo-packager 0.11 only enables signing when the identity is in
+          # its macOS config; it does not read an identity environment
+          # variable. Append it to this disposable CI checkout, JSON-escaped
+          # (a JSON string is also a valid TOML basic string).
+          identity="$(ruby -rjson -e 'print ARGV.fetch(0).to_json' "$APPLE_CODESIGN_IDENTITY")"
+          printf '\n[package.metadata.packager.macos]\nsigning-identity = %s\n' "$identity" >> Cargo.toml
+
           printf 'EKUBO_RELEASE_KEYCHAIN=%s\n' "$keychain_path" >> "$GITHUB_ENV"
           printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path" >> "$GITHUB_ENV"
       - name: Build native packages
