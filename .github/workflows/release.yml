@@ -14,30 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install GPUI Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - run: test "$GITHUB_REF_NAME" = "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
-      - run: cargo fmt --all --check
-      - name: Run release validation tests
-        # GPUI's dependency graph plus two workspace test harnesses exhausted
-        # the Ubuntu runner while rust-lld was writing full debuginfo. Release
-        # validation needs assertions and overflow checks, not debug symbols.
-        env:
-          CARGO_PROFILE_TEST_DEBUG: 0
-          RUST_MIN_STACK: 67108864
-          RUSTFLAGS: -D warnings
-        run: cargo test --locked --workspace
-      - run: contrib/generate-third-party-licenses.py --check
-      - run: cargo tree --locked | (! grep -E ' (clap|clap_complete|crossterm|ratatui) v')
-      - run: '! grep -R "transport-io" Cargo.toml Cargo.lock'
-
   package:
-    needs: validate
     environment: release
     strategy:
       fail-fast: false

@@ -104,7 +104,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(test, target_os = "linux"))]
 fn desktop_exec_escape(value: &str) -> String {
     value
         .replace('\\', "\\\\")
