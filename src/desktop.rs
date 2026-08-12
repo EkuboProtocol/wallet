@@ -33,7 +33,7 @@ use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, McpClien
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
 use ekubo_wallet_core::networks::NetworkProfile;
-use ekubo_wallet_core::pending::PendingStatus;
+use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
 use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
@@ -6489,6 +6489,35 @@ impl WalletWindow {
         cx.notify();
     }
 
+    fn synchronize_transaction_activity(
+        &mut self,
+        request_id: uuid::Uuid,
+        updated: Option<PendingTransaction>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(updated) = updated
+            && let Some(snapshot) = self.desktop_snapshot.as_mut()
+            && let Ok(activity) = &mut Arc::make_mut(snapshot).activity
+            && let Some(record) = Arc::make_mut(activity).iter_mut().find(|record| {
+                matches!(
+                    record,
+                    OwnerActivityRecord::Transaction(existing)
+                        if existing.request_id == request_id
+                )
+            })
+        {
+            *record = OwnerActivityRecord::Transaction(Box::new(updated));
+        }
+        self.activity_inspections.remove(&request_id);
+        if self.selected_record == Some(request_id) {
+            self.load_transaction_inspection(request_id, cx);
+        }
+        // An action may persist a terminal status and then return an error
+        // (notably cancellation discovering that the original already mined),
+        // so reload on every outcome rather than only on a domain event.
+        self.reload_desktop_snapshot(cx);
+    }
+
     fn refresh_transaction(&mut self, request_id: uuid::Uuid, cx: &mut Context<Self>) {
         if !self.activity_busy.insert(request_id) {
             return;
@@ -6502,6 +6531,7 @@ impl WalletWindow {
             let result = task.await;
             let _ = view.update(cx, |view, cx| {
                 view.activity_busy.remove(&request_id);
+                let updated = result.as_ref().ok().cloned();
                 view.activity_feedback.insert(
                     request_id,
                     match result {
@@ -6515,6 +6545,7 @@ impl WalletWindow {
                         },
                     },
                 );
+                view.synchronize_transaction_activity(request_id, updated, cx);
                 cx.notify();
             });
         })
@@ -6536,6 +6567,7 @@ impl WalletWindow {
             let _ = view.update(cx, |view, cx| {
                 view.activity_busy.remove(&request_id);
                 view.selected_record = Some(request_id);
+                let updated = result.as_ref().ok().map(|action| action.record.clone());
                 let feedback = match result {
                     Ok(action) => match action
                         .broadcast
@@ -6564,6 +6596,7 @@ impl WalletWindow {
                     },
                 };
                 view.activity_feedback.insert(request_id, feedback);
+                view.synchronize_transaction_activity(request_id, updated, cx);
                 cx.notify();
             });
         })
@@ -6618,6 +6651,7 @@ impl WalletWindow {
             let _ = view.update(cx, |view, cx| {
                 view.activity_busy.remove(&request_id);
                 view.selected_record = Some(request_id);
+                let updated = result.as_ref().ok().map(|action| action.record.clone());
                 let feedback = match result {
                     Ok(action) => match action
                         .broadcast
@@ -6644,6 +6678,7 @@ impl WalletWindow {
                     },
                 };
                 view.activity_feedback.insert(request_id, feedback);
+                view.synchronize_transaction_activity(request_id, updated, cx);
                 cx.notify();
             });
         })

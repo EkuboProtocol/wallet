@@ -1154,7 +1154,14 @@ impl OwnerApi {
         &self,
         request_id: Uuid,
     ) -> Result<OwnerTransactionInspection> {
-        let pending = self.transaction(request_id)?;
+        // Opening the receipt view is itself an opportunity to settle a stale
+        // lifecycle row. Keep inspection available when an RPC is temporarily
+        // unreachable, but never keep presenting `Broadcast` after the same
+        // lookup has already observed a mined receipt.
+        let pending = match self.refresh_transaction(request_id).await {
+            Ok(refreshed) => refreshed,
+            Err(_) => self.transaction(request_id)?,
+        };
         let chain_id = pending
             .chain_id
             .parse::<u64>()
@@ -1254,10 +1261,14 @@ impl OwnerApi {
             .lock()
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
             .get(request_id)?;
+        let starting_status = before.status;
         let wallet = self.config.wallet(&before.wallet_id)?;
         let network = self.config.network_by_chain_id(before.chain_id.as_str())?;
         let current = reconcile_record(&pending, &network, before, true).await?;
-        let starting_status = current.status;
+        if current.status != starting_status {
+            self.publish_transaction_status(&current);
+        }
+        let reconciled_status = current.status;
         let claimed = match current.status {
             PendingStatus::Signed => pending
                 .lock()
@@ -1285,7 +1296,7 @@ impl OwnerApi {
             ),
         };
         let (record, broadcast) = submit_claimed(&pending, &wallet, &network, claimed).await?;
-        if record.status != starting_status {
+        if record.status != reconciled_status {
             self.publish_transaction_status(&record);
         }
         Ok(OwnerTransactionAction {
@@ -1311,7 +1322,7 @@ impl OwnerApi {
         let starting_status = record.status;
         let wallet = self.config.wallet(&record.wallet_id)?;
         let network = self.config.network_by_chain_id(record.chain_id.as_str())?;
-        let (record, broadcast) = attempt_cancellation(
+        let outcome = attempt_cancellation(
             &pending,
             &self.config,
             &wallet,
@@ -1319,7 +1330,24 @@ impl OwnerApi {
             record,
             &OsKeyStore,
         )
-        .await?;
+        .await;
+        let (record, broadcast) = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Cancellation begins by reconciling. A receipt may therefore
+                // finalize the row immediately before the operation correctly
+                // refuses to cancel an already-mined transaction. Publish the
+                // persisted terminal state even though the requested action
+                // returns an error.
+                if let Ok(store) = pending.lock()
+                    && let Ok(current) = store.get(request_id)
+                    && current.status != starting_status
+                {
+                    self.publish_transaction_status(&current);
+                }
+                return Err(error);
+            }
+        };
         if record.status != starting_status {
             self.publish_transaction_status(&record);
         }
