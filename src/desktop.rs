@@ -4065,6 +4065,53 @@ impl WalletWindow {
         }
     }
 
+    /// Drop every window-scoped entity this view owns.
+    ///
+    /// Reopening the window rebuilds all of them, and each one left behind is
+    /// an input still subscribed to a window that no longer exists. It is also
+    /// the list that has to grow whenever a field does, which is why it lives
+    /// beside the fields rather than being spelled out at a call site.
+    fn release_window_state(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = false;
+        self.command_palette_list = None;
+        self.command_palette_subscription = None;
+        self.form_input_subscriptions.clear();
+        self.appearance_subscription = None;
+        self.token_list = None;
+        self.token_proposal_list = None;
+        self.token_list_url_input = None;
+        self.token_chain_id_input = None;
+        self.token_address_input = None;
+        self.token_symbol_input = None;
+        self.token_name_input = None;
+        self.token_decimals_input = None;
+        self.token_editor_open = false;
+        self.token_list_generation = self.token_list_generation.wrapping_add(1);
+        self.account_id_input = None;
+        self.private_key_input = None;
+        self.walletconnect_uri_input = None;
+        self.network_name_input = None;
+        self.network_display_name_input = None;
+        self.network_aliases_input = None;
+        self.network_chain_id_input = None;
+        self.network_rpc_urls_input = None;
+        self.network_max_gas_limit_input = None;
+        self.network_max_fee_per_gas_input = None;
+        self.network_native_name_input = None;
+        self.network_native_symbol_input = None;
+        self.network_native_decimals_input = None;
+        self.network_explorer_url_input = None;
+        self.network_documentation_url_input = None;
+        self.network_editor_open = false;
+        self.network_editor_original = None;
+        self.policy_json_input = None;
+        self.policy_editor = None;
+        self.policy_installing = false;
+        self.token_proposal_busy = false;
+        self.network_proposal_busy = false;
+        cx.notify();
+    }
+
     fn set_route_error(&mut self, route: Route, error: impl Into<SharedString>) {
         self.route_errors.insert(route, error.into());
     }
@@ -12941,46 +12988,7 @@ fn show_wallet_window(
         return Ok(());
     }
 
-    wallet_view.update(cx, |view, cx| {
-        view.command_palette = false;
-        view.command_palette_list = None;
-        view.command_palette_subscription = None;
-        view.form_input_subscriptions.clear();
-        view.appearance_subscription = None;
-        view.token_list = None;
-        view.token_proposal_list = None;
-        view.token_list_url_input = None;
-        view.token_chain_id_input = None;
-        view.token_address_input = None;
-        view.token_symbol_input = None;
-        view.token_name_input = None;
-        view.token_decimals_input = None;
-        view.token_editor_open = false;
-        view.token_list_generation = view.token_list_generation.wrapping_add(1);
-        view.account_id_input = None;
-        view.private_key_input = None;
-        view.walletconnect_uri_input = None;
-        view.network_name_input = None;
-        view.network_display_name_input = None;
-        view.network_aliases_input = None;
-        view.network_chain_id_input = None;
-        view.network_rpc_urls_input = None;
-        view.network_max_gas_limit_input = None;
-        view.network_max_fee_per_gas_input = None;
-        view.network_native_name_input = None;
-        view.network_native_symbol_input = None;
-        view.network_native_decimals_input = None;
-        view.network_explorer_url_input = None;
-        view.network_documentation_url_input = None;
-        view.network_editor_open = false;
-        view.network_editor_original = None;
-        view.policy_json_input = None;
-        view.policy_editor = None;
-        view.policy_installing = false;
-        view.token_proposal_busy = false;
-        view.network_proposal_busy = false;
-        cx.notify();
-    });
+    wallet_view.update(cx, WalletWindow::release_window_state);
     let wallet_content = wallet_view.clone();
     let window_handle = cx.open_window(
         WindowOptions {
@@ -13484,3 +13492,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
 #[cfg(test)]
 #[path = "desktop_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "desktop_render_test.rs"]
+mod render_tests;

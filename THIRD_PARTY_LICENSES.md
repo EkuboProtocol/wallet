@@ -363,6 +363,7 @@ file follows in the appendix. Regenerate this document with
 - color_quant 1.1.0 — nwin <nwin@users.noreply.github.com> — https://github.com/image-rs/color_quant.git
 - combine 4.6.7 — Markus Westerlind <marwes91@gmail.com> — https://github.com/Marwes/combine
 - convert_case 0.10.0 — rutrum <dave@rutrum.net> — https://github.com/rutrum/convert-case
+- convert_case 0.11.0 — rutrum <dave@rutrum.net> — https://github.com/rutrum/convert-case
 - core_maths 0.1.1 — Robert Bastian <me@robertbastian.dev — https://github.com/robertbastian/core_maths
 - crunchy 0.2.4 — Eira Fransham <jackefransham@gmail.com> — https://github.com/eira-fransham/crunchy
 - darling 0.23.0 — Ted Driggs <ted.driggs@outlook.com> — https://github.com/TedDriggs/darling
@@ -933,7 +934,9 @@ file follows in the appendix. Regenerate this document with
 - proc-macro2 1.0.107 — David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com> — https://github.com/dtolnay/proc-macro2
 - profiling 1.0.18 — Philip Degarmo <aclysma@gmail.com> — https://github.com/aclysma/profiling
 - profiling-procmacros 1.0.18 — Philip Degarmo <aclysma@gmail.com> — https://github.com/aclysma/profiling
+- proptest 1.10.0 — Jason Lingle — https://github.com/proptest-rs/proptest
 - proptest 1.11.0 — Jason Lingle — https://github.com/proptest-rs/proptest
+- proptest-macro 0.5.0 — The Proptest Developers — https://github.com/proptest-rs/proptest
 - psm 0.1.32 — Simonas Kazlauskas <psm@kazlauskas.me> — https://github.com/rust-lang/stacker/
 - qoi 0.4.1 — Ivan Smirnov <rust@ivan.smirnov.ie> — https://github.com/aldanor/qoi-rust
 - quick-error 1.2.3 — Paul Colomiets <paul@colomiets.name>, Colin Kiegel <kiegel@gmx.de> — http://github.com/tailhook/quick-error
@@ -5419,7 +5422,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 ```
 
-## License text for: convert_case 0.10.0
+## License text for: convert_case 0.10.0, convert_case 0.11.0
 
 ```text
 MIT License
@@ -11752,7 +11755,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## License text for: proptest 1.11.0, rusty-fork 0.3.1
+## License text for: proptest 1.10.0, proptest 1.11.0, proptest-macro 0.5.0, rusty-fork 0.3.1
 
 ```text
 Copyright (c) 2016 FullContact, Inc

@@ -603,6 +603,29 @@ pub struct OwnerReviewQueues {
 }
 
 impl OwnerApi {
+    /// An owner capability over a throwaway database, for tests only.
+    ///
+    /// `ApplicationAuthority::open` deliberately goes straight to
+    /// `DesktopStore::production`, so the real authority can only ever be
+    /// built on the keychain-backed database — which is also why nothing could
+    /// lay out a `WalletWindow` in a test. This is the same `#[cfg(test)]`
+    /// escape the core crate already uses for `plan_fetch::insecure_for_tests`
+    /// and `clear_signing::stake_fixture`: it exists only in a test build of
+    /// this crate, it takes an explicit key rather than reading one, and no
+    /// release binary contains it.
+    #[cfg(test)]
+    pub(crate) fn for_test(data_dir: &std::path::Path) -> Result<Self> {
+        use ekubo_wallet_core::policy_store::{DATABASE_FILE, DatabaseKey};
+
+        let key = DatabaseKey::new([0x43; 32]);
+        let desktop = DesktopStore::open(&data_dir.join(DATABASE_FILE), &key)?;
+        Ok(Self {
+            config: ConfigStore::new(data_dir),
+            desktop: Arc::new(Mutex::new(desktop)),
+            events: EventBus::default(),
+        })
+    }
+
     fn desktop(&self) -> Result<std::sync::MutexGuard<'_, DesktopStore>> {
         self.desktop
             .lock()
