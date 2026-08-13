@@ -464,8 +464,12 @@ async fn transaction_inspection_document(
                         .unwrap_or_default(),
                     network,
                 ),
-            )
-            .fact("Why this call is here", step.kind.label());
+            );
+        // Only when the step is one the reader did not ask for; see
+        // `ExecutionStepKind::reason`.
+        if let Some(reason) = step.kind.reason() {
+            request = request.fact("Why this call is here", reason);
+        }
         for detail in interpretation.details {
             request = request.fact("·", detail);
         }
