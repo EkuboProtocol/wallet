@@ -759,7 +759,7 @@ fn oauth_error(status: StatusCode, code: &str, description: &str) -> Response {
 fn authorization_error_page(headline: &str, reason: &str) -> Response {
     tracing::warn!(headline, reason, "rejected an OAuth authorization request");
     let body = format!(
-        "<h1>{}</h1><p>{}</p><p>If your agent was connected before, its saved registration for this wallet is no longer valid. Clear the stored authentication for this server in the agent and connect again — in Claude Code that is <code>/mcp</code>, then the <code>ekubo-wallet</code> entry, then clear authentication. The agent then registers afresh and this page will ask for your consent.</p><small>Nothing was authorized and no credential was issued.</small>",
+        "<h1>{}</h1><p>{}</p><p>If your agent was connected before, its saved registration for this wallet is no longer valid. Clear the stored authentication for this server in the agent and connect again — in Claude Code that is <code>/mcp</code>, then the <code>ekubo_wallet</code> entry, then clear authentication. The agent then registers afresh and this page will ask for your consent.</p><small>Nothing was authorized and no credential was issued.</small>",
         escape_html(headline),
         escape_html(reason),
     );

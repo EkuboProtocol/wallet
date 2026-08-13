@@ -8,7 +8,12 @@ Install the signed native package for the platform:
   StatusNotifierItem integration, and the polkit policy.
 
 The app launches without arguments. On startup it detects supported agents and
-upserts a credential-free `ekubo-wallet` MCP entry for each one. This never
+upserts a credential-free `ekubo_wallet` MCP entry for each one, deleting the
+hyphenated `ekubo-wallet` entry earlier versions wrote so an upgraded install
+ends with one entry rather than two. The key is spelled with an underscore
+because harnesses derive the tool names the model sees from it, and Codex
+rewrites `-` to `_` when it does; a hyphenated key therefore reaches the model
+under a name its own `resources/list` does not accept. This never
 opens an authentication prompt. A login launch stays hidden
 when a tray host exists; on Linux without a tray host it retains a minimized
 taskbar window.
@@ -30,7 +35,7 @@ No separate agent skill file is installed or maintained on disk.
 Codex entries use the fixed Streamable HTTP `url` and `auth = "oauth"`; no
 static header, bearer token, refresh token, or client secret is written to any
 managed configuration. The user starts authentication from the harness (for
-Codex, **Authenticate** or `codex mcp login ekubo-wallet`). Ekubo Wallet must be
+Codex, **Authenticate** or `codex mcp login ekubo_wallet`). Ekubo Wallet must be
 running. Its local consent page offers one-day, one-week, and one-month session
 lifetimes, then requires operating-system human presence before access is
 granted. Access tokens last 10 minutes and refresh rotation cannot extend the

@@ -99,11 +99,11 @@ fn revoked_and_optimistically_hidden_agent_sessions_are_not_rendered() {
 #[test]
 fn every_supported_agent_has_a_copy_ready_oauth_login_instruction() {
     let expected = [
-        (AgentKind::Codex, "codex mcp login ekubo-wallet"),
-        (AgentKind::ClaudeCode, "claude mcp login ekubo-wallet"),
-        (AgentKind::GeminiCli, "/mcp auth ekubo-wallet"),
-        (AgentKind::Cursor, "cursor-agent mcp login ekubo-wallet"),
-        (AgentKind::Opencode, "opencode mcp auth ekubo-wallet"),
+        (AgentKind::Codex, "codex mcp login ekubo_wallet"),
+        (AgentKind::ClaudeCode, "claude mcp login ekubo_wallet"),
+        (AgentKind::GeminiCli, "/mcp auth ekubo_wallet"),
+        (AgentKind::Cursor, "cursor-agent mcp login ekubo_wallet"),
+        (AgentKind::Opencode, "opencode mcp auth ekubo_wallet"),
     ];
     for (kind, command) in expected {
         assert_eq!(agent_login_instruction(kind).unwrap().command, command);

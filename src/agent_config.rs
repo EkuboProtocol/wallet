@@ -14,7 +14,21 @@ use tempfile::NamedTempFile;
 use toml_edit::{DocumentMut, Item, Table, value};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub const LOCAL_SERVER_NAME: &str = "ekubo-wallet";
+/// The key this wallet registers itself under in every agent's MCP config.
+///
+/// Underscores, not hyphens, because the key is not private to the config
+/// file: harnesses derive the tool names the model sees from it. Codex
+/// rewrites `-` to `_` when it builds those names, so a hyphenated key
+/// reaches the model only as `ekubo_wallet__wallet_send_execution_plan`
+/// while `resources/list` still expects the unsanitized key — a name the
+/// model has then never been shown. That mismatch made the wallet's own
+/// skill and security-model resources unreachable by name. An underscore
+/// key survives the rewrite unchanged, so both spellings agree.
+pub const LOCAL_SERVER_NAME: &str = "ekubo_wallet";
+/// The hyphenated key used before that. Every managed write deletes it, so
+/// re-running setup migrates an existing install instead of leaving two
+/// entries pointing at the same wallet.
+pub const LEGACY_LOCAL_SERVER_NAME: &str = "ekubo-wallet";
 pub const COMPANION_SERVER_NAME: &str = "ekubo";
 pub const COMPANION_SERVER_URL: &str = "https://mcp.ekubo.org/mcp";
 
@@ -318,6 +332,7 @@ fn merge_codex(before: &str, url: &str, companion: bool) -> Result<String> {
         .or_insert_with(|| Item::Table(Table::new()))
         .as_table_mut()
         .context("Codex mcp_servers configuration must be a table")?;
+    servers.remove(LEGACY_LOCAL_SERVER_NAME);
     let local = servers
         .entry(LOCAL_SERVER_NAME)
         .or_insert_with(|| Item::Table(Table::new()))
@@ -355,6 +370,7 @@ fn remove_codex(before: &str, companion: bool) -> Result<String> {
         .context("Codex config is not valid TOML")?;
     if let Some(servers) = document.get_mut("mcp_servers").and_then(Item::as_table_mut) {
         servers.remove(LOCAL_SERVER_NAME);
+        servers.remove(LEGACY_LOCAL_SERVER_NAME);
         if companion {
             servers.remove(COMPANION_SERVER_NAME);
         }
@@ -389,6 +405,7 @@ fn merge_json(
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .context("agent MCP configuration must be an object")?;
+    servers.remove(LEGACY_LOCAL_SERVER_NAME);
     let local = match shape {
         JsonShape::Url => json!({"type": "http", "url": url}),
         JsonShape::HttpUrl => json!({"httpUrl": url}),
@@ -411,6 +428,7 @@ fn remove_json(before: &str, root: &str, companion: bool) -> Result<String> {
         serde_json::from_str(before).context("agent config is not valid JSON")?;
     if let Some(servers) = document.get_mut(root).and_then(Value::as_object_mut) {
         servers.remove(LOCAL_SERVER_NAME);
+        servers.remove(LEGACY_LOCAL_SERVER_NAME);
         if companion {
             servers.remove(COMPANION_SERVER_NAME);
         }
@@ -430,7 +448,11 @@ fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<Str
                 codex_value(&before, None, "mcp_oauth_credentials_store"),
                 codex_value(&after, None, "mcp_oauth_credentials_store"),
             );
-            for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
+            for server in [
+                LOCAL_SERVER_NAME,
+                LEGACY_LOCAL_SERVER_NAME,
+                COMPANION_SERVER_NAME,
+            ] {
                 push_managed_change(
                     &mut changes,
                     &format!("mcp_servers.{server}"),
@@ -447,7 +469,11 @@ fn managed_config_diff(kind: AgentKind, before: &str, after: &str) -> Result<Str
             };
             let before = parse_json_document(before)?;
             let after = parse_json_document(after)?;
-            for server in [LOCAL_SERVER_NAME, COMPANION_SERVER_NAME] {
+            for server in [
+                LOCAL_SERVER_NAME,
+                LEGACY_LOCAL_SERVER_NAME,
+                COMPANION_SERVER_NAME,
+            ] {
                 push_managed_change(
                     &mut changes,
                     &format!("{root}.{server}"),
@@ -618,6 +644,12 @@ fn validate_codex_shape(contents: &str, installed: bool, companion: bool) -> Res
         "Codex must store wallet OAuth credentials in the OS keyring"
     );
     let servers = document.get("mcp_servers").and_then(Item::as_table);
+    ensure!(
+        servers
+            .and_then(|servers| servers.get(LEGACY_LOCAL_SERVER_NAME))
+            .is_none(),
+        "hyphenated legacy MCP server entry was not removed"
+    );
     let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
     if !installed {
         ensure!(local.is_none(), "local MCP server was not removed");
@@ -676,6 +708,12 @@ fn validate_json_shape(
         "mcpServers"
     };
     let servers = document.get(root).and_then(Value::as_object);
+    ensure!(
+        servers
+            .and_then(|servers| servers.get(LEGACY_LOCAL_SERVER_NAME))
+            .is_none(),
+        "hyphenated legacy MCP server entry was not removed"
+    );
     let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
     if !installed {
         ensure!(local.is_none(), "local MCP server was not removed");

@@ -3127,7 +3127,7 @@ impl ServerHandler for WalletMcpServer {
                 .build(),
         )
         .with_server_info(
-            Implementation::new("ekubo-wallet", crate::BUILD_VERSION)
+            Implementation::new("ekubo_wallet", crate::BUILD_VERSION)
                 .with_title("Ekubo Wallet — Local EVM Execution"),
         )
         .with_instructions(SERVER_INSTRUCTIONS)
