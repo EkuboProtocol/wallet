@@ -40,8 +40,8 @@ use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
 use ekubo_wallet_core::typed_data::TypedDataStatus;
 use gpui::{
     AnyElement, AnyView, App, ClipboardItem, Context, ElementId, Entity, FocusHandle,
-    Interactivity, KeyBinding, MouseButton, QuitMode, Render, RenderImage, RenderOnce, Role,
-    ScrollAnchor, ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
+    Interactivity, KeyBinding, QuitMode, Render, RenderImage, RenderOnce, Role, ScrollAnchor,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, WindowAppearance, WindowBounds, WindowHandle,
     WindowOptions, actions, div, img, prelude::*, px, size, uniform_list,
 };
@@ -8674,9 +8674,14 @@ impl WalletWindow {
             // something on the list behind it, and it stays visible as
             // context.
             .bg(cx.theme().background.opacity(0.85))
-            // Swallow clicks so nothing underneath reacts to a press aimed at
-            // the modal or the scrim.
-            .on_mouse_down(MouseButton::Left, |_, _, _| {})
+            // The scrim takes the mouse, so nothing behind it reacts: no press
+            // aimed at the modal reaches a row underneath, and — the reason
+            // this matters most here — the wheel no longer scrolls the inbox
+            // out from under the receipt you are reading. An empty mouse-down
+            // handler did not do this: it never stopped propagation, and the
+            // page's scroll region only asks whether its own hitbox is under
+            // the pointer, which it still was.
+            .occlude()
             .p_4()
             .child(
                 div()
@@ -12945,7 +12950,9 @@ impl WalletWindow {
             .absolute()
             .inset_0()
             .min_h_0()
-            .on_mouse_down(MouseButton::Left, |_, _, _| {})
+            // Takes the mouse for the whole window: the page behind must not
+            // scroll or answer clicks while a decision is on the screen.
+            .occlude()
             .p_4()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -13106,7 +13113,10 @@ impl WalletWindow {
             .absolute()
             .inset_0()
             .min_h_0()
-            .on_mouse_down(MouseButton::Left, |_, _, _| {})
+            // Takes the mouse for the whole window. A document that has to be
+            // read to the end especially cannot have the wheel land on the page
+            // behind it.
+            .occlude()
             .p_4()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -13200,9 +13210,8 @@ impl WalletWindow {
             .as_ref()
             .map_or(Duration::ZERO, ExportLease::remaining);
         let expired = export.lease.is_some() && visible.is_none();
-        div()
-            .absolute()
-            .inset_4()
+        let panel = div()
+            .size_full()
             .p_4()
             .rounded(cx.theme().radius_lg)
             .border_1()
@@ -13325,7 +13334,17 @@ impl WalletWindow {
                                 )
                             }),
                     ),
-            )
+            );
+        // The panel is inset from the window edge, so it cannot take the mouse
+        // for the whole window by itself: the gutter around it left the page
+        // behind live to the wheel. A full-window container that occludes puts
+        // the panel exactly where `inset_4` did and locks everything under it.
+        div()
+            .absolute()
+            .inset_0()
+            .occlude()
+            .p_4()
+            .child(panel)
             .focus_trap("account-security-focus", &self.modal_focus)
             .into_any_element()
     }
