@@ -18,6 +18,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # The extension is published on this release, so it has to name this
+      # release. The tag is held to the same version because it, and not
+      # Cargo.toml, is what `latest.json` reports to installed wallets.
+      - name: Require the bundle and the tag to name this wallet version
+        run: contrib/sync-claude-desktop-version.py --check --expect "${GITHUB_REF_NAME#v}"
       - uses: actions/setup-node@v4
         with:
           node-version: 22

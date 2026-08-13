@@ -3,7 +3,7 @@
   "manifest_version": "0.4",
   "name": "ekubo-wallet",
   "display_name": "Ekubo Wallet",
-  "version": "1.0.0-rc.6",
+  "version": "1.0.0-rc.7",
   "description": "Connect Claude Desktop to the locally running Ekubo Wallet.",
   "long_description": "A credential-free local bridge from Claude Desktop's stdio transport to Ekubo Wallet's OAuth-protected loopback MCP server. Ekubo Wallet must be installed and running. OAuth credentials remain in memory and are discarded when the extension stops.",
   "author": {

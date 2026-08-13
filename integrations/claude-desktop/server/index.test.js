@@ -28,13 +28,23 @@ test("stdio messages are forwarded without changing their identity", async () =>
   assert.deepEqual(output, [{ jsonrpc: "2.0", id: 7, result: { tools: [] } }]);
 });
 
+// The bundle ships on the wallet's own release and Claude Desktop shows this
+// number to the person installing it, so all four copies of it name the wallet
+// or none of them mean anything. The lockfile is included because npm does not
+// mind a stale root version, which leaves this the only thing that would ever
+// notice one.
 test("bundle version matches the native wallet", () => {
-  const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url)));
-  const npmPackage = JSON.parse(readFileSync(new URL("../package.json", import.meta.url)));
+  const read = name => JSON.parse(readFileSync(new URL(`../${name}`, import.meta.url)));
+  const manifest = read("manifest.json");
+  const npmPackage = read("package.json");
+  const lockfile = read("package-lock.json");
   const cargo = readFileSync(new URL("../../../Cargo.toml", import.meta.url), "utf8");
   const walletVersion = cargo.match(/^version = "([^"]+)"$/m)?.[1];
-  assert.equal(manifest.version, walletVersion);
-  assert.equal(npmPackage.version, walletVersion);
+  const fix = "run contrib/sync-claude-desktop-version.py";
+  assert.equal(manifest.version, walletVersion, `manifest.json: ${fix}`);
+  assert.equal(npmPackage.version, walletVersion, `package.json: ${fix}`);
+  assert.equal(lockfile.version, walletVersion, `package-lock.json: ${fix}`);
+  assert.equal(lockfile.packages[""].version, walletVersion, `package-lock.json: ${fix}`);
 });
 
 test("runtime bridge contains no filesystem credential store", () => {
