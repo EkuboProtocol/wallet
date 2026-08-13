@@ -172,6 +172,31 @@ jobs:
           certificate-profile-name: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
           files-folder: target/release
           files-folder-filter: exe
+      - name: Create website download archive (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent \
+            "target/release/Ekubo Wallet.app" \
+            "target/release/Ekubo-Wallet-macOS-Apple-Silicon.zip"
+      - name: Create website download archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "target/release" -Filter "*setup.exe" | Select-Object -First 1
+          if ($null -eq $installer) { throw "Windows installer was not produced" }
+          Compress-Archive -LiteralPath $installer.FullName -DestinationPath "target/release/Ekubo-Wallet-Windows-x86_64.zip" -CompressionLevel Optimal
+      - name: Create website download archive (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage="$(find target/release -maxdepth 1 -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          appimage="$(basename "$appimage")"
+          cd target/release
+          python3 -m zipfile -c "Ekubo-Wallet-Linux-x86_64.zip" "$appimage"
       - name: Remove temporary Apple signing material
         if: always() && runner.os == 'macOS'
         shell: bash
@@ -192,6 +217,7 @@ jobs:
             target/release/*.dmg.sig
             target/release/*.exe
             target/release/*.exe.sig
+            target/release/*.zip
           if-no-files-found: error
 
   publish:
