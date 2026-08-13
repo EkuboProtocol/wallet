@@ -24,11 +24,14 @@ jobs:
           # concurrently can exhaust the Linux hosted runner and crash
           # rust-lld with SIGBUS, so keep link concurrency deliberately low.
           - runner: ubuntu-24.04
-            test_jobs: 2
+            test_jobs: 1
+            test_debug: 0
           - runner: macos-15
             test_jobs: 4
+            test_debug: 2
           - runner: windows-2025
             test_jobs: 2
+            test_debug: 2
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -59,6 +62,10 @@ jobs:
         # frames overflow that thread's smaller default stack.
         env:
           RUST_MIN_STACK: 67108864
+          # Linux's hosted linker has repeatedly crashed with SIGBUS while
+          # mapping GPUI's full debug symbols. This changes diagnostics only,
+          # not test behavior or optimization.
+          CARGO_PROFILE_TEST_DEBUG: ${{ matrix.test_debug }}
         run: cargo test --locked --workspace --all-features --jobs ${{ matrix.test_jobs }}
 
   lint:
