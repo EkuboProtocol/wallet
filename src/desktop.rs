@@ -4569,14 +4569,20 @@ impl WalletWindow {
         let Ok(chain_id) = typed.parse::<u64>() else {
             return Some("Not a chain ID. Enter the network's decimal number.".into());
         };
-        let visible = self
+        let configured = self
             .cached_networks()
             .ok()?
             .iter()
-            .find(|network| network.chain_id == chain_id)
-            .filter(|network| self.testnet_mode || !network.testnet);
-        Some(match visible {
-            Some(network) => network.display_label().to_owned().into(),
+            .find(|network| network.chain_id == chain_id);
+        Some(match configured {
+            Some(network) if self.testnet_mode || !network.testnet => {
+                network.display_label().to_owned().into()
+            }
+            // Configured, but hidden right now. Sending the reader to add it
+            // would send them to a page where they cannot see it either, to
+            // create a network that already exists. Saving already says this;
+            // the field says it before the form is filled in.
+            Some(_) => "Configured as a test network. Turn on testnet mode to use it.".into(),
             None => "No network configured here. Add it under Networks first.".into(),
         })
     }
