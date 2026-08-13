@@ -3234,6 +3234,7 @@ dependencies = [
  "chrono",
  "directories",
  "ekubo-wallet-core",
+ "embed-resource",
  "fs2",
  "futures",
  "gpui",

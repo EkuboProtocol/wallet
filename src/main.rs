@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let hidden_startup = match arguments.as_slice() {

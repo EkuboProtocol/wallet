@@ -313,21 +313,15 @@ fn scaled_tray_artwork(image: &image::RgbaImage) -> image::RgbaImage {
 
 #[cfg(not(target_os = "macos"))]
 fn wallet_icon(_dark_mode: bool) -> Result<Icon> {
-    const SIDE: u32 = 20;
-    let mut rgba = vec![0_u8; (SIDE * SIDE * 4) as usize];
-    for y in 3..17 {
-        for x in 3..17 {
-            let stroke = x <= 6
-                || (x >= 6 && (4..=7).contains(&y))
-                || (x >= 6 && (9..=11).contains(&y))
-                || (x >= 6 && (14..=16).contains(&y));
-            if stroke {
-                let offset = ((y * SIDE + x) * 4) as usize;
-                rgba[offset..offset + 4].copy_from_slice(&[0, 0, 0, 255]);
-            }
-        }
-    }
-    Icon::from_rgba(rgba, SIDE, SIDE).context("failed to construct tray icon pixels")
+    const SIDE: u32 = 32;
+    let image = image::load_from_memory_with_format(
+        include_bytes!("../assets/app-icon-512.png"),
+        image::ImageFormat::Png,
+    )
+    .context("failed to decode the application icon")?
+    .into_rgba8();
+    let image = image::imageops::resize(&image, SIDE, SIDE, image::imageops::FilterType::Lanczos3);
+    Icon::from_rgba(image.into_raw(), SIDE, SIDE).context("failed to construct tray icon pixels")
 }
 
 #[cfg(test)]

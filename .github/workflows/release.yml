@@ -145,6 +145,32 @@ jobs:
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.EKUBO_UPDATER_PRIVATE_KEY_PASSWORD }}
         run: cargo packager --release --formats "${{ matrix.formats }}"
+      - name: Verify Windows application identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $path = "target/release/ekubo-wallet.exe"
+          $version = (Get-Item $path).VersionInfo
+          if ($version.FileDescription -ne "Ekubo Wallet") {
+            throw "Unexpected FileDescription: '$($version.FileDescription)'"
+          }
+          if ($version.ProductName -ne "Ekubo Wallet") {
+            throw "Unexpected ProductName: '$($version.ProductName)'"
+          }
+
+          $stream = [System.IO.File]::OpenRead($path)
+          try {
+            $reader = [System.IO.BinaryReader]::new($stream)
+            $stream.Position = 0x3c
+            $peOffset = $reader.ReadInt32()
+            $stream.Position = $peOffset + 24 + 68
+            $subsystem = $reader.ReadUInt16()
+            if ($subsystem -ne 2) {
+              throw "Windows executable subsystem is $subsystem, expected 2 (GUI)"
+            }
+          } finally {
+            $stream.Dispose()
+          }
       - name: Verify signed macOS packages
         if: runner.os == 'macOS'
         shell: bash

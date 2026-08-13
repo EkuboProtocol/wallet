@@ -1,0 +1,39 @@
+#include <windows.h>
+
+#define EKUBO_FILE_VERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+#define EKUBO_FILE_VERSION_STRING VERSION_STRING "\0"
+
+1 ICON "assets/windows/app-icon.ico"
+
+1 VERSIONINFO
+FILEVERSION EKUBO_FILE_VERSION
+PRODUCTVERSION EKUBO_FILE_VERSION
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+FILEFLAGS VS_FF_DEBUG
+#else
+FILEFLAGS 0x0L
+#endif
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Ekubo\0"
+            VALUE "FileDescription", "Ekubo Wallet\0"
+            VALUE "FileVersion", EKUBO_FILE_VERSION_STRING
+            VALUE "InternalName", "ekubo-wallet\0"
+            VALUE "LegalCopyright", "Copyright Ekubo contributors\0"
+            VALUE "OriginalFilename", "ekubo-wallet.exe\0"
+            VALUE "ProductName", "Ekubo Wallet\0"
+            VALUE "ProductVersion", EKUBO_FILE_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
