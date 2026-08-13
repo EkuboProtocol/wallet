@@ -717,7 +717,7 @@ async fn run_matrix(chain_id: u64) {
     };
     eprintln!(
         "chain {chain_id} via {}",
-        network.primary_rpc_url().host_str().unwrap()
+        network.rpc_urls[0].host_str().unwrap()
     );
     // Reads never depend on chain capabilities and must work everywhere.
     batch_reads_are_pinned_and_decoded(&network).await;

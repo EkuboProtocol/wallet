@@ -329,12 +329,18 @@ async fn transaction_inspection_document(
     receipt: Option<&ReceiptDetails>,
     receipt_error: Option<&str>,
 ) -> Result<ReviewDocument> {
+    // A record that never reached a chain has no receipt to be missing, so it
+    // is not told it is waiting for one.
+    let reachable = pending.status.can_reach_a_chain();
     let summary = match receipt {
         Some(receipt) if receipt.succeeded => {
             "This transaction was mined successfully. Receipt-derived asset movements and decoded events are shown before the original calls."
         }
         Some(_) => {
             "This transaction was mined but reverted. No state changes from its calls were committed; the network fee was still paid."
+        }
+        None if !reachable => {
+            "Nothing was signed and nothing was sent, so there is no receipt and never will be. The calls that were asked for are decoded below."
         }
         None => {
             "This lifecycle record has no readable mined receipt yet. The original calls are decoded below so the request remains understandable."
@@ -362,10 +368,15 @@ async fn transaction_inspection_document(
         request = request.fact("Transaction hash", hash);
     }
 
-    request = request.section_kind(
-        ApprovalSectionKind::Effects,
-        "Receipt-derived wallet changes",
-    );
+    // No receipt section at all for a record that cannot have one. It held a
+    // single row reading "Receipt — Not available", under a heading promising
+    // receipt-derived changes, on a request the wallet refused to sign.
+    if reachable {
+        request = request.section_kind(
+            ApprovalSectionKind::Effects,
+            "Receipt-derived wallet changes",
+        );
+    }
     if let Some(receipt) = receipt {
         let presentation = receipt_presentation(wallet, receipt, metadata);
         if receipt.succeeded {
@@ -434,7 +445,7 @@ async fn transaction_inspection_document(
         if !receipt.logs.is_empty() {
             request = request.warning("Standard token events are decoded locally from the receipt. They are useful evidence, but unusual contracts can omit or emit misleading events, so this is not a complete archival state diff.");
         }
-    } else {
+    } else if reachable {
         request = request.fact("Receipt", "Not available");
     }
 
@@ -464,8 +475,12 @@ async fn transaction_inspection_document(
                         .unwrap_or_default(),
                     network,
                 ),
-            )
-            .fact("Why this call is here", step.kind.label());
+            );
+        // Only when the step is one the reader did not ask for; see
+        // `ExecutionStepKind::reason`.
+        if let Some(reason) = step.kind.reason() {
+            request = request.fact("Why this call is here", reason);
+        }
         for detail in interpretation.details {
             request = request.fact("·", detail);
         }
@@ -588,6 +603,29 @@ pub struct OwnerReviewQueues {
 }
 
 impl OwnerApi {
+    /// An owner capability over a throwaway database, for tests only.
+    ///
+    /// `ApplicationAuthority::open` deliberately goes straight to
+    /// `DesktopStore::production`, so the real authority can only ever be
+    /// built on the keychain-backed database — which is also why nothing could
+    /// lay out a `WalletWindow` in a test. This is the same `#[cfg(test)]`
+    /// escape the core crate already uses for `plan_fetch::insecure_for_tests`
+    /// and `clear_signing::stake_fixture`: it exists only in a test build of
+    /// this crate, it takes an explicit key rather than reading one, and no
+    /// release binary contains it.
+    #[cfg(test)]
+    pub(crate) fn for_test(data_dir: &std::path::Path) -> Result<Self> {
+        use ekubo_wallet_core::policy_store::{DATABASE_FILE, DatabaseKey};
+
+        let key = DatabaseKey::new([0x43; 32]);
+        let desktop = DesktopStore::open(&data_dir.join(DATABASE_FILE), &key)?;
+        Ok(Self {
+            config: ConfigStore::new(data_dir),
+            desktop: Arc::new(Mutex::new(desktop)),
+            events: EventBus::default(),
+        })
+    }
+
     fn desktop(&self) -> Result<std::sync::MutexGuard<'_, DesktopStore>> {
         self.desktop
             .lock()
@@ -803,10 +841,6 @@ impl OwnerApi {
         self.desktop()?.clients()
     }
 
-    pub async fn authorize_agent_access(&self) -> Result<OwnerAuthorization> {
-        Ok(authorize_owner(OwnerAuthorizationScope::AgentAccess).await?)
-    }
-
     pub fn detailed_notification_previews(&self) -> Result<bool> {
         self.desktop()?.detailed_notification_previews()
     }
@@ -905,11 +939,6 @@ impl OwnerApi {
 
     pub fn networks(&self) -> Result<Vec<NetworkConfig>> {
         Ok(self.config.load()?.networks)
-    }
-
-    #[must_use]
-    pub fn network_presets(&self) -> Vec<ekubo_wallet_core::networks::NetworkProfile> {
-        ekubo_wallet_core::networks::known_networks().to_vec()
     }
 
     pub fn network_by_chain_id(&self, chain_id: u64) -> Result<NetworkConfig> {
@@ -1035,15 +1064,6 @@ impl OwnerApi {
             .replace_network(reviewed, replacement, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
-    }
-
-    pub async fn install_network_preset(&self, chain_id: u64) -> Result<NetworkConfig> {
-        let preset = ekubo_wallet_core::networks::known_network(chain_id)
-            .with_context(|| format!("chain {chain_id} has no built-in network preset"))?
-            .config
-            .clone();
-        self.install_network(preset.clone()).await?;
-        Ok(preset)
     }
 
     pub async fn reset_networks_to_defaults(
@@ -1481,13 +1501,6 @@ impl OwnerApi {
         Ok(result)
     }
 
-    pub fn reject_transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
-        let rejected = PendingStore::production(self.config.data_dir())?.reject(request_id)?;
-        self.events
-            .publish(DomainEventKind::ReviewChanged { request_id });
-        Ok(rejected)
-    }
-
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
         let request = MessageStore::production(self.config.data_dir())?.get(request_id)?;
         let display = describe_message(&request.message_bytes()?);
@@ -1697,15 +1710,6 @@ impl OwnerApi {
         TokenStore::production(self.config.data_dir())?.list(chain_id, limit, offset)
     }
 
-    pub fn search_tokens(
-        &self,
-        query: &str,
-        chain_id: Option<u64>,
-        limit: usize,
-    ) -> Result<Vec<StoredToken>> {
-        TokenStore::production(self.config.data_dir())?.search(query, chain_id, limit)
-    }
-
     pub async fn add_token(&self, token: ListedToken) -> Result<StoredToken> {
         ensure!(
             contains_configured_chain(&self.config.load()?, token.chain_id),
@@ -1720,44 +1724,6 @@ impl OwnerApi {
         );
         let stored = TokenStore::production(self.config.data_dir())?.add_authorized(
             &token,
-            "Manual entry",
-            &authorization,
-        )?;
-        self.events.publish(DomainEventKind::ConfigurationChanged);
-        Ok(stored)
-    }
-
-    pub async fn replace_token(
-        &self,
-        reviewed: &StoredToken,
-        replacement: ListedToken,
-    ) -> Result<StoredToken> {
-        let reviewed_chain_id = reviewed
-            .chain_id
-            .parse::<u64>()
-            .context("stored token has an invalid chain ID")?;
-        let reviewed_address = reviewed
-            .address
-            .parse::<Address>()
-            .context("stored token has an invalid address")?;
-        ensure!(
-            (replacement.chain_id, replacement.address) == (reviewed_chain_id, reviewed_address),
-            "a token's chain ID and address cannot change while it is edited"
-        );
-        ensure!(
-            contains_configured_chain(&self.config.load()?, replacement.chain_id),
-            "chain {} is not a configured network",
-            replacement.chain_id
-        );
-        let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
-        ensure!(
-            contains_configured_chain(&self.config.load()?, replacement.chain_id),
-            "chain {} was removed during authentication",
-            replacement.chain_id
-        );
-        let stored = TokenStore::production(self.config.data_dir())?.replace_authorized(
-            reviewed,
-            &replacement,
             "Manual entry",
             &authorization,
         )?;
@@ -1919,16 +1885,9 @@ fn ensure_reviewed_digest(reviewed: &str, current: &str) -> Result<()> {
 
 pub const PRIVATE_KEY_REVEAL_DURATION: Duration = Duration::from_secs(30);
 
-pub trait Clipboard: Send + Sync + 'static {
-    fn read_text(&self) -> Result<Option<String>>;
-    fn write_text(&self, value: &str) -> Result<()>;
-    fn clear(&self) -> Result<()>;
-}
-
 pub struct ExportLease {
     value: Arc<Mutex<zeroize::Zeroizing<String>>>,
     expires_at: Instant,
-    duration: Duration,
 }
 
 impl ExportLease {
@@ -1949,7 +1908,6 @@ impl ExportLease {
         Self {
             value,
             expires_at: Instant::now() + duration,
-            duration,
         }
     }
 
@@ -1979,20 +1937,6 @@ impl ExportLease {
             .lock()
             .ok()
             .map(|value| zeroize::Zeroizing::new(value.to_string()))
-    }
-
-    pub fn copy_explicitly(&self, clipboard: Arc<dyn Clipboard>) -> Result<()> {
-        let value = self.visible_value().context("private-key reveal expired")?;
-        clipboard.write_text(&value)?;
-        let expected = zeroize::Zeroizing::new(value.to_string());
-        let duration = self.duration;
-        std::thread::spawn(move || {
-            std::thread::sleep(duration);
-            if clipboard.read_text().ok().flatten().as_deref() == Some(expected.as_str()) {
-                let _ = clipboard.clear();
-            }
-        });
-        Ok(())
     }
 }
 

@@ -293,37 +293,6 @@ pub async fn interpret(
     }
 }
 
-/// A clear-signed reading of one EIP-712 payload, matched by the domain's
-/// chain and verifying contract.
-pub struct TypedDataReading {
-    pub intent: String,
-    pub fields: Vec<String>,
-}
-
-/// Render a typed-data payload through its vendored descriptor, if one
-/// matches the domain exactly. Display-only, like every descriptor reading:
-/// the complete payload the desktop presents remains the authoritative review.
-pub async fn interpret_typed_data(typed_data: &serde_json::Value) -> Option<TypedDataReading> {
-    let data: clear_signing::eip712::TypedData = serde_json::from_value(typed_data.clone()).ok()?;
-    let outcome = clear_signing::format_typed_data(
-        &registry().eip712,
-        &data,
-        &clear_signing::EmptyDataProvider,
-    )
-    .await
-    .ok()?;
-    match outcome {
-        FormatOutcome::ClearSigned { model, .. } => {
-            let reading = clear_signed(&model);
-            Some(TypedDataReading {
-                intent: reading.intent,
-                fields: reading.fields,
-            })
-        }
-        FormatOutcome::Fallback { .. } => None,
-    }
-}
-
 /// Flattens the engine's display model into capped, sanitized lines.
 fn clear_signed(model: &DisplayModel) -> ClearSigned {
     let intent = model.interpolated_intent.as_ref().unwrap_or(&model.intent);

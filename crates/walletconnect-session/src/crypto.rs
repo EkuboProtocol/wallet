@@ -99,12 +99,6 @@ impl SymKey {
         Ok(Self(bytes))
     }
 
-    #[must_use]
-    #[cfg(test)]
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-
     /// The relay topic this key addresses: hex of the SHA-256 of its raw
     /// bytes. Deriving it from the hex spelling instead is the classic way to
     /// end up subscribed to a topic nobody publishes to.

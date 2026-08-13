@@ -190,12 +190,6 @@ pub enum ApprovalDecision {
     Rejected,
 }
 
-/// Presents a server-authored request. It never receives signing material.
-#[async_trait]
-pub trait ApprovalUi: Send + Sync {
-    async fn review(&self, request: &ApprovalRequest) -> Result<ApprovalDecision>;
-}
-
 /// Presents one transaction review — the complete server-authored document
 /// plus the fresh simulation — and returns the decision. A presenter never
 /// receives key material or store handles, and

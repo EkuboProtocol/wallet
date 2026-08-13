@@ -53,49 +53,6 @@ async fn the_vendored_vetoken_descriptor_interprets_a_stake() {
 }
 
 #[tokio::test]
-async fn a_permit_descriptor_reads_mainnet_usdc_typed_data() {
-    // The registry's permit descriptors resolve through the shared
-    // eip712-erc2612-permit include, so this also proves the include
-    // chain resolves from the embedded tree.
-    let typed_data = serde_json::json!({
-        "types": {
-            "EIP712Domain": [
-                {"name": "name", "type": "string"},
-                {"name": "version", "type": "string"},
-                {"name": "chainId", "type": "uint256"},
-                {"name": "verifyingContract", "type": "address"}
-            ],
-            "Permit": [
-                {"name": "owner", "type": "address"},
-                {"name": "spender", "type": "address"},
-                {"name": "value", "type": "uint256"},
-                {"name": "nonce", "type": "uint256"},
-                {"name": "deadline", "type": "uint256"}
-            ]
-        },
-        "primaryType": "Permit",
-        "domain": {
-            "name": "USD Coin",
-            "version": "2",
-            "chainId": 1,
-            "verifyingContract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
-        },
-        "message": {
-            "owner": "0x1111111111111111111111111111111111111111",
-            "spender": "0x2222222222222222222222222222222222222222",
-            "value": "1000000",
-            "nonce": "0",
-            "deadline": "1900000000"
-        }
-    });
-    let reading = interpret_typed_data(&typed_data)
-        .await
-        .expect("usdc permit descriptor matches");
-    assert!(!reading.intent.is_empty());
-    assert!(!reading.fields.is_empty());
-}
-
-#[tokio::test]
 async fn a_forged_symbol_cannot_stand_in_for_a_token_address() {
     // Run 6251, finding 186992. A stored symbol is text the wallet did not
     // author: it arrives from a token list, and a fresh database seeds

@@ -25,12 +25,13 @@ fn register(store: &mut DesktopStore) -> McpClient {
 fn authorize_and_exchange(store: &mut DesktopStore, client: &McpClient) -> OAuthTokenPair {
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
     let code = store
-        .issue_authorization_code(
+        .issue_authorization_code_with_session(
             client.id,
             REDIRECT,
             &challenge,
             MCP_SCOPE,
             MCP_RESOURCE,
+            OAuthSessionPreset::OneDayOneWeek,
             &agent_authorization(),
         )
         .unwrap();
@@ -323,12 +324,13 @@ fn authorization_codes_are_one_time_and_pkce_bound() {
     let client = register(&mut store);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
     let code = store
-        .issue_authorization_code(
+        .issue_authorization_code_with_session(
             client.id,
             REDIRECT,
             &challenge,
             MCP_SCOPE,
             MCP_RESOURCE,
+            OAuthSessionPreset::OneDayOneWeek,
             &agent_authorization(),
         )
         .unwrap();
@@ -484,12 +486,13 @@ fn protected_desktop_settings_reject_the_wrong_authorization_scope() {
     );
     assert!(
         store
-            .issue_authorization_code(
+            .issue_authorization_code_with_session(
                 client.id,
                 REDIRECT,
                 &challenge,
                 MCP_SCOPE,
                 MCP_RESOURCE,
+                OAuthSessionPreset::OneDayOneWeek,
                 &wrong_scope,
             )
             .is_err()

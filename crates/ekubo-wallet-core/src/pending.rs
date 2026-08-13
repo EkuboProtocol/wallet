@@ -90,6 +90,18 @@ impl PendingStatus {
         }
     }
 
+    /// Whether a receipt for this record could ever exist.
+    ///
+    /// A rejected request was never signed and never left this machine, and
+    /// one still waiting for a decision has not been signed either. There is
+    /// nothing on any chain to look up, now or later — so a surface that shows
+    /// a receipt section, or offers to go and look for one, is promising
+    /// something it can never deliver and inviting the reader to wait for it.
+    #[must_use]
+    pub const fn can_reach_a_chain(self) -> bool {
+        !matches!(self, Self::AwaitingApproval | Self::Rejected)
+    }
+
     /// One sentence saying what the state means for the owner, written to
     /// stand on its own without the label beside it.
     #[must_use]
@@ -137,31 +149,6 @@ impl PendingStatus {
             _ => anyhow::bail!("stored pending transaction has invalid status {value}"),
         }
     }
-}
-
-/// Whether this error means the store simply does not hold that request.
-///
-/// A request id does not say which of the three signing queues owns it, so the
-/// reconciler tries each in turn. What it must not do is treat *every* failure as
-/// "not here": a transaction row whose stored envelope no longer parses, a
-/// typed-data row that has already been decided, a database that cannot be
-/// read at all — each of those used to send the search on to the next queue,
-/// where a colliding or merely subsequent id could be found and, in the
-/// rejection path, terminally closed. The request the owner meant stayed
-/// awaiting a decision, and the error they were shown named the wrong queue.
-///
-/// Only a missing row is an invitation to look elsewhere. Every store reports
-/// that the same way, because every store reads through `query_row`, so
-/// `QueryReturnedNoRows` anywhere in the chain is the one answer that means
-/// absence rather than trouble.
-#[must_use]
-pub fn is_unknown_request(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::QueryReturnedNoRows)
-        )
-    })
 }
 
 /// Drop this wallet's oldest finished rows past the retention bound.
@@ -959,25 +946,6 @@ impl PendingStore {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         request_ids.into_iter().map(|id| self.get(id)).collect()
-    }
-
-    pub fn get_by_identifier(&self, identifier: &str) -> Result<PendingTransaction> {
-        if let Ok(request_id) = Uuid::parse_str(identifier) {
-            return self.get(request_id);
-        }
-        let hash = parse_hash(identifier)?;
-        let request_id: Uuid = self
-            .database
-            .connection
-            .query_row(
-                "SELECT request_id FROM pending_transactions
-                 WHERE signed_transaction_hash = ?1 OR broadcast_transaction_hash = ?1
-                 ORDER BY created_at DESC LIMIT 1",
-                [Blob(hash)],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("unknown transaction {identifier}"))?;
-        self.get(request_id)
     }
 
     fn read(&self, request_id: Uuid) -> Result<PendingTransaction> {

@@ -28,12 +28,11 @@ use ekubo_wallet_core::approval::{
     ApprovalFact, ApprovalSection, ApprovalSectionKind, ReviewDecision, ReviewDocument,
 };
 use ekubo_wallet_core::config::{NativeCurrency, NetworkConfig, RpcStrategy, WalletMetadata};
-use ekubo_wallet_core::core::policy::{Effect, Rule, WalletPolicy, diff_policies};
+use ekubo_wallet_core::core::policy::{WalletPolicy, diff_policies};
 use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, MCP_RESOURCE, McpClient};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
-use ekubo_wallet_core::networks::NetworkProfile;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
 use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
@@ -132,10 +131,6 @@ impl GroupBox {
 
     fn title(mut self, title: impl IntoElement) -> Self {
         self.title = Some(title.into_any_element());
-        self
-    }
-
-    fn outline(self) -> Self {
         self
     }
 
@@ -540,6 +535,20 @@ fn selectable_code_text(id: impl Into<ElementId>, value: &str) -> TextView {
     TextView::markdown(id, markdown_fenced_code(value)).selectable(true)
 }
 
+/// What the digest row is called, which depends on whether anything signed it.
+///
+/// It read "Digest that was signed" in every state, including directly under
+/// an explanation saying "You turned this down, so no signature was ever
+/// produced." One of the two was lying, and the label is the one a reader
+/// skims.
+const fn digest_label(signed: bool) -> &'static str {
+    if signed {
+        "Digest that was signed"
+    } else {
+        "Digest this would have signed"
+    }
+}
+
 fn copyable_value(id: impl Into<SharedString>, label: &'static str, value: String) -> gpui::Div {
     let id = id.into();
     let text_id = SharedString::from(format!("{id}-text"));
@@ -647,6 +656,15 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: Option<&Leg
         })
 }
 
+/// The readable width for a line of explanatory text.
+///
+/// A settings row wants the full measure — its control belongs at the right
+/// edge — but the sentence under the row does not. Measured, the prose in this
+/// pane ran 634px, which at 14px is about ninety characters a line; the
+/// comfortable band is nearer sixty-five to seventy-five. Capping the prose
+/// rather than the pane keeps the rows where the platform puts them.
+const PROSE_MEASURE: gpui::Pixels = px(520.0);
+
 fn settings_section(title: &'static str, content: GroupBox) -> gpui::Div {
     div().w_full().child(content.title(title))
 }
@@ -667,11 +685,11 @@ fn account_required_panel(
 ) -> GroupBox {
     GroupBox::new()
         .id(panel_id)
-        .outline()
         .title("Create your first account")
         .child(selectable_label(message))
         .child(
             app_button(button_id)
+                .self_start()
                 .label("Go to Accounts")
                 .primary()
                 .on_click(cx.listener(|view, _, _, cx| {
@@ -689,12 +707,22 @@ fn about_row(
     title: &'static str,
     detail: Option<(SharedString, gpui::Hsla)>,
     action: impl IntoElement,
+    ruled: bool,
+    cx: &App,
 ) -> gpui::Div {
     h_flex()
         .w_full()
         .items_center()
         .justify_between()
         .gap_4()
+        // Each row is a name, a fact about it, and one control, and the
+        // control sits a column away from the name. A rule between rows is
+        // what keeps the pairing obvious without asking the eye to track
+        // across a gap. The last row has none: the copyright line below it is
+        // not another row.
+        .when(ruled, |row| {
+            row.pb_2().border_b_1().border_color(cx.theme().border)
+        })
         .child(
             div()
                 .min_w_0()
@@ -962,6 +990,47 @@ impl StatusTone {
             Self::NeedsYou => cx.theme().warning,
             Self::Working => cx.theme().muted_foreground,
             Self::Failed => cx.theme().danger,
+        }
+    }
+}
+
+/// Whether an agent can reach this wallet right now.
+///
+/// The tray menu has always said this — "Agents cannot connect right now" —
+/// but the window never did. The gateway binds one fixed loopback port, so
+/// another process already holding it leaves every agent unable to connect
+/// while Settings still shows the endpoint, the install button, and a list of
+/// configured agents, all of them describing a server that is not running.
+#[derive(Clone)]
+enum McpGatewayStatus {
+    Starting,
+    Online,
+    Offline(SharedString),
+}
+
+impl McpGatewayStatus {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Online => "Reachable",
+            Self::Offline(_) => "Unreachable",
+        }
+    }
+
+    const fn tone(&self) -> StatusTone {
+        match self {
+            Self::Starting => StatusTone::Working,
+            Self::Online => StatusTone::Done,
+            Self::Offline(_) => StatusTone::Failed,
+        }
+    }
+
+    /// The sentence under the pill. Only a failure has one: the reason the
+    /// port could not be served is the only thing here nobody can guess.
+    fn detail(&self) -> Option<SharedString> {
+        match self {
+            Self::Starting | Self::Online => None,
+            Self::Offline(error) => Some(error.clone()),
         }
     }
 }
@@ -1305,7 +1374,7 @@ pub struct WalletWindow {
     token_import_status: Option<SharedString>,
     token_proposal_error: Option<SharedString>,
     token_list_generation: u64,
-    mcp_status: SharedString,
+    mcp_status: McpGatewayStatus,
     selected_record: Option<uuid::Uuid>,
     activity_busy: BTreeSet<uuid::Uuid>,
     activity_feedback: BTreeMap<uuid::Uuid, ActivityFeedback>,
@@ -1334,6 +1403,9 @@ pub struct WalletWindow {
     account_entry_mode: AccountEntryMode,
     account_operation: Option<AccountOperation>,
     account_status: Option<SharedString>,
+    /// Names the newest note, so a timer set for an older one cannot take a
+    /// newer one off the screen with it.
+    account_status_seq: u64,
     account_id_error: Option<SharedString>,
     private_key_error: Option<SharedString>,
     account_action_errors: BTreeMap<String, SharedString>,
@@ -1376,33 +1448,11 @@ pub struct WalletWindow {
     network_native_decimals_input: Option<Entity<InputState>>,
     network_explorer_url_input: Option<Entity<InputState>>,
     network_documentation_url_input: Option<Entity<InputState>>,
-    network_presets: Arc<[NetworkProfile]>,
-    network_preset_search_input: Option<Entity<InputState>>,
-    network_preset_search_subscription: Option<Subscription>,
-    network_preset_busy: Option<u64>,
-    network_preset_error: Option<SharedString>,
-    network_reset_error: Option<SharedString>,
-    pending_network_reset: Option<Vec<NetworkConfig>>,
-    network_reset_busy: bool,
     network_action_busy: BTreeSet<String>,
     network_action_errors: BTreeMap<String, SharedString>,
     network_proposal_error: Option<SharedString>,
     policy_json_input: Option<Entity<InputState>>,
     policy_editor: Option<PolicyEditor>,
-    policy_rule_editor_open: bool,
-    policy_rule_original_index: Option<usize>,
-    policy_rule_effect: GuidedRuleEffect,
-    policy_rule_target_mode: GuidedLiteralMode,
-    policy_rule_chain_mode: GuidedLiteralMode,
-    policy_rule_value_mode: GuidedLiteralMode,
-    policy_rule_calldata_mode: GuidedCalldataMode,
-    policy_rule_label_input: Option<Entity<InputState>>,
-    policy_rule_targets_input: Option<Entity<InputState>>,
-    policy_rule_chain_ids_input: Option<Entity<InputState>>,
-    policy_rule_values_input: Option<Entity<InputState>>,
-    policy_rule_abi_input: Option<Entity<InputState>>,
-    policy_rule_args_input: Option<Entity<InputState>>,
-    policy_rule_errors: GuidedPolicyRuleErrors,
     policy_installing: bool,
     policy_action_error: Option<SharedString>,
     token_proposal_busy: bool,
@@ -1634,61 +1684,6 @@ struct PolicyEditor {
     current_policy: Option<WalletPolicy>,
     proposal: Option<PolicyProposal>,
     validation: Option<std::result::Result<PolicyDraftReview, SharedString>>,
-    mode: PolicyEditorMode,
-    guided_policy: std::result::Result<WalletPolicy, SharedString>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Kept for the disabled "Coming soon" guided editor branch.
-enum PolicyEditorMode {
-    Guided,
-    Advanced,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidedRuleEffect {
-    Allow,
-    Deny,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidedLiteralMode {
-    Any,
-    Exact,
-    Predicate,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidedCalldataMode {
-    Any,
-    Empty,
-    Selector,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct GuidedPolicyRuleErrors {
-    label: Option<String>,
-    targets: Option<String>,
-    chain_ids: Option<String>,
-    values: Option<String>,
-    abi: Option<String>,
-    args: Option<String>,
-    form: Option<String>,
-}
-
-#[derive(Clone)]
-struct GuidedPolicyRuleDraft {
-    effect: GuidedRuleEffect,
-    label: String,
-    target_mode: GuidedLiteralMode,
-    targets: String,
-    chain_mode: GuidedLiteralMode,
-    chain_ids: String,
-    value_mode: GuidedLiteralMode,
-    values: String,
-    calldata_mode: GuidedCalldataMode,
-    abi: String,
-    args: String,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1720,6 +1715,35 @@ enum ActiveReviewCompletion {
     AccountRemoval {
         wallet_id: String,
     },
+}
+
+/// What a review calls its two decisions, and which one costs something.
+struct ReviewDecisionLabels {
+    reject: &'static str,
+    approve: &'static str,
+    approve_is_destructive: bool,
+}
+
+const fn review_decision_labels(
+    completion: Option<&ActiveReviewCompletion>,
+) -> ReviewDecisionLabels {
+    match completion {
+        Some(ActiveReviewCompletion::WalletConnect { .. }) => ReviewDecisionLabels {
+            reject: "Decline connection",
+            approve: "Authenticate & connect",
+            approve_is_destructive: false,
+        },
+        Some(ActiveReviewCompletion::AccountRemoval { .. }) => ReviewDecisionLabels {
+            reject: "Keep this account",
+            approve: "Authenticate & remove",
+            approve_is_destructive: true,
+        },
+        _ => ReviewDecisionLabels {
+            reject: "Reject request",
+            approve: "Authenticate & approve",
+            approve_is_destructive: false,
+        },
+    }
 }
 
 enum QueuedReview {
@@ -1853,8 +1877,13 @@ struct ActivityFeedback {
     seq: u64,
 }
 
-/// How long a note about something that worked stays on its row.
-const ACTIVITY_FEEDBACK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(8);
+/// How long a note about something that worked stays on the screen.
+///
+/// Both places one appears: an inbox row's note about the last thing the owner
+/// asked it to do, and the line under the account form saying an account was
+/// created. Each is a receipt for a press whose result is already visible
+/// beside it, so each says so briefly and then gets out of the way.
+const SUCCESS_NOTE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(8);
 
 impl ActivityFeedback {
     fn note(message: impl Into<SharedString>) -> Self {
@@ -2835,87 +2864,6 @@ fn block_explorer_resource_url(base: &url::Url, resource: &str, identifier: &str
     url.into()
 }
 
-fn network_preset_match_rank(profile: &NetworkProfile, query: &str) -> Option<(usize, usize)> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return Some((usize::from(!profile.is_default), 0));
-    }
-    let chain_id = profile.config.chain_id.to_string();
-    let display_name = profile
-        .config
-        .display_name
-        .as_deref()
-        .unwrap_or_default()
-        .to_lowercase();
-    let name = profile.config.name.to_lowercase();
-    let aliases = profile
-        .config
-        .aliases
-        .iter()
-        .map(|alias| alias.to_lowercase())
-        .collect::<Vec<_>>();
-    std::iter::once(chain_id.as_str())
-        .chain(std::iter::once(name.as_str()))
-        .chain(std::iter::once(display_name.as_str()))
-        .chain(aliases.iter().map(String::as_str))
-        .filter_map(|value| {
-            let position = value.find(&query)?;
-            let kind = if value.len() == query.len() {
-                0
-            } else if position == 0 {
-                1
-            } else {
-                2
-            };
-            Some((kind, position))
-        })
-        .min()
-}
-
-fn network_presets_for_display<'a>(
-    presets: &'a [NetworkProfile],
-    configured: &[NetworkConfig],
-    query: &str,
-    limit: usize,
-    testnet_mode: bool,
-) -> Vec<&'a NetworkProfile> {
-    let configured_chains = configured
-        .iter()
-        .map(|network| network.chain_id)
-        .collect::<BTreeSet<_>>();
-    let mut matches = presets
-        .iter()
-        .filter(|profile| testnet_mode || !profile.config.testnet)
-        .filter_map(|profile| network_preset_match_rank(profile, query).map(|rank| (rank, profile)))
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|(rank, profile)| {
-        (
-            *rank,
-            profile.config.testnet,
-            configured_chains.contains(&profile.config.chain_id),
-            profile.config.chain_id,
-        )
-    });
-    matches
-        .into_iter()
-        .take(limit)
-        .map(|(_, profile)| profile)
-        .collect()
-}
-
-fn networks_discarded_by_default_reset(
-    configured: &[NetworkConfig],
-    defaults: &[NetworkConfig],
-) -> Vec<String> {
-    let mut discarded = configured
-        .iter()
-        .filter(|network| !defaults.contains(network))
-        .map(|network| network.name.clone())
-        .collect::<Vec<_>>();
-    discarded.sort();
-    discarded
-}
-
 fn parse_network_editor_draft(
     draft: &NetworkEditorDraft,
     disabled: bool,
@@ -3743,318 +3691,14 @@ fn review_policy_draft(
     })
 }
 
-fn allow_anything_policy_document() -> Result<(String, WalletPolicy)> {
-    let policy = WalletPolicy::allow_anything();
-    let document = serde_json::to_string_pretty(&policy)?;
-    Ok((document, policy))
+fn allow_anything_policy_document() -> Result<String> {
+    Ok(serde_json::to_string_pretty(
+        &WalletPolicy::allow_anything(),
+    )?)
 }
 
-fn disable_signing_policy_document() -> Result<(String, WalletPolicy)> {
-    let policy = WalletPolicy::deny_all();
-    let document = serde_json::to_string_pretty(&policy)?;
-    Ok((document, policy))
-}
-
-fn guided_literal_predicate(
-    mode: GuidedLiteralMode,
-    input: &str,
-    address: bool,
-    expected: &str,
-) -> std::result::Result<Option<serde_json::Value>, String> {
-    if mode == GuidedLiteralMode::Any {
-        return Ok(None);
-    }
-    if mode == GuidedLiteralMode::Predicate {
-        return serde_json::from_str(input.trim())
-            .map(Some)
-            .map_err(|error| format!("Enter one predicate JSON object: {error}"));
-    }
-    let values = input
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>();
-    if values.is_empty() {
-        return Err(format!(
-            "Enter one or more {expected}, separated by commas."
-        ));
-    }
-    let valid = if address {
-        values.iter().all(|value| {
-            *value == "$self"
-                || (value.len() == 42
-                    && value.starts_with("0x")
-                    && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit()))
-        })
-    } else {
-        values
-            .iter()
-            .all(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
-    };
-    if !valid {
-        return Err(format!("Use {expected}, separated by commas."));
-    }
-    let values = values.into_iter().map(str::to_owned).collect::<Vec<_>>();
-    Ok(Some(if values.len() == 1 {
-        serde_json::json!({ "eq": values[0] })
-    } else {
-        serde_json::json!({ "in": values })
-    }))
-}
-
-fn update_guided_policy_rule(
-    document: &str,
-    original_index: Option<usize>,
-    draft: &GuidedPolicyRuleDraft,
-) -> std::result::Result<(String, WalletPolicy), Box<GuidedPolicyRuleErrors>> {
-    let mut errors = GuidedPolicyRuleErrors::default();
-    let label = draft.label.trim();
-    if !label.is_empty()
-        && (label.chars().count() > 160
-            || ekubo_wallet_core::sanitize::stripped_capped(label, 160) != label)
-    {
-        errors.label = Some(
-            "Use at most 160 visible characters with no control or bidirectional characters."
-                .into(),
-        );
-    }
-    let target = guided_literal_predicate(
-        draft.target_mode,
-        &draft.targets,
-        true,
-        "complete 0x-prefixed addresses or $self",
-    )
-    .map_err(|error| errors.targets = Some(error))
-    .ok()
-    .flatten();
-    let chain_id = guided_literal_predicate(
-        draft.chain_mode,
-        &draft.chain_ids,
-        false,
-        "non-negative decimal chain IDs",
-    )
-    .map_err(|error| errors.chain_ids = Some(error))
-    .ok()
-    .flatten();
-    let native_value = guided_literal_predicate(
-        draft.value_mode,
-        &draft.values,
-        false,
-        "non-negative decimal wei values",
-    )
-    .map_err(|error| errors.values = Some(error))
-    .ok()
-    .flatten();
-    let calldata = match draft.calldata_mode {
-        GuidedCalldataMode::Any => None,
-        GuidedCalldataMode::Empty => Some(serde_json::json!({ "eq": "0x" })),
-        GuidedCalldataMode::Selector => {
-            let abi = draft.abi.trim();
-            if abi.is_empty() {
-                errors.abi = Some("Enter the complete canonical function signature.".into());
-            }
-            let args = match serde_json::from_str::<serde_json::Value>(draft.args.trim()) {
-                Ok(serde_json::Value::Object(args)) => Some(args),
-                Ok(_) => {
-                    errors.args = Some("Argument constraints must be a JSON object.".into());
-                    None
-                }
-                Err(error) => {
-                    errors.args = Some(format!("Argument constraints are not valid JSON: {error}"));
-                    None
-                }
-            };
-            args.filter(|_| !abi.is_empty()).map(|args| {
-                if args.is_empty() {
-                    serde_json::json!({ "selector": { "abi": abi } })
-                } else {
-                    serde_json::json!({ "selector": { "abi": abi, "args": args } })
-                }
-            })
-        }
-    };
-    if errors != GuidedPolicyRuleErrors::default() {
-        return Err(Box::new(errors));
-    }
-
-    let mut rule = serde_json::Map::new();
-    rule.insert(
-        "effect".into(),
-        serde_json::Value::String(
-            match draft.effect {
-                GuidedRuleEffect::Allow => "allow",
-                GuidedRuleEffect::Deny => "deny",
-            }
-            .into(),
-        ),
-    );
-    if !label.is_empty() {
-        rule.insert("label".into(), serde_json::Value::String(label.into()));
-    }
-    for (slot, predicate) in [
-        ("chain_id", chain_id),
-        ("to", target),
-        ("native_value", native_value),
-        ("calldata", calldata),
-    ] {
-        if let Some(predicate) = predicate {
-            rule.insert(slot.into(), predicate);
-        }
-    }
-
-    let mut value: serde_json::Value = match serde_json::from_str(document) {
-        Ok(value) => value,
-        Err(error) => {
-            errors.form = Some(format!(
-                "The advanced document is not valid JSON. Fix it before using the guided editor: {error}"
-            ));
-            return Err(Box::new(errors));
-        }
-    };
-    let rules = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("rules"))
-        .and_then(serde_json::Value::as_array_mut);
-    let Some(rules) = rules else {
-        errors.form = Some("The policy document has no ordered `rules` list.".into());
-        return Err(Box::new(errors));
-    };
-    let rule = serde_json::Value::Object(rule);
-    if let Some(index) = original_index {
-        let Some(existing) = rules.get_mut(index) else {
-            errors.form = Some("The selected rule changed while it was being edited.".into());
-            return Err(Box::new(errors));
-        };
-        *existing = rule;
-    } else {
-        rules.push(rule);
-    }
-    match WalletPolicy::parse(value) {
-        Ok(policy) => match serde_json::to_string_pretty(&policy) {
-            Ok(document) => Ok((document, policy)),
-            Err(error) => {
-                errors.form = Some(format!("Could not serialize the policy: {error:#}"));
-                Err(Box::new(errors))
-            }
-        },
-        Err(error) => {
-            if draft.calldata_mode == GuidedCalldataMode::Selector {
-                errors.abi = Some(format!(
-                    "The selector or its predicates are invalid: {error:#}"
-                ));
-            } else {
-                errors.form = Some(format!("The resulting rule is invalid: {error:#}"));
-            }
-            Err(Box::new(errors))
-        }
-    }
-}
-
-fn remove_guided_policy_rule(document: &str, index: usize) -> Result<(String, WalletPolicy)> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(document).context("policy document is not valid JSON")?;
-    let rules = value
-        .as_object_mut()
-        .and_then(|root| root.get_mut("rules"))
-        .and_then(serde_json::Value::as_array_mut)
-        .context("the policy document has no ordered rule list")?;
-    ensure!(index < rules.len(), "the selected rule no longer exists");
-    rules.remove(index);
-    let policy = WalletPolicy::parse(value)?;
-    let document = serde_json::to_string_pretty(&policy)?;
-    Ok((document, policy))
-}
-
-fn guided_predicate_values(
-    predicate: Option<&ekubo_wallet_core::core::predicate::Predicate>,
-) -> Result<(GuidedLiteralMode, String)> {
-    let Some(predicate) = predicate else {
-        return Ok((GuidedLiteralMode::Any, String::new()));
-    };
-    let value = serde_json::to_value(predicate)?;
-    match value {
-        serde_json::Value::String(value) if value == "any_value" => {
-            Ok((GuidedLiteralMode::Any, String::new()))
-        }
-        serde_json::Value::Object(object) if object.len() == 1 => {
-            if let Some(serde_json::Value::String(value)) = object.get("eq") {
-                Ok((GuidedLiteralMode::Exact, value.clone()))
-            } else if let Some(serde_json::Value::Array(values)) = object.get("in") {
-                let values = values
-                    .iter()
-                    .map(serde_json::Value::as_str)
-                    .collect::<Option<Vec<_>>>()
-                    .context("the literal set contains a non-string value")?;
-                Ok((GuidedLiteralMode::Exact, values.join(", ")))
-            } else {
-                Ok((
-                    GuidedLiteralMode::Predicate,
-                    serde_json::to_string_pretty(&serde_json::Value::Object(object))?,
-                ))
-            }
-        }
-        other => Ok((
-            GuidedLiteralMode::Predicate,
-            serde_json::to_string_pretty(&other)?,
-        )),
-    }
-}
-
-fn guided_rule_draft(rule: &Rule) -> Result<GuidedPolicyRuleDraft> {
-    let (target_mode, targets) = guided_predicate_values(rule.to.as_ref())?;
-    let (chain_mode, chain_ids) = guided_predicate_values(rule.chain_id.as_ref())?;
-    let (value_mode, values) = guided_predicate_values(rule.native_value.as_ref())?;
-    let (calldata_mode, abi, args) = match rule.calldata.as_ref() {
-        None => (GuidedCalldataMode::Any, String::new(), "{}".into()),
-        Some(predicate) => {
-            let value = serde_json::to_value(predicate)?;
-            match value {
-                serde_json::Value::String(value) if value == "any_value" => {
-                    (GuidedCalldataMode::Any, String::new(), "{}".into())
-                }
-                serde_json::Value::Object(object)
-                    if object.len() == 1
-                        && object.get("eq") == Some(&serde_json::Value::String("0x".into())) =>
-                {
-                    (GuidedCalldataMode::Empty, String::new(), "{}".into())
-                }
-                serde_json::Value::Object(object) if object.len() == 1 => {
-                    let selector = object
-                        .get("selector")
-                        .and_then(serde_json::Value::as_object)
-                        .context("this calldata predicate requires Advanced JSON")?;
-                    let abi = selector
-                        .get("abi")
-                        .and_then(serde_json::Value::as_str)
-                        .context("this selector has no ABI signature")?
-                        .to_owned();
-                    let args = selector
-                        .get("args")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    let args = serde_json::to_string_pretty(&args)?;
-                    (GuidedCalldataMode::Selector, abi, args)
-                }
-                _ => anyhow::bail!("this calldata predicate requires Advanced JSON"),
-            }
-        }
-    };
-    Ok(GuidedPolicyRuleDraft {
-        effect: match rule.effect {
-            Effect::Allow => GuidedRuleEffect::Allow,
-            Effect::Deny => GuidedRuleEffect::Deny,
-        },
-        label: rule.label.clone().unwrap_or_default(),
-        target_mode,
-        targets,
-        chain_mode,
-        chain_ids,
-        value_mode,
-        values,
-        calldata_mode,
-        abi,
-        args,
-    })
+fn disable_signing_policy_document() -> Result<String> {
+    Ok(serde_json::to_string_pretty(&WalletPolicy::deny_all())?)
 }
 
 impl WalletWindow {
@@ -4069,7 +3713,6 @@ impl WalletWindow {
     ) -> Self {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
         let testnet_mode = owner.testnet_mode().unwrap_or(false);
-        let network_presets = Arc::from(owner.network_presets());
         let route_scroll_handle = ScrollHandle::new();
         let sidebar_logo_light =
             render_embedded_png(include_bytes!("../assets/tray/light_mode_tray_icon.png"))
@@ -4111,7 +3754,7 @@ impl WalletWindow {
             token_import_status: None,
             token_proposal_error: None,
             token_list_generation: 0,
-            mcp_status: "MCP starting…".into(),
+            mcp_status: McpGatewayStatus::Starting,
             selected_record: None,
             activity_busy: BTreeSet::new(),
             activity_feedback: BTreeMap::new(),
@@ -4133,6 +3776,7 @@ impl WalletWindow {
             account_entry_mode: AccountEntryMode::Create,
             account_operation: None,
             account_status: None,
+            account_status_seq: 0,
             account_id_error: None,
             private_key_error: None,
             account_action_errors: BTreeMap::new(),
@@ -4172,33 +3816,11 @@ impl WalletWindow {
             network_native_decimals_input: None,
             network_explorer_url_input: None,
             network_documentation_url_input: None,
-            network_presets,
-            network_preset_search_input: None,
-            network_preset_search_subscription: None,
-            network_preset_busy: None,
-            network_preset_error: None,
-            network_reset_error: None,
-            pending_network_reset: None,
-            network_reset_busy: false,
             network_action_busy: BTreeSet::new(),
             network_action_errors: BTreeMap::new(),
             network_proposal_error: None,
             policy_json_input: None,
             policy_editor: None,
-            policy_rule_editor_open: false,
-            policy_rule_original_index: None,
-            policy_rule_effect: GuidedRuleEffect::Allow,
-            policy_rule_target_mode: GuidedLiteralMode::Any,
-            policy_rule_chain_mode: GuidedLiteralMode::Any,
-            policy_rule_value_mode: GuidedLiteralMode::Any,
-            policy_rule_calldata_mode: GuidedCalldataMode::Any,
-            policy_rule_label_input: None,
-            policy_rule_targets_input: None,
-            policy_rule_chain_ids_input: None,
-            policy_rule_values_input: None,
-            policy_rule_abi_input: None,
-            policy_rule_args_input: None,
-            policy_rule_errors: GuidedPolicyRuleErrors::default(),
             policy_installing: false,
             policy_action_error: None,
             token_proposal_busy: false,
@@ -4460,42 +4082,53 @@ impl WalletWindow {
                     .placeholder("Select an account to inspect and edit its policy")
             }));
         }
-        if self.policy_rule_label_input.is_none() {
-            self.policy_rule_label_input =
-                Some(cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("What this permission is for")
-                }));
-        }
-        if self.policy_rule_targets_input.is_none() {
-            self.policy_rule_targets_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("0x-prefixed target addresses, separated by commas")
-            }));
-        }
-        if self.policy_rule_chain_ids_input.is_none() {
-            self.policy_rule_chain_ids_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Decimal chain IDs, separated by commas")
-            }));
-        }
-        if self.policy_rule_values_input.is_none() {
-            self.policy_rule_values_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Exact wei values, separated by commas")
-            }));
-        }
-        if self.policy_rule_abi_input.is_none() {
-            self.policy_rule_abi_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder("transfer(address to, uint256 amount)")
-            }));
-        }
-        if self.policy_rule_args_input.is_none() {
-            self.policy_rule_args_input = Some(cx.new(|cx| {
-                InputState::new(window, cx)
-                    .code_editor("json")
-                    .rows(6)
-                    .default_value("{}")
-                    .placeholder("Typed argument predicate object")
-            }));
-        }
+    }
+
+    /// Drop every window-scoped entity this view owns.
+    ///
+    /// Reopening the window rebuilds all of them, and each one left behind is
+    /// an input still subscribed to a window that no longer exists. It is also
+    /// the list that has to grow whenever a field does, which is why it lives
+    /// beside the fields rather than being spelled out at a call site.
+    fn release_window_state(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = false;
+        self.command_palette_list = None;
+        self.command_palette_subscription = None;
+        self.form_input_subscriptions.clear();
+        self.appearance_subscription = None;
+        self.token_list = None;
+        self.token_proposal_list = None;
+        self.token_list_url_input = None;
+        self.token_chain_id_input = None;
+        self.token_address_input = None;
+        self.token_symbol_input = None;
+        self.token_name_input = None;
+        self.token_decimals_input = None;
+        self.token_editor_open = false;
+        self.token_list_generation = self.token_list_generation.wrapping_add(1);
+        self.account_id_input = None;
+        self.private_key_input = None;
+        self.walletconnect_uri_input = None;
+        self.network_name_input = None;
+        self.network_display_name_input = None;
+        self.network_aliases_input = None;
+        self.network_chain_id_input = None;
+        self.network_rpc_urls_input = None;
+        self.network_max_gas_limit_input = None;
+        self.network_max_fee_per_gas_input = None;
+        self.network_native_name_input = None;
+        self.network_native_symbol_input = None;
+        self.network_native_decimals_input = None;
+        self.network_explorer_url_input = None;
+        self.network_documentation_url_input = None;
+        self.network_editor_open = false;
+        self.network_editor_original = None;
+        self.policy_json_input = None;
+        self.policy_editor = None;
+        self.policy_installing = false;
+        self.token_proposal_busy = false;
+        self.network_proposal_busy = false;
+        cx.notify();
     }
 
     fn set_route_error(&mut self, route: Route, error: impl Into<SharedString>) {
@@ -4775,9 +4408,19 @@ impl WalletWindow {
             let Some(entity) = view.upgrade() else {
                 return dialog.title("Add token").child("Token form unavailable.");
             };
-            let (busy, errors) = {
+            let (busy, errors, chain_hint) = {
                 let window = entity.read(cx);
-                (window.token_editor_busy, window.token_editor_errors.clone())
+                // Which network the number in the field actually names. The
+                // form asked for a chain ID and said nothing back, so adding a
+                // token meant knowing that Base is 8453 and trusting you had
+                // typed it — and a wrong-but-configured chain saved happily
+                // under the wrong network.
+                let hint = window.token_editor_chain_hint(cx);
+                (
+                    window.token_editor_busy,
+                    window.token_editor_errors.clone(),
+                    hint,
+                )
             };
             let add_view = view.clone();
             let close_view = view.clone();
@@ -4824,6 +4467,14 @@ impl WalletWindow {
                                                 .aria_label("Chain ID")
                                                 .disabled(busy),
                                         )
+                                        .when_some(chain_hint, |field, hint| {
+                                            field.child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(selectable_label(hint)),
+                                            )
+                                        })
                                         .when_some(errors.chain_id.clone(), |field, error| {
                                             field.child(field_error(
                                                 "token-editor-chain-id-error",
@@ -4963,6 +4614,43 @@ impl WalletWindow {
         });
         chain_id_focus.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
+    }
+
+    /// What the chain ID currently in the token form names, said back to the
+    /// reader while they type it.
+    ///
+    /// The wallet knows every configured network by name, and the form asked
+    /// for the number anyway and answered nothing — so adding a token meant
+    /// remembering that Base is 8453, and a plausible wrong number that
+    /// happened to be configured saved without complaint under the wrong
+    /// network. An empty field says nothing, because a hint about a field
+    /// nobody has filled in yet is noise.
+    fn token_editor_chain_hint(&self, cx: &App) -> Option<SharedString> {
+        let input = self.token_chain_id_input.as_ref()?;
+        let typed = input.read(cx).value();
+        let typed = typed.trim();
+        if typed.is_empty() {
+            return None;
+        }
+        let Ok(chain_id) = typed.parse::<u64>() else {
+            return Some("Not a chain ID. Enter the network's decimal number.".into());
+        };
+        let configured = self
+            .cached_networks()
+            .ok()?
+            .iter()
+            .find(|network| network.chain_id == chain_id);
+        Some(match configured {
+            Some(network) if self.testnet_mode || !network.testnet => {
+                network.display_label().to_owned().into()
+            }
+            // Configured, but hidden right now. Sending the reader to add it
+            // would send them to a page where they cannot see it either, to
+            // create a network that already exists. Saving already says this;
+            // the field says it before the form is filled in.
+            Some(_) => "Configured as a test network. Turn on testnet mode to use it.".into(),
+            None => "No network configured here. Add it under Networks first.".into(),
+        })
     }
 
     fn save_token_editor(&mut self, cx: &mut Context<Self>) {
@@ -5249,6 +4937,28 @@ impl WalletWindow {
         cx.notify();
     }
 
+    /// A note that an account was created or imported, which then leaves.
+    ///
+    /// It used to stay for the life of the process: "Account primary was
+    /// created." sat under the form while the reader went to Settings, set up
+    /// an agent, came back, and read it again — about something the list
+    /// directly below had been showing the whole time.
+    fn set_account_status(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.account_status_seq = self.account_status_seq.wrapping_add(1);
+        let seq = self.account_status_seq;
+        self.account_status = Some(message.into());
+        cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(SUCCESS_NOTE_LIFETIME).await;
+            let _ = view.update(cx, |view, cx| {
+                if view.account_status_seq == seq {
+                    view.account_status = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn set_account_entry_mode(&mut self, mode: AccountEntryMode, cx: &mut Context<Self>) {
         if self.account_operation.is_some() || self.account_entry_mode == mode {
             return;
@@ -5295,8 +5005,7 @@ impl WalletWindow {
                             input.update(cx, |input, cx| input.set_value("", window, cx));
                         }
                         view.account_action_errors.remove(&account.id);
-                        view.account_status =
-                            Some(format!("Account {} was created.", account.id).into());
+                        view.set_account_status(format!("Account {} was created.", account.id), cx);
                         view.reload_desktop_snapshot(cx);
                         view.invalidate_portfolio();
                     }
@@ -5361,8 +5070,10 @@ impl WalletWindow {
                             input.update(cx, |input, cx| input.set_value("", window, cx));
                         }
                         view.account_action_errors.remove(&account.id);
-                        view.account_status =
-                            Some(format!("Account {} was imported.", account.id).into());
+                        view.set_account_status(
+                            format!("Account {} was imported.", account.id),
+                            cx,
+                        );
                         view.reload_desktop_snapshot(cx);
                         view.invalidate_portfolio();
                     }
@@ -5512,15 +5223,10 @@ impl WalletWindow {
                         self.policy_editor = Some(PolicyEditor {
                             wallet_id: wallet_id.to_owned(),
                             source_revision,
-                            guided_policy: Ok(current_policy
-                                .clone()
-                                .unwrap_or_else(WalletPolicy::require_approval_for_everything)),
                             current_policy,
                             proposal: None,
                             validation: None,
-                            mode: PolicyEditorMode::Advanced,
                         });
-                        self.reset_guided_policy_rule_form(window, cx);
                         self.policy_action_error = None;
                         self.policy_editor_anchor.scroll_to(window, cx);
                     }
@@ -5569,11 +5275,8 @@ impl WalletWindow {
                             source_revision: Some(proposal.source_revision),
                             current_policy,
                             proposal: Some(proposal),
-                            guided_policy: Ok(review.policy.clone()),
                             validation: Some(Ok(review)),
-                            mode: PolicyEditorMode::Advanced,
                         });
-                        self.reset_guided_policy_rule_form(window, cx);
                         self.policy_action_error = None;
                     }
                     Err(error) => {
@@ -5611,237 +5314,6 @@ impl WalletWindow {
         cx.notify();
     }
 
-    #[allow(dead_code)] // Re-enabled with the guided editor when that workflow is ready.
-    fn set_policy_editor_mode(&mut self, mode: PolicyEditorMode, cx: &mut Context<Self>) {
-        let Some(editor) = self.policy_editor.as_mut() else {
-            return;
-        };
-        if mode == PolicyEditorMode::Guided
-            && let Some(input) = self.policy_json_input.as_ref()
-        {
-            editor.guided_policy = serde_json::from_str(input.read(cx).value().as_ref())
-                .context("policy document is not valid JSON")
-                .and_then(WalletPolicy::parse)
-                .map_err(|error| format!("Guided editor unavailable: {error:#}").into());
-        }
-        editor.mode = mode;
-        cx.notify();
-    }
-
-    fn reset_guided_policy_rule_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in [
-            self.policy_rule_label_input.as_ref(),
-            self.policy_rule_targets_input.as_ref(),
-            self.policy_rule_chain_ids_input.as_ref(),
-            self.policy_rule_values_input.as_ref(),
-            self.policy_rule_abi_input.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
-        if let Some(input) = self.policy_rule_args_input.as_ref() {
-            input.update(cx, |input, cx| input.set_value("{}", window, cx));
-        }
-        self.policy_rule_editor_open = false;
-        self.policy_rule_original_index = None;
-        self.policy_rule_effect = GuidedRuleEffect::Allow;
-        self.policy_rule_target_mode = GuidedLiteralMode::Any;
-        self.policy_rule_chain_mode = GuidedLiteralMode::Any;
-        self.policy_rule_value_mode = GuidedLiteralMode::Any;
-        self.policy_rule_calldata_mode = GuidedCalldataMode::Any;
-        self.policy_rule_errors = GuidedPolicyRuleErrors::default();
-        cx.notify();
-    }
-
-    fn begin_guided_policy_rule(
-        &mut self,
-        index: Option<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.reset_guided_policy_rule_form(window, cx);
-        if let Some(index) = index {
-            let Some(Ok(policy)) = self
-                .policy_editor
-                .as_ref()
-                .map(|editor| &editor.guided_policy)
-            else {
-                return;
-            };
-            let Some(rule) = policy.rules.get(index) else {
-                self.policy_rule_errors.form = Some("The selected rule no longer exists.".into());
-                cx.notify();
-                return;
-            };
-            let draft = match guided_rule_draft(rule) {
-                Ok(draft) => draft,
-                Err(error) => {
-                    self.policy_rule_errors.form = Some(format!(
-                        "This rule uses predicates that need the Advanced JSON editor: {error:#}"
-                    ));
-                    cx.notify();
-                    return;
-                }
-            };
-            let values = [
-                (self.policy_rule_label_input.as_ref(), draft.label),
-                (self.policy_rule_targets_input.as_ref(), draft.targets),
-                (self.policy_rule_chain_ids_input.as_ref(), draft.chain_ids),
-                (self.policy_rule_values_input.as_ref(), draft.values),
-                (self.policy_rule_abi_input.as_ref(), draft.abi),
-                (self.policy_rule_args_input.as_ref(), draft.args),
-            ];
-            for (input, value) in values {
-                if let Some(input) = input {
-                    input.update(cx, |input, cx| input.set_value(value, window, cx));
-                }
-            }
-            self.policy_rule_effect = draft.effect;
-            self.policy_rule_target_mode = draft.target_mode;
-            self.policy_rule_chain_mode = draft.chain_mode;
-            self.policy_rule_value_mode = draft.value_mode;
-            self.policy_rule_calldata_mode = draft.calldata_mode;
-            self.policy_rule_original_index = Some(index);
-        }
-        self.policy_rule_editor_open = true;
-        if let Some(input) = self.policy_rule_label_input.as_ref() {
-            input.update(cx, |input, cx| input.focus(window, cx));
-        }
-        self.policy_editor_anchor.scroll_to(window, cx);
-        cx.notify();
-    }
-
-    fn save_guided_policy_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let inputs = (
-            self.policy_rule_label_input.as_ref(),
-            self.policy_rule_targets_input.as_ref(),
-            self.policy_rule_chain_ids_input.as_ref(),
-            self.policy_rule_values_input.as_ref(),
-            self.policy_rule_abi_input.as_ref(),
-            self.policy_rule_args_input.as_ref(),
-            self.policy_json_input.as_ref(),
-        );
-        let (
-            Some(label),
-            Some(targets),
-            Some(chain_ids),
-            Some(values),
-            Some(abi),
-            Some(args),
-            Some(document_input),
-        ) = inputs
-        else {
-            return;
-        };
-        if !self.policy_rule_editor_open {
-            return;
-        }
-        let draft = GuidedPolicyRuleDraft {
-            effect: self.policy_rule_effect,
-            label: label.read(cx).value().to_string(),
-            target_mode: self.policy_rule_target_mode,
-            targets: targets.read(cx).value().to_string(),
-            chain_mode: self.policy_rule_chain_mode,
-            chain_ids: chain_ids.read(cx).value().to_string(),
-            value_mode: self.policy_rule_value_mode,
-            values: values.read(cx).value().to_string(),
-            calldata_mode: self.policy_rule_calldata_mode,
-            abi: abi.read(cx).value().to_string(),
-            args: args.read(cx).value().to_string(),
-        };
-        match update_guided_policy_rule(
-            document_input.read(cx).value().as_ref(),
-            self.policy_rule_original_index,
-            &draft,
-        ) {
-            Ok((document, policy)) => {
-                document_input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
-            }
-            Err(errors) => self.policy_rule_errors = *errors,
-        }
-        cx.notify();
-    }
-
-    fn remove_guided_policy_rule(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(input) = self.policy_json_input.as_ref() else {
-            return;
-        };
-        match remove_guided_policy_rule(input.read(cx).value().as_ref(), index) {
-            Ok((document, policy)) => {
-                input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.reset_guided_policy_rule_form(window, cx);
-                self.policy_action_error = None;
-            }
-            Err(error) => {
-                self.policy_action_error =
-                    Some(format!("Could not remove rule from draft: {error:#}").into());
-            }
-        }
-        cx.notify();
-    }
-
-    fn move_guided_policy_rule(
-        &mut self,
-        from: usize,
-        to: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(input) = self.policy_json_input.as_ref() else {
-            return;
-        };
-        let result = (|| -> Result<(String, WalletPolicy)> {
-            let mut value: serde_json::Value =
-                serde_json::from_str(input.read(cx).value().as_ref())
-                    .context("policy document is not valid JSON")?;
-            let rules = value
-                .as_object_mut()
-                .and_then(|root| root.get_mut("rules"))
-                .and_then(serde_json::Value::as_array_mut)
-                .context("the policy document has no ordered rule list")?;
-            ensure!(
-                from < rules.len() && to < rules.len(),
-                "the selected rule no longer exists"
-            );
-            rules.swap(from, to);
-            let policy = WalletPolicy::parse(value)?;
-            Ok((serde_json::to_string_pretty(&policy)?, policy))
-        })();
-        match result {
-            Ok((document, policy)) => {
-                input.update(cx, |input, cx| input.set_value(document, window, cx));
-                if let Some(editor) = self.policy_editor.as_mut() {
-                    editor.guided_policy = Ok(policy);
-                    editor.validation = None;
-                }
-                self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
-            }
-            Err(error) => {
-                self.policy_action_error =
-                    Some(format!("Could not reorder rule: {error:#}").into());
-            }
-        }
-        cx.notify();
-    }
-
     fn apply_allow_anything_policy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(editor), Some(input)) =
             (self.policy_editor.as_mut(), self.policy_json_input.as_ref())
@@ -5849,12 +5321,10 @@ impl WalletWindow {
             return;
         };
         match allow_anything_policy_document() {
-            Ok((document, policy)) => {
+            Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
-                editor.guided_policy = Ok(policy);
                 self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
@@ -5871,12 +5341,10 @@ impl WalletWindow {
             return;
         };
         match disable_signing_policy_document() {
-            Ok((document, policy)) => {
+            Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
-                editor.guided_policy = Ok(policy);
                 self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
@@ -5896,9 +5364,7 @@ impl WalletWindow {
             Ok(document) => {
                 input.update(cx, |input, cx| input.set_value(document, window, cx));
                 editor.validation = None;
-                editor.guided_policy = Ok(WalletPolicy::require_approval_for_everything());
                 self.policy_action_error = None;
-                self.reset_guided_policy_rule_form(window, cx);
             }
             Err(error) => {
                 self.policy_action_error =
@@ -5926,7 +5392,6 @@ impl WalletWindow {
                 input.update(cx, |input, cx| {
                     input.set_value(review.document.clone(), window, cx);
                 });
-                editor.guided_policy = Ok(review.policy.clone());
                 self.policy_action_error = None;
                 Ok(review)
             }
@@ -6138,6 +5603,12 @@ impl WalletWindow {
         match self.owner.accept_legal(document, &review.digest) {
             Ok(()) => {
                 self.open_next_required_legal(cx);
+                // Acceptance is written straight to the legal store, which
+                // raises no domain event, so nothing else was ever going to
+                // refresh the snapshot. Settings reads its acceptance dates
+                // from that snapshot and went on saying "Review required"
+                // about a document the reader had just accepted.
+                self.reload_desktop_snapshot(cx);
             }
             Err(error) => {
                 if let Some(review) = self.legal_review.as_mut() {
@@ -6689,102 +6160,6 @@ impl WalletWindow {
         cx.notify();
     }
 
-    fn install_network_preset(&mut self, chain_id: u64, cx: &mut Context<Self>) {
-        if self.network_preset_busy.is_some() || self.network_reset_busy {
-            return;
-        }
-        self.network_preset_busy = Some(chain_id);
-        self.network_preset_error = None;
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.install_network_preset(chain_id).await
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                if view.network_preset_busy != Some(chain_id) {
-                    return;
-                }
-                view.network_preset_busy = None;
-                match result {
-                    Ok(_) => view.network_preset_error = None,
-                    Err(error) => {
-                        view.network_preset_error =
-                            Some(format!("Could not install the network preset: {error:#}").into());
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn begin_network_reset(&mut self, cx: &mut Context<Self>) {
-        if self.network_preset_busy.is_some() || self.network_reset_busy {
-            return;
-        }
-        match self.cached_networks() {
-            Ok(networks) => {
-                self.pending_network_reset = Some(networks.to_vec());
-                self.network_reset_error = None;
-            }
-            Err(error) => {
-                self.network_reset_error =
-                    Some(format!("Could not prepare the network reset: {error:#}").into());
-            }
-        }
-        cx.notify();
-    }
-
-    fn cancel_network_reset(&mut self, cx: &mut Context<Self>) {
-        if self.network_reset_busy {
-            return;
-        }
-        self.pending_network_reset = None;
-        cx.notify();
-    }
-
-    fn confirm_network_reset(&mut self, cx: &mut Context<Self>) {
-        let Some(reviewed_networks) = self.pending_network_reset.clone() else {
-            return;
-        };
-        if self.network_reset_busy || self.network_preset_busy.is_some() {
-            return;
-        }
-        self.network_reset_busy = true;
-        self.network_reset_error = None;
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.reset_networks_to_defaults(&reviewed_networks).await
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.network_reset_busy = false;
-                match result {
-                    Ok(_) => {
-                        view.pending_network_reset = None;
-                        view.network_reset_error = None;
-                        view.invalidate_portfolio();
-                    }
-                    Err(error) => {
-                        view.pending_network_reset = None;
-                        view.network_reset_error = Some(
-                            format!(
-                                "Networks were not reset; review the current configuration and try again: {error:#}"
-                            )
-                            .into(),
-                        );
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn set_network_disabled(
         &mut self,
         reviewed: NetworkConfig,
@@ -7100,9 +6475,7 @@ impl WalletWindow {
         self.activity_feedback.insert(request_id, feedback);
         if expiring {
             cx.spawn(async move |view, cx| {
-                cx.background_executor()
-                    .timer(ACTIVITY_FEEDBACK_LIFETIME)
-                    .await;
+                cx.background_executor().timer(SUCCESS_NOTE_LIFETIME).await;
                 let _ = view.update(cx, |view, cx| {
                     // Only this note. A later press on the same row put its own
                     // note there, and that one has its own timer.
@@ -8010,6 +7383,12 @@ impl WalletWindow {
     }
 
     fn open_notification(&mut self, route: NotificationRoute, cx: &mut Context<Self>) {
+        // Nothing a banner points at can be acted on before the legal
+        // documents are answered, and moving the app behind that modal only
+        // hides where the reader was.
+        if self.legal_gate {
+            return;
+        }
         self.command_palette = false;
         self.set_route(Route::Activity);
         match route {
@@ -8166,6 +7545,12 @@ impl WalletWindow {
                     .child(img(logo).w(px(36.0)).h(px(36.0))),
             );
         for route in Route::ALL {
+            // The badge is the one thing on this rail that changes on its own,
+            // and it was drawn for the eye alone: the button's tooltip and its
+            // screen-reader name both said "Inbox" whether or not anything was
+            // waiting in it.
+            let waiting = (route == Route::Activity && pending_reviews > 0)
+                .then(|| format!("{} waiting", pluralize(pending_reviews, "request")));
             let button = app_button(SharedString::from(format!(
                 "sidebar-route-{}",
                 route.label()
@@ -8176,12 +7561,21 @@ impl WalletWindow {
             .selected(route == self.route)
             .toggled(route == self.route)
             .disabled(self.legal_gate || self.network_editor_open)
-            .tooltip(format!("{}  {}", route.label(), route.shortcut()))
+            .tooltip(match &waiting {
+                Some(waiting) => format!("{} — {waiting}  {}", route.label(), route.shortcut()),
+                None => format!("{}  {}", route.label(), route.shortcut()),
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
             }))
             .child(Icon::new(route.icon()).size(px(30.0)));
-            let button = accessible_button(button, route.label());
+            let button = accessible_button(
+                button,
+                match &waiting {
+                    Some(waiting) => format!("{}, {waiting}", route.label()),
+                    None => route.label().to_owned(),
+                },
+            );
             if route == Route::Activity {
                 let count = if pending_reviews > 99 {
                     "99+".to_owned()
@@ -8333,6 +7727,11 @@ impl WalletWindow {
                         )))
                         .label("Review")
                         .primary()
+                        // The same guard the transaction card above carries.
+                        // Without it these two answered a press with an error
+                        // telling the reader to finish the review that was
+                        // already on the screen in front of them.
+                        .disabled(self.review_flow.is_in_progress())
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.begin_typed_data_review(request_id, cx);
                         })),
@@ -8360,6 +7759,7 @@ impl WalletWindow {
                         app_button(SharedString::from(format!("review-message-{request_id}")))
                             .label("Review")
                             .primary()
+                            .disabled(self.review_flow.is_in_progress())
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 view.begin_message_review(request_id, cx);
                             })),
@@ -8488,46 +7888,27 @@ impl WalletWindow {
                 .flex()
                 .flex_col()
                 .gap_2()
+                // No Close button in here. This header scrolls with the rest
+                // of the record, and a settled transaction's detail runs
+                // taller than the window — so the only way out sat above the
+                // top of the viewport for as long as anybody was reading. It
+                // lives in the modal's fixed footer instead.
                 .child(
-                    div()
+                    h_flex()
                         .w_full()
                         .min_w_0()
-                        .flex()
                         .flex_wrap()
                         .items_center()
-                        .justify_between()
-                        .gap_4()
+                        .gap_2()
                         .child(
-                            h_flex()
-                                .min_w_0()
-                                .flex_1()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    selectable_text(
-                                        SharedString::from(format!(
-                                            "activity-heading-{request_id}"
-                                        )),
-                                        title,
-                                    )
-                                    .text_lg()
-                                    .font_semibold(),
-                                )
-                                .child(status_pill(status, tone, cx)),
+                            selectable_text(
+                                SharedString::from(format!("activity-heading-{request_id}")),
+                                title,
+                            )
+                            .text_lg()
+                            .font_semibold(),
                         )
-                        .child(
-                            app_button(SharedString::from(format!(
-                                "close-activity-detail-{request_id}"
-                            )))
-                            .label("Close")
-                            .on_click(cx.listener(
-                                |view, _, _, cx| {
-                                    view.selected_record = None;
-                                    cx.notify();
-                                },
-                            )),
-                        ),
+                        .child(status_pill(status, tone, cx)),
                 )
                 .child(
                     selectable_text(
@@ -8592,6 +7973,7 @@ impl WalletWindow {
                                     app_button(SharedString::from(format!(
                                         "retry-transaction-inspection-{request_id}"
                                     )))
+                                    .self_start()
                                     .label("Try again")
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.load_transaction_inspection(request_id, cx);
@@ -8600,43 +7982,48 @@ impl WalletWindow {
                     }
                     Some(ActivityInspectionState::Ready(inspection)) => {
                         let document = &inspection.document;
-                        detail =
-                            detail
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .when_some(
-                                            item.broadcast_transaction_hash
-                                                .as_ref()
-                                                .or(item.signed_transaction_hash.as_ref())
-                                                .and_then(|hash| {
-                                                    item.chain_id.parse::<u64>().ok().and_then(
-                                                        |chain_id| {
-                                                            self.cached_networks().ok().and_then(
-                                                                |networks| {
-                                                                    block_explorer_transaction_url(
-                                                                        networks, chain_id, hash,
-                                                                    )
-                                                                },
-                                                            )
-                                                        },
-                                                    )
-                                                }),
-                                            |buttons, explorer_url| {
-                                                buttons.child(
-                                                    app_button(SharedString::from(format!(
-                                                        "open-transaction-explorer-{request_id}"
-                                                    )))
-                                                    .label("View on block explorer")
-                                                    .on_click(move |_, _, cx| {
-                                                        cx.open_url(&explorer_url);
-                                                    }),
+                        detail = detail
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .when_some(
+                                        item.broadcast_transaction_hash
+                                            .as_ref()
+                                            .or(item.signed_transaction_hash.as_ref())
+                                            .and_then(|hash| {
+                                                item.chain_id.parse::<u64>().ok().and_then(
+                                                    |chain_id| {
+                                                        self.cached_networks().ok().and_then(
+                                                            |networks| {
+                                                                block_explorer_transaction_url(
+                                                                    networks, chain_id, hash,
+                                                                )
+                                                            },
+                                                        )
+                                                    },
                                                 )
-                                            },
-                                        )
-                                        .child(
+                                            }),
+                                        |buttons, explorer_url| {
+                                            buttons.child(
+                                                app_button(SharedString::from(format!(
+                                                    "open-transaction-explorer-{request_id}"
+                                                )))
+                                                .label("View on block explorer")
+                                                .on_click(move |_, _, cx| {
+                                                    cx.open_url(&explorer_url);
+                                                }),
+                                            )
+                                        },
+                                    )
+                                    // Nothing to look for on a request that
+                                    // was never signed: the button offered
+                                    // to go and check the network for a
+                                    // receipt the wallet had guaranteed
+                                    // would never exist.
+                                    .when(item.status.can_reach_a_chain(), |buttons| {
+                                        buttons.child(
                                             app_button(SharedString::from(format!(
                                                 "refresh-transaction-inspection-{request_id}"
                                             )))
@@ -8648,16 +8035,17 @@ impl WalletWindow {
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 view.load_transaction_inspection(request_id, cx);
                                             })),
-                                        ),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                selectable_text(
+                                    format!("transaction-inspection-summary-{request_id}"),
+                                    &document.request.summary,
                                 )
-                                .child(
-                                    selectable_text(
-                                        format!("transaction-inspection-summary-{request_id}"),
-                                        &document.request.summary,
-                                    )
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_normal(),
-                                );
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_normal(),
+                            );
                         // What moved first, then what was called, then the fee
                         // and the raw lifecycle bookkeeping — the same order a
                         // person asks the questions in.
@@ -8727,6 +8115,7 @@ impl WalletWindow {
                             app_button(SharedString::from(format!(
                                 "load-transaction-inspection-{request_id}"
                             )))
+                            .self_start()
                             .label("Show what this transaction did")
                             .on_click(cx.listener(
                                 move |view, _, _, cx| {
@@ -8803,7 +8192,7 @@ impl WalletWindow {
                 }
                 detail = detail.child(copyable_value(
                     format!("activity-message-digest-{request_id}"),
-                    "Digest that was signed",
+                    digest_label(item.status == MessageStatus::Signed),
                     item.digest.clone(),
                 ));
                 match document {
@@ -8813,7 +8202,11 @@ impl WalletWindow {
                                 self.render_exact_payload(
                                     request_id,
                                     &format!("message-payload-{index}"),
-                                    "the exact message that was signed",
+                                    if item.status == MessageStatus::Signed {
+                                        "the exact message that was signed"
+                                    } else {
+                                        "the exact message this would have signed"
+                                    },
                                     payload,
                                     cx,
                                 )
@@ -8891,7 +8284,7 @@ impl WalletWindow {
                 }
                 detail = detail.child(copyable_value(
                     format!("activity-typed-data-digest-{request_id}"),
-                    "Digest that was signed",
+                    digest_label(item.status == TypedDataStatus::Signed),
                     item.digest.clone(),
                 ));
                 match document {
@@ -8901,7 +8294,11 @@ impl WalletWindow {
                                 self.render_exact_payload(
                                     request_id,
                                     &format!("typed-data-payload-{index}"),
-                                    "the exact typed data that was signed",
+                                    if item.status == TypedDataStatus::Signed {
+                                        "the exact typed data that was signed"
+                                    } else {
+                                        "the exact typed data this would have signed"
+                                    },
                                     payload,
                                     cx,
                                 )
@@ -8941,8 +8338,9 @@ impl WalletWindow {
             .iter()
             .find(|record| record.request_id() == request_id)
         else {
-            // The record left the snapshot — approved out of the queue, or
-            // aged past the retained history. Nothing to show over the list.
+            // Unreachable in a settled frame: `render` drops a selection the
+            // snapshot cannot account for before it gets here. Kept so a
+            // record that leaves mid-frame draws nothing rather than panicking.
             return div().into_any_element();
         };
         let detail = self.render_activity_detail(record, cx);
@@ -8989,6 +8387,37 @@ impl WalletWindow {
                             .pr_2()
                             .overflow_y_scrollbar()
                             .child(detail),
+                    )
+                    // Fixed chrome, the way the security review's decision row
+                    // is: the way out of a modal must not depend on how far
+                    // through it you have read.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .flex_shrink_0()
+                            .pt_3()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label(
+                                        "This is a record of what happened. Nothing here can be changed.",
+                                    )),
+                            )
+                            .child(
+                                app_button(SharedString::from(format!(
+                                    "close-activity-detail-{request_id}"
+                                )))
+                                .label("Close")
+                                .primary()
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.selected_record = None;
+                                    cx.notify();
+                                })),
+                            ),
                     ),
             )
             .focus_trap("activity-detail-focus", &self.modal_focus)
@@ -9236,18 +8665,18 @@ impl WalletWindow {
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            // Same rhythm as the settings pane: the gap between "Waiting on
+            // you" and "Already decided" is a section break, not a row break.
+            .gap_6()
             .child(
                 GroupBox::new()
                     .id("activity-needs-review")
-                    .outline()
                     .title("Waiting on you")
                     .child(self.render_reviews(cx)),
             )
             .child(
                 GroupBox::new()
                     .id("inbox-history")
-                    .outline()
                     .title("Already decided")
                     .child(self.render_activity_history(cx)),
             )
@@ -9262,6 +8691,7 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
+                    .max_w(PROSE_MEASURE)
                     .child(selectable_label(
                         "Install the MCP server into a detected agent to see its sign-in command.",
                     )),
@@ -9271,6 +8701,7 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                     .child(selectable_label("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose paired access-token and refresh-session lifetimes.")),
             );
             for instruction in login_instructions {
@@ -9296,6 +8727,7 @@ impl WalletWindow {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
+                                .max_w(PROSE_MEASURE)
                                 .child(selectable_text(
                                     format!("agent-login-location-{}", instruction.harness),
                                     instruction.location,
@@ -9393,6 +8825,7 @@ impl WalletWindow {
                                             div()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
+                                                .max_w(PROSE_MEASURE)
                                                 .child(selectable_text(
                                                     format!("managed-agent-last-used-{client_id}"),
                                                     &last_used,
@@ -9434,6 +8867,7 @@ impl WalletWindow {
             managed_agents = managed_agents.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
+                    .max_w(PROSE_MEASURE)
                     .child(selectable_label("No authorized agent sessions.")),
             );
         }
@@ -9452,9 +8886,14 @@ impl WalletWindow {
                 ));
             }
             AgentDetectionState::Ready(detected) if detected.is_empty() => {
-                agents = agents.child(div().text_color(cx.theme().muted_foreground).child(
-                    selectable_label("No supported agent installation was detected."),
-                ));
+                agents = agents.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .max_w(PROSE_MEASURE)
+                        .child(selectable_label(
+                            "No supported agent installation was detected.",
+                        )),
+                );
             }
             // Installation is one button for every agent, so a row is a
             // status and not a decision: an icon, the agent, and the file the
@@ -9500,6 +8939,7 @@ impl WalletWindow {
                                                     div()
                                                         .text_sm()
                                                         .text_color(cx.theme().muted_foreground)
+                                                        .max_w(PROSE_MEASURE)
                                                         .truncate()
                                                         .child(selectable_text(
                                                             ("detected-agent-path", index),
@@ -9512,6 +8952,7 @@ impl WalletWindow {
                                                 .flex_none()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
+                                                .max_w(PROSE_MEASURE)
                                                 .child(selectable_text(
                                                     ("detected-agent-status", index),
                                                     if installed {
@@ -9539,18 +8980,38 @@ impl WalletWindow {
         }
 
         div()
+            // Named so a render test can measure this cap rather than take it
+            // on trust. `debug_selector` is a documented no-op in release
+            // builds. Without the cap the pane lays out to 1800px in a 1400px
+            // window; the test asserts the difference.
+            .debug_selector(|| "settings-pane".to_owned())
+            // A settings row puts its name at the left edge and its control at
+            // the right, which is the desktop idiom and reads well until the
+            // window is wide: at a thousand pixels the `View` beside a legal
+            // document sat a hand's width from the document it opened, and the
+            // pairing had to be inferred from vertical alignment alone. Every
+            // settings pane worth copying caps its measure for this reason —
+            // the control stays beside its subject however wide the window is.
+            // Only this route is capped; the token list and the policy
+            // document want every pixel they can get.
+            .max_w(px(720.0))
             .flex()
             .flex_col()
-            .gap_4()
+            // A settings pane's groups need more air than the rows inside
+            // them, or the whole page reads as one dense block — the same
+            // thing the account form fixed for itself. The reference desktop
+            // settings spacing is 20-28px between groups against 16px within
+            // one; these were both 16.
+            .gap_6()
             .child(settings_section(
                 "Appearance",
                 GroupBox::new()
                     .id("appearance-settings")
-                    .outline()
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                             .child(selectable_label("System follows your operating-system appearance and updates while the wallet is running.")),
                     )
                     .child(
@@ -9622,7 +9083,6 @@ impl WalletWindow {
             .child(untitled_settings_section(
                 GroupBox::new()
                     .id("testnet-mode-settings")
-                    .outline()
                     .child(
                         h_flex()
                             .w_full()
@@ -9638,8 +9098,10 @@ impl WalletWindow {
                                     .child(div().font_medium().child("Testnet mode"))
                                     .child(
                                         div()
+                                            .debug_selector(|| "settings-prose".to_owned())
                                             .text_sm()
                                             .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                                             .child(selectable_label("Show configured test networks and their linked balances, tokens, requests, and activity. Testnet mode is off by default.")),
                                     ),
                             )
@@ -9656,7 +9118,39 @@ impl WalletWindow {
                 "Detected agents",
                 GroupBox::new()
                     .id("detected-agent-settings")
-                    .outline()
+                    // Whether the endpoint below is actually being served. It
+                    // is the first thing every row under it depends on, so it
+                    // is the first thing the section says.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .child(selectable_label("Agent gateway")),
+                            )
+                            .child(status_pill(
+                                self.mcp_status.label(),
+                                self.mcp_status.tone(),
+                                cx,
+                            )),
+                    )
+                    .when_some(self.mcp_status.detail(), |group, error| {
+                        group.child(
+                            selectable_error_alert(
+                                "mcp-gateway-error",
+                                format!(
+                                    "No agent can reach this wallet until it is restarted: {error}"
+                                ),
+                            )
+                            .title("The agent gateway could not start"),
+                        )
+                    })
                     // The endpoint every one of these installs points at. It
                     // was a compile-time constant the interface never showed,
                     // so an agent configured by hand had nothing to copy.
@@ -9664,6 +9158,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                             .child(selectable_label(
                                 "Installing writes this server into an agent's configuration file. Agents authenticate with OAuth credentials they obtain on their first connection; no key or secret is written to the file.",
                             )),
@@ -9710,6 +9205,7 @@ impl WalletWindow {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                                         .child(selectable_label(
                                             "Every detected agent is already configured.",
                                         )),
@@ -9722,7 +9218,6 @@ impl WalletWindow {
                 "Agent sessions",
                 GroupBox::new()
                     .id("agent-session-settings")
-                    .outline()
                     .child(login_commands)
                     .child(
                         div()
@@ -10021,379 +9516,6 @@ impl WalletWindow {
         div().flex().flex_col().gap_4().child(form).child(accounts)
     }
 
-    fn render_guided_policy_rule_form(&self, cx: &mut Context<Self>) -> gpui::Div {
-        if !self.policy_rule_editor_open {
-            return div();
-        }
-        let mut form = div()
-            .p_4()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().font_semibold().child(selectable_label(format!(
-                "{} ordered rule",
-                if self.policy_rule_original_index.is_some() {
-                    "Edit"
-                } else {
-                    "Add"
-                }
-            ))))
-            .child(selectable_label("Effect"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        app_button("policy-rule-allow")
-                            .label("Allow automatically")
-                            .toggled(self.policy_rule_effect == GuidedRuleEffect::Allow)
-                            .when(
-                                self.policy_rule_effect == GuidedRuleEffect::Allow,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_effect = GuidedRuleEffect::Allow;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-deny")
-                            .label("Deny without review")
-                            .danger()
-                            .toggled(self.policy_rule_effect == GuidedRuleEffect::Deny)
-                            .when(
-                                self.policy_rule_effect == GuidedRuleEffect::Deny,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_effect = GuidedRuleEffect::Deny;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if let Some(input) = self.policy_rule_label_input.as_ref() {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(selectable_label("Description (optional)"))
-                    .child(app_input(input, cx).aria_label("Rule description"))
-                    .when_some(self.policy_rule_errors.label.clone(), |field, error| {
-                        field.child(field_error("policy-rule-description-error", error, cx))
-                    }),
-            );
-        }
-        form = form
-            .child(selectable_label("Called contract or recipient"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        app_button("policy-rule-target-any")
-                            .label("Any target")
-                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Any)
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Any;
-                                view.policy_rule_errors.targets = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-target-exact")
-                            .label("Named targets")
-                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Exact)
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Exact;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-target-predicate")
-                            .label("Predicate")
-                            .toggled(self.policy_rule_target_mode == GuidedLiteralMode::Predicate)
-                            .when(
-                                self.policy_rule_target_mode == GuidedLiteralMode::Predicate,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_target_mode = GuidedLiteralMode::Predicate;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if self.policy_rule_target_mode != GuidedLiteralMode::Any
-            && let Some(input) = self.policy_rule_targets_input.as_ref()
-        {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        app_input(input, cx).aria_label("Called contract or recipient constraint"),
-                    )
-                    .when_some(self.policy_rule_errors.targets.clone(), |field, error| {
-                        field.child(field_error("policy-rule-targets-error", error, cx))
-                    }),
-            );
-        }
-        form = form.child(selectable_label("Network chain ID")).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    app_button("policy-rule-chain-any")
-                        .label("Any network")
-                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Any)
-                        .when(
-                            self.policy_rule_chain_mode == GuidedLiteralMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_chain_mode = GuidedLiteralMode::Any;
-                            view.policy_rule_errors.chain_ids = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-chain-exact")
-                        .label("Specific chain IDs")
-                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Exact)
-                        .when(
-                            self.policy_rule_chain_mode == GuidedLiteralMode::Exact,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_chain_mode = GuidedLiteralMode::Exact;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-chain-predicate")
-                        .label("Predicate")
-                        .toggled(self.policy_rule_chain_mode == GuidedLiteralMode::Predicate)
-                        .when(
-                            self.policy_rule_chain_mode == GuidedLiteralMode::Predicate,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_chain_mode = GuidedLiteralMode::Predicate;
-                            cx.notify();
-                        })),
-                ),
-        );
-        if self.policy_rule_chain_mode != GuidedLiteralMode::Any
-            && let Some(input) = self.policy_rule_chain_ids_input.as_ref()
-        {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(app_input(input, cx).aria_label("Network chain ID constraint"))
-                    .when_some(self.policy_rule_errors.chain_ids.clone(), |field, error| {
-                        field.child(field_error("policy-rule-chain-ids-error", error, cx))
-                    }),
-            );
-        }
-        form = form
-            .child(selectable_label("Native value on the call"))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        app_button("policy-rule-value-any")
-                            .label("Any value")
-                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Any)
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Any,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Any;
-                                view.policy_rule_errors.values = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-value-exact")
-                            .label("Exact wei values")
-                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Exact)
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Exact,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Exact;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        app_button("policy-rule-value-predicate")
-                            .label("Range or predicate")
-                            .toggled(self.policy_rule_value_mode == GuidedLiteralMode::Predicate)
-                            .when(
-                                self.policy_rule_value_mode == GuidedLiteralMode::Predicate,
-                                ButtonVariants::primary,
-                            )
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.policy_rule_value_mode = GuidedLiteralMode::Predicate;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        if self.policy_rule_value_mode != GuidedLiteralMode::Any
-            && let Some(input) = self.policy_rule_values_input.as_ref()
-        {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(app_input(input, cx).aria_label("Native value constraint"))
-                    .when_some(self.policy_rule_errors.values.clone(), |field, error| {
-                        field.child(field_error("policy-rule-values-error", error, cx))
-                    }),
-            );
-        }
-        form = form.child(selectable_label("Calldata")).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    app_button("policy-rule-calldata-any")
-                        .label("Any calldata")
-                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Any)
-                        .when(
-                            self.policy_rule_calldata_mode == GuidedCalldataMode::Any,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_calldata_mode = GuidedCalldataMode::Any;
-                            view.policy_rule_errors.abi = None;
-                            view.policy_rule_errors.args = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-calldata-empty")
-                        .label("Empty calldata")
-                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Empty)
-                        .when(
-                            self.policy_rule_calldata_mode == GuidedCalldataMode::Empty,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_calldata_mode = GuidedCalldataMode::Empty;
-                            view.policy_rule_errors.abi = None;
-                            view.policy_rule_errors.args = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    app_button("policy-rule-calldata-selector")
-                        .label("ABI function")
-                        .toggled(self.policy_rule_calldata_mode == GuidedCalldataMode::Selector)
-                        .when(
-                            self.policy_rule_calldata_mode == GuidedCalldataMode::Selector,
-                            ButtonVariants::primary,
-                        )
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.policy_rule_calldata_mode = GuidedCalldataMode::Selector;
-                            cx.notify();
-                        })),
-                ),
-        );
-        if self.policy_rule_calldata_mode == GuidedCalldataMode::Selector {
-            if let Some(input) = self.policy_rule_abi_input.as_ref() {
-                form = form.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(selectable_label("Canonical function signature"))
-                        .child(app_input(input, cx).aria_label("Canonical function signature"))
-                        .when_some(self.policy_rule_errors.abi.clone(), |field, error| {
-                            field.child(field_error("policy-rule-abi-error", error, cx))
-                        }),
-                );
-            }
-            if let Some(input) = self.policy_rule_args_input.as_ref() {
-                form = form.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(selectable_label("Typed argument predicates (JSON object)"))
-                        .child(
-                            app_input(input, cx)
-                                .aria_label("Typed argument predicates")
-                                .w_full(),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(selectable_label("Use eq/in predicates, or compose any, all, not, each, selector, and length predicates. The signature type-checks every constraint.")),
-                        )
-                        .when_some(self.policy_rule_errors.args.clone(), |field, error| {
-                            field.child(field_error("policy-rule-arguments-error", error, cx))
-                        }),
-                );
-            }
-        }
-        form.when_some(self.policy_rule_errors.form.clone(), |form, error| {
-            form.child(field_error("policy-rule-form-error", error, cx))
-        })
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(
-                    app_button("save-guided-policy-rule")
-                        .label(if self.policy_rule_original_index.is_some() {
-                            "Save rule draft"
-                        } else {
-                            "Add rule draft"
-                        })
-                        .primary()
-                        .disabled(self.policy_installing)
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.save_guided_policy_rule(window, cx);
-                        })),
-                )
-                .child(
-                    app_button("cancel-guided-policy-rule")
-                        .label("Cancel")
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.reset_guided_policy_rule_form(window, cx);
-                        })),
-                ),
-        )
-    }
-
     fn render_policies(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div()
             .h_full()
@@ -10555,7 +9677,6 @@ impl WalletWindow {
                 content = content.child(
                     GroupBox::new()
                         .id("policy-proposals")
-                        .outline()
                         .title("Agent proposals")
                         .child(proposal_list),
                 );
@@ -10649,186 +9770,45 @@ impl WalletWindow {
                     )
                 },
             );
-        match editor.mode {
-            PolicyEditorMode::Advanced => {
-                editor_panel = editor_panel
-                    .child(
-                        div()
-                        .id("policy-json-editor-input")
-                        .flex_1()
-                        .min_h(px(320.0))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_medium()
-                                .child(selectable_label("Policy JSON")),
-                        )
-                        .child(
-                            app_input(input, cx)
-                                .aria_label("Policy JSON")
-                                .font_family(MONO_FONT_FAMILY)
-                                .w_full()
-                                .h_full(),
-                        ),
-                    )
-                    .when(allow_anything_draft, |panel| {
-                        panel.child(
-                            div()
-                                .id("policy-unrestricted-warning")
-                                .role(Role::Alert)
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().danger)
-                                .text_color(cx.theme().danger)
-                                .child(selectable_label("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value.")),
-                        )
-                    });
-            }
-            PolicyEditorMode::Guided => match &editor.guided_policy {
-                Err(error) => {
-                    editor_panel = editor_panel.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().danger)
-                            .child(selectable_label(error.clone())),
-                    );
-                }
-                Ok(policy) => {
-                    let mut rule_cards = div().flex().flex_col().gap_2();
-                    for (rule_index, rule) in policy.rules.iter().enumerate() {
-                        let mut controls = h_flex().gap_2();
-                        if rule_index > 0 {
-                            controls =
-                                controls.child(
-                                    app_button(SharedString::from(format!(
-                                        "move-policy-rule-up-{rule_index}"
-                                    )))
-                                    .label("Move up")
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.move_guided_policy_rule(
-                                            rule_index,
-                                            rule_index - 1,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                                );
-                        }
-                        if rule_index + 1 < policy.rules.len() {
-                            controls =
-                                controls.child(
-                                    app_button(SharedString::from(format!(
-                                        "move-policy-rule-down-{rule_index}"
-                                    )))
-                                    .label("Move down")
-                                    .on_click(cx.listener(move |view, _, window, cx| {
-                                        view.move_guided_policy_rule(
-                                            rule_index,
-                                            rule_index + 1,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                                );
-                        }
-                        rule_cards = rule_cards.child(
-                            div()
-                                .p_3()
-                                .rounded(cx.theme().radius_lg)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(div().font_semibold().child(selectable_text(
-                                    ("policy-rule-title", rule_index),
-                                    &format!(
-                                        "{}. {}",
-                                        rule_index + 1,
-                                        match rule.effect {
-                                            Effect::Allow => "Allow",
-                                            Effect::Deny => "Deny",
-                                        }
-                                    ),
-                                )))
-                                .child(div().min_w_0().text_sm().child(selectable_text(
-                                    ("policy-rule-description", rule_index),
-                                    &rule.describe(),
-                                )))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(selectable_text(
-                                            ("policy-rule-match-description", rule_index),
-                                            "The first matching rule decides this call.",
-                                        )),
-                                )
-                                .child(
-                                    controls
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "edit-policy-rule-{rule_index}"
-                                            )))
-                                            .label("Edit")
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.begin_guided_policy_rule(
-                                                    Some(rule_index),
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                        )
-                                        .child(
-                                            app_button(SharedString::from(format!(
-                                                "remove-policy-rule-{rule_index}"
-                                            )))
-                                            .label("Remove")
-                                            .danger()
-                                            .on_click(cx.listener(move |view, _, window, cx| {
-                                                view.remove_guided_policy_rule(
-                                                    rule_index, window, cx,
-                                                );
-                                            })),
-                                        ),
-                                ),
-                        );
-                    }
-                    if policy.rules.is_empty() {
-                        rule_cards =
-                            rule_cards.child(div().text_color(cx.theme().muted_foreground).child(
-                                selectable_label(
-                                    "No rules. Every transaction request will need your approval.",
-                                ),
-                            ));
-                    }
-                    editor_panel = editor_panel
-                        .child(self.render_guided_policy_rule_form(cx))
-                        .child(
-                            GroupBox::new()
-                                .id("guided-policy-rules")
-                                .outline()
-                                .title("Ordered rules")
-                                .child(rule_cards)
-                                .child(app_button("add-policy-rule").label("Add rule").on_click(
-                                    cx.listener(|view, _, window, cx| {
-                                        view.begin_guided_policy_rule(None, window, cx);
-                                    }),
-                                )),
-                        );
-                }
-            },
-        }
         editor_panel = editor_panel
+            .child(
+                div()
+                .id("policy-json-editor-input")
+                .flex_1()
+                .min_h(px(320.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .child(selectable_label("Policy JSON")),
+                )
+                .child(
+                    app_input(input, cx)
+                        .aria_label("Policy JSON")
+                        .font_family(MONO_FONT_FAMILY)
+                        .w_full()
+                        .h_full(),
+                ),
+            )
+            .when(allow_anything_draft, |panel| {
+                panel.child(
+                    div()
+                        .id("policy-unrestricted-warning")
+                        .role(Role::Alert)
+                        .p_3()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().danger)
+                        .text_color(cx.theme().danger)
+                        .child(selectable_label("Danger: this policy automatically signs every call on every chain, including arbitrary calldata and native value.")),
+                )
+            })
             .child(
                 GroupBox::new()
                     .id("policy-presets")
-                    .outline()
                     .title("Policy presets")
                     .child(
                         div()
@@ -10865,7 +9845,6 @@ impl WalletWindow {
             .child(
                 GroupBox::new()
                     .id("policy-preview-workflow")
-                    .outline()
                     .title("Review changes")
                     .child(
                         div()
@@ -10891,6 +9870,7 @@ impl WalletWindow {
                     )
                     .child(
                         app_button("validate-policy-draft")
+                            .self_start()
                             .label(if reviewed_exact_document {
                                 "Refresh preview"
                             } else {
@@ -10926,7 +9906,6 @@ impl WalletWindow {
                 content.child(
                     GroupBox::new()
                         .id("policy-permission-diff")
-                        .outline()
                         .title("Computed permission changes")
                         .child(
                             div()
@@ -10937,6 +9916,7 @@ impl WalletWindow {
                         .child(changes)
                         .child(
                             app_button("install-policy-draft")
+                            .self_start()
                                 .label(if self.policy_installing {
                                     "Authenticating…"
                                 } else {
@@ -10966,12 +9946,13 @@ impl WalletWindow {
         let version = format!("Version {BUILD_VERSION}");
         let panel = GroupBox::new()
             .id("legal-and-version")
-            .outline()
             .compact()
             .child(about_row(
                 "Ekubo Wallet",
                 Some((version.clone().into(), cx.theme().muted_foreground)),
                 copy_button("copy-version", version, "Copy version"),
+                true,
+                cx,
             ));
         let panel = match self.cached_legal_status() {
             Ok(status) => panel
@@ -10983,6 +9964,8 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::TermsOfService, cx);
                         })),
+                    true,
+                    cx,
                 ))
                 .child(about_row(
                     "Privacy Policy",
@@ -10992,6 +9975,8 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
                         })),
+                    true,
+                    cx,
                 )),
             // Only the two documents that carry an acceptance state depend on
             // this; the license rows below open a bundled file either way.
@@ -11004,12 +9989,21 @@ impl WalletWindow {
             panel
                 .child(about_row(
                     "Application License",
-                    None,
+                    // The identifier, under the name, because "Application
+                    // License" says a licence exists and not which one. It is
+                    // read from the manifest, so it cannot drift from what the
+                    // crate is actually published under.
+                    Some((
+                        env!("CARGO_PKG_LICENSE").into(),
+                        cx.theme().muted_foreground,
+                    )),
                     app_button("review-license")
                         .label("View")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ApplicationLicense, cx);
                         })),
+                    true,
+                    cx,
                 ))
                 .child(about_row(
                     "Third-Party Licenses",
@@ -11019,6 +10013,8 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
                         })),
+                    false,
+                    cx,
                 ))
                 .child(
                     div()
@@ -11360,7 +10356,6 @@ impl WalletWindow {
                                 ButtonGroup::new("network-editor-rpc-strategy")
                                     .flex_none()
                                     .small()
-                                    .outline()
                                     .disabled(busy)
                                     .child(
                                         Button::new("network-strategy-ordered")
@@ -11606,280 +10601,6 @@ impl WalletWindow {
                     }),
             )
     }
-
-    #[allow(dead_code)]
-    fn render_network_registry(
-        &self,
-        configured: &[NetworkConfig],
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let mut registry = div().flex().flex_col().gap_4();
-        if let Some(search) = self.network_preset_search_input.as_ref() {
-            let query = search.read(cx).value().to_string();
-            let matches = network_presets_for_display(
-                self.network_presets.as_ref(),
-                configured,
-                &query,
-                10,
-                self.testnet_mode,
-            );
-            let mut rows = div().flex().flex_col().gap_2();
-            if matches.is_empty() {
-                rows = rows.child(div().py_3().text_color(cx.theme().muted_foreground).child(
-                    selectable_label("No built-in network preset matches this search."),
-                ));
-            }
-            for profile in matches {
-                let chain_id = profile.config.chain_id;
-                let configured_network = configured
-                    .iter()
-                    .find(|network| network.chain_id == chain_id);
-                let exact = configured_network == Some(&profile.config);
-                let installing = self.network_preset_busy == Some(chain_id);
-                let any_action_busy = self.network_preset_busy.is_some() || self.network_reset_busy;
-                let title = profile
-                    .config
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&profile.config.name)
-                    .to_owned();
-                let mut rpc_urls = div().flex().flex_col().gap_1();
-                for (index, url) in profile.config.rpc_urls.iter().enumerate() {
-                    rpc_urls = rpc_urls.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "network-preset-{chain_id}-rpc-{index}"
-                            )))
-                            .max_w_full()
-                            .overflow_x_scroll()
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_text(
-                                format!("network-preset-{chain_id}-rpc-text-{index}"),
-                                url.as_str(),
-                            )),
-                    );
-                }
-                rows = rows.child(
-                    div()
-                        .p_3()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .flex_wrap()
-                                .items_start()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex_basis(px(220.0))
-                                        .child(div().font_semibold().child(selectable_text(
-                                            format!("network-preset-title-{chain_id}"),
-                                            &title,
-                                        )))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(selectable_text(
-                                                    format!("network-preset-metadata-{chain_id}"),
-                                                    &format!(
-                                                        "{} · chain {}{}",
-                                                        profile.config.name,
-                                                        chain_id,
-                                                        if profile.config.testnet {
-                                                            " · testnet"
-                                                        } else {
-                                                            ""
-                                                        }
-                                                    ),
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "install-network-preset-{chain_id}"
-                                    )))
-                                    .label(if installing {
-                                        "Authenticating…"
-                                    } else if exact {
-                                        "Current preset"
-                                    } else if configured_network.is_some() {
-                                        "Restore preset"
-                                    } else {
-                                        "Install preset"
-                                    })
-                                    .primary()
-                                    .disabled(any_action_busy || exact)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.install_network_preset(chain_id, cx);
-                                    })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(if profile.simulate_endpoints == 0 {
-                                    cx.theme().warning
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .child(selectable_text(
-                                    format!("network-preset-capabilities-{chain_id}"),
-                                    &if profile.simulate_endpoints == 0 {
-                                        "No bundled endpoint currently supports the simulation method required for signing. Install only for read access, then configure a compatible RPC."
-                                            .to_owned()
-                                    } else {
-                                        format!(
-                                            "{} measured · {} able to simulate a fork",
-                                            pluralize(profile.simulate_endpoints, "endpoint"),
-                                            profile.fork_endpoints
-                                        )
-                                    },
-                                )),
-                        )
-                        .child(rpc_urls),
-                );
-            }
-            registry = registry.child(
-                GroupBox::new()
-                    .id("network-preset-registry")
-                    .outline()
-                    .title("Built-in network presets")
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label("Search the bundled registry instead of finding RPC URLs yourself. The wallet verifies the chain ID before asking you to authenticate the change. RPC URLs are shown in full because they supply security-sensitive simulation results.")),
-                    )
-                    .child(
-                        app_input(search, cx)
-                            .aria_label("Search built-in network presets")
-                            .cleanable(true),
-                    )
-                    .when_some(self.network_preset_error.clone(), |panel, error| {
-                        panel.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(selectable_label(error)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label("Showing up to 10 matches.")),
-                    )
-                    .child(rows),
-            );
-        }
-
-        let defaults = ekubo_wallet_core::config::default_networks();
-        let pending = self.pending_network_reset.as_deref();
-        let discarded = pending
-            .map(|reviewed| networks_discarded_by_default_reset(reviewed, &defaults))
-            .unwrap_or_default();
-        let reset_panel = GroupBox::new()
-            .id("network-default-reset")
-            .outline()
-            .title("Reset network configuration")
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label(format!(
-                        "Replace every configured network with fresh copies of the {} built-in defaults. Accounts, policies, tokens, and activity are untouched.",
-                        defaults.len()
-                    ))),
-            )
-            .when_some(self.network_reset_error.clone(), |panel, error| {
-                panel.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(selectable_label(error)),
-                )
-            })
-            .when(pending.is_none(), |panel| {
-                panel.child(
-                    app_button("prepare-network-reset")
-                        .label("Review reset")
-                        .danger()
-                        .disabled(self.network_preset_busy.is_some() || self.network_reset_busy)
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.begin_network_reset(cx);
-                        })),
-                )
-            })
-            .when_some(pending, |panel, _| {
-                panel
-                    .child(
-                        div()
-                            .p_3()
-                            .rounded(cx.theme().radius_lg)
-                            .border_1()
-                            .border_color(cx.theme().danger)
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .child(selectable_label("Confirm complete network reset")),
-                            )
-                            .child(selectable_label(if discarded.is_empty() {
-                                "The configured rows already match the shipped defaults. Resetting will still restore their shipped enabled/disabled state and exact RPC lists."
-                                    .to_owned()
-                            } else {
-                                format!(
-                                    "Custom or modified configuration will be discarded for: {}.",
-                                    discarded.join(", ")
-                                )
-                            }))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        app_button("confirm-network-reset")
-                                            .label(if self.network_reset_busy {
-                                                "Authenticating…"
-                                            } else {
-                                                "Authenticate & reset"
-                                            })
-                                            .danger()
-                                            .disabled(self.network_reset_busy)
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.confirm_network_reset(cx);
-                                            })),
-                                    )
-                                    .child(
-                                        app_button("cancel-network-reset")
-                                            .label("Cancel")
-                                            .disabled(self.network_reset_busy)
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.cancel_network_reset(cx);
-                                            })),
-                                    ),
-                            ),
-                    )
-            });
-        registry.child(reset_panel)
-    }
-
     fn render_networks(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_4();
         match self.cached_reviews().map(|reviews| {
@@ -11966,7 +10687,6 @@ impl WalletWindow {
                 content = content.child(
                     GroupBox::new()
                         .id("network-proposals")
-                        .outline()
                         .title("Agent proposals")
                         .child(
                             div()
@@ -11995,6 +10715,7 @@ impl WalletWindow {
         }
         content = content.child(
             app_button("open-custom-network-editor")
+                .self_start()
                 .label("Add custom network")
                 .primary()
                 .icon(IconName::Plus)
@@ -12005,6 +10726,34 @@ impl WalletWindow {
                 })),
         );
         content = match self.cached_networks() {
+            // Nothing to list, and the reason matters: with testnet mode off,
+            // a wallet whose networks are all test networks drew an empty page
+            // under an Add button and no account of where they had gone. Every
+            // other page in this wallet says what its own empty means.
+            Ok(networks) if networks_for_display(networks, self.testnet_mode).is_empty() => content
+                .child(
+                    div()
+                        .p_5()
+                        .rounded(cx.theme().radius_lg)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .font_semibold()
+                                .child(selectable_label("No network is configured")),
+                        )
+                        .child(div().text_color(cx.theme().muted_foreground).child(
+                            selectable_label(if networks.is_empty() {
+                                "This wallet will not sign for any chain until you add one above."
+                            } else {
+                                "Every configured network is a test network. Turn on testnet mode in Settings to see them, or add a network above."
+                            }),
+                        )),
+                ),
             Ok(networks) => content.children(
                 networks_for_display(networks, self.testnet_mode)
                     .into_iter()
@@ -12482,38 +11231,50 @@ impl WalletWindow {
                         .child(selectable_label(error)),
                 )
             });
+        // Two ways to get a token into this wallet, so they belong on one
+        // line. Stacked, they read as a menu of unrelated commands and push
+        // the list they act on further down the page.
         content = content.child(
-            app_button("open-token-editor")
-                .label("Add token")
-                .primary()
-                .disabled(self.token_editor_open)
-                .on_click(cx.listener(|view, _, window, cx| {
-                    view.open_new_token_editor(window, cx);
-                })),
+            h_flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    app_button("open-token-editor")
+                        .debug_selector(|| "add-token-button".to_owned())
+                        .label("Add token")
+                        .primary()
+                        .disabled(self.token_editor_open)
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.open_new_token_editor(window, cx);
+                        })),
+                )
+                .when_some(self.token_list_url_input.as_ref(), |row, _| {
+                    row.child(
+                        app_button("toggle-owner-token-list-import")
+                            .label(if self.token_list_import_open {
+                                "Close token-list import"
+                            } else {
+                                "Import a published token list…"
+                            })
+                            .icon(if self.token_list_import_open {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .disabled(self.token_import_state == TokenImportState::Fetching)
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.toggle_token_list_import(cx);
+                            })),
+                    )
+                }),
         );
-        if let Some(input) = self.token_list_url_input.as_ref() {
+        if let Some(input) = self.token_list_url_input.as_ref()
+            && self.token_list_import_open
+        {
             content = content.child(
-                app_button("toggle-owner-token-list-import")
-                    .label(if self.token_list_import_open {
-                        "Close token-list import"
-                    } else {
-                        "Import a published token list…"
-                    })
-                    .icon(if self.token_list_import_open {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .disabled(self.token_import_state == TokenImportState::Fetching)
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.toggle_token_list_import(cx);
-                    })),
-            );
-            if self.token_list_import_open {
-                content = content.child(
                 GroupBox::new()
                     .id("owner-token-list-import")
-                    .outline()
                     .title("Import published token list")
                     .child(
                         div()
@@ -12593,7 +11354,6 @@ impl WalletWindow {
                         )
                     }),
                 );
-            }
         }
         match self.cached_reviews().map(|reviews| {
             reviews
@@ -12655,7 +11415,6 @@ impl WalletWindow {
                 content = content.child(
                     GroupBox::new()
                         .id("token-proposal-groups")
-                        .outline()
                         .title("Agent proposals")
                         .child(groups),
                 );
@@ -12673,7 +11432,6 @@ impl WalletWindow {
             content = content.child(
                 GroupBox::new()
                     .id("token-proposal-review")
-                    .outline()
                     .title(format!("Review {source}"))
                     .child(
                         div()
@@ -12764,6 +11522,7 @@ impl WalletWindow {
         panel = match &self.release_state {
             ReleaseDisplayState::Idle => panel.child(
                 app_button("check-latest-release")
+                    .self_start()
                     .label("Check latest version")
                     .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
             ),
@@ -12794,6 +11553,7 @@ impl WalletWindow {
                 .when_some(update.as_ref(), |panel, update| {
                     panel.child(
                         app_button("install-signed-update")
+                            .self_start()
                             .label(format!("Install {}", update.version))
                             .primary()
                             .on_click(cx.listener(|view, _, window, cx| {
@@ -12804,12 +11564,14 @@ impl WalletWindow {
                 .when(check.update_available && update.is_none(), |panel| {
                     panel.child(
                         app_button("open-latest-release")
+                            .self_start()
                             .label("View latest release")
                             .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
                     )
                 })
                 .child(
                     app_button("recheck-latest-release")
+                        .self_start()
                         .label("Check again")
                         .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
@@ -12821,16 +11583,14 @@ impl WalletWindow {
                 )
                 .child(
                     app_button("retry-latest-release")
+                        .self_start()
                         .label("Try again")
                         .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
         };
         settings_section(
             "Updates",
-            GroupBox::new()
-                .id("software-updates")
-                .outline()
-                .child(panel),
+            GroupBox::new().id("software-updates").child(panel),
         )
     }
 
@@ -13059,10 +11819,15 @@ impl WalletWindow {
             active.completion,
             Some(ActiveReviewCompletion::Transaction(_))
         );
-        let walletconnect_connection = matches!(
-            active.completion,
-            Some(ActiveReviewCompletion::WalletConnect { .. })
-        );
+        // What the two decisions are called, and which of them is the
+        // dangerous one.
+        //
+        // Reject was red and approve was purple in every review, which is
+        // right when approving is what lets something happen. Removing an
+        // account inverts it: approving destroys a key, and the red sat on the
+        // button that keeps it. A reader who reads only the colour was being
+        // pointed at the safe choice as though it were the costly one.
+        let decisions = review_decision_labels(active.completion.as_ref());
         let mut review_body = div()
             .w_full()
             .max_w(px(920.0))
@@ -13312,15 +12077,28 @@ impl WalletWindow {
                     .gap_2()
                     .justify_between()
                     .items_center()
-                    .child(
-                        app_button(("review-refresh", generation))
-                            .label("Re-simulate")
-                            .loading(active.awaiting_refresh)
-                            .disabled(active.awaiting_refresh || !can_refresh)
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.send_review_command(generation, GuiReviewCommand::Refresh, cx);
-                            })),
-                    )
+                    // Only a transaction has a simulation to re-run. The other
+                    // four kinds of review — a message, typed data, a
+                    // connection, an account removal — rendered this button
+                    // permanently greyed, which reads as a thing that is
+                    // temporarily unavailable rather than one that was never
+                    // going to apply. An empty slot keeps the decision buttons
+                    // where they are.
+                    .child(div().when(can_refresh, |slot| {
+                        slot.child(
+                            app_button(("review-refresh", generation))
+                                .label("Re-simulate")
+                                .loading(active.awaiting_refresh)
+                                .disabled(active.awaiting_refresh)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.send_review_command(
+                                        generation,
+                                        GuiReviewCommand::Refresh,
+                                        cx,
+                                    );
+                                })),
+                        )
+                    }))
                     .child(
                         div()
                             .flex()
@@ -13337,24 +12115,20 @@ impl WalletWindow {
                             })
                             .child(
                                 app_button(("review-select-reject", generation))
-                                    .label(if walletconnect_connection {
-                                        "Decline connection"
-                                    } else {
-                                        "Reject request"
-                                    })
-                                    .danger()
+                                    .label(decisions.reject)
+                                    .when(!decisions.approve_is_destructive, ButtonVariants::danger)
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.decide_review(generation, ReviewDecision::Reject, cx);
                                     })),
                             )
                             .child(
                                 app_button(("review-select-approve", generation))
-                                    .label(if walletconnect_connection {
-                                        "Authenticate & connect"
-                                    } else {
-                                        "Authenticate & approve"
-                                    })
-                                    .primary()
+                                    .label(decisions.approve)
+                                    .when_else(
+                                        decisions.approve_is_destructive,
+                                        ButtonVariants::danger,
+                                        ButtonVariants::primary,
+                                    )
                                     .disabled(!approve_enabled)
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.decide_review(generation, ReviewDecision::Approve, cx);
@@ -13866,7 +12640,7 @@ impl WalletWindow {
     }
 
     fn render_palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let palette = div()
             .absolute()
             .top(px(54.0))
             .left(px(58.0))
@@ -13878,7 +12652,28 @@ impl WalletWindow {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
-            .child(div().font_semibold().mb_2().child("Go to…"))
+            // A press anywhere off the panel dismisses it, which is what every
+            // other launcher does and what the scrim below makes possible to
+            // aim at. Escape already worked; a mouse had no way out.
+            .on_mouse_down_out(cx.listener(|view, _, _, cx| {
+                view.command_palette = false;
+                cx.notify();
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .mb_2()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(div().font_semibold().child("Go to…"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Esc to close"),
+                    ),
+            )
             .when_some(self.command_palette_list.as_ref(), |palette, list| {
                 palette.child(
                     List::new(list)
@@ -13888,7 +12683,12 @@ impl WalletWindow {
                         .border_color(cx.theme().border)
                         .rounded(cx.theme().radius),
                 )
-            })
+            });
+        // The palette used to float over a live page: the wheel scrolled
+        // whatever was behind it, and a press landed on whichever control was
+        // underneath. Every other surface that takes over this window
+        // occludes; this one is no different for as long as it is open.
+        div().absolute().inset_0().occlude().child(palette)
     }
 }
 
@@ -13929,6 +12729,20 @@ impl Render for WalletWindow {
             cx.on_next_frame(window, move |view, _, cx| {
                 view.update_legal_scroll_state(&digest, cx);
             });
+        }
+        // A notification names a record by id, and the inbox keeps only the
+        // most recent few hundred. Clicking a banner for one that has aged out
+        // used to leave `selected_record` set: the detail overlay drew nothing,
+        // but the window still counted a modal as open and moved focus into a
+        // trap that was not on the screen. Drop the selection instead, so the
+        // click lands on the inbox it was always about.
+        if let Some(request_id) = self.selected_record
+            && let Ok(records) = self.cached_activity_records()
+            && !records
+                .iter()
+                .any(|record| record.request_id() == request_id)
+        {
+            self.selected_record = None;
         }
         let modal_open = self.active_review.is_some()
             || self.legal_review.is_some()
@@ -14249,54 +13063,7 @@ fn show_wallet_window(
         return Ok(());
     }
 
-    wallet_view.update(cx, |view, cx| {
-        view.command_palette = false;
-        view.command_palette_list = None;
-        view.command_palette_subscription = None;
-        view.form_input_subscriptions.clear();
-        view.appearance_subscription = None;
-        view.token_list = None;
-        view.token_proposal_list = None;
-        view.token_list_url_input = None;
-        view.token_chain_id_input = None;
-        view.token_address_input = None;
-        view.token_symbol_input = None;
-        view.token_name_input = None;
-        view.token_decimals_input = None;
-        view.token_editor_open = false;
-        view.token_list_generation = view.token_list_generation.wrapping_add(1);
-        view.account_id_input = None;
-        view.private_key_input = None;
-        view.walletconnect_uri_input = None;
-        view.network_name_input = None;
-        view.network_display_name_input = None;
-        view.network_aliases_input = None;
-        view.network_chain_id_input = None;
-        view.network_rpc_urls_input = None;
-        view.network_max_gas_limit_input = None;
-        view.network_max_fee_per_gas_input = None;
-        view.network_native_name_input = None;
-        view.network_native_symbol_input = None;
-        view.network_native_decimals_input = None;
-        view.network_explorer_url_input = None;
-        view.network_documentation_url_input = None;
-        view.network_preset_search_input = None;
-        view.network_preset_search_subscription = None;
-        view.network_editor_open = false;
-        view.network_editor_original = None;
-        view.policy_json_input = None;
-        view.policy_editor = None;
-        view.policy_rule_label_input = None;
-        view.policy_rule_targets_input = None;
-        view.policy_rule_chain_ids_input = None;
-        view.policy_rule_values_input = None;
-        view.policy_rule_abi_input = None;
-        view.policy_rule_args_input = None;
-        view.policy_installing = false;
-        view.token_proposal_busy = false;
-        view.network_proposal_busy = false;
-        cx.notify();
-    });
+    wallet_view.update(cx, WalletWindow::release_window_state);
     let wallet_content = wallet_view.clone();
     let window_handle = cx.open_window(
         WindowOptions {
@@ -14526,9 +13293,13 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 &event.kind,
                                 crate::events::DomainEventKind::OAuthAuthorizationRequested { .. }
                             ) {
+                                // `navigate_route`, for the reason the tray
+                                // uses it: an agent that connects while the
+                                // legal documents are still open must not pull
+                                // the app to Settings behind a modal the reader
+                                // cannot dismiss.
                                 event_view.update(cx, |view, cx| {
-                                    view.set_route(Route::Settings);
-                                    cx.notify();
+                                    view.navigate_route(Route::Settings, cx);
                                 });
                                 let _ = cx.update(|cx| {
                                     show_wallet_window(cx, &event_view, &event_window)
@@ -14673,18 +13444,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
                         }
                         TrayCommand::OpenRoute(route) => {
+                            // `navigate_route`, not `set_route`: the rail's own
+                            // buttons are disabled while the legal gate is up,
+                            // and the tray must not be the one way to move the
+                            // app out from under a decision it cannot dismiss.
                             tray_view.update(cx, |view, cx| {
-                                view.set_route(route);
-                                cx.notify();
-                            });
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                        }
-                        TrayCommand::CheckForUpdates => {
-                            tray_view.update(cx, |view, cx| {
-                                view.set_route(Route::Settings);
-                                view.check_latest_release(cx);
-                                cx.notify();
+                                view.navigate_route(route, cx);
                             });
                             let _ =
                                 cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
@@ -14778,7 +13543,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
             });
             cx.spawn(async move |cx| match server_task.await {
                 Ok(server) => {
-                    let address = server.address;
                     if let Ok(mut guard) = slot.lock() {
                         *guard = Some(server);
                     }
@@ -14786,12 +13550,12 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         tray.set_mcp_online(true);
                     }
                     wallet_view.update(cx, |view, cx| {
-                        view.mcp_status = format!("MCP online at {address}/mcp").into();
+                        view.mcp_status = McpGatewayStatus::Online;
                         cx.notify();
                     });
                 }
                 Err(error) => wallet_view.update(cx, |view, cx| {
-                    view.mcp_status = format!("MCP offline: {error:#}").into();
+                    view.mcp_status = McpGatewayStatus::Offline(format!("{error:#}").into());
                     cx.notify();
                 }),
             })
@@ -14803,3 +13567,7 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
 #[cfg(test)]
 #[path = "desktop_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "desktop_render_test.rs"]
+mod render_tests;

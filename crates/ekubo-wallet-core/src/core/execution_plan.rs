@@ -75,16 +75,25 @@ pub enum ExecutionStepKind {
 }
 
 impl ExecutionStepKind {
-    /// What this step is for, in words. Approval documents say this instead of
-    /// the variant name, which reads as a category rather than a purpose.
+    /// Why this step is in the plan at all, where that is not simply "it is
+    /// the thing you asked for".
+    ///
+    /// A plan's own call needs no explanation: the review already carries a
+    /// decoded account of what it does, directly above this, and answering
+    /// "why is this here" with "does the work you asked for" spent a line of a
+    /// security review saying nothing. The steps worth naming are the ones a
+    /// reader did not ask for and would otherwise have to account for
+    /// themselves — an allowance granted before the call, the same allowance
+    /// taken back after it, a call that spends a signature approved earlier.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub const fn reason(self) -> Option<&'static str> {
         match self {
-            Self::Approval => "Grants a spending allowance",
-            Self::Execution => "Does the work you asked for",
-            Self::AllowanceCleanup => "Takes a spending allowance back",
-            Self::SignatureDependentExecution => "Uses a signature produced earlier",
-            Self::Other => "Something else",
+            Self::Approval => Some("Grants a spending allowance the next call needs"),
+            Self::AllowanceCleanup => Some("Takes that spending allowance back afterwards"),
+            Self::SignatureDependentExecution => Some("Uses a signature you approved earlier"),
+            // "Does the work you asked for" and "Something else" are both
+            // true of every plan and useful about none of them.
+            Self::Execution | Self::Other => None,
         }
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
 use ekubo_wallet_core::approval::{ApprovalKind, ApprovalRequest};
+use ekubo_wallet_core::core::policy::Effect;
 
 #[test]
 fn command_palette_matches_route_labels_as_ordered_subsequences() {
@@ -182,50 +183,6 @@ fn the_install_button_reflects_what_is_left_to_install() {
 }
 
 #[test]
-fn network_preset_search_prefers_exact_names_and_chain_ids() {
-    let presets = ekubo_wallet_core::networks::known_networks();
-    let configured = ekubo_wallet_core::config::default_networks();
-
-    let by_chain = network_presets_for_display(presets, &configured, "8453", 10, false);
-    assert_eq!(by_chain[0].config.chain_id, 8453);
-
-    let by_name = network_presets_for_display(presets, &configured, "base", 10, false);
-    assert_eq!(by_name[0].config.name, "base");
-    assert!(
-        by_name
-            .iter()
-            .all(|profile| { network_preset_match_rank(profile, "base").is_some() })
-    );
-}
-
-#[test]
-fn network_reset_preview_names_every_custom_or_modified_row() {
-    let defaults = ekubo_wallet_core::config::default_networks();
-    let mut configured = defaults.clone();
-    configured[0].rpc_urls = vec!["https://owner-rpc.example".parse().unwrap()];
-    configured.push(NetworkConfig {
-        name: "owner-chain".into(),
-        disabled: true,
-        testnet: false,
-        display_name: Some("Owner Chain".into()),
-        aliases: Vec::new(),
-        chain_id: 9_999_991,
-        rpc_urls: vec!["https://owner-chain.example".parse().unwrap()],
-        rpc_strategy: RpcStrategy::default(),
-        max_gas_limit: None,
-        max_fee_per_gas: None,
-        native_currency: None,
-        block_explorer_url: None,
-        documentation_url: None,
-    });
-
-    let discarded = networks_discarded_by_default_reset(&configured, &defaults);
-    assert!(discarded.contains(&configured[0].name));
-    assert!(discarded.contains(&"owner-chain".to_owned()));
-    assert_eq!(discarded.len(), 2);
-}
-
-#[test]
 fn structured_network_editor_builds_the_complete_network_configuration() {
     let draft = NetworkEditorDraft {
         name: "owner-chain".into(),
@@ -402,124 +359,12 @@ fn portfolio_rows_are_commingled_by_chain_then_token_address() {
     );
 }
 
-fn guided_rule_draft_with_selector() -> GuidedPolicyRuleDraft {
-    GuidedPolicyRuleDraft {
-        effect: GuidedRuleEffect::Allow,
-        label: "Send a bounded amount to named recipients".into(),
-        target_mode: GuidedLiteralMode::Exact,
-        targets: concat!(
-            "0x1111111111111111111111111111111111111111, ",
-            "0x2222222222222222222222222222222222222222"
-        )
-        .into(),
-        chain_mode: GuidedLiteralMode::Exact,
-        chain_ids: "1".into(),
-        value_mode: GuidedLiteralMode::Exact,
-        values: "0".into(),
-        calldata_mode: GuidedCalldataMode::Selector,
-        abi: "transfer(address to, uint256 amount)".into(),
-        args: r#"{
-            "to": { "in": ["0x3333333333333333333333333333333333333333"] },
-            "amount": { "all": [{ "not": { "eq": "0" } }] }
-        }"#
-        .into(),
-    }
-}
-
-#[test]
-fn guided_policy_rule_crud_round_trips_through_canonical_validation() {
-    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
-    let draft = guided_rule_draft_with_selector();
-    let (document, policy) = update_guided_policy_rule(&document, None, &draft).unwrap();
-
-    assert_eq!(policy.rules.len(), 1);
-    assert_eq!(
-        policy.rules[0].label.as_deref(),
-        Some("Send a bounded amount to named recipients")
-    );
-    assert!(policy.rules[0].describe().contains("transfer"));
-
-    let mut replacement = draft;
-    replacement.effect = GuidedRuleEffect::Deny;
-    replacement.label = "Never make this transfer".into();
-    replacement.calldata_mode = GuidedCalldataMode::Empty;
-    let (document, policy) = update_guided_policy_rule(&document, Some(0), &replacement).unwrap();
-    assert_eq!(policy.rules.len(), 1);
-    assert!(
-        policy.rules[0]
-            .describe()
-            .starts_with("deny [Never make this transfer]")
-    );
-
-    let (document, policy) = remove_guided_policy_rule(&document, 0).unwrap();
-    assert!(policy.rules.is_empty());
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&document).unwrap()["rules"],
-        serde_json::json!([])
-    );
-}
-
-#[test]
-fn guided_policy_rule_preserves_recursive_predicates_when_reopened() {
-    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
-    let draft = GuidedPolicyRuleDraft {
-        effect: GuidedRuleEffect::Allow,
-        label: "Bounded mainnet transfer".into(),
-        target_mode: GuidedLiteralMode::Predicate,
-        targets: r#"{ "not": { "eq": "0x0000000000000000000000000000000000000000" } }"#.into(),
-        chain_mode: GuidedLiteralMode::Predicate,
-        chain_ids: r#"{ "any": [{ "eq": "1" }, { "eq": "8453" }] }"#.into(),
-        value_mode: GuidedLiteralMode::Predicate,
-        values: r#"{ "all": [{ "gte": "1" }, { "lte": "1000000000000000000" }] }"#.into(),
-        calldata_mode: GuidedCalldataMode::Any,
-        abi: String::new(),
-        args: "{}".into(),
-    };
-    let (_, policy) = update_guided_policy_rule(&document, None, &draft).unwrap();
-    let reopened = guided_rule_draft(&policy.rules[0]).unwrap();
-
-    assert_eq!(reopened.target_mode, GuidedLiteralMode::Predicate);
-    assert_eq!(reopened.chain_mode, GuidedLiteralMode::Predicate);
-    assert_eq!(reopened.value_mode, GuidedLiteralMode::Predicate);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&reopened.values).unwrap(),
-        serde_json::json!({ "all": [{ "gte": "1" }, { "lte": "1000000000000000000" }] })
-    );
-}
-
-#[test]
-fn guided_policy_rule_reports_errors_next_to_each_invalid_field() {
-    let document = serde_json::to_string(&WalletPolicy::require_approval_for_everything()).unwrap();
-    let draft = GuidedPolicyRuleDraft {
-        effect: GuidedRuleEffect::Allow,
-        label: "\u{202e}misleading".into(),
-        target_mode: GuidedLiteralMode::Exact,
-        targets: "not an address".into(),
-        chain_mode: GuidedLiteralMode::Exact,
-        chain_ids: "0x1234".into(),
-        value_mode: GuidedLiteralMode::Exact,
-        values: "one ether".into(),
-        calldata_mode: GuidedCalldataMode::Selector,
-        abi: String::new(),
-        args: "[]".into(),
-    };
-
-    let errors = update_guided_policy_rule(&document, None, &draft).unwrap_err();
-    assert!(errors.label.is_some());
-    assert!(errors.targets.is_some());
-    assert!(errors.chain_ids.is_some());
-    assert!(errors.values.is_some());
-    assert!(errors.abi.is_some());
-    assert!(errors.args.is_some());
-    assert!(errors.form.is_none());
-}
-
 #[test]
 fn allow_anything_preset_is_canonical_and_unambiguously_unrestricted() {
-    let (document, policy) = allow_anything_policy_document().unwrap();
-    let reparsed = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
+    let document = allow_anything_policy_document().unwrap();
+    let policy = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
 
-    assert_eq!(policy, reparsed);
+    assert_eq!(policy, WalletPolicy::allow_anything());
     assert_eq!(policy.rules.len(), 1);
     assert_eq!(policy.rules[0].effect, Effect::Allow);
     assert!(policy.rules[0].chain_id.is_none());
@@ -530,10 +375,10 @@ fn allow_anything_preset_is_canonical_and_unambiguously_unrestricted() {
 
 #[test]
 fn disable_signing_preset_is_one_unconditional_deny() {
-    let (document, policy) = disable_signing_policy_document().unwrap();
-    let reparsed = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
+    let document = disable_signing_policy_document().unwrap();
+    let policy = WalletPolicy::parse(serde_json::from_str(&document).unwrap()).unwrap();
 
-    assert_eq!(policy, reparsed);
+    assert_eq!(policy, WalletPolicy::deny_all());
     assert_eq!(policy.rules.len(), 1);
     assert_eq!(policy.rules[0].effect, Effect::Deny);
     assert!(policy.rules[0].chain_id.is_none());
@@ -1403,6 +1248,25 @@ fn status_colour_separates_success_from_waiting_from_failure() {
 }
 
 #[test]
+fn a_gateway_that_could_not_start_reads_as_a_failure_and_carries_its_reason() {
+    assert_eq!(McpGatewayStatus::Starting.tone(), StatusTone::Working);
+    assert_eq!(McpGatewayStatus::Starting.label(), "Starting");
+    assert_eq!(McpGatewayStatus::Starting.detail(), None);
+
+    assert_eq!(McpGatewayStatus::Online.tone(), StatusTone::Done);
+    assert_eq!(McpGatewayStatus::Online.label(), "Reachable");
+    // Nothing to explain: the endpoint beside the pill is the whole story.
+    assert_eq!(McpGatewayStatus::Online.detail(), None);
+
+    let offline = McpGatewayStatus::Offline("address already in use".into());
+    assert_eq!(offline.tone(), StatusTone::Failed);
+    assert_eq!(offline.label(), "Unreachable");
+    // The one fact a reader cannot guess from a status word: the port is
+    // fixed, so why it could not be served is the whole of the diagnosis.
+    assert_eq!(offline.detail().as_deref(), Some("address already in use"));
+}
+
+#[test]
 fn ages_read_as_elapsed_time_until_they_are_old_enough_to_need_a_date() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-08-12T12:00:00Z")
         .unwrap()
@@ -1555,4 +1419,30 @@ fn a_source_cannot_draw_outside_its_line() {
         signature_source_label(Some("Ekubo\u{202e}Protocol\n"), None),
         "via EkuboProtocol"
     );
+}
+
+#[test]
+fn a_digest_is_only_described_as_signed_when_something_signed_it() {
+    assert_eq!(digest_label(true), "Digest that was signed");
+    // A rejected request sits under an explanation reading "no signature was
+    // ever produced". The row beneath it used to say the digest was signed.
+    assert_eq!(digest_label(false), "Digest this would have signed");
+}
+
+#[test]
+fn removing_an_account_puts_the_danger_on_the_button_that_destroys_the_key() {
+    // Approving is normally the permissive choice, so reject carries the red.
+    // Account removal inverts that: approving destroys a key that cannot be
+    // recovered, and the red used to sit on the button that keeps it.
+    let removal = review_decision_labels(Some(&ActiveReviewCompletion::AccountRemoval {
+        wallet_id: "primary".into(),
+    }));
+    assert!(removal.approve_is_destructive);
+    assert_eq!(removal.approve, "Authenticate & remove");
+    assert_eq!(removal.reject, "Keep this account");
+
+    let transaction = review_decision_labels(None);
+    assert!(!transaction.approve_is_destructive);
+    assert_eq!(transaction.approve, "Authenticate & approve");
+    assert_eq!(transaction.reject, "Reject request");
 }

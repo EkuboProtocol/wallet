@@ -128,15 +128,6 @@ impl PairingUri {
     }
 }
 
-/// Whether a pasted line even looks like a pairing URI.
-///
-/// Used only to keep the paste prompt from accepting an obviously wrong line;
-/// [`PairingUri::parse`] is what decides.
-#[must_use]
-pub fn looks_like_pairing_uri(input: &str) -> bool {
-    input.trim().starts_with("wc:")
-}
-
 #[cfg(test)]
 #[path = "uri_test.rs"]
 mod tests;

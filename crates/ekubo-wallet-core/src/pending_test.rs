@@ -105,7 +105,6 @@ fn automatic_signatures_are_recorded_but_never_enter_approval_queue() {
         store.list(Some("primary"), 10).unwrap(),
         std::slice::from_ref(&signed)
     );
-    assert_eq!(store.get_by_identifier(hash).unwrap(), signed);
 }
 
 #[test]
@@ -1280,58 +1279,25 @@ fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
 }
 
 #[test]
-fn only_a_missing_row_invites_the_next_queue_to_be_searched() {
-    // A request id does not say which of the three signing queues owns it, so
-    // the reconciler tries each in turn -- and treated every failure as "not here".
-    // A row that has already been decided, an envelope that no longer parses,
-    // a database that cannot be read: each sent the search onward, where the
-    // rejection path could terminally close whatever the next queue held under
-    // that id while the request the owner meant stayed awaiting a decision.
-    let (_directory, mut store) = store();
+fn only_a_request_that_was_signed_can_ever_have_a_receipt() {
+    // Nothing was signed in either of these, so no chain has heard of them and
+    // none ever will. A receipt section, or an offer to go and look for one,
+    // is a promise that cannot be kept.
+    assert!(!PendingStatus::AwaitingApproval.can_reach_a_chain());
+    assert!(!PendingStatus::Rejected.can_reach_a_chain());
 
-    // Genuinely absent: the only answer that means "look elsewhere".
-    let missing = store.get(uuid::Uuid::new_v4()).unwrap_err();
-    assert!(
-        is_unknown_request(&missing),
-        "a row that is not there is not there: {missing:#}"
-    );
-
-    // Present but already decided. The request exists in *this* queue, so the
-    // search must stop here even though the operation failed.
-    let request = store
-        .create("primary", "ethereum", &plan(), None, 1)
-        .unwrap();
-    store.reject(request.request_id).unwrap();
-    let decided = store.reject(request.request_id).unwrap_err();
-    assert!(
-        !is_unknown_request(&decided),
-        "an already-decided request is this queue's answer, not an absence: {decided:#}"
-    );
-
-    // Present but unreadable, which is the case that used to look identical to
-    // absence and is the reason the distinction is worth a function.
-    let signed = store
-        .record_automatic_signed(
-            "primary",
-            "ethereum",
-            &plan_with_value("3"),
-            None,
-            1,
-            ORIGINAL_BYTES,
-            hash_of(ORIGINAL_BYTES).as_str(),
-        )
-        .unwrap();
-    store
-        .database
-        .connection
-        .execute(
-            "UPDATE pending_transactions SET signed_transaction_hash = ?2 WHERE request_id = ?1",
-            params![signed.request_id, Blob(B256::repeat_byte(7))],
-        )
-        .unwrap();
-    let unreadable = store.get(signed.request_id).unwrap_err();
-    assert!(
-        !is_unknown_request(&unreadable),
-        "a row this queue holds but cannot read must not read as absent: {unreadable:#}"
-    );
+    // Signed but unsent still counts: it can be sent, and then it has one.
+    // Replaced and Cancelled count too — those bytes reached the network even
+    // though something else won the nonce.
+    for status in [
+        PendingStatus::Signed,
+        PendingStatus::Submitting,
+        PendingStatus::Broadcast,
+        PendingStatus::Confirmed,
+        PendingStatus::Reverted,
+        PendingStatus::Cancelled,
+        PendingStatus::Replaced,
+    ] {
+        assert!(status.can_reach_a_chain(), "{status:?} reaches a chain");
+    }
 }
