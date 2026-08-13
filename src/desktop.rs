@@ -10973,12 +10973,17 @@ impl WalletWindow {
                     .child(
                         h_flex()
                             .w_full()
+                            // Wrapping here is the narrow-window escape hatch:
+                            // the segmented control is wider than the label, so
+                            // on a small viewport it drops below rather than
+                            // running off the edge of the dialog.
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
                             .gap_3()
                             .child(
                                 h_flex()
-                                    .min_w_0()
+                                    .flex_none()
                                     .gap_1()
                                     .text_sm()
                                     .font_medium()
@@ -10987,6 +10992,7 @@ impl WalletWindow {
                             )
                             .child(
                                 ButtonGroup::new("network-editor-rpc-strategy")
+                                    .flex_none()
                                     .small()
                                     .outline()
                                     .disabled(busy)
