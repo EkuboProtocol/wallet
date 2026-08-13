@@ -244,8 +244,18 @@ fn the_settings_pane_is_capped_to_a_readable_measure(cx: &mut gpui::TestAppConte
     // The cap is the whole of the fix for a control sitting a hand's width
     // from its label, so it is worth asserting rather than eyeballing.
     cx.update_entity(&view, |wallet, _| wallet.set_route(Route::Settings));
-    let measured = measure(cx, window, &view, &["settings-pane"]);
+    let measured = measure(cx, window, &view, &["settings-pane", "settings-prose"]);
     let pane = measured[0].expect("the settings pane must have been laid out");
+    // A row wants the full measure so its control can sit at the right edge.
+    // The sentence under the row does not: measured, this prose ran 634px,
+    // which at 14px is about ninety characters a line against a comfortable
+    // band nearer sixty-five to seventy-five.
+    let prose = measured[1].expect("the settings prose must have been laid out");
+    assert!(
+        prose.size.width <= PROSE_MEASURE,
+        "explanatory text must stay inside a readable measure: it was {:?}",
+        prose.size.width
+    );
     assert!(
         pane.size.width <= px(720.0),
         "the settings pane must stay within its measure, not stretch to the \

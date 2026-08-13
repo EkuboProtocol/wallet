@@ -656,6 +656,15 @@ fn legal_review_requires_acceptance(document: LegalDocument, status: Option<&Leg
         })
 }
 
+/// The readable width for a line of explanatory text.
+///
+/// A settings row wants the full measure — its control belongs at the right
+/// edge — but the sentence under the row does not. Measured, the prose in this
+/// pane ran 634px, which at 14px is about ninety characters a line; the
+/// comfortable band is nearer sixty-five to seventy-five. Capping the prose
+/// rather than the pane keeps the rows where the platform puts them.
+const PROSE_MEASURE: gpui::Pixels = px(520.0);
+
 fn settings_section(title: &'static str, content: GroupBox) -> gpui::Div {
     div().w_full().child(content.title(title))
 }
@@ -8672,6 +8681,7 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
+                    .max_w(PROSE_MEASURE)
                     .child(selectable_label(
                         "Install the MCP server into a detected agent to see its sign-in command.",
                     )),
@@ -8681,6 +8691,7 @@ impl WalletWindow {
                 div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                     .child(selectable_label("Keep Ekubo Wallet open, then run the command for your agent. The browser will ask you to authenticate and choose paired access-token and refresh-session lifetimes.")),
             );
             for instruction in login_instructions {
@@ -8706,6 +8717,7 @@ impl WalletWindow {
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
+                                .max_w(PROSE_MEASURE)
                                 .child(selectable_text(
                                     format!("agent-login-location-{}", instruction.harness),
                                     instruction.location,
@@ -8803,6 +8815,7 @@ impl WalletWindow {
                                             div()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
+                                                .max_w(PROSE_MEASURE)
                                                 .child(selectable_text(
                                                     format!("managed-agent-last-used-{client_id}"),
                                                     &last_used,
@@ -8844,6 +8857,7 @@ impl WalletWindow {
             managed_agents = managed_agents.child(
                 div()
                     .text_color(cx.theme().muted_foreground)
+                    .max_w(PROSE_MEASURE)
                     .child(selectable_label("No authorized agent sessions.")),
             );
         }
@@ -8862,9 +8876,14 @@ impl WalletWindow {
                 ));
             }
             AgentDetectionState::Ready(detected) if detected.is_empty() => {
-                agents = agents.child(div().text_color(cx.theme().muted_foreground).child(
-                    selectable_label("No supported agent installation was detected."),
-                ));
+                agents = agents.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .max_w(PROSE_MEASURE)
+                        .child(selectable_label(
+                            "No supported agent installation was detected.",
+                        )),
+                );
             }
             // Installation is one button for every agent, so a row is a
             // status and not a decision: an icon, the agent, and the file the
@@ -8910,6 +8929,7 @@ impl WalletWindow {
                                                     div()
                                                         .text_sm()
                                                         .text_color(cx.theme().muted_foreground)
+                                                        .max_w(PROSE_MEASURE)
                                                         .truncate()
                                                         .child(selectable_text(
                                                             ("detected-agent-path", index),
@@ -8922,6 +8942,7 @@ impl WalletWindow {
                                                 .flex_none()
                                                 .text_sm()
                                                 .text_color(cx.theme().muted_foreground)
+                                                .max_w(PROSE_MEASURE)
                                                 .child(selectable_text(
                                                     ("detected-agent-status", index),
                                                     if installed {
@@ -8980,6 +9001,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                             .child(selectable_label("System follows your operating-system appearance and updates while the wallet is running.")),
                     )
                     .child(
@@ -9066,8 +9088,10 @@ impl WalletWindow {
                                     .child(div().font_medium().child("Testnet mode"))
                                     .child(
                                         div()
+                                            .debug_selector(|| "settings-prose".to_owned())
                                             .text_sm()
                                             .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                                             .child(selectable_label("Show configured test networks and their linked balances, tokens, requests, and activity. Testnet mode is off by default.")),
                                     ),
                             )
@@ -9124,6 +9148,7 @@ impl WalletWindow {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                             .child(selectable_label(
                                 "Installing writes this server into an agent's configuration file. Agents authenticate with OAuth credentials they obtain on their first connection; no key or secret is written to the file.",
                             )),
@@ -9170,6 +9195,7 @@ impl WalletWindow {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
+.max_w(PROSE_MEASURE)
                                         .child(selectable_label(
                                             "Every detected agent is already configured.",
                                         )),
