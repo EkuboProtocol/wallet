@@ -20,12 +20,13 @@ fn clients() -> (Arc<Mutex<DesktopStore>>, String) {
         .unwrap();
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
     let code = store
-        .issue_authorization_code(
+        .issue_authorization_code_with_session(
             client.id,
             REDIRECT,
             &challenge,
             MCP_SCOPE,
             MCP_RESOURCE,
+            OAuthSessionPreset::OneDayOneWeek,
             &OwnerAuthorization::for_test(OwnerAuthorizationScope::AgentAccess),
         )
         .unwrap();

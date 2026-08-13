@@ -118,15 +118,9 @@ impl Drop for ConfigBatchInstall {
 #[derive(Clone, Copy)]
 enum ConfigValidation {
     Installed { kind: AgentKind, companion: bool },
-    Removed { kind: AgentKind, companion: bool },
 }
 
 impl ConfigPreview {
-    #[must_use]
-    pub fn managed_diff(&self) -> &str {
-        &self.diff
-    }
-
     #[must_use]
     pub fn has_changes(&self) -> bool {
         self.before != self.after
@@ -280,29 +274,6 @@ impl AgentAdapter {
             },
         })
     }
-
-    pub fn preview_remove(&self, remove_companion: bool) -> Result<ConfigPreview> {
-        let before = fs::read_to_string(&self.config_path)?;
-        let after = match self.kind {
-            AgentKind::Codex => remove_codex(&before, remove_companion)?,
-            AgentKind::ClaudeCode | AgentKind::GeminiCli | AgentKind::Cursor => {
-                remove_json(&before, "mcpServers", remove_companion)?
-            }
-            AgentKind::Opencode => remove_json(&before, "mcp", remove_companion)?,
-            AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
-        };
-        let diff = managed_config_diff(self.kind, &before, &after)?;
-        Ok(ConfigPreview {
-            path: self.config_path.clone(),
-            before,
-            after,
-            diff,
-            validation: ConfigValidation::Removed {
-                kind: self.kind,
-                companion: remove_companion,
-            },
-        })
-    }
 }
 
 fn binary_on_path(name: &str) -> bool {
@@ -363,19 +334,6 @@ fn merge_codex(before: &str, url: &str, companion: bool) -> Result<String> {
     Ok(document.to_string())
 }
 
-fn remove_codex(before: &str, companion: bool) -> Result<String> {
-    let mut document = before
-        .parse::<DocumentMut>()
-        .context("Codex config is not valid TOML")?;
-    if let Some(servers) = document.get_mut("mcp_servers").and_then(Item::as_table_mut) {
-        servers.remove(LOCAL_SERVER_NAME);
-        if companion {
-            servers.remove(COMPANION_SERVER_NAME);
-        }
-    }
-    Ok(document.to_string())
-}
-
 #[derive(Clone, Copy)]
 enum JsonShape {
     Url,
@@ -416,18 +374,6 @@ fn merge_json(
             JsonShape::Remote => json!({"type": "remote", "url": COMPANION_SERVER_URL}),
         };
         servers.insert(COMPANION_SERVER_NAME.into(), remote);
-    }
-    Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
-}
-
-fn remove_json(before: &str, root: &str, companion: bool) -> Result<String> {
-    let mut document: Value =
-        serde_json::from_str(before).context("agent config is not valid JSON")?;
-    if let Some(servers) = document.get_mut(root).and_then(Value::as_object_mut) {
-        servers.remove(LOCAL_SERVER_NAME);
-        if companion {
-            servers.remove(COMPANION_SERVER_NAME);
-        }
     }
     Ok(format!("{}\n", serde_json::to_string_pretty(&document)?))
 }
@@ -607,20 +553,17 @@ fn validate_document(path: &Path, contents: &str) -> Result<()> {
 }
 
 fn validate_server_shape(contents: &str, validation: ConfigValidation) -> Result<()> {
-    let (kind, companion, installed) = match validation {
-        ConfigValidation::Installed { kind, companion } => (kind, companion, true),
-        ConfigValidation::Removed { kind, companion } => (kind, companion, false),
-    };
+    let ConfigValidation::Installed { kind, companion } = validation;
     match kind {
-        AgentKind::Codex => validate_codex_shape(contents, installed, companion),
+        AgentKind::Codex => validate_codex_shape(contents, companion),
         AgentKind::ClaudeCode | AgentKind::GeminiCli | AgentKind::Cursor | AgentKind::Opencode => {
-            validate_json_shape(contents, kind, installed, companion)
+            validate_json_shape(contents, kind, companion)
         }
         AgentKind::Other => anyhow::bail!("unsupported agent configuration"),
     }
 }
 
-fn validate_codex_shape(contents: &str, installed: bool, companion: bool) -> Result<()> {
+fn validate_codex_shape(contents: &str, companion: bool) -> Result<()> {
     let document = contents
         .parse::<DocumentMut>()
         .context("Codex config is not valid TOML")?;
@@ -633,19 +576,6 @@ fn validate_codex_shape(contents: &str, installed: bool, companion: bool) -> Res
     );
     let servers = document.get("mcp_servers").and_then(Item::as_table);
     let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
-    if !installed {
-        ensure!(local.is_none(), "local MCP server was not removed");
-        if companion {
-            ensure!(
-                servers
-                    .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
-                    .is_none(),
-                "companion MCP server was not removed"
-            );
-        }
-        return Ok(());
-    }
-
     let local = local.context("local MCP server is missing")?;
     ensure!(
         local.get("command").is_none(),
@@ -676,12 +606,7 @@ fn validate_codex_shape(contents: &str, installed: bool, companion: bool) -> Res
     Ok(())
 }
 
-fn validate_json_shape(
-    contents: &str,
-    kind: AgentKind,
-    installed: bool,
-    companion: bool,
-) -> Result<()> {
+fn validate_json_shape(contents: &str, kind: AgentKind, companion: bool) -> Result<()> {
     let document: Value =
         serde_json::from_str(contents).context("agent config is not valid JSON")?;
     let root = if kind == AgentKind::Opencode {
@@ -691,19 +616,6 @@ fn validate_json_shape(
     };
     let servers = document.get(root).and_then(Value::as_object);
     let local = servers.and_then(|servers| servers.get(LOCAL_SERVER_NAME));
-    if !installed {
-        ensure!(local.is_none(), "local MCP server was not removed");
-        if companion {
-            ensure!(
-                servers
-                    .and_then(|servers| servers.get(COMPANION_SERVER_NAME))
-                    .is_none(),
-                "companion MCP server was not removed"
-            );
-        }
-        return Ok(());
-    }
-
     let local = local.context("local MCP server is missing")?;
     ensure!(
         local.get("command").is_none(),

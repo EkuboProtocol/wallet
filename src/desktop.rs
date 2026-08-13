@@ -134,10 +134,6 @@ impl GroupBox {
         self
     }
 
-    fn outline(self) -> Self {
-        self
-    }
-
     fn compact(mut self) -> Self {
         self.gap = px(8.0);
         self
@@ -666,7 +662,6 @@ fn account_required_panel(
 ) -> GroupBox {
     GroupBox::new()
         .id(panel_id)
-        .outline()
         .title("Create your first account")
         .child(selectable_label(message))
         .child(
@@ -8450,14 +8445,12 @@ impl WalletWindow {
             .child(
                 GroupBox::new()
                     .id("activity-needs-review")
-                    .outline()
                     .title("Waiting on you")
                     .child(self.render_reviews(cx)),
             )
             .child(
                 GroupBox::new()
                     .id("inbox-history")
-                    .outline()
                     .title("Already decided")
                     .child(self.render_activity_history(cx)),
             )
@@ -8756,7 +8749,6 @@ impl WalletWindow {
                 "Appearance",
                 GroupBox::new()
                     .id("appearance-settings")
-                    .outline()
                     .child(
                         div()
                             .text_sm()
@@ -8832,7 +8824,6 @@ impl WalletWindow {
             .child(untitled_settings_section(
                 GroupBox::new()
                     .id("testnet-mode-settings")
-                    .outline()
                     .child(
                         h_flex()
                             .w_full()
@@ -8866,7 +8857,6 @@ impl WalletWindow {
                 "Detected agents",
                 GroupBox::new()
                     .id("detected-agent-settings")
-                    .outline()
                     // Whether the endpoint below is actually being served. It
                     // is the first thing every row under it depends on, so it
                     // is the first thing the section says.
@@ -8965,7 +8955,6 @@ impl WalletWindow {
                 "Agent sessions",
                 GroupBox::new()
                     .id("agent-session-settings")
-                    .outline()
                     .child(login_commands)
                     .child(
                         div()
@@ -9425,7 +9414,6 @@ impl WalletWindow {
                 content = content.child(
                     GroupBox::new()
                         .id("policy-proposals")
-                        .outline()
                         .title("Agent proposals")
                         .child(proposal_list),
                 );
@@ -9558,7 +9546,6 @@ impl WalletWindow {
             .child(
                 GroupBox::new()
                     .id("policy-presets")
-                    .outline()
                     .title("Policy presets")
                     .child(
                         div()
@@ -9595,7 +9582,6 @@ impl WalletWindow {
             .child(
                 GroupBox::new()
                     .id("policy-preview-workflow")
-                    .outline()
                     .title("Review changes")
                     .child(
                         div()
@@ -9656,7 +9642,6 @@ impl WalletWindow {
                 content.child(
                     GroupBox::new()
                         .id("policy-permission-diff")
-                        .outline()
                         .title("Computed permission changes")
                         .child(
                             div()
@@ -9696,7 +9681,6 @@ impl WalletWindow {
         let version = format!("Version {BUILD_VERSION}");
         let panel = GroupBox::new()
             .id("legal-and-version")
-            .outline()
             .compact()
             .child(about_row(
                 "Ekubo Wallet",
@@ -10090,7 +10074,6 @@ impl WalletWindow {
                                 ButtonGroup::new("network-editor-rpc-strategy")
                                     .flex_none()
                                     .small()
-                                    .outline()
                                     .disabled(busy)
                                     .child(
                                         Button::new("network-strategy-ordered")
@@ -10422,7 +10405,6 @@ impl WalletWindow {
                 content = content.child(
                     GroupBox::new()
                         .id("network-proposals")
-                        .outline()
                         .title("Agent proposals")
                         .child(
                             div()
@@ -10997,7 +10979,6 @@ impl WalletWindow {
                 content = content.child(
                 GroupBox::new()
                     .id("owner-token-list-import")
-                    .outline()
                     .title("Import published token list")
                     .child(
                         div()
@@ -11139,7 +11120,6 @@ impl WalletWindow {
                 content = content.child(
                     GroupBox::new()
                         .id("token-proposal-groups")
-                        .outline()
                         .title("Agent proposals")
                         .child(groups),
                 );
@@ -11157,7 +11137,6 @@ impl WalletWindow {
             content = content.child(
                 GroupBox::new()
                     .id("token-proposal-review")
-                    .outline()
                     .title(format!("Review {source}"))
                     .child(
                         div()
@@ -11311,10 +11290,7 @@ impl WalletWindow {
         };
         settings_section(
             "Updates",
-            GroupBox::new()
-                .id("software-updates")
-                .outline()
-                .child(panel),
+            GroupBox::new().id("software-updates").child(panel),
         )
     }
 

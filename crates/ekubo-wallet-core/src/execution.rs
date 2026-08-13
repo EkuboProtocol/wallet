@@ -91,11 +91,6 @@ impl PreparedExecution {
     }
 
     #[must_use]
-    pub const fn authorizes_delegation(&self) -> bool {
-        self.authorize_delegation
-    }
-
-    #[must_use]
     pub fn authorization_nonce(&self) -> Option<u64> {
         self.authorize_delegation.then(|| {
             self.nonce

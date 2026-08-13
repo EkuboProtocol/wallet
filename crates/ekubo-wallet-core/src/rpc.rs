@@ -588,35 +588,6 @@ pub async fn transaction_receipt_details(
         .transpose()
 }
 
-/// An address's native balance just before and just after one block:
-/// `(parent, at_block)`. The difference is the net native change the block
-/// made to the address — including internal transfers no log records and the
-/// gas its own transactions paid. Needs an RPC that still serves the parent
-/// block's state; callers treat an error as "unavailable", not as zero.
-pub async fn native_balances_around_block(
-    network: &NetworkConfig,
-    address: Address,
-    block_number: u64,
-) -> Result<(alloy::primitives::U256, alloy::primitives::U256)> {
-    let parent = block_number
-        .checked_sub(1)
-        .context("the genesis block has no parent state to diff against")?;
-    try_clients(network, |client| async move {
-        let (chain_id, before, after) = tokio::try_join!(
-            with_timeout(client.chain_id()),
-            with_timeout(client.balance(address, parent.into())),
-            with_timeout(client.balance(address, block_number.into())),
-        )?;
-        ensure!(
-            chain_id == network.chain_id,
-            "RPC reports chain {chain_id}, not {}",
-            network.chain_id
-        );
-        Ok((before, after))
-    })
-    .await
-}
-
 /// The chain head height, used to count confirmations for a mined receipt.
 pub async fn latest_block_number(network: &NetworkConfig) -> Result<u64> {
     try_clients(network, |client| async move {

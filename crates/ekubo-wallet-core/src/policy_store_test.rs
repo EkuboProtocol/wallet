@@ -52,7 +52,7 @@ fn a_network_suggestion_waits_and_the_latest_one_prevails() {
             .network_proposal(profile.chain_id)
             .unwrap()
             .unwrap()
-            .primary_rpc_url()
+            .rpc_urls[0]
             .as_str(),
         "https://second.example.invalid/rpc"
     );

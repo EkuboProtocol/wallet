@@ -150,10 +150,7 @@ fn default_testnets_are_the_probed_project_operated_endpoints() {
                 "default testnet {} has no compatible simulation endpoint",
                 profile.config.name
             );
-            (
-                profile.config.chain_id,
-                profile.config.primary_rpc_url().as_str(),
-            )
+            (profile.config.chain_id, profile.config.rpc_urls[0].as_str())
         })
         .collect::<Vec<_>>();
     assert_eq!(defaults, expected);

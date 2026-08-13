@@ -803,10 +803,6 @@ impl OwnerApi {
         self.desktop()?.clients()
     }
 
-    pub async fn authorize_agent_access(&self) -> Result<OwnerAuthorization> {
-        Ok(authorize_owner(OwnerAuthorizationScope::AgentAccess).await?)
-    }
-
     pub fn detailed_notification_previews(&self) -> Result<bool> {
         self.desktop()?.detailed_notification_previews()
     }
@@ -905,11 +901,6 @@ impl OwnerApi {
 
     pub fn networks(&self) -> Result<Vec<NetworkConfig>> {
         Ok(self.config.load()?.networks)
-    }
-
-    #[must_use]
-    pub fn network_presets(&self) -> Vec<ekubo_wallet_core::networks::NetworkProfile> {
-        ekubo_wallet_core::networks::known_networks().to_vec()
     }
 
     pub fn network_by_chain_id(&self, chain_id: u64) -> Result<NetworkConfig> {
@@ -1035,15 +1026,6 @@ impl OwnerApi {
             .replace_network(reviewed, replacement, &authorization)?;
         self.events.publish(DomainEventKind::ConfigurationChanged);
         Ok(())
-    }
-
-    pub async fn install_network_preset(&self, chain_id: u64) -> Result<NetworkConfig> {
-        let preset = ekubo_wallet_core::networks::known_network(chain_id)
-            .with_context(|| format!("chain {chain_id} has no built-in network preset"))?
-            .config
-            .clone();
-        self.install_network(preset.clone()).await?;
-        Ok(preset)
     }
 
     pub async fn reset_networks_to_defaults(
@@ -1481,13 +1463,6 @@ impl OwnerApi {
         Ok(result)
     }
 
-    pub fn reject_transaction(&self, request_id: Uuid) -> Result<PendingTransaction> {
-        let rejected = PendingStore::production(self.config.data_dir())?.reject(request_id)?;
-        self.events
-            .publish(DomainEventKind::ReviewChanged { request_id });
-        Ok(rejected)
-    }
-
     pub fn message_review_document(&self, request_id: Uuid) -> Result<ReviewDocument> {
         let request = MessageStore::production(self.config.data_dir())?.get(request_id)?;
         let display = describe_message(&request.message_bytes()?);
@@ -1697,15 +1672,6 @@ impl OwnerApi {
         TokenStore::production(self.config.data_dir())?.list(chain_id, limit, offset)
     }
 
-    pub fn search_tokens(
-        &self,
-        query: &str,
-        chain_id: Option<u64>,
-        limit: usize,
-    ) -> Result<Vec<StoredToken>> {
-        TokenStore::production(self.config.data_dir())?.search(query, chain_id, limit)
-    }
-
     pub async fn add_token(&self, token: ListedToken) -> Result<StoredToken> {
         ensure!(
             contains_configured_chain(&self.config.load()?, token.chain_id),
@@ -1720,44 +1686,6 @@ impl OwnerApi {
         );
         let stored = TokenStore::production(self.config.data_dir())?.add_authorized(
             &token,
-            "Manual entry",
-            &authorization,
-        )?;
-        self.events.publish(DomainEventKind::ConfigurationChanged);
-        Ok(stored)
-    }
-
-    pub async fn replace_token(
-        &self,
-        reviewed: &StoredToken,
-        replacement: ListedToken,
-    ) -> Result<StoredToken> {
-        let reviewed_chain_id = reviewed
-            .chain_id
-            .parse::<u64>()
-            .context("stored token has an invalid chain ID")?;
-        let reviewed_address = reviewed
-            .address
-            .parse::<Address>()
-            .context("stored token has an invalid address")?;
-        ensure!(
-            (replacement.chain_id, replacement.address) == (reviewed_chain_id, reviewed_address),
-            "a token's chain ID and address cannot change while it is edited"
-        );
-        ensure!(
-            contains_configured_chain(&self.config.load()?, replacement.chain_id),
-            "chain {} is not a configured network",
-            replacement.chain_id
-        );
-        let authorization = authorize_owner(OwnerAuthorizationScope::TokenMetadata).await?;
-        ensure!(
-            contains_configured_chain(&self.config.load()?, replacement.chain_id),
-            "chain {} was removed during authentication",
-            replacement.chain_id
-        );
-        let stored = TokenStore::production(self.config.data_dir())?.replace_authorized(
-            reviewed,
-            &replacement,
             "Manual entry",
             &authorization,
         )?;
@@ -1919,16 +1847,9 @@ fn ensure_reviewed_digest(reviewed: &str, current: &str) -> Result<()> {
 
 pub const PRIVATE_KEY_REVEAL_DURATION: Duration = Duration::from_secs(30);
 
-pub trait Clipboard: Send + Sync + 'static {
-    fn read_text(&self) -> Result<Option<String>>;
-    fn write_text(&self, value: &str) -> Result<()>;
-    fn clear(&self) -> Result<()>;
-}
-
 pub struct ExportLease {
     value: Arc<Mutex<zeroize::Zeroizing<String>>>,
     expires_at: Instant,
-    duration: Duration,
 }
 
 impl ExportLease {
@@ -1949,7 +1870,6 @@ impl ExportLease {
         Self {
             value,
             expires_at: Instant::now() + duration,
-            duration,
         }
     }
 
@@ -1979,20 +1899,6 @@ impl ExportLease {
             .lock()
             .ok()
             .map(|value| zeroize::Zeroizing::new(value.to_string()))
-    }
-
-    pub fn copy_explicitly(&self, clipboard: Arc<dyn Clipboard>) -> Result<()> {
-        let value = self.visible_value().context("private-key reveal expired")?;
-        clipboard.write_text(&value)?;
-        let expected = zeroize::Zeroizing::new(value.to_string());
-        let duration = self.duration;
-        std::thread::spawn(move || {
-            std::thread::sleep(duration);
-            if clipboard.read_text().ok().flatten().as_deref() == Some(expected.as_str()) {
-                let _ = clipboard.clear();
-            }
-        });
-        Ok(())
     }
 }
 

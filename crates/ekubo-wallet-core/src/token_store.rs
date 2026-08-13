@@ -479,62 +479,6 @@ impl TokenStore {
             .context("inserted token missing")
     }
 
-    /// Replace only the exact token row the owner opened in the editor.
-    ///
-    /// Token metadata names and scales values on approval screens. It cannot
-    /// grant permission, but silently overwriting a newer symbol or decimals
-    /// after authentication would still misrepresent the transaction being
-    /// reviewed. The complete stored row is therefore the optimistic revision.
-    pub fn replace_authorized(
-        &mut self,
-        reviewed: &StoredToken,
-        replacement: &ListedToken,
-        source: &str,
-        authorization: &OwnerAuthorization,
-    ) -> Result<StoredToken> {
-        authorization.require(OwnerAuthorizationScope::TokenMetadata)?;
-        let (reviewed_chain_id, reviewed_address) = stored_token_identity(reviewed)?;
-        ensure!(
-            (replacement.chain_id, replacement.address) == (reviewed_chain_id, reviewed_address),
-            "a token's chain ID and address cannot change while it is edited"
-        );
-        let fields = normalize_owner_token(replacement, source)?;
-        let transaction = self.database.connection.transaction()?;
-        let changed = transaction.execute(
-            "UPDATE tokens
-             SET symbol = ?8, name = ?9, decimals = ?10, source = ?11
-             WHERE chain_id = ?1 AND address = ?2
-               AND symbol IS ?3 AND name IS ?4 AND decimals IS ?5
-               AND source = ?6 AND added_at = ?7",
-            params![
-                fields.chain_id,
-                Blob(replacement.address),
-                reviewed.symbol,
-                reviewed.name,
-                reviewed.decimals,
-                reviewed.source,
-                Millis(reviewed.added_at),
-                fields.symbol,
-                fields.name,
-                replacement.decimals,
-                fields.source,
-            ],
-        )?;
-        ensure!(
-            changed == 1,
-            "token {} on chain {} changed while it was being edited; review the current metadata",
-            replacement.address.to_checksum(None),
-            replacement.chain_id
-        );
-        transaction.execute(
-            "DELETE FROM token_proposals WHERE chain_id = ?1 AND address = ?2",
-            params![fields.chain_id, Blob(replacement.address)],
-        )?;
-        transaction.commit()?;
-        self.get(replacement.chain_id, replacement.address)?
-            .context("updated token missing")
-    }
-
     pub(crate) fn consume_proposals(&mut self, proposals: &[TokenProposal]) -> Result<u64> {
         ensure!(!proposals.is_empty(), "no token proposals were selected");
         let transaction = self.database.connection.transaction()?;

@@ -304,13 +304,6 @@ fn desktop_replacement_takes_over_the_name_or_the_chain_id() {
     replace_configured_network(&mut networks, renamed).unwrap();
     assert_eq!(networks.len(), count, "chain 1 was replaced, not added");
     assert!(networks.iter().all(|network| network.name != "ethereum"));
-    assert_eq!(
-        remove_configured_network(&mut networks, "eth")
-            .unwrap()
-            .name,
-        "custom",
-        "the aliases came along with the chain"
-    );
 }
 
 #[test]

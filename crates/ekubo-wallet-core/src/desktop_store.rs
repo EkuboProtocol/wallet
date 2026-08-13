@@ -466,26 +466,6 @@ impl DesktopStore {
         Ok(client)
     }
 
-    pub fn issue_authorization_code(
-        &mut self,
-        client_id: Uuid,
-        redirect_uri: &str,
-        code_challenge: &str,
-        scope: &str,
-        resource: &str,
-        authorization: &OwnerAuthorization,
-    ) -> Result<OAuthAuthorizationCode> {
-        self.issue_authorization_code_with_session(
-            client_id,
-            redirect_uri,
-            code_challenge,
-            scope,
-            resource,
-            OAuthSessionPreset::OneDayOneWeek,
-            authorization,
-        )
-    }
-
     pub fn issue_authorization_code_with_session(
         &mut self,
         client_id: Uuid,

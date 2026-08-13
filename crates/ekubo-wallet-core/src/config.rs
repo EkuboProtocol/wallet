@@ -190,16 +190,6 @@ impl NetworkConfig {
     pub fn display_label(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.name)
     }
-
-    /// The endpoint tried first, and the one shown wherever a single endpoint
-    /// identifies the network. Every constructor and the deserializer refuse
-    /// an empty list, so this cannot fail on a value that exists.
-    #[must_use]
-    pub fn primary_rpc_url(&self) -> &Url {
-        self.rpc_urls
-            .first()
-            .expect("a network config always carries at least one RPC URL")
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -598,24 +588,6 @@ pub fn default_data_dir() -> Result<PathBuf> {
 /// configuration contains" is a configuration question.
 pub use crate::networks::default_networks;
 
-/// Whether this endpoint sends the wallet's reads in the clear to another
-/// machine.
-///
-/// Used by the desktop to put a targeted warning on the confirmation screen.
-/// Loopback is not remote -- local development nodes commonly use plaintext.
-#[must_use]
-pub fn is_remote_plaintext(rpc_url: &url::Url) -> bool {
-    if rpc_url.scheme() != "http" {
-        return false;
-    }
-    !match rpc_url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
-        None => false,
-    }
-}
-
 pub fn validate_config(config: &WalletConfig) -> Result<()> {
     ensure!(config.version == 2, "unsupported configuration version");
     let mut wallet_ids = BTreeSet::new();
@@ -962,22 +934,6 @@ pub fn replace_configured_network(
     networks.retain(|network| network.chain_id != next.chain_id);
     networks.push(next);
     Ok(())
-}
-
-pub fn remove_configured_network(
-    networks: &mut Vec<NetworkConfig>,
-    requested: &str,
-) -> Result<NetworkConfig> {
-    let index = networks
-        .iter()
-        .position(|network| network.name == requested)
-        .or_else(|| {
-            networks
-                .iter()
-                .position(|network| network.aliases.iter().any(|alias| alias == requested))
-        })
-        .with_context(|| format!("unknown network {requested}"))?;
-    Ok(networks.remove(index))
 }
 
 pub(crate) fn create_private_dir(path: &Path) -> Result<()> {

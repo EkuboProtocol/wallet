@@ -156,7 +156,7 @@ fn managed_preview_contains_no_credential() {
             companion: false,
         },
     };
-    assert!(!preview.managed_diff().contains("Authorization"));
+    assert!(!preview.diff.contains("Authorization"));
     assert!(!preview.after.contains("Bearer"));
 }
 

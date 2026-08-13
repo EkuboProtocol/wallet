@@ -17,7 +17,12 @@ fn valid() -> String {
 fn a_well_formed_link_parses() {
     let pairing = PairingUri::parse(&valid(), now()).unwrap();
     assert_eq!(pairing.topic, TOPIC);
-    assert_eq!(pairing.sym_key.to_hex(), SYM_KEY);
+    // SymKey deliberately exposes no bytes and no Debug, so the topic — the
+    // SHA-256 of those bytes — is how a test names the key it expected.
+    assert_eq!(
+        pairing.sym_key.topic(),
+        SymKey::from_hex(SYM_KEY).unwrap().topic()
+    );
     assert_eq!(pairing.relay_protocol, "irn");
     assert!(pairing.expiry.is_none());
 }
@@ -105,12 +110,4 @@ fn something_that_is_not_a_pairing_link_is_told_where_to_find_one() {
             "{message}"
         );
     }
-}
-
-#[test]
-fn the_paste_guard_only_admits_wc_links() {
-    assert!(looks_like_pairing_uri("wc:abc@2"));
-    assert!(looks_like_pairing_uri("   wc:abc@2  "));
-    assert!(!looks_like_pairing_uri("https://example.com"));
-    assert!(!looks_like_pairing_uri(""));
 }
