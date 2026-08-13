@@ -32,7 +32,7 @@ fn embed_windows_resources() {
         format!("VERSION_MAJOR={}", env!("CARGO_PKG_VERSION_MAJOR")),
         format!("VERSION_MINOR={}", env!("CARGO_PKG_VERSION_MINOR")),
         format!("VERSION_PATCH={}", env!("CARGO_PKG_VERSION_PATCH")),
-        format!(r#"VERSION_STRING=\"{}\""#, env!("CARGO_PKG_VERSION")),
+        format!(r#"VERSION_STRING="{}""#, env!("CARGO_PKG_VERSION")),
     ];
     embed_resource::compile_for("assets/windows/app.rc", ["ekubo-wallet"], &macros)
         .manifest_required()

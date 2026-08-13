@@ -86,3 +86,13 @@ fn gpui_revisions_and_desktop_database_identity_are_pinned() {
     assert!(store.contains("org.ekubo.wallet.db"));
     assert!(store.contains("wallet.db"));
 }
+
+#[test]
+fn windows_resource_version_macro_is_rc_compatible() {
+    let build_script = fs::read_to_string(root().join("build.rs")).unwrap();
+    assert!(build_script.contains("format!(r#\"VERSION_STRING=\"{}\"\"#"));
+    assert!(
+        !build_script.contains("VERSION_STRING=\\\""),
+        "RC.EXE receives macro arguments directly; escaped quotes become literal backslashes"
+    );
+}
