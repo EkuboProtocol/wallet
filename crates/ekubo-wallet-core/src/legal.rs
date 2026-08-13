@@ -37,7 +37,7 @@ pub const APPLICATION_LICENSE: &str = include_str!("../../../LICENSE");
 pub const TERMS_OF_SERVICE: &str = "\
 # Ekubo Wallet Terms of Service
 
-Version 3 — Effective 2026-08-10
+Version 4 — Effective 2026-08-13
 
 These terms are an agreement between you and Ekubo, Inc. (the
 \"developer\"). By accepting them you agree to all of the following before
@@ -51,8 +51,8 @@ machine and stay in your operating system's credential store. The developer
 operates no servers for this software and never has access to your keys or
 funds.
 
-The Connections → WalletConnect screen additionally speaks the WalletConnect
-protocol to a dapp you choose, through a relay operated by a third party — by default
+The WalletConnect feature additionally speaks the WalletConnect protocol to a
+dapp you choose, through a relay operated by a third party — by default
 `wss://relay.walletconnect.org`. Neither the relay nor the dapp is operated
 by, endorsed by, or under the control of the developer, and this software's
 use of the WalletConnect protocol implies no relationship with, or approval
@@ -141,7 +141,7 @@ them again before signing resumes.
 const PRIVACY_POLICY_PREAMBLE: &str = "\
 # Ekubo Wallet Privacy Policy
 
-Version 4 — Effective 2026-08-11
+Version 5 — Effective 2026-08-13
 
 This policy of Ekubo, Inc. (the \"developer\") must be acknowledged
 separately from the terms of service.
@@ -164,11 +164,11 @@ developer's control. The developer is not responsible for data those
 endpoints collect.
 
 Apart from these RPC endpoints, the referenced-artifact fetches described in
-section 4, the WalletConnect relay described in section 5, and the release
-check described in section 6, this software makes no network requests. If you
-add or replace a network, requests for that network go to the endpoints you
-configure. The complete network configuration, including RPC URLs, is
-owner-controlled and stored in the encrypted local database. A fresh
+section 4, the WalletConnect relay described in section 5, and the release and
+update activity described in section 6, this software makes no network
+requests. If you add or replace a network, requests for that network go to the
+endpoints you configure. The complete network configuration, including RPC
+URLs, is owner-controlled and stored in the encrypted local database. A fresh
 installation starts with bundled settings that you can inspect and replace in
 Networks. A disabled network sends no RPC requests until you enable it.
 
@@ -195,9 +195,9 @@ other tool — hands the wallet an execution plan, or a bundle of read-only
 calls, as a reference rather than as inline text: a URL where the exact body
 is stored, plus a digest of those bytes. When you or your agent passes such a
 reference to a wallet tool, this process fetches the body from that URL
-itself. Apart from the WalletConnect relay in section 5 and the release check
-in section 6, these fetches are the only network requests this software makes
-that do not go to a configured RPC endpoint.
+itself. Apart from the WalletConnect relay in section 5 and the release and
+update activity in section 6, these fetches are the only network requests this
+software makes that do not go to a configured RPC endpoint.
 
 The request is an unauthenticated HTTPS GET for exactly the URL given. It
 carries no wallet address, key, credential, cookie, policy, or other data of
@@ -222,7 +222,7 @@ fetches over the network.
 
 ## 5. The WalletConnect relay
 
-The Connections → WalletConnect screen pairs this wallet with a dapp over the
+The WalletConnect feature pairs this wallet with a dapp over the
 WalletConnect protocol. While a session is connected — and only then — this software holds
 an open websocket to a WalletConnect relay, by default
 `wss://relay.walletconnect.org`, operated by an independent third party
@@ -251,20 +251,25 @@ developer is not responsible for data the relay operator or the dapp collects.
 Having no connected session means this software opens no relay connection at
 all.
 
-## 6. The release check
+## 6. Release checks and software updates
 
-To tell you when the copy you are running is out of date, this software asks
-GitHub which release is newest. It sends an unauthenticated HTTPS GET to
+To tell you when the copy you are running is out of date, this software sends
+an unauthenticated HTTPS GET to
 `https://api.github.com/repos/EkuboProtocol/wallet/releases/latest`,
-which is the same listing the installer reads, and uses only the version tag
-in the answer. Nothing of yours is sent: no wallet address, key, credential,
-cookie, balance, policy, or transaction, and no identifier of your machine or
-your installation. The request carries a user agent naming this software and
-its version, which every copy of a given release shares.
+and uses only the version tag in the answer. Signed builds can additionally
+read update metadata from
+`https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json`
+after that version check reports a newer release. The metadata names the
+platform artifact and carries its signature. Nothing of yours is sent: no
+wallet address, key, credential, cookie, balance, policy, or transaction, and
+no identifier of your machine or your installation. The requests carry a user
+agent naming this software and its version, which every copy of a given
+release shares.
 
-The check runs when you open or refresh the Updates screen and when an agent
-calls the `wallet_check_for_updates` tool. The release-listing answer used by the
-read-only MCP tool is cached in your wallet data directory for a day.
+The check runs when you open or refresh the desktop's software-update controls
+and when an agent calls the `wallet_check_for_updates` tool. The release-listing
+answer used by the read-only MCP tool is cached in your wallet data directory
+for a day.
 Setting `EKUBO_WALLET_SKIP_UPDATE_CHECK=1` disables the check entirely, and
 nothing else about the software changes when you do.
 
@@ -273,9 +278,11 @@ observe your IP address and the time of the request, and may log or retain
 that under its own policy. The developer receives nothing from this check and
 operates no service involved in it.
 
-The application has no self-update capability. The Updates screen reports the
-latest published version and opens the wallet's GitHub Releases page in your
-browser; downloading and installing a release is outside this application.
+Only after you explicitly confirm installation does the application download
+the platform artifact. It verifies that artifact with the update public key
+compiled into the running application before shutting down, installing it,
+and relaunching. Package formats without in-place update support use the
+GitHub Releases page instead.
 
 ## 7. Data exposed through agents and tooling
 
@@ -524,7 +531,7 @@ pub fn require_status_allows_use(status: &LegalStatus) -> Result<()> {
         "this wallet is disabled until the user accepts the current Terms of Service and Privacy \
          Policy. The user must run the Legal screen in the desktop application (never run \
          it for them). The documents can be read first with the wallet_get_legal tool or the \
-         Legal & Version screen."
+         Settings screen."
     );
     Ok(())
 }

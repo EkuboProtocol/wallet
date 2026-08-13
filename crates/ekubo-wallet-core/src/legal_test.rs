@@ -61,8 +61,8 @@ fn privacy_policy_discloses_the_walletconnect_relay() {
     // Section 2's "nothing else leaves this machine" claim has to account for
     // it, or the disclosure contradicts the section that promises exhaustion.
     assert!(policy.contains(
-        "the WalletConnect relay described in section 5, and the release\ncheck described in \
-section 6, this software makes no network requests."
+        "the WalletConnect relay described in section 5, and the release and\nupdate activity \
+described in section 6, this software makes no network\nrequests."
     ));
 }
 
@@ -72,19 +72,27 @@ section 6, this software makes no network requests."
 /// triggers a request, say nothing of the owner's is sent, and say it can be
 /// turned off.
 #[test]
-fn privacy_policy_discloses_the_release_check() {
+fn privacy_policy_discloses_release_checks_and_updates() {
     let policy = privacy_policy();
-    assert!(policy.contains("## 6. The release check"));
+    assert!(policy.contains("## 6. Release checks and software updates"));
     assert!(policy.contains("https://api.github.com/repos/EkuboProtocol/wallet/releases/latest"));
+    assert!(
+        policy.contains(
+            "https://github.com/EkuboProtocol/wallet/releases/latest/download/latest.json"
+        )
+    );
     assert!(policy.contains("EKUBO_WALLET_SKIP_UPDATE_CHECK=1"));
     // What triggers it, because "when you run a command" is the difference
     // between this and the background telemetry section 1 promises is absent.
-    assert!(policy.contains("The application has no self-update capability."));
+    assert!(policy.contains("Only after you explicitly confirm installation"));
+    assert!(policy.contains("update public key"));
+    assert!(policy.contains("compiled into the running application"));
     assert!(policy.contains("GitHub Releases page"));
     // Section 4's exhaustive claim has to account for it too, not just
     // section 2's.
     assert!(policy.contains(
-        "Apart from the WalletConnect relay in section 5 and the release check\nin section 6,"
+        "Apart from the WalletConnect relay in section 5 and the release and\nupdate activity in \
+section 6,"
     ));
 }
 
