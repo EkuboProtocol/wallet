@@ -19,7 +19,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-15, windows-2025]
+        include:
+          # GPUI makes each desktop test binary large. Linking several of them
+          # concurrently can exhaust the Linux hosted runner and crash
+          # rust-lld with SIGBUS, so keep link concurrency deliberately low.
+          - runner: ubuntu-24.04
+            test_jobs: 2
+          - runner: macos-15
+            test_jobs: 4
+          - runner: windows-2025
+            test_jobs: 2
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Check out source
@@ -50,7 +59,7 @@ jobs:
         # frames overflow that thread's smaller default stack.
         env:
           RUST_MIN_STACK: 67108864
-        run: cargo test --locked --workspace --all-features
+        run: cargo test --locked --workspace --all-features --jobs ${{ matrix.test_jobs }}
 
   lint:
     name: Formatting and lints
