@@ -707,12 +707,22 @@ fn about_row(
     title: &'static str,
     detail: Option<(SharedString, gpui::Hsla)>,
     action: impl IntoElement,
+    ruled: bool,
+    cx: &App,
 ) -> gpui::Div {
     h_flex()
         .w_full()
         .items_center()
         .justify_between()
         .gap_4()
+        // Each row is a name, a fact about it, and one control, and the
+        // control sits a column away from the name. A rule between rows is
+        // what keeps the pairing obvious without asking the eye to track
+        // across a gap. The last row has none: the copyright line below it is
+        // not another row.
+        .when(ruled, |row| {
+            row.pb_2().border_b_1().border_color(cx.theme().border)
+        })
         .child(
             div()
                 .min_w_0()
@@ -9941,6 +9951,8 @@ impl WalletWindow {
                 "Ekubo Wallet",
                 Some((version.clone().into(), cx.theme().muted_foreground)),
                 copy_button("copy-version", version, "Copy version"),
+                true,
+                cx,
             ));
         let panel = match self.cached_legal_status() {
             Ok(status) => panel
@@ -9952,6 +9964,8 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::TermsOfService, cx);
                         })),
+                    true,
+                    cx,
                 ))
                 .child(about_row(
                     "Privacy Policy",
@@ -9961,6 +9975,8 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
                         })),
+                    true,
+                    cx,
                 )),
             // Only the two documents that carry an acceptance state depend on
             // this; the license rows below open a bundled file either way.
@@ -9973,12 +9989,21 @@ impl WalletWindow {
             panel
                 .child(about_row(
                     "Application License",
-                    None,
+                    // The identifier, under the name, because "Application
+                    // License" says a licence exists and not which one. It is
+                    // read from the manifest, so it cannot drift from what the
+                    // crate is actually published under.
+                    Some((
+                        env!("CARGO_PKG_LICENSE").into(),
+                        cx.theme().muted_foreground,
+                    )),
                     app_button("review-license")
                         .label("View")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ApplicationLicense, cx);
                         })),
+                    true,
+                    cx,
                 ))
                 .child(about_row(
                     "Third-Party Licenses",
@@ -9988,6 +10013,8 @@ impl WalletWindow {
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
                         })),
+                    false,
+                    cx,
                 ))
                 .child(
                     div()
