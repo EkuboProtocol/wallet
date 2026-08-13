@@ -7786,43 +7786,48 @@ impl WalletWindow {
                     }
                     Some(ActivityInspectionState::Ready(inspection)) => {
                         let document = &inspection.document;
-                        detail =
-                            detail
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap_2()
-                                        .when_some(
-                                            item.broadcast_transaction_hash
-                                                .as_ref()
-                                                .or(item.signed_transaction_hash.as_ref())
-                                                .and_then(|hash| {
-                                                    item.chain_id.parse::<u64>().ok().and_then(
-                                                        |chain_id| {
-                                                            self.cached_networks().ok().and_then(
-                                                                |networks| {
-                                                                    block_explorer_transaction_url(
-                                                                        networks, chain_id, hash,
-                                                                    )
-                                                                },
-                                                            )
-                                                        },
-                                                    )
-                                                }),
-                                            |buttons, explorer_url| {
-                                                buttons.child(
-                                                    app_button(SharedString::from(format!(
-                                                        "open-transaction-explorer-{request_id}"
-                                                    )))
-                                                    .label("View on block explorer")
-                                                    .on_click(move |_, _, cx| {
-                                                        cx.open_url(&explorer_url);
-                                                    }),
+                        detail = detail
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .when_some(
+                                        item.broadcast_transaction_hash
+                                            .as_ref()
+                                            .or(item.signed_transaction_hash.as_ref())
+                                            .and_then(|hash| {
+                                                item.chain_id.parse::<u64>().ok().and_then(
+                                                    |chain_id| {
+                                                        self.cached_networks().ok().and_then(
+                                                            |networks| {
+                                                                block_explorer_transaction_url(
+                                                                    networks, chain_id, hash,
+                                                                )
+                                                            },
+                                                        )
+                                                    },
                                                 )
-                                            },
-                                        )
-                                        .child(
+                                            }),
+                                        |buttons, explorer_url| {
+                                            buttons.child(
+                                                app_button(SharedString::from(format!(
+                                                    "open-transaction-explorer-{request_id}"
+                                                )))
+                                                .label("View on block explorer")
+                                                .on_click(move |_, _, cx| {
+                                                    cx.open_url(&explorer_url);
+                                                }),
+                                            )
+                                        },
+                                    )
+                                    // Nothing to look for on a request that
+                                    // was never signed: the button offered
+                                    // to go and check the network for a
+                                    // receipt the wallet had guaranteed
+                                    // would never exist.
+                                    .when(item.status.can_reach_a_chain(), |buttons| {
+                                        buttons.child(
                                             app_button(SharedString::from(format!(
                                                 "refresh-transaction-inspection-{request_id}"
                                             )))
@@ -7834,16 +7839,17 @@ impl WalletWindow {
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 view.load_transaction_inspection(request_id, cx);
                                             })),
-                                        ),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                selectable_text(
+                                    format!("transaction-inspection-summary-{request_id}"),
+                                    &document.request.summary,
                                 )
-                                .child(
-                                    selectable_text(
-                                        format!("transaction-inspection-summary-{request_id}"),
-                                        &document.request.summary,
-                                    )
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_normal(),
-                                );
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_normal(),
+                            );
                         // What moved first, then what was called, then the fee
                         // and the raw lifecycle bookkeeping — the same order a
                         // person asks the questions in.

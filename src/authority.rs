@@ -329,12 +329,18 @@ async fn transaction_inspection_document(
     receipt: Option<&ReceiptDetails>,
     receipt_error: Option<&str>,
 ) -> Result<ReviewDocument> {
+    // A record that never reached a chain has no receipt to be missing, so it
+    // is not told it is waiting for one.
+    let reachable = pending.status.can_reach_a_chain();
     let summary = match receipt {
         Some(receipt) if receipt.succeeded => {
             "This transaction was mined successfully. Receipt-derived asset movements and decoded events are shown before the original calls."
         }
         Some(_) => {
             "This transaction was mined but reverted. No state changes from its calls were committed; the network fee was still paid."
+        }
+        None if !reachable => {
+            "Nothing was signed and nothing was sent, so there is no receipt and never will be. The calls that were asked for are decoded below."
         }
         None => {
             "This lifecycle record has no readable mined receipt yet. The original calls are decoded below so the request remains understandable."
@@ -362,10 +368,15 @@ async fn transaction_inspection_document(
         request = request.fact("Transaction hash", hash);
     }
 
-    request = request.section_kind(
-        ApprovalSectionKind::Effects,
-        "Receipt-derived wallet changes",
-    );
+    // No receipt section at all for a record that cannot have one. It held a
+    // single row reading "Receipt — Not available", under a heading promising
+    // receipt-derived changes, on a request the wallet refused to sign.
+    if reachable {
+        request = request.section_kind(
+            ApprovalSectionKind::Effects,
+            "Receipt-derived wallet changes",
+        );
+    }
     if let Some(receipt) = receipt {
         let presentation = receipt_presentation(wallet, receipt, metadata);
         if receipt.succeeded {
@@ -434,7 +445,7 @@ async fn transaction_inspection_document(
         if !receipt.logs.is_empty() {
             request = request.warning("Standard token events are decoded locally from the receipt. They are useful evidence, but unusual contracts can omit or emit misleading events, so this is not a complete archival state diff.");
         }
-    } else {
+    } else if reachable {
         request = request.fact("Receipt", "Not available");
     }
 

@@ -1277,3 +1277,27 @@ fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
         "a row the lifecycle still needs is never history"
     );
 }
+
+#[test]
+fn only_a_request_that_was_signed_can_ever_have_a_receipt() {
+    // Nothing was signed in either of these, so no chain has heard of them and
+    // none ever will. A receipt section, or an offer to go and look for one,
+    // is a promise that cannot be kept.
+    assert!(!PendingStatus::AwaitingApproval.can_reach_a_chain());
+    assert!(!PendingStatus::Rejected.can_reach_a_chain());
+
+    // Signed but unsent still counts: it can be sent, and then it has one.
+    // Replaced and Cancelled count too — those bytes reached the network even
+    // though something else won the nonce.
+    for status in [
+        PendingStatus::Signed,
+        PendingStatus::Submitting,
+        PendingStatus::Broadcast,
+        PendingStatus::Confirmed,
+        PendingStatus::Reverted,
+        PendingStatus::Cancelled,
+        PendingStatus::Replaced,
+    ] {
+        assert!(status.can_reach_a_chain(), "{status:?} reaches a chain");
+    }
+}

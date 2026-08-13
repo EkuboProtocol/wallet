@@ -90,6 +90,18 @@ impl PendingStatus {
         }
     }
 
+    /// Whether a receipt for this record could ever exist.
+    ///
+    /// A rejected request was never signed and never left this machine, and
+    /// one still waiting for a decision has not been signed either. There is
+    /// nothing on any chain to look up, now or later — so a surface that shows
+    /// a receipt section, or offers to go and look for one, is promising
+    /// something it can never deliver and inviting the reader to wait for it.
+    #[must_use]
+    pub const fn can_reach_a_chain(self) -> bool {
+        !matches!(self, Self::AwaitingApproval | Self::Rejected)
+    }
+
     /// One sentence saying what the state means for the owner, written to
     /// stand on its own without the label beside it.
     #[must_use]
