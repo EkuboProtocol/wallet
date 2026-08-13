@@ -651,6 +651,44 @@ fn settings_section(title: &'static str, content: GroupBox) -> gpui::Div {
     div().w_full().child(content.title(title))
 }
 
+fn untitled_settings_section(content: GroupBox) -> gpui::Div {
+    div().w_full().child(content)
+}
+
+/// One row of the About panel: a name, an optional status line beneath it, and
+/// a single action on the right. Each row used to assemble its own container,
+/// so the buttons did not share a column and the status hung off the name
+/// behind a `·` where a second line reads more easily.
+fn about_row(
+    title: &'static str,
+    detail: Option<(SharedString, gpui::Hsla)>,
+    action: impl IntoElement,
+) -> gpui::Div {
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(selectable_label(title))
+                .when_some(detail, |column, (status, color)| {
+                    column.child(
+                        div()
+                            .text_sm()
+                            .text_color(color)
+                            .child(selectable_label(status)),
+                    )
+                }),
+        )
+        .child(div().flex_none().child(action))
+}
+
 fn scroll_reached_end(offset_y: gpui::Pixels, max_offset_y: gpui::Pixels) -> bool {
     -offset_y >= max_offset_y - px(1.0)
 }
@@ -663,6 +701,20 @@ fn legal_acceptance_label(status: &ekubo_wallet_core::legal::DocumentStatus) -> 
         (true, None) => "Accepted".into(),
         (false, _) => "Review required".into(),
     }
+}
+
+/// The acceptance line under a legal document's name, toned so a document that
+/// still needs a decision is visibly different from one already accepted.
+fn legal_acceptance_detail(
+    status: &ekubo_wallet_core::legal::DocumentStatus,
+    cx: &App,
+) -> (SharedString, gpui::Hsla) {
+    let color = if status.accepted {
+        cx.theme().muted_foreground
+    } else {
+        cx.theme().warning
+    };
+    (legal_acceptance_label(status).into(), color)
 }
 
 fn agent_session_expiry_label(
@@ -9287,9 +9339,14 @@ impl WalletWindow {
                         .flex_col()
                         .gap_2()
                         .child(
+                            // The session's two facts — when it was last used
+                            // and when it expires — read as one stacked block
+                            // on the left, so the Revoke button is the only
+                            // thing on the right and can center against them.
                             h_flex()
                                 .w_full()
                                 .flex_wrap()
+                                .items_center()
                                 .justify_between()
                                 .gap_4()
                                 .child(
@@ -9314,15 +9371,7 @@ impl WalletWindow {
                                                     format!("managed-agent-last-used-{client_id}"),
                                                     &last_used,
                                                 )),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .flex()
-                                        .flex_col()
-                                        .items_end()
-                                        .gap_1()
+                                        )
                                         .child(
                                             div()
                                                 .text_sm()
@@ -9335,20 +9384,22 @@ impl WalletWindow {
                                                     format!("managed-agent-expiry-{client_id}"),
                                                     &expiration,
                                                 )),
-                                        )
-                                        .when(!expired, |actions| {
-                                            actions.child(
-                                                app_button(SharedString::from(format!(
-                                                    "revoke-agent-{client_id}"
-                                                )))
-                                                .label("Revoke")
-                                                .danger()
-                                                .on_click(cx.listener(move |view, _, _, cx| {
-                                                    view.revoke_agent(client_id, cx);
-                                                })),
-                                            )
-                                        }),
-                                ),
+                                        ),
+                                )
+                                .when(!expired, |row| {
+                                    row.child(
+                                        div().flex_none().child(
+                                            app_button(SharedString::from(format!(
+                                                "revoke-agent-{client_id}"
+                                            )))
+                                            .label("Revoke")
+                                            .danger()
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.revoke_agent(client_id, cx);
+                                            })),
+                                        ),
+                                    )
+                                }),
                         ),
                 ),
             );
@@ -9539,8 +9590,10 @@ impl WalletWindow {
                             ),
                     ),
             ))
-            .child(settings_section(
-                "Test networks",
+            // No section heading here: the row's own "Testnet mode" label
+            // already names it, and a "Test networks" title above it just
+            // said the same thing twice.
+            .child(untitled_settings_section(
                 GroupBox::new()
                     .id("testnet-mode-settings")
                     .outline()
@@ -9659,15 +9712,19 @@ impl WalletWindow {
     fn render_accounts(&self, cx: &mut Context<Self>) -> gpui::Div {
         let busy = self.account_operation.is_some();
         let creating = self.account_entry_mode == AccountEntryMode::Create;
+        // Roomier than the account cards below it on purpose: this is the one
+        // card on the page that is a form, and at the list card's `p_4`/`gap_3`
+        // the tab bar, the explanation, the labelled field, and the primary
+        // button were all the same distance apart and read as one dense block.
         let mut form = div()
-            .p_4()
+            .p_5()
             .rounded(cx.theme().radius_lg)
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary)
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_4()
             .child(
                 TabBar::new("account-entry-tabs")
                     .w_full()
@@ -9696,52 +9753,56 @@ impl WalletWindow {
                     })),
             );
         if let Some(input) = &self.account_id_input {
-            form = form
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_medium()
-                                .child(selectable_label("Account name")),
-                        )
-                        .child(
-                            app_input(input, cx)
-                                .aria_label("Account name")
-                                .disabled(busy),
-                        ),
-                )
-                .when_some(self.account_id_error.clone(), |form, error| {
-                    form.child(field_error("account-name-error", error, cx))
-                });
+            // The error belongs to the field, so it lives in the field's own
+            // column. As a sibling of the form it sat the full row gap away
+            // and read as if it belonged to whatever came next.
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child(selectable_label("Account name")),
+                    )
+                    .child(
+                        app_input(input, cx)
+                            .aria_label("Account name")
+                            .disabled(busy),
+                    )
+                    .when_some(self.account_id_error.clone(), |field, error| {
+                        field.child(field_error("account-name-error", error, cx))
+                    }),
+            );
         }
         if !creating && let Some(input) = &self.private_key_input {
-            form = form
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_medium()
-                                .child(selectable_label("Private key")),
-                        )
-                        .child(
-                            app_input(input, cx)
-                                .aria_label("Private key")
-                                .content_type(InputContentType::Password)
-                                .mask_toggle()
-                                .disabled(busy),
-                        ),
-                )
-                .when_some(self.private_key_error.clone(), |form, error| {
-                    form.child(field_error("private-key-error", error, cx))
-                });
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_medium()
+                            .child(selectable_label("Private key")),
+                    )
+                    .child(
+                        // No reveal toggle. A private key that can be unmasked
+                        // is a private key that can be shoulder-surfed or
+                        // caught by a screen recording, and nothing about
+                        // pasting one in needs it visible.
+                        app_input(input, cx)
+                            .aria_label("Private key")
+                            .content_type(InputContentType::Password)
+                            .disabled(busy),
+                    )
+                    .when_some(self.private_key_error.clone(), |field, error| {
+                        field.child(field_error("private-key-error", error, cx))
+                    }),
+            );
         }
         form = form
             .child(
@@ -10885,73 +10946,73 @@ impl WalletWindow {
     }
 
     fn render_legal(&self, cx: &mut Context<Self>) -> gpui::Div {
+        // The version is the one thing here anybody has to reproduce
+        // elsewhere — in a bug report, in a support thread — so it gets a copy
+        // button rather than asking to be retyped from a screenshot.
+        let version = format!("Version {BUILD_VERSION}");
         let panel = GroupBox::new()
             .id("legal-and-version")
             .outline()
             .compact()
-            .child(selectable_label(format!("Version {BUILD_VERSION}")))
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_between()
-                    .child(selectable_label("Copyright © 2026 Ekubo, Inc."))
-                    .child(app_button("review-license").label("View license").on_click(
-                        cx.listener(|view, _, _, cx| {
+            .child(about_row(
+                "Ekubo Wallet",
+                Some((version.clone().into(), cx.theme().muted_foreground)),
+                copy_button("copy-version", version, "Copy version"),
+            ));
+        let panel = match self.cached_legal_status() {
+            Ok(status) => panel
+                .child(about_row(
+                    "Terms of Service",
+                    Some(legal_acceptance_detail(&status.terms_of_service, cx)),
+                    app_button("review-terms")
+                        .label("View")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.open_legal_review(LegalDocument::TermsOfService, cx);
+                        })),
+                ))
+                .child(about_row(
+                    "Privacy Policy",
+                    Some(legal_acceptance_detail(&status.privacy_policy, cx)),
+                    app_button("review-privacy")
+                        .label("View")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
+                        })),
+                )),
+            // Only the two documents that carry an acceptance state depend on
+            // this; the license rows below open a bundled file either way.
+            Err(error) => panel.child(selectable_label(format!(
+                "Legal status unavailable: {error:#}"
+            ))),
+        };
+        settings_section(
+            "About Ekubo Wallet",
+            panel
+                .child(about_row(
+                    "Application License",
+                    None,
+                    app_button("review-license")
+                        .label("View")
+                        .on_click(cx.listener(|view, _, _, cx| {
                             view.open_legal_review(LegalDocument::ApplicationLicense, cx);
-                        }),
-                    )),
-            );
-        let panel =
-            match self.cached_legal_status() {
-                Ok(status) => panel
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(selectable_label(format!(
-                                "Terms of Service · {}",
-                                legal_acceptance_label(&status.terms_of_service)
-                            )))
-                            .child(
-                                app_button("review-terms")
-                                    .label("View")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.open_legal_review(LegalDocument::TermsOfService, cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(selectable_label(format!(
-                                "Privacy Policy · {}",
-                                legal_acceptance_label(&status.privacy_policy)
-                            )))
-                            .child(app_button("review-privacy").label("View").on_click(
-                                cx.listener(|view, _, _, cx| {
-                                    view.open_legal_review(LegalDocument::PrivacyPolicy, cx);
-                                }),
-                            )),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .child(selectable_label("Third-Party Licenses"))
-                            .child(app_button("review-licenses").label("View").on_click(
-                                cx.listener(|view, _, _, cx| {
-                                    view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
-                                }),
-                            )),
-                    ),
-                Err(error) => panel.child(selectable_label(format!(
-                    "Legal status unavailable: {error:#}"
-                ))),
-            };
-        settings_section("About Ekubo Wallet", panel)
+                        })),
+                ))
+                .child(about_row(
+                    "Third-Party Licenses",
+                    None,
+                    app_button("review-licenses")
+                        .label("View")
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.open_legal_review(LegalDocument::ThirdPartyLicenses, cx);
+                        })),
+                ))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(selectable_label("Copyright © 2026 Ekubo, Inc.")),
+                ),
+        )
     }
 
     fn render_walletconnect(&self, cx: &mut Context<Self>) -> gpui::Div {
