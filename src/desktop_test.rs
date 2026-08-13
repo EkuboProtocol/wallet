@@ -234,11 +234,34 @@ fn network_rpc_editor_displays_explicit_commas_and_round_trips_them() {
         native_currency_symbol: "ETH".into(),
         native_currency_decimals: "18".into(),
         block_explorer_url: "https://explorer.example".into(),
+        documentation_url: "https://docs.example".into(),
         ..NetworkEditorDraft::default()
     };
     let (parsed, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
     assert_eq!(errors, NetworkEditorErrors::default());
     assert_eq!(parsed.unwrap().rpc_urls, urls);
+}
+
+#[test]
+fn structured_network_editor_requires_network_metadata() {
+    let draft = NetworkEditorDraft {
+        name: "example".into(),
+        chain_id: "123456".into(),
+        rpc_urls: "https://rpc.example".into(),
+        native_currency_name: "Example Ether".into(),
+        native_currency_symbol: "ETH".into(),
+        native_currency_decimals: "18".into(),
+        block_explorer_url: "https://explorer.example".into(),
+        ..NetworkEditorDraft::default()
+    };
+
+    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+
+    assert!(network.is_none());
+    assert_eq!(
+        errors.documentation_url.as_deref(),
+        Some("Enter the network's documentation URL.")
+    );
 }
 
 #[test]

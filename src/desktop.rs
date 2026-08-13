@@ -2618,6 +2618,9 @@ fn parse_network_editor_draft(
                 Some("Enter an http:// or https:// URL with no query string or fragment.".into());
             None
         });
+    if documentation_url.is_none() && errors.documentation_url.is_none() {
+        errors.documentation_url = Some("Enter the network's documentation URL.".into());
+    }
 
     if errors != NetworkEditorErrors::default() {
         return (None, errors);
@@ -5853,9 +5856,13 @@ impl WalletWindow {
                     return dialog.title("Network").child("Network form unavailable.");
                 };
                 let viewport = window.viewport_size();
-                let dialog_width = (viewport.width - px(32.0)).min(px(760.0));
-                let dialog_height = viewport.height - px(32.0);
-                let form_height = (dialog_height - px(150.0)).max(px(220.0));
+                // Preserve breathing room where possible without ever making
+                // the modal larger than the window that contains it.
+                let horizontal_inset = viewport.width.min(px(32.0));
+                let vertical_inset = viewport.height.min(px(32.0));
+                let dialog_width = (viewport.width - horizontal_inset).min(px(760.0));
+                let dialog_height = viewport.height - vertical_inset;
+                let form_height = (dialog_height - px(150.0)).max(px(0.0));
                 let (busy, editing, form, footer) = {
                     let wallet = entity.read(cx);
                     (
@@ -5873,7 +5880,6 @@ impl WalletWindow {
                     .w(dialog_width)
                     .max_w(dialog_width)
                     .max_h(dialog_height)
-                    .margin_top(px(16.0))
                     .title(if editing {
                         "Edit network"
                     } else {
@@ -10368,7 +10374,7 @@ impl WalletWindow {
                      error: Option<String>,
                      disabled: bool| {
             div()
-                .min_w(px(180.0))
+                .min_w_0()
                 .flex_1()
                 .flex()
                 .flex_col()
@@ -10590,7 +10596,7 @@ impl WalletWindow {
                         false,
                     ))
                     .child(field(
-                        "Documentation URL (optional)",
+                        "Documentation URL",
                         documentation,
                         self.network_editor_errors.documentation_url.clone(),
                         false,
