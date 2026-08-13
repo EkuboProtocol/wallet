@@ -194,14 +194,28 @@ struct RegistrationRequest {
 
 async fn register_client(state: Arc<HttpState>, request: Request) -> Response {
     if !has_media_type(request.headers(), "application/json") {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_metadata",
+            "client registration must use Content-Type: application/json",
+        );
     }
     let Ok(body) = to_bytes(request.into_body(), OAUTH_REQUEST_LIMIT_BYTES).await else {
-        return oauth_error(StatusCode::PAYLOAD_TOO_LARGE, "invalid_client_metadata");
+        return oauth_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_client_metadata",
+            "client registration exceeds the 64 KiB request limit",
+        );
     };
     let registration: RegistrationRequest = match serde_json::from_slice(&body) {
         Ok(registration) => registration,
-        Err(_) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata"),
+        Err(error) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client_metadata",
+                &format!("client registration is not valid JSON metadata: {error}"),
+            );
+        }
     };
     if registration
         .token_endpoint_auth_method
@@ -219,17 +233,28 @@ async fn register_client(state: Arc<HttpState>, request: Request) -> Response {
                 .iter()
                 .any(|value| value == "code"))
     {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_metadata",
+            "this wallet registers only public clients using the authorization_code grant with response_type=code",
+        );
     }
     let raw_registration = serde_json::from_slice::<Value>(&body).ok();
     let kind = infer_agent_kind(&registration.client_name);
-    let Ok(client) = state.owner.register_oauth_client(
+    let client = match state.owner.register_oauth_client(
         &registration.client_name,
         kind,
         &registration.redirect_uris,
         raw_registration.as_ref(),
-    ) else {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_client_metadata");
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client_metadata",
+                &format!("{error:#}"),
+            );
+        }
     };
     let mut response = axum::Json(json!({
         "client_id": client.id.to_string(),
@@ -265,49 +290,87 @@ struct ConsentSelection {
 
 async fn authorize(state: Arc<HttpState>, encoded_query: String) -> Response {
     if encoded_query.len() > OAUTH_REQUEST_LIMIT_BYTES {
-        return oauth_error(StatusCode::URI_TOO_LONG, "invalid_request");
+        return oauth_error(
+            StatusCode::URI_TOO_LONG,
+            "invalid_request",
+            "the authorization request query string is too long",
+        );
     }
     let Ok(selection) = serde_urlencoded::from_str::<ConsentSelection>(&encoded_query) else {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        return authorization_error_page(
+            "This authorization link is malformed",
+            "The query string could not be parsed as form-encoded parameters.",
+        );
     };
     if selection.consent.is_some() || selection.duration.is_some() {
         let (Some(consent), Some(duration)) = (selection.consent, selection.duration) else {
-            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+            return authorization_error_page(
+                "This consent link is incomplete",
+                "A consent choice must carry both the consent token and the session duration.",
+            );
         };
         let Ok(session_preset) = OAuthSessionPreset::parse_query_value(&duration) else {
-            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+            return authorization_error_page(
+                "This consent link is not valid",
+                "The requested session duration is not one this wallet offers.",
+            );
         };
         let pending = {
             let Ok(mut pending) = state.pending_consents.lock() else {
-                return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+                return oauth_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "temporarily_unavailable",
+                    "the consent store is unavailable",
+                );
             };
             pending.retain(|_, consent| consent.created_at.elapsed() < CONSENT_TTL);
             pending.remove(&consent)
         };
         let Some(pending) = pending else {
-            return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+            return authorization_error_page(
+                "This consent choice is no longer available",
+                "Each consent link may be used once, expires five minutes after the page is shown, and does not survive a wallet restart. Start the connection again from your agent.",
+            );
         };
         return finish_authorization(state, pending.request, session_preset).await;
     }
     let query: AuthorizationRequest = match serde_urlencoded::from_str(&encoded_query) {
         Ok(query) => query,
-        Err(_) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request"),
+        Err(error) => {
+            return authorization_error_page(
+                "This authorization request is incomplete",
+                &format!("The request is missing a required OAuth parameter: {error}."),
+            );
+        }
     };
     if query.response_type != "code" || query.code_challenge_method != "S256" {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        return authorization_error_page(
+            "This authorization request is not supported",
+            "The wallet only issues authorization codes with an S256 PKCE challenge.",
+        );
     }
     let scope = query.scope.clone().unwrap_or_else(|| MCP_SCOPE.to_owned());
-    let Ok(client) = state.owner.validate_oauth_authorization_request(
+    let client = match state.owner.validate_oauth_authorization_request(
         query.client_id,
         &query.redirect_uri,
         &query.code_challenge,
         &scope,
         &query.resource,
-    ) else {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            return authorization_error_page(
+                "This wallet cannot authorize that request",
+                &format!("{error:#}."),
+            );
+        }
     };
     let Ok(consent) = create_pending_consent(&state, query) else {
-        return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+        return oauth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily_unavailable",
+            "too many authorization requests are awaiting consent",
+        );
     };
     consent_page(&client.display_name, &scope, &consent)
 }
@@ -318,7 +381,10 @@ async fn finish_authorization(
     session_preset: OAuthSessionPreset,
 ) -> Response {
     let Ok(mut redirect) = url::Url::parse(&query.redirect_uri) else {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        return authorization_error_page(
+            "This authorization request is not valid",
+            "The agent's redirect URI could not be parsed.",
+        );
     };
     let scope = query.scope.as_deref().unwrap_or(MCP_SCOPE);
     let result = state
@@ -401,12 +467,21 @@ fn consent_page(client_name: &str, scope: &str, consent: &str) -> Response {
         .expect("writing OAuth consent HTML to a string cannot fail");
     }
     let body = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Authorize Ekubo Wallet</title><style>:root{{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}}main{{width:min(32rem,calc(100% - 2rem));padding:2rem;border:1px solid GrayText;border-radius:1rem;box-sizing:border-box}}h1{{font-size:1.35rem;margin:0 0 1rem}}p{{line-height:1.5}}code{{font-family:ui-monospace,monospace}}.choices{{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;margin-top:1.5rem}}.choice{{min-height:3rem;padding:.8rem .5rem;display:flex;align-items:center;justify-content:center;box-sizing:border-box;text-align:center;text-decoration:none;border:1px solid LinkText;border-radius:.6rem;color:LinkText;font-weight:600;line-height:1.25}}.choice:focus,.choice:hover{{outline:2px solid LinkText;outline-offset:2px}}small{{display:block;margin-top:1.25rem;color:GrayText;line-height:1.4}}@media(max-width:28rem){{.choices{{grid-template-columns:1fr}}}}</style></head><body><main><h1>Authorize {}</h1><p><strong>{}</strong> is requesting <code>{}</code> access to this wallet.</p><p>Choose an access-token lifetime and the absolute refresh-session deadline. Shorter access tokens reduce the value of a leaked bearer token; the client can reuse its refresh credential until the paired deadline.</p><div class=\"choices\">{buttons}</div><small>Each choice is shown as access / refresh. Your agent harness is responsible for protecting both credentials; either can authorize wallet operations while valid. The wallet will ask for operating-system authentication after you choose, and revocation in Settings immediately invalidates both.</small></main></body></html>",
+        "<h1>Authorize {}</h1><p><strong>{}</strong> is requesting <code>{}</code> access to this wallet.</p><p>Choose an access-token lifetime and the absolute refresh-session deadline. Shorter access tokens reduce the value of a leaked bearer token; the client can reuse its refresh credential until the paired deadline.</p><div class=\"choices\">{buttons}</div><small>Each choice is shown as access / refresh. Your agent harness is responsible for protecting both credentials; either can authorize wallet operations while valid. The wallet will ask for operating-system authentication after you choose, and revocation in Settings immediately invalidates both.</small>",
         escape_html(client_name),
         escape_html(client_name),
         escape_html(scope),
     );
+    browser_page(StatusCode::OK, &body)
+}
+
+/// The shared shell for every page the owner sees at `/authorize`.
+fn browser_page(status: StatusCode, main: &str) -> Response {
+    let body = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Authorize Ekubo Wallet</title><style>:root{{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}}body{{margin:0;min-height:100vh;display:grid;place-items:center;background:Canvas;color:CanvasText}}main{{width:min(32rem,calc(100% - 2rem));padding:2rem;border:1px solid GrayText;border-radius:1rem;box-sizing:border-box}}h1{{font-size:1.35rem;margin:0 0 1rem}}p{{line-height:1.5}}code{{font-family:ui-monospace,monospace}}.choices{{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;margin-top:1.5rem}}.choice{{min-height:3rem;padding:.8rem .5rem;display:flex;align-items:center;justify-content:center;box-sizing:border-box;text-align:center;text-decoration:none;border:1px solid LinkText;border-radius:.6rem;color:LinkText;font-weight:600;line-height:1.25}}.choice:focus,.choice:hover{{outline:2px solid LinkText;outline-offset:2px}}small{{display:block;margin-top:1.25rem;color:GrayText;line-height:1.4}}@media(max-width:28rem){{.choices{{grid-template-columns:1fr}}}}</style></head><body><main>{main}</main></body></html>"
+    );
     let mut response = Html(body).into_response();
+    *response.status_mut() = status;
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
@@ -445,14 +520,28 @@ struct TokenRequest {
 
 async fn token(state: Arc<HttpState>, request: Request) -> Response {
     if !has_media_type(request.headers(), "application/x-www-form-urlencoded") {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_request");
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "the token request must use Content-Type: application/x-www-form-urlencoded",
+        );
     }
     let Ok(body) = to_bytes(request.into_body(), OAUTH_REQUEST_LIMIT_BYTES).await else {
-        return oauth_error(StatusCode::PAYLOAD_TOO_LARGE, "invalid_request");
+        return oauth_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request",
+            "the token request exceeds the 64 KiB request limit",
+        );
     };
     let request: TokenRequest = match serde_urlencoded::from_bytes(&body) {
         Ok(request) => request,
-        Err(_) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request"),
+        Err(error) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                &format!("the token request is missing a required parameter: {error}"),
+            );
+        }
     };
     let result = match request.grant_type.as_str() {
         "authorization_code" => match (
@@ -469,7 +558,13 @@ async fn token(state: Arc<HttpState>, request: Request) -> Response {
                     &request.resource,
                 )
             }
-            _ => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request"),
+            _ => {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "the authorization_code grant requires code, redirect_uri, and code_verifier",
+                );
+            }
         },
         "refresh_token" => match request.refresh_token.as_deref() {
             Some(refresh_token) => {
@@ -477,13 +572,29 @@ async fn token(state: Arc<HttpState>, request: Request) -> Response {
                     .owner
                     .refresh_oauth_token(refresh_token, request.client_id, &request.resource)
             }
-            None => return oauth_error(StatusCode::BAD_REQUEST, "invalid_request"),
+            None => {
+                return oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "the refresh_token grant requires refresh_token",
+                );
+            }
         },
-        _ => return oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+        _ => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_grant_type",
+                "the wallet supports only the authorization_code and refresh_token grants",
+            );
+        }
     };
     match result {
         Ok(pair) => token_response(&pair),
-        Err(_) => oauth_error(StatusCode::BAD_REQUEST, "invalid_grant"),
+        Err(error) => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            &format!("{error:#}"),
+        ),
     }
 }
 
@@ -626,13 +737,33 @@ fn unauthorized_response() -> Response {
     response
 }
 
-fn oauth_error(status: StatusCode, code: &str) -> Response {
-    let mut response = axum::Json(json!({"error": code})).into_response();
+/// Machine-facing OAuth failure. Every rejection carries an
+/// `error_description` and a log line: without one, each distinct cause
+/// collapses into the same opaque `{"error":"invalid_request"}` and neither
+/// the agent nor the owner can tell a malformed request from a stale
+/// registration.
+fn oauth_error(status: StatusCode, code: &str, description: &str) -> Response {
+    tracing::warn!(error = code, description, "rejected an OAuth request");
+    let mut response =
+        axum::Json(json!({"error": code, "error_description": description})).into_response();
     *response.status_mut() = status;
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+/// Browser-facing authorization failure. The owner reaches `/authorize` in a
+/// browser and the agent only ever sees its callback, so a JSON body here is
+/// read by a person and has to tell them what to do next.
+fn authorization_error_page(headline: &str, reason: &str) -> Response {
+    tracing::warn!(headline, reason, "rejected an OAuth authorization request");
+    let body = format!(
+        "<h1>{}</h1><p>{}</p><p>If your agent was connected before, its saved registration for this wallet is no longer valid. Clear the stored authentication for this server in the agent and connect again — in Claude Code that is <code>/mcp</code>, then the <code>ekubo-wallet</code> entry, then clear authentication. The agent then registers afresh and this page will ask for your consent.</p><small>Nothing was authorized and no credential was issued.</small>",
+        escape_html(headline),
+        escape_html(reason),
+    );
+    browser_page(StatusCode::BAD_REQUEST, &body)
 }
 
 fn infer_agent_kind(name: &str) -> AgentKind {

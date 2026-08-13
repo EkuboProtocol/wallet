@@ -149,6 +149,55 @@ fn unauthorized_challenge_points_to_protected_resource_metadata() {
     assert!(challenge.contains(MCP_SCOPE));
 }
 
+/// The owner reads `/authorize` in a browser and the agent only ever sees its
+/// own callback, so a rejection here has to name the cause and the recovery.
+/// An opaque `{"error":"invalid_request"}` left a stale registration
+/// indistinguishable from a malformed request.
+#[tokio::test]
+async fn authorization_failures_explain_themselves_and_escape_the_reason() {
+    let response = authorization_error_page(
+        "This wallet cannot authorize that request",
+        "unknown OAuth client <script>alert(1)</script>",
+    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.headers().get(header::X_FRAME_OPTIONS).unwrap(),
+        "DENY"
+    );
+    assert_eq!(
+        response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+
+    let body = to_bytes(response.into_body(), OAUTH_REQUEST_LIMIT_BYTES)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("unknown OAuth client"));
+    assert!(body.contains("/mcp"));
+    assert!(body.contains("clear authentication"));
+    assert!(!body.contains("<script"));
+}
+
+#[tokio::test]
+async fn machine_facing_oauth_errors_carry_a_description() {
+    let response = oauth_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_grant",
+        "unknown or expired authorization code",
+    );
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), OAUTH_REQUEST_LIMIT_BYTES)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"], "invalid_grant");
+    assert_eq!(
+        body["error_description"],
+        "unknown or expired authorization code"
+    );
+}
+
 #[tokio::test]
 async fn oauth_consent_page_has_exact_duration_choices_and_cannot_be_framed() {
     let response = consent_page("Codex <local>", MCP_SCOPE, "opaque-consent");

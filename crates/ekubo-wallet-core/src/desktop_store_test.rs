@@ -64,6 +64,73 @@ fn registration_creates_no_credential_until_owner_authorizes_login() {
     );
 }
 
+/// Agent harnesses persist the `client_id` dynamic registration returned and
+/// never register again, so an aged-out registration is not a stale row — it
+/// is an agent that can never log in again, because `/authorize` rejects the
+/// only `client_id` it has. A never-authorized registration therefore has to
+/// outlive an unrelated registration made long afterwards.
+#[test]
+fn an_abandoned_registration_survives_so_a_cached_client_id_keeps_working() {
+    let mut store = store(37);
+    let abandoned = register(&mut store);
+    store
+        .connection
+        .execute(
+            "UPDATE mcp_clients SET created_at = ?1 WHERE client_id = ?2",
+            params![
+                Millis(Utc::now() - Duration::days(9)),
+                Blob(*abandoned.id.as_bytes())
+            ],
+        )
+        .unwrap();
+
+    let _unrelated = register(&mut store);
+
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER.as_bytes()));
+    assert!(
+        store
+            .validate_oauth_authorization_request(
+                abandoned.id,
+                REDIRECT,
+                &challenge,
+                MCP_SCOPE,
+                MCP_RESOURCE,
+            )
+            .is_ok()
+    );
+}
+
+/// The registration table is still bounded; pruning is what pressure buys.
+#[test]
+fn registration_prunes_only_under_pressure_and_stays_capped() {
+    let mut store = store(38);
+    for _ in 0..MAX_OAUTH_CLIENTS {
+        register(&mut store);
+    }
+    assert!(register_result(&mut store).is_err());
+
+    store
+        .connection
+        .execute(
+            "UPDATE mcp_clients SET created_at = ?1",
+            [Millis(
+                Utc::now() - UNAUTHORIZED_CLIENT_RETENTION - Duration::days(1),
+            )],
+        )
+        .unwrap();
+    assert!(register_result(&mut store).is_ok());
+
+    let count: i64 = store
+        .connection
+        .query_row("SELECT count(*) FROM mcp_clients", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+fn register_result(store: &mut DesktopStore) -> Result<McpClient> {
+    store.register_oauth_client("Codex", AgentKind::Codex, &[REDIRECT.to_owned()], None)
+}
+
 #[test]
 fn native_loopback_redirects_allow_ephemeral_ports_and_host_spellings() {
     let mut store = store(41);
