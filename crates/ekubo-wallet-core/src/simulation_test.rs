@@ -275,6 +275,7 @@ async fn live_direct_simulation_uses_eth_simulate_v1() {
     };
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
+        wallet_address: wallet.address,
         policy: crate::core::policy::WalletPolicy::allow_anything(),
         revision: 1,
         updated_at: Utc::now(),
@@ -305,6 +306,7 @@ async fn live_batch_simulation_executes_canonical_calibur() {
     };
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
+        wallet_address: wallet.address,
         policy: crate::core::policy::WalletPolicy::allow_anything(),
         revision: 1,
         updated_at: Utc::now(),
@@ -358,6 +360,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
     );
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
+        wallet_address: wallet.address,
         policy: wallet_policy,
         revision: 1,
         updated_at: Utc::now(),
@@ -404,6 +407,7 @@ fn a_failed_batch_says_the_delegation_was_never_observed() {
     };
     let policy = StoredPolicy {
         wallet_id: wallet.id.clone(),
+        wallet_address: wallet.address,
         policy: crate::core::policy::WalletPolicy::allow_anything(),
         revision: 1,
         updated_at: Utc::now(),

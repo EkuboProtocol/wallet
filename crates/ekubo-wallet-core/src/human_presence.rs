@@ -8,6 +8,7 @@ const OWNER_AUTHORIZATION_LIFETIME: Duration = Duration::from_mins(2);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerAuthorizationScope {
     AgentAccess,
+    PolicySettings,
     NetworkSettings,
     NotificationPrivacy,
     TokenMetadata,
@@ -202,6 +203,9 @@ impl PresenceRequest {
             Self::ChangeProtectedSettings { scope } => match scope {
                 OwnerAuthorizationScope::AgentAccess => {
                     "change which local agents can access the wallet".into()
+                }
+                OwnerAuthorizationScope::PolicySettings => {
+                    "widen automatic signing policy permissions".into()
                 }
                 OwnerAuthorizationScope::NetworkSettings => {
                     "change the wallet's trusted network configuration".into()

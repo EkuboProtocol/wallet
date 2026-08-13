@@ -95,8 +95,9 @@ fn half_provisioned(with_policy: bool) -> HalfProvisioned {
     let mut policies = PolicyStore::open(&directory.path().join("policies.db"), &KEY).unwrap();
     if with_policy {
         policies
-            .put(
+            .put_for_wallet(
                 "primary",
+                wallet.address,
                 &WalletPolicy::require_approval_for_everything(),
                 None,
             )
@@ -117,7 +118,7 @@ fn a_wallet_with_no_policy_is_not_provisioned() {
     let missing = half_provisioned(false);
     let error = format!(
         "{:#}",
-        require_provisioned_wallet(&missing.policies, "primary").unwrap_err()
+        require_provisioned_wallet(&missing.policies, &missing.wallet).unwrap_err()
     );
     assert!(error.contains("has no policy"), "{error}");
     assert!(
@@ -126,7 +127,7 @@ fn a_wallet_with_no_policy_is_not_provisioned() {
     );
 
     let present = half_provisioned(true);
-    require_provisioned_wallet(&present.policies, "primary")
+    require_provisioned_wallet(&present.policies, &present.wallet)
         .expect("a provisioned wallet signs as it always did");
 }
 

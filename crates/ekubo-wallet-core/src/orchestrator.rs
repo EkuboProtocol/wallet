@@ -41,7 +41,7 @@ use crate::{
     typed_data::{PendingTypedData, TypedDataStatus, TypedDataStore},
 };
 use alloy::{primitives::B256, signers::SignerSync as _};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use num_bigint::BigUint;
 use std::{
     str::FromStr,
@@ -191,6 +191,10 @@ pub async fn execute_automatic(
     simulation: &SimulationResult,
 ) -> Result<SendDisposition> {
     validate_send(wallet, network, plan, simulation)?;
+    ensure!(
+        stored_policy.wallet_id == wallet.id && stored_policy.wallet_address == wallet.address,
+        "the policy used for this decision belongs to a different wallet identity"
+    );
 
     // Rejected outright: nothing signs and nothing queues. Creating a pending
     // row here would offer the user an approval prompt for something their own
@@ -223,6 +227,13 @@ pub async fn execute_automatic(
     let in_flight = lock(pending)?.in_flight(&wallet.id, &network.chain_id.to_string())?;
     if let Some(previous) = in_flight {
         crate::reconcile::reconcile_record(pending, network, previous, true).await?;
+    }
+    if let Some(blocker) = lock(pending)?.in_flight(&wallet.id, &network.chain_id.to_string())? {
+        bail!(
+            "transaction {} still holds this wallet and chain's signing slot while its outcome reaches {} confirmations",
+            blocker.request_id,
+            network.finality_confirmations
+        );
     }
 
     let signed = sign_execution(
@@ -319,6 +330,13 @@ pub async fn approve_transaction(
     let in_flight = lock(&pending)?.in_flight(&wallet.id, &request.chain_id)?;
     if let Some(previous) = in_flight {
         crate::reconcile::reconcile_record(&pending, &network, previous, true).await?;
+    }
+    if let Some(blocker) = lock(&pending)?.in_flight(&wallet.id, &request.chain_id)? {
+        bail!(
+            "transaction {} still holds this wallet and chain's signing slot while its outcome reaches {} confirmations",
+            blocker.request_id,
+            network.finality_confirmations
+        );
     }
 
     let policy_context = crate::core::predicate::PolicyContext {
@@ -832,12 +850,18 @@ async fn transaction_approval_request(
 /// separate question from what a policy *says*: this asks only whether the
 /// wallet was ever finished. A wallet is either provisioned or it is not, and
 /// nothing it holds may be signed until it is.
-fn require_provisioned_wallet(policies: &PolicyStore, wallet_id: &str) -> Result<()> {
+fn require_provisioned_wallet(
+    policies: &PolicyStore,
+    wallet: &crate::config::WalletMetadata,
+) -> Result<()> {
     ensure!(
-        policies.get(wallet_id)?.is_some(),
-        "wallet {wallet_id} has no policy, so nothing it holds can be signed. It was created or \
+        policies
+            .get_for_wallet(&wallet.id, wallet.address)?
+            .is_some(),
+        "wallet {} has no policy bound to its current address, so nothing it holds can be signed. It was created or \
          imported while policy initialization failed. Open Accounts in the wallet application to \
-         install a require-approval policy or remove wallet {wallet_id}."
+         install a require-approval policy or remove that wallet.",
+        wallet.id
     );
     Ok(())
 }
@@ -865,7 +889,7 @@ pub async fn sign_reviewed_message(
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
 ) -> Result<PendingMessage> {
-    require_provisioned_wallet(policies, &wallet.id)?;
+    require_provisioned_wallet(policies, wallet)?;
 
     presence
         .confirm(&PresenceRequest::SignMessage {
@@ -876,17 +900,18 @@ pub async fn sign_reviewed_message(
     // Presence can remain open while the owner changes or removes this
     // account's policy in another window. Re-read provisioning after the OS
     // prompt so the signature cannot cross that configuration boundary.
-    require_provisioned_wallet(policies, &wallet.id)?;
+    require_provisioned_wallet(policies, wallet)?;
     let current = store.get(request.request_id)?;
     ensure!(
         current.status == MessageStatus::AwaitingApproval
             && current.digest == request.digest
             && current.message_hex == request.message_hex
-            && current.wallet_id == request.wallet_id,
+            && current.wallet_id == request.wallet_id
+            && current.wallet_address == request.wallet_address,
         "message request changed during approval"
     );
     ensure!(
-        current.wallet_id == wallet.id,
+        current.wallet_id == wallet.id && current.wallet_address == wallet.address,
         "message request belongs to another wallet"
     );
     ensure!(
@@ -920,7 +945,7 @@ pub async fn sign_reviewed_typed_data(
     presence: &dyn HumanPresence,
     keys: &dyn KeyStore,
 ) -> Result<PendingTypedData> {
-    require_provisioned_wallet(policies, &wallet.id)?;
+    require_provisioned_wallet(policies, wallet)?;
 
     presence
         .confirm(&PresenceRequest::SignTypedData {
@@ -928,17 +953,18 @@ pub async fn sign_reviewed_typed_data(
         })
         .await?;
 
-    require_provisioned_wallet(policies, &wallet.id)?;
+    require_provisioned_wallet(policies, wallet)?;
     let current = store.get(request.request_id)?;
     ensure!(
         current.status == TypedDataStatus::AwaitingApproval
             && current.digest == request.digest
             && current.typed_data == request.typed_data
-            && current.wallet_id == request.wallet_id,
+            && current.wallet_id == request.wallet_id
+            && current.wallet_address == request.wallet_address,
         "typed-data request changed during approval"
     );
     ensure!(
-        current.wallet_id == wallet.id,
+        current.wallet_id == wallet.id && current.wallet_address == wallet.address,
         "typed-data request belongs to another wallet"
     );
     ensure!(

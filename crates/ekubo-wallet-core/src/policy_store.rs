@@ -10,19 +10,21 @@ use crate::{
         NetworkConfig, create_private_dir, open_private_file, validate_network, validate_wallet_id,
     },
     core::policy::WalletPolicy,
+    human_presence::{OwnerAuthorization, OwnerAuthorizationScope},
     sql::{Millis, RowExt},
 };
+use alloy::primitives::Address;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use keyring::{Entry, Error as KeyringError};
 use rand::TryRng;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use std::path::Path;
+use std::{path::Path, str::FromStr};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// The first and only encrypted database schema shipped by the desktop wallet.
-const SCHEMA_VERSION: i64 = 1;
+/// The encrypted database schema understood by this build.
+const SCHEMA_VERSION: i64 = 2;
 pub const DATABASE_FILE: &str = "wallet.db";
 const DATABASE_LOCK_FILE: &str = "wallet.lock";
 /// The credential-store entry holding this database's key.
@@ -79,6 +81,7 @@ impl DatabaseKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredPolicy {
     pub wallet_id: String,
+    pub wallet_address: Address,
     pub policy: WalletPolicy,
     pub revision: u64,
     pub updated_at: DateTime<Utc>,
@@ -91,6 +94,7 @@ pub struct StoredPolicy {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PolicyProposal {
     pub wallet_id: String,
+    pub wallet_address: Address,
     pub source_revision: u64,
     pub policy: WalletPolicy,
     /// Agent-authored free text shown to the reviewer; untrusted display data.
@@ -315,6 +319,10 @@ impl PolicyStore {
                 }
                 SCHEMA_VERSION
             }
+            Some(1) => {
+                migrate_v1_to_v2(&connection)?;
+                SCHEMA_VERSION
+            }
             Some(version) => version,
         };
         ensure!(
@@ -353,24 +361,27 @@ impl PolicyStore {
         let row = self
             .connection
             .query_row(
-                "SELECT policy_json, revision, updated_at
+                "SELECT wallet_address, policy_json, revision, updated_at
                  FROM wallet_policies WHERE wallet_id = ?1",
                 [wallet_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.time(2)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.time(3)?,
                     ))
                 },
             )
             .optional()?;
-        row.map(|(json, revision, updated_at)| {
+        row.map(|(wallet_address, json, revision, updated_at)| {
             let revision = u64::try_from(revision).context("stored policy revision is invalid")?;
             let value = serde_json::from_str(&json).context("stored policy is invalid JSON")?;
             let policy = WalletPolicy::parse(value).context("stored policy is invalid")?;
             Ok(StoredPolicy {
                 wallet_id: wallet_id.into(),
+                wallet_address: Address::from_str(&wallet_address)
+                    .context("stored policy wallet identity is invalid")?,
                 policy,
                 revision,
                 updated_at,
@@ -379,17 +390,103 @@ impl PolicyStore {
         .transpose()
     }
 
-    /// Replaces a wallet's policy only when the caller observed the current
-    /// revision. `None` is valid only for the first policy.
+    /// Resolve authority only for the immutable address currently attached to
+    /// a wallet name. A predecessor row is not an active policy for a
+    /// replacement wallet.
+    pub fn get_for_wallet(
+        &self,
+        wallet_id: &str,
+        wallet_address: Address,
+    ) -> Result<Option<StoredPolicy>> {
+        let stored = self.get(wallet_id)?;
+        if let Some(policy) = &stored {
+            ensure!(
+                policy.wallet_address == wallet_address,
+                "policy for wallet {wallet_id} belongs to {} rather than current address {wallet_address}",
+                policy.wallet_address
+            );
+        }
+        Ok(stored)
+    }
+
+    /// Test-only raw policy insertion. Production callers must use
+    /// [`Self::install_policy`], which enforces the authorization direction in
+    /// this crate immediately before committing.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn put(
         &mut self,
         wallet_id: &str,
         policy: &WalletPolicy,
         expected_revision: Option<u64>,
     ) -> Result<StoredPolicy> {
-        let transaction = self.connection.transaction()?;
-        let stored = Self::apply_policy(&transaction, wallet_id, policy, expected_revision)?;
+        self.put_for_wallet(wallet_id, Address::ZERO, policy, expected_revision)
+    }
 
+    /// Test-only identity-aware raw policy insertion.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn put_for_wallet(
+        &mut self,
+        wallet_id: &str,
+        wallet_address: Address,
+        policy: &WalletPolicy,
+        expected_revision: Option<u64>,
+    ) -> Result<StoredPolicy> {
+        let transaction = self.connection.transaction()?;
+        let stored = Self::apply_policy(
+            &transaction,
+            wallet_id,
+            wallet_address,
+            policy,
+            expected_revision,
+        )?;
+
+        transaction.commit()?;
+        Ok(stored)
+    }
+
+    /// Install a policy transition after re-reading the active policy inside
+    /// the write transaction. Tightening is authorization-free; widening or
+    /// an incomparable edit requires a fresh policy-scoped capability.
+    pub fn install_policy(
+        &mut self,
+        wallet_id: &str,
+        wallet_address: Address,
+        policy: &WalletPolicy,
+        expected_revision: Option<u64>,
+        authorization: Option<&OwnerAuthorization>,
+    ) -> Result<StoredPolicy> {
+        let transaction = self.connection.transaction()?;
+        Self::authorize_policy_transition(
+            &transaction,
+            wallet_id,
+            wallet_address,
+            policy,
+            authorization,
+        )?;
+        let stored = Self::apply_policy(
+            &transaction,
+            wallet_id,
+            wallet_address,
+            policy,
+            expected_revision,
+        )?;
+        transaction.commit()?;
+        Ok(stored)
+    }
+
+    /// Initialize a newly created identity with no ability to widen beyond
+    /// the fail-closed baseline. Custody calls this while it holds the wallet
+    /// lifecycle lock; a permissive initial policy must be installed later by
+    /// the authenticated owner path.
+    pub(crate) fn initialize_policy(
+        &mut self,
+        wallet_id: &str,
+        wallet_address: Address,
+        policy: &WalletPolicy,
+    ) -> Result<StoredPolicy> {
+        let transaction = self.connection.transaction()?;
+        Self::authorize_policy_transition(&transaction, wallet_id, wallet_address, policy, None)?;
+        let stored = Self::apply_policy(&transaction, wallet_id, wallet_address, policy, None)?;
         transaction.commit()?;
         Ok(stored)
     }
@@ -411,16 +508,29 @@ impl PolicyStore {
     /// proposal that was reviewed, so consuming it applies what the human saw.
     ///
     /// One transaction, so a proposal is applied exactly when it is consumed.
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn consume_proposal(&mut self, proposal: &PolicyProposal) -> Result<StoredPolicy> {
+        let authorization = OwnerAuthorization::for_test(OwnerAuthorizationScope::PolicySettings);
+        self.apply_proposal(proposal, Some(&authorization))
+    }
+
+    /// Apply the exact reviewed proposal. As with direct installation, core
+    /// decides from the current policy whether authentication is necessary.
+    pub fn apply_proposal(
+        &mut self,
+        proposal: &PolicyProposal,
+        authorization: Option<&OwnerAuthorization>,
+    ) -> Result<StoredPolicy> {
         validate_wallet_id(&proposal.wallet_id)?;
         let policy_json = serde_json::to_string(&proposal.policy)?;
         let transaction = self.connection.transaction()?;
         let consumed = transaction.execute(
             "DELETE FROM policy_proposals
-             WHERE wallet_id = ?1 AND created_at = ?2 AND source_revision = ?3
-               AND policy_json = ?4 AND rationale = ?5",
+             WHERE wallet_id = ?1 AND wallet_address = ?2 AND created_at = ?3
+               AND source_revision = ?4 AND policy_json = ?5 AND rationale = ?6",
             params![
                 proposal.wallet_id,
+                format!("{:#x}", proposal.wallet_address),
                 Millis(proposal.created_at),
                 i64::try_from(proposal.source_revision).context("source revision out of range")?,
                 policy_json,
@@ -432,14 +542,58 @@ impl PolicyStore {
             "the proposal you reviewed was replaced by a newer one; nothing was applied. \
              Run the review again to decide on the current proposal."
         );
+        Self::authorize_policy_transition(
+            &transaction,
+            &proposal.wallet_id,
+            proposal.wallet_address,
+            &proposal.policy,
+            authorization,
+        )?;
         let stored = Self::apply_policy(
             &transaction,
             &proposal.wallet_id,
+            proposal.wallet_address,
             &proposal.policy,
             Some(proposal.source_revision),
         )?;
         transaction.commit()?;
         Ok(stored)
+    }
+
+    fn authorize_policy_transition(
+        transaction: &rusqlite::Transaction<'_>,
+        wallet_id: &str,
+        wallet_address: Address,
+        proposed: &WalletPolicy,
+        authorization: Option<&OwnerAuthorization>,
+    ) -> Result<()> {
+        validate_wallet_id(wallet_id)?;
+        let current_row: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT wallet_address, policy_json FROM wallet_policies WHERE wallet_id = ?1",
+                [wallet_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let current = current_row
+            .map(|(stored_address, json)| {
+                let stored_address = Address::from_str(&stored_address)
+                    .context("stored policy wallet identity is invalid")?;
+                ensure!(
+                    stored_address == wallet_address,
+                    "policy for wallet {wallet_id} belongs to {stored_address} rather than current address {wallet_address}"
+                );
+                let value = serde_json::from_str(&json).context("stored policy is invalid JSON")?;
+                WalletPolicy::parse(value).context("stored policy is invalid")
+            })
+            .transpose()?
+            .unwrap_or_else(WalletPolicy::require_approval_for_everything);
+        if !crate::core::policy::is_tightening(&current, proposed) {
+            authorization
+                .context("this policy change widens or ambiguously changes signing authority")?
+                .require(OwnerAuthorizationScope::PolicySettings)?;
+        }
+        Ok(())
     }
 
     /// The policy write both entry points share, run inside a transaction the
@@ -449,6 +603,7 @@ impl PolicyStore {
     fn apply_policy(
         transaction: &rusqlite::Transaction<'_>,
         wallet_id: &str,
+        wallet_address: Address,
         policy: &WalletPolicy,
         expected_revision: Option<u64>,
     ) -> Result<StoredPolicy> {
@@ -463,20 +618,29 @@ impl PolicyStore {
             "policy document exceeds {MAX_POLICY_BYTES} bytes"
         );
         let updated_at = crate::sql::now();
-        let current: Option<i64> = transaction
+        let current: Option<(i64, String)> = transaction
             .query_row(
-                "SELECT revision FROM wallet_policies WHERE wallet_id = ?1",
+                "SELECT revision, wallet_address FROM wallet_policies WHERE wallet_id = ?1",
                 [wallet_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
+        if let Some((_, stored_address)) = &current {
+            let stored_address = Address::from_str(stored_address)
+                .context("stored policy wallet identity is invalid")?;
+            ensure!(
+                stored_address == wallet_address,
+                "policy for wallet {wallet_id} belongs to {stored_address} rather than current address {wallet_address}"
+            );
+        }
+        let current_revision = current.as_ref().map(|(revision, _)| *revision);
         let expected_revision = expected_revision
             .map(i64::try_from)
             .transpose()
             .context("expected policy revision is too large")?;
         ensure!(
-            current == expected_revision,
-            "policy revision conflict: expected {expected_revision:?}, found {current:?}"
+            current_revision == expected_revision,
+            "policy revision conflict: expected {expected_revision:?}, found {current_revision:?}"
         );
         // Installing where there was no policy clears whatever else the name
         // still holds.
@@ -492,7 +656,7 @@ impl PolicyStore {
         //
         // In the same transaction as the policy write, so the name is either
         // clear or unchanged.
-        if current.is_none() {
+        if current_revision.is_none() {
             for table in [
                 "policy_proposals",
                 "pending_transactions",
@@ -505,24 +669,37 @@ impl PolicyStore {
                 )?;
             }
         }
-        let revision = current.map_or(1, |value| value + 1);
+        let revision = current_revision.map_or(1, |value| value + 1);
         transaction.execute(
-            "INSERT INTO wallet_policies(wallet_id, policy_json, revision, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO wallet_policies(wallet_id, wallet_address, policy_json, revision, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(wallet_id) DO UPDATE SET
+                 wallet_address = excluded.wallet_address,
                  policy_json = excluded.policy_json,
                  revision = excluded.revision,
                  updated_at = excluded.updated_at",
-            params![wallet_id, policy_json, revision, Millis(updated_at)],
+            params![
+                wallet_id,
+                format!("{wallet_address:#x}"),
+                policy_json,
+                revision,
+                Millis(updated_at)
+            ],
         )?;
         transaction.execute(
-            "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?3
-             WHERE wallet_id = ?1 AND policy_revision <> ?2
+            "UPDATE pending_transactions SET status = 'cancelled', updated_at = ?4
+             WHERE wallet_id = ?1 AND wallet_address = ?2 AND policy_revision <> ?3
                AND status IN ('awaiting_approval', 'signed')",
-            params![wallet_id, revision, Millis(updated_at)],
+            params![
+                wallet_id,
+                format!("{wallet_address:#x}"),
+                revision,
+                Millis(updated_at)
+            ],
         )?;
         Ok(StoredPolicy {
             wallet_id: wallet_id.into(),
+            wallet_address,
             policy,
             revision: u64::try_from(revision).expect("positive policy revision"),
             updated_at,
@@ -533,9 +710,10 @@ impl PolicyStore {
     /// insert re-checks that `source_revision` is the active revision inside
     /// the transaction, so a proposal can never be recorded against a policy
     /// the proposer did not read. The latest proposal always prevails.
-    pub fn put_proposal(
+    pub fn put_proposal_for_wallet(
         &mut self,
         wallet_id: &str,
+        wallet_address: Address,
         source_revision: u64,
         policy: &WalletPolicy,
         rationale: &str,
@@ -558,8 +736,9 @@ impl PolicyStore {
         let transaction = self.connection.transaction()?;
         let current: Option<i64> = transaction
             .query_row(
-                "SELECT revision FROM wallet_policies WHERE wallet_id = ?1",
-                [wallet_id],
+                "SELECT revision FROM wallet_policies
+                 WHERE wallet_id = ?1 AND wallet_address = ?2",
+                params![wallet_id, format!("{wallet_address:#x}")],
                 |row| row.get(0),
             )
             .optional()?;
@@ -571,15 +750,17 @@ impl PolicyStore {
         let created_at = crate::sql::now();
         transaction.execute(
             "INSERT INTO policy_proposals(
-                wallet_id, source_revision, policy_json, rationale, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)
+                wallet_id, wallet_address, source_revision, policy_json, rationale, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(wallet_id) DO UPDATE SET
+                 wallet_address = excluded.wallet_address,
                  source_revision = excluded.source_revision,
                  policy_json = excluded.policy_json,
                  rationale = excluded.rationale,
                  created_at = excluded.created_at",
             params![
                 wallet_id,
+                format!("{wallet_address:#x}"),
                 source,
                 policy_json,
                 rationale,
@@ -589,6 +770,7 @@ impl PolicyStore {
         transaction.commit()?;
         Ok(PolicyProposal {
             wallet_id: wallet_id.into(),
+            wallet_address,
             source_revision,
             policy,
             rationale: rationale.into(),
@@ -596,57 +778,83 @@ impl PolicyStore {
         })
     }
 
+    /// Test-only proposal helper for legacy fixtures that do not model a
+    /// custody identity. Production proposals must bind the current address.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn put_proposal(
+        &mut self,
+        wallet_id: &str,
+        source_revision: u64,
+        policy: &WalletPolicy,
+        rationale: &str,
+    ) -> Result<PolicyProposal> {
+        self.put_proposal_for_wallet(wallet_id, Address::ZERO, source_revision, policy, rationale)
+    }
+
     pub fn proposal(&self, wallet_id: &str) -> Result<Option<PolicyProposal>> {
         validate_wallet_id(wallet_id)?;
         self.connection
             .query_row(
-                "SELECT source_revision, policy_json, rationale, created_at
+                "SELECT wallet_address, source_revision, policy_json, rationale, created_at
                  FROM policy_proposals WHERE wallet_id = ?1",
                 [wallet_id],
                 |row| {
                     Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
                         row.get::<_, String>(2)?,
-                        row.time(3)?,
+                        row.get::<_, String>(3)?,
+                        row.time(4)?,
                     ))
                 },
             )
             .optional()?
-            .map(|(source_revision, policy_json, rationale, created_at)| {
-                parse_proposal(
-                    wallet_id,
-                    source_revision,
-                    &policy_json,
-                    rationale,
-                    created_at,
-                )
-            })
+            .map(
+                |(wallet_address, source_revision, policy_json, rationale, created_at)| {
+                    parse_proposal(
+                        wallet_id,
+                        &wallet_address,
+                        source_revision,
+                        &policy_json,
+                        rationale,
+                        created_at,
+                    )
+                },
+            )
             .transpose()
     }
 
     pub fn list_proposals(&self) -> Result<Vec<PolicyProposal>> {
         let mut statement = self.connection.prepare(
-            "SELECT wallet_id, source_revision, policy_json, rationale, created_at
+            "SELECT wallet_id, wallet_address, source_revision, policy_json, rationale, created_at
              FROM policy_proposals ORDER BY wallet_id",
         )?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
-                    row.time(4)?,
+                    row.get::<_, String>(4)?,
+                    row.time(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         rows.into_iter()
             .map(
-                |(wallet_id, source_revision, policy_json, rationale, created_at)| {
+                |(
+                    wallet_id,
+                    wallet_address,
+                    source_revision,
+                    policy_json,
+                    rationale,
+                    created_at,
+                )| {
                     parse_proposal(
                         &wallet_id,
+                        &wallet_address,
                         source_revision,
                         &policy_json,
                         rationale,
@@ -671,10 +879,11 @@ impl PolicyStore {
         let policy_json = serde_json::to_string(&proposal.policy)?;
         let changed = self.connection.execute(
             "DELETE FROM policy_proposals
-             WHERE wallet_id = ?1 AND created_at = ?2 AND source_revision = ?3
-               AND policy_json = ?4 AND rationale = ?5",
+             WHERE wallet_id = ?1 AND wallet_address = ?2 AND created_at = ?3
+               AND source_revision = ?4 AND policy_json = ?5 AND rationale = ?6",
             params![
                 proposal.wallet_id,
+                format!("{:#x}", proposal.wallet_address),
                 Millis(proposal.created_at),
                 i64::try_from(proposal.source_revision).context("source revision out of range")?,
                 policy_json,
@@ -835,7 +1044,12 @@ impl PolicyStore {
             .join(", ");
         let mut statement = self.connection.prepare(&format!(
             "SELECT request_id, chain_id, status FROM pending_transactions
-             WHERE wallet_id = ?1 AND status IN ({placeholders})
+             WHERE wallet_id = ?1 AND (
+                 status IN ({placeholders})
+                 OR (status IN ('confirmed', 'reverted', 'cancelled')
+                     AND settlement_transaction_hash IS NOT NULL
+                     AND finalized_at IS NULL)
+             )
              ORDER BY created_at"
         ))?;
         let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&wallet_id];
@@ -882,6 +1096,7 @@ impl PolicyStore {
 
 fn parse_proposal(
     wallet_id: &str,
+    wallet_address: &str,
     source_revision: i64,
     policy_json: &str,
     rationale: String,
@@ -890,6 +1105,8 @@ fn parse_proposal(
     let value = serde_json::from_str(policy_json).context("stored proposal is invalid JSON")?;
     Ok(PolicyProposal {
         wallet_id: wallet_id.into(),
+        wallet_address: Address::from_str(wallet_address)
+            .context("stored proposal wallet identity is invalid")?,
         source_revision: u64::try_from(source_revision)
             .context("stored proposal revision is invalid")?,
         policy: WalletPolicy::parse(value).context("stored proposal policy is invalid")?,
@@ -929,6 +1146,74 @@ fn schema_version(connection: &Connection) -> Result<Option<i64>> {
         .optional()?;
     let version = version.context("policy database schema_metadata holds no version row")?;
     Ok(Some(version))
+}
+
+/// Upgrade the shipped v1 database without trusting a wallet name as an
+/// identity. Existing rows are bound from the encrypted wallet inventory in
+/// `application_settings`; rows for an identity that no longer exists remain
+/// NULL and every bound read fails closed on them.
+fn migrate_v1_to_v2(connection: &Connection) -> Result<()> {
+    const BIND_FROM_INVENTORY: &str = "(SELECT json_extract(wallet.value, '$.address')
+            FROM application_settings AS settings,
+                 json_each(settings.value_json, '$.wallets') AS wallet
+           WHERE settings.key = 'wallet_configuration'
+             AND json_extract(wallet.value, '$.id') = {table}.wallet_id)";
+    let bind_policy = format!(
+        "UPDATE wallet_policies SET wallet_address = {}",
+        BIND_FROM_INVENTORY.replace("{table}", "wallet_policies")
+    );
+    let bind_transactions = format!(
+        "UPDATE pending_transactions SET wallet_address = {}",
+        BIND_FROM_INVENTORY.replace("{table}", "pending_transactions")
+    );
+    let bind_typed = format!(
+        "UPDATE pending_typed_data SET wallet_address = {}",
+        BIND_FROM_INVENTORY.replace("{table}", "pending_typed_data")
+    );
+    let bind_messages = format!(
+        "UPDATE pending_messages SET wallet_address = {}",
+        BIND_FROM_INVENTORY.replace("{table}", "pending_messages")
+    );
+    let bind_proposals = format!(
+        "UPDATE policy_proposals SET wallet_address = {}",
+        BIND_FROM_INVENTORY.replace("{table}", "policy_proposals")
+    );
+    let record_version = format!("UPDATE schema_metadata SET version = {SCHEMA_VERSION}");
+    run_transaction(
+        connection,
+        &[
+            "ALTER TABLE wallet_policies ADD COLUMN wallet_address TEXT",
+            "ALTER TABLE pending_transactions ADD COLUMN wallet_address TEXT",
+            "ALTER TABLE pending_typed_data ADD COLUMN wallet_address TEXT",
+            "ALTER TABLE pending_messages ADD COLUMN wallet_address TEXT",
+            "ALTER TABLE policy_proposals ADD COLUMN wallet_address TEXT",
+            "ALTER TABLE pending_transactions ADD COLUMN block_hash BLOB
+                 CHECK (block_hash IS NULL OR length(block_hash) = 32)",
+            "ALTER TABLE pending_transactions ADD COLUMN settlement_transaction_hash BLOB
+                 CHECK (settlement_transaction_hash IS NULL
+                     OR length(settlement_transaction_hash) = 32)",
+            "ALTER TABLE pending_transactions ADD COLUMN finalized_at INTEGER",
+            "DROP INDEX pending_transactions_wallet_chain_in_flight",
+            "CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
+                 ON pending_transactions(wallet_id, chain_id)
+                 WHERE status IN ('signed', 'submitting', 'broadcast', 'cancelling')
+                    OR (status IN ('confirmed', 'reverted', 'cancelled')
+                        AND settlement_transaction_hash IS NOT NULL
+                        AND finalized_at IS NULL)",
+            bind_policy.as_str(),
+            bind_transactions.as_str(),
+            bind_typed.as_str(),
+            bind_messages.as_str(),
+            bind_proposals.as_str(),
+            // Old terminal observations have no retained block identity and
+            // cannot safely be rolled back. Preserve them as legacy-final;
+            // every v2 receipt records the information needed to revalidate.
+            "UPDATE pending_transactions SET finalized_at = updated_at
+               WHERE status IN ('confirmed', 'reverted', 'cancelled')
+                 AND block_number IS NOT NULL",
+            record_version.as_str(),
+        ],
+    )
 }
 
 /// Creates the complete current schema in one transaction on an empty
@@ -1006,6 +1291,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
              ) STRICT",
             "CREATE TABLE wallet_policies (
                  wallet_id TEXT PRIMARY KEY NOT NULL,
+                 wallet_address TEXT NOT NULL,
                  policy_json TEXT NOT NULL,
                  revision INTEGER NOT NULL CHECK (revision > 0),
                  updated_at INTEGER NOT NULL
@@ -1021,6 +1307,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             "CREATE TABLE pending_transactions (
                  request_id BLOB PRIMARY KEY NOT NULL CHECK (length(request_id) = 16),
                  wallet_id TEXT NOT NULL,
+                 wallet_address TEXT NOT NULL,
                  network_name TEXT NOT NULL,
                  chain_id INTEGER NOT NULL CHECK (chain_id > 0),
                  plan_json TEXT NOT NULL,
@@ -1059,6 +1346,11 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                      CHECK (broadcast_transaction_hash IS NULL
                          OR length(broadcast_transaction_hash) = 32),
                  block_number INTEGER CHECK (block_number IS NULL OR block_number >= 0),
+                 block_hash BLOB CHECK (block_hash IS NULL OR length(block_hash) = 32),
+                 settlement_transaction_hash BLOB
+                     CHECK (settlement_transaction_hash IS NULL
+                         OR length(settlement_transaction_hash) = 32),
+                 finalized_at INTEGER,
                  approval_required INTEGER NOT NULL DEFAULT 1
                      CHECK (approval_required IN (0, 1)),
                  review_digest BLOB
@@ -1122,13 +1414,17 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
                  WHERE signed_transaction_hash IS NOT NULL",
             "CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
                  ON pending_transactions(wallet_id, chain_id)
-                 WHERE status IN ('signed', 'submitting', 'broadcast', 'cancelling')",
+                 WHERE status IN ('signed', 'submitting', 'broadcast', 'cancelling')
+                    OR (status IN ('confirmed', 'reverted', 'cancelled')
+                        AND settlement_transaction_hash IS NOT NULL
+                        AND finalized_at IS NULL)",
             "CREATE UNIQUE INDEX pending_transactions_unique_pending_plan
                  ON pending_transactions(wallet_id, chain_id, plan_digest)
                  WHERE status = 'awaiting_approval'",
             "CREATE TABLE pending_typed_data (
                  request_id BLOB PRIMARY KEY NOT NULL CHECK (length(request_id) = 16),
                  wallet_id TEXT NOT NULL,
+                 wallet_address TEXT NOT NULL,
                  chain_id INTEGER NOT NULL CHECK (chain_id > 0),
                  typed_data_json TEXT NOT NULL,
                  digest BLOB NOT NULL CHECK (length(digest) = 32),
@@ -1189,6 +1485,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
             "CREATE TABLE pending_messages (
                  request_id BLOB PRIMARY KEY NOT NULL CHECK (length(request_id) = 16),
                  wallet_id TEXT NOT NULL,
+                 wallet_address TEXT NOT NULL,
                  chain_id INTEGER NOT NULL CHECK (chain_id >= 0),
                  message BLOB NOT NULL CHECK (length(message) > 0),
                  message_encoding TEXT NOT NULL
@@ -1254,6 +1551,7 @@ fn create_current_schema(connection: &Connection) -> Result<()> {
              ) STRICT",
             "CREATE TABLE policy_proposals (
                  wallet_id TEXT PRIMARY KEY NOT NULL,
+                 wallet_address TEXT NOT NULL,
                  source_revision INTEGER NOT NULL CHECK (source_revision > 0),
                  policy_json TEXT NOT NULL,
                  rationale TEXT NOT NULL,

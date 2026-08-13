@@ -86,6 +86,13 @@ pub struct NetworkConfig {
     /// Whether endpoints are tried in configured or fresh random order.
     #[serde(default, skip_serializing_if = "RpcStrategy::is_default")]
     pub rpc_strategy: RpcStrategy,
+    /// Receipts remain provisional, and keep the wallet/chain signing slot,
+    /// until they are this many blocks deep.
+    #[serde(
+        default = "default_finality_confirmations",
+        skip_serializing_if = "is_default_finality_confirmations"
+    )]
+    pub finality_confirmations: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_gas_limit: Option<String>,
     /// The most this wallet will ever sign as `maxFeePerGas`, in wei.
@@ -111,6 +118,19 @@ pub struct NetworkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
     pub documentation_url: Option<Url>,
+}
+
+pub const DEFAULT_FINALITY_CONFIRMATIONS: u16 = 12;
+
+const fn default_finality_confirmations() -> u16 {
+    DEFAULT_FINALITY_CONFIRMATIONS
+}
+
+// Serde's `skip_serializing_if` callback receives a reference even for Copy
+// fields, so this signature is fixed by the derive contract.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_finality_confirmations(value: &u16) -> bool {
+    *value == DEFAULT_FINALITY_CONFIRMATIONS
 }
 
 fn deserialize_rpc_urls<'de, D>(deserializer: D) -> std::result::Result<Vec<Url>, D::Error>
@@ -253,6 +273,20 @@ impl ConfigStore {
             #[cfg(any(test, feature = "test-hooks"))]
             ConfigDatabase::Explicit(key) => {
                 DesktopStore::open(&self.data_dir.join(DATABASE_FILE), key)
+            }
+        }
+    }
+
+    /// Open the shared security database through the same production or
+    /// explicit test key as this configuration store.
+    pub(crate) fn policy_store(&self) -> Result<crate::policy_store::PolicyStore> {
+        match &self.database {
+            ConfigDatabase::Production => {
+                crate::policy_store::PolicyStore::production(&self.data_dir)
+            }
+            #[cfg(any(test, feature = "test-hooks"))]
+            ConfigDatabase::Explicit(key) => {
+                crate::policy_store::PolicyStore::open(&self.data_dir.join(DATABASE_FILE), key)
             }
         }
     }
@@ -462,14 +496,20 @@ impl ConfigStore {
         Ok(defaults)
     }
 
-    /// Enable or disable one network after core-verified owner authorization.
+    /// Disable without friction because it only removes attack surface. Enabling
+    /// restores signing and RPC authority and therefore requires core-verified
+    /// owner authorization.
     pub fn set_network_disabled(
         &self,
         reviewed: &NetworkConfig,
         disabled: bool,
-        authorization: &OwnerAuthorization,
+        authorization: Option<&OwnerAuthorization>,
     ) -> Result<NetworkConfig> {
-        authorization.require(OwnerAuthorizationScope::NetworkSettings)?;
+        if !disabled {
+            authorization
+                .context("enabling a network requires owner authorization")?
+                .require(OwnerAuthorizationScope::NetworkSettings)?;
+        }
         self.update(|config| {
             let network = config
                 .networks
@@ -685,6 +725,10 @@ pub fn validate_network(network: &NetworkConfig) -> Result<()> {
         );
     }
     ensure!(network.chain_id > 0, "network chain ID must be positive");
+    ensure!(
+        (1..=1_000).contains(&network.finality_confirmations),
+        "network finality confirmations must be between 1 and 1000"
+    );
     ensure!(
         !network.rpc_urls.is_empty(),
         "a network must have at least one RPC URL"

@@ -72,7 +72,12 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
     )
     .unwrap();
     policies
-        .put("primary", &WalletPolicy::allow_anything(), None)
+        .put_for_wallet(
+            "primary",
+            Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+            &WalletPolicy::allow_anything(),
+            None,
+        )
         .unwrap();
     let pending_database = PolicyStore::open(
         &directory.path().join("policies.db"),
@@ -697,6 +702,7 @@ async fn proposing_a_network_settles_name_conflicts_before_contacting_anything()
             // with a connection error rather than the conflict below.
             rpc_urls: vec!["http://127.0.0.1:9".parse().unwrap()],
             rpc_strategy: None,
+            finality_confirmations: 12,
             max_gas_limit: "30000000".into(),
             native_currency: NativeCurrency {
                 name: "Test Ether".into(),
@@ -752,6 +758,7 @@ fn add_network_input(rpc_url: &str) -> AddNetworkInput {
         testnet: true,
         rpc_urls: vec![rpc_url.parse().unwrap()],
         rpc_strategy: None,
+        finality_confirmations: 12,
         max_gas_limit: "30000000".into(),
         native_currency: NativeCurrency {
             name: "Test Ether".into(),
@@ -1220,8 +1227,9 @@ async fn a_simulation_evaluated_under_a_superseded_policy_is_refused() {
         let mut policies = server.policies.lock().unwrap();
         let current = policies.get("primary").unwrap().unwrap();
         policies
-            .put(
+            .put_for_wallet(
                 "primary",
+                server.config.wallet("primary").unwrap().address,
                 &WalletPolicy::require_approval_for_everything(),
                 Some(current.revision),
             )

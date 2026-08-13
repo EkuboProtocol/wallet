@@ -199,7 +199,7 @@ fn structured_network_editor_builds_the_complete_network_configuration() {
         documentation_url: "https://docs.example/network".into(),
     };
 
-    let (network, errors) = parse_network_editor_draft(&draft, true, true, RpcStrategy::Random);
+    let (network, errors) = parse_network_editor_draft(&draft, true, true, RpcStrategy::Random, 12);
     assert_eq!(errors, NetworkEditorErrors::default());
     let network = network.unwrap();
     assert_eq!(network.name, "owner-chain");
@@ -236,7 +236,8 @@ fn network_rpc_editor_displays_explicit_commas_and_round_trips_them() {
         documentation_url: "https://docs.example".into(),
         ..NetworkEditorDraft::default()
     };
-    let (parsed, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+    let (parsed, errors) =
+        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
     assert_eq!(errors, NetworkEditorErrors::default());
     assert_eq!(parsed.unwrap().rpc_urls, urls);
 }
@@ -254,7 +255,8 @@ fn structured_network_editor_requires_network_metadata() {
         ..NetworkEditorDraft::default()
     };
 
-    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+    let (network, errors) =
+        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
 
     assert!(network.is_none());
     assert_eq!(
@@ -274,7 +276,8 @@ fn structured_network_editor_reports_errors_beside_the_relevant_fields() {
         ..NetworkEditorDraft::default()
     };
 
-    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+    let (network, errors) =
+        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
     assert!(network.is_none());
     assert!(errors.name.is_some());
     assert!(errors.chain_id.is_some());
@@ -1342,7 +1345,8 @@ fn the_rpc_endpoint_field_holds_text_only_a_multi_line_input_can_shape() {
         block_explorer_url: "https://explorer.example".into(),
         documentation_url: "https://docs.example/network".into(),
     };
-    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+    let (network, errors) =
+        parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered, 12);
     assert_eq!(errors, NetworkEditorErrors::default());
     assert_eq!(
         network

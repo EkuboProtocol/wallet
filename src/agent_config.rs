@@ -1,7 +1,6 @@
 //! Typed, transactional configuration adapters for supported agent hosts.
 
 use anyhow::{Context, Result, ensure};
-use chrono::Utc;
 use directories::BaseDirs;
 use ekubo_wallet_core::desktop_store::{AgentKind, MCP_RESOURCE};
 use serde_json::{Map, Value, json};
@@ -48,12 +47,14 @@ pub struct ConfigPreview {
 struct InstalledConfig {
     path: PathBuf,
     existed: bool,
-    backup: PathBuf,
+    before: zeroize::Zeroizing<String>,
 }
 
 /// A set of managed configuration writes that either all remain installed or
-/// all return to their exact prior bytes. Timestamped backups remain on disk
-/// after commit or rollback.
+/// all return to their exact prior bytes. Prior contents live only in
+/// zeroizing memory for the duration of the batch; agent configuration files
+/// can contain credentials for unrelated services and must never be copied to
+/// a persistent rollback file.
 pub struct ConfigBatchInstall {
     installed: Vec<InstalledConfig>,
     committed: bool,
@@ -73,10 +74,10 @@ impl ConfigBatchInstall {
             let path = preview.path.clone();
             let existed = path.is_file();
             match preview.install() {
-                Ok(backup) => batch.installed.push(InstalledConfig {
+                Ok(before) => batch.installed.push(InstalledConfig {
                     path,
                     existed,
-                    backup,
+                    before,
                 }),
                 Err(error) => {
                     batch.rollback_best_effort();
@@ -97,9 +98,7 @@ impl ConfigBatchInstall {
     fn rollback_best_effort(&self) {
         for installed in self.installed.iter().rev() {
             if installed.existed {
-                if let Ok(prior) = fs::read(&installed.backup) {
-                    let _ = write_atomic(&installed.path, &prior);
-                }
+                let _ = write_atomic(&installed.path, installed.before.as_bytes());
             } else if installed.path.is_file() {
                 let _ = fs::remove_file(&installed.path);
             }
@@ -139,24 +138,10 @@ impl ConfigPreview {
         validate_server_shape(&installed, self.validation)
     }
 
-    pub fn install(mut self) -> Result<PathBuf> {
+    pub fn install(mut self) -> Result<zeroize::Zeroizing<String>> {
         let parent = self.path.parent().context("agent config has no parent")?;
         fs::create_dir_all(parent)?;
-        let backup = if self.path.is_file() {
-            let stamp = Utc::now().format("%Y%m%dT%H%M%S%.9fZ");
-            let name = self
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("agent config filename is not UTF-8")?;
-            let backup = self.path.with_file_name(format!("{name}.backup-{stamp}"));
-            fs::copy(&self.path, &backup).with_context(|| {
-                format!("failed to back up agent config as {}", backup.display())
-            })?;
-            Some(backup)
-        } else {
-            None
-        };
+        let existed = self.path.is_file();
 
         write_atomic(&self.path, self.after.as_bytes())?;
         let validation = fs::read_to_string(&self.path)
@@ -170,18 +155,18 @@ impl ConfigPreview {
                 validate_server_shape(&installed, self.validation)
             });
         if let Err(error) = validation {
-            if let Some(backup) = &backup {
-                let prior = fs::read(backup)?;
-                write_atomic(&self.path, &prior)?;
+            if existed {
+                write_atomic(&self.path, self.before.as_bytes())?;
             } else if self.path.is_file() {
                 fs::remove_file(&self.path)?;
             }
-            return Err(error).context("agent configuration validation failed; backup restored");
+            return Err(error)
+                .context("agent configuration validation failed; prior bytes restored");
         }
-        self.before.zeroize();
+        let before = zeroize::Zeroizing::new(std::mem::take(&mut self.before));
         self.after.zeroize();
         self.diff.zeroize();
-        Ok(backup.unwrap_or_default())
+        Ok(before)
     }
 }
 

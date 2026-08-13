@@ -90,6 +90,41 @@ fn matcherless_allow_permits_every_transaction_call() {
 }
 
 #[test]
+fn tightening_classifier_accepts_only_structurally_proven_reductions() {
+    let approval = WalletPolicy::require_approval_for_everything();
+    let allow_all = WalletPolicy::allow_anything();
+    let deny_all = WalletPolicy::deny_all();
+    assert!(is_tightening(&approval, &deny_all));
+    assert!(!is_tightening(&approval, &allow_all));
+    assert!(is_tightening(&allow_all, &approval));
+    assert!(!is_tightening(&deny_all, &approval));
+
+    let broad_allow = policy(json!({"version": 1, "rules": [{
+        "effect": "allow", "chain_id": {"eq": "1"}
+    }]}));
+    let narrow_allow = policy(json!({"version": 1, "rules": [{
+        "effect": "allow", "chain_id": {"eq": "1"},
+        "to": {"eq": format!("{TOKEN:#x}")}
+    }]}));
+    assert!(is_tightening(&broad_allow, &narrow_allow));
+    assert!(!is_tightening(&narrow_allow, &broad_allow));
+}
+
+#[test]
+fn inserting_denies_and_deleting_allows_are_prompt_free_tightenings() {
+    let current = policy(json!({"version": 1, "rules": [
+        {"effect": "allow", "chain_id": {"eq": "1"}},
+        {"effect": "allow", "chain_id": {"eq": "10"}}
+    ]}));
+    let proposed = policy(json!({"version": 1, "rules": [
+        {"effect": "deny", "to": {"eq": format!("{TOKEN:#x}")}},
+        {"effect": "allow", "chain_id": {"eq": "10"}}
+    ]}));
+    assert!(is_tightening(&current, &proposed));
+    assert!(!is_tightening(&proposed, &current));
+}
+
+#[test]
 fn first_matching_rule_wins() {
     let allow_chain_first = policy(json!({"version": 1, "rules": [
         {"effect": "allow", "chain_id": {"eq": "1"}},

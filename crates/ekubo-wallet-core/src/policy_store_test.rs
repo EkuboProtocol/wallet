@@ -124,19 +124,22 @@ fn purging_a_wallet_leaves_nothing_for_the_next_one_to_inherit() {
         .unwrap();
     for statement in [
         "INSERT INTO pending_transactions(
-                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
+                 request_id, wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
                  policy_revision, status, created_at, updated_at
-             ) VALUES (randomblob(16), 'primary', 'mainnet', 1, '{}', zeroblob(32), 1,
+             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+                       'mainnet', 1, '{}', zeroblob(32), 1,
                        'awaiting_approval', 0, 0)",
         "INSERT INTO pending_typed_data(
-                 request_id, wallet_id, chain_id, typed_data_json, digest, status,
+                 request_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
                  created_at, updated_at
-             ) VALUES (randomblob(16), 'primary', 1, '{}', zeroblob(32),
+             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+                       1, '{}', zeroblob(32),
                        'awaiting_approval', 0, 0)",
         "INSERT INTO pending_messages(
-                 request_id, wallet_id, chain_id, message, message_encoding, digest,
+                 request_id, wallet_id, wallet_address, chain_id, message, message_encoding, digest,
                  status, created_at, updated_at
-             ) VALUES (randomblob(16), 'primary', 1, x'6869', 'text', zeroblob(32),
+             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+                       1, x'6869', 'text', zeroblob(32),
                        'awaiting_approval', 0, 0)",
     ] {
         store.connection.execute_batch(statement).unwrap();
@@ -173,6 +176,111 @@ fn purging_a_wallet_leaves_nothing_for_the_next_one_to_inherit() {
         )
         .unwrap();
     assert_eq!(restarted.revision, 1);
+}
+
+#[test]
+fn wallet_names_never_transfer_policy_authority_to_a_replacement_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let mut store = PolicyStore::open(&path, &key(41)).unwrap();
+    let predecessor = Address::repeat_byte(0x11);
+    let replacement = Address::repeat_byte(0x22);
+    store
+        .put_for_wallet(
+            "primary",
+            predecessor,
+            &WalletPolicy::allow_anything(),
+            None,
+        )
+        .unwrap();
+
+    let error = store
+        .get_for_wallet("primary", replacement)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("belongs to"), "{error}");
+    assert!(
+        store
+            .install_policy(
+                "primary",
+                replacement,
+                &WalletPolicy::require_approval_for_everything(),
+                Some(1),
+                None,
+            )
+            .is_err()
+    );
+
+    store.purge("primary").unwrap();
+    let installed = store
+        .initialize_policy(
+            "primary",
+            replacement,
+            &WalletPolicy::require_approval_for_everything(),
+        )
+        .unwrap();
+    assert_eq!(installed.wallet_address, replacement);
+    assert_eq!(installed.revision, 1);
+}
+
+#[test]
+fn core_requires_authorization_only_when_a_policy_transition_can_widen_authority() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policies.db");
+    let mut store = PolicyStore::open(&path, &key(42)).unwrap();
+    let address = Address::repeat_byte(0x11);
+    store
+        .initialize_policy(
+            "primary",
+            address,
+            &WalletPolicy::require_approval_for_everything(),
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .install_policy(
+                "primary",
+                address,
+                &WalletPolicy::allow_anything(),
+                Some(1),
+                None,
+            )
+            .is_err()
+    );
+    let wrong = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
+    assert!(
+        store
+            .install_policy(
+                "primary",
+                address,
+                &WalletPolicy::allow_anything(),
+                Some(1),
+                Some(&wrong),
+            )
+            .is_err()
+    );
+    let policy_authorization =
+        OwnerAuthorization::for_test(OwnerAuthorizationScope::PolicySettings);
+    let widened = store
+        .install_policy(
+            "primary",
+            address,
+            &WalletPolicy::allow_anything(),
+            Some(1),
+            Some(&policy_authorization),
+        )
+        .unwrap();
+    let tightened = store
+        .install_policy(
+            "primary",
+            address,
+            &WalletPolicy::require_approval_for_everything(),
+            Some(widened.revision),
+            None,
+        )
+        .unwrap();
+    assert_eq!(tightened.revision, 3);
 }
 
 #[test]
@@ -239,6 +347,61 @@ fn a_fresh_database_is_created_at_the_only_schema_there_is() {
             })
             .unwrap_or_else(|error| panic!("{table} missing from a fresh database: {error}"));
     }
+}
+
+#[test]
+fn v1_rows_are_bound_to_the_encrypted_wallet_identity_during_migration() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = crate::config::ConfigStore::new(directory.path());
+    let wallet = crate::config::WalletMetadata {
+        id: "primary".into(),
+        address: Address::repeat_byte(0x11),
+        created_at: Utc::now(),
+        source: crate::config::WalletSource::Created,
+        exported_at: None,
+    };
+    config
+        .update_for_test(|settings| {
+            settings.wallets.push(wallet.clone());
+            Ok(())
+        })
+        .unwrap();
+    let path = directory.path().join(DATABASE_FILE);
+    let mut store = PolicyStore::open(&path, &key(0x43)).unwrap();
+    store
+        .put_for_wallet(
+            &wallet.id,
+            wallet.address,
+            &WalletPolicy::allow_anything(),
+            None,
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            "DROP INDEX pending_transactions_wallet_chain_in_flight;
+             ALTER TABLE wallet_policies DROP COLUMN wallet_address;
+             ALTER TABLE pending_transactions DROP COLUMN wallet_address;
+             ALTER TABLE pending_transactions DROP COLUMN block_hash;
+             ALTER TABLE pending_transactions DROP COLUMN settlement_transaction_hash;
+             ALTER TABLE pending_transactions DROP COLUMN finalized_at;
+             ALTER TABLE pending_typed_data DROP COLUMN wallet_address;
+             ALTER TABLE pending_messages DROP COLUMN wallet_address;
+             ALTER TABLE policy_proposals DROP COLUMN wallet_address;
+             CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
+                 ON pending_transactions(wallet_id, chain_id)
+                 WHERE status IN ('signed', 'submitting', 'broadcast', 'cancelling');
+             UPDATE schema_metadata SET version = 1;",
+        )
+        .unwrap();
+    drop(store);
+
+    let migrated = PolicyStore::open(&path, &key(0x43)).unwrap();
+    assert_eq!(schema_version(&migrated.connection).unwrap(), Some(2));
+    assert_eq!(
+        migrated.get(&wallet.id).unwrap().unwrap().wallet_address,
+        wallet.address
+    );
 }
 
 #[test]
@@ -462,9 +625,10 @@ fn only_real_decision_states_are_storable() {
     let insert = |chain: i64, status: &str, approval_required: i64, decided_at: Option<i64>| {
         store.connection.execute(
             "INSERT INTO pending_transactions(
-                 request_id, wallet_id, network_name, chain_id, plan_json, plan_digest,
+                 request_id, wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
                  policy_revision, status, approval_required, created_at, updated_at, decided_at
-             ) VALUES (randomblob(16), 'primary', 'mainnet', ?1, '{}', zeroblob(32), 1,
+             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+                       'mainnet', ?1, '{}', zeroblob(32), 1,
                        ?2, ?3, 0, 0, ?4)",
             rusqlite::params![chain, status, approval_required, decided_at],
         )

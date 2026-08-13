@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use rand::TryRng as _;
-use rusqlite::{OptionalExtension as _, params};
+use rusqlite::{OptionalExtension as _, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest as _, Sha256};
 use std::path::Path;
@@ -187,19 +187,6 @@ impl OAuthSecret {
     #[must_use]
     pub fn expose_base64url(&self) -> String {
         URL_SAFE_NO_PAD.encode(self.0)
-    }
-
-    fn from_base64url(encoded: &str) -> Result<Self> {
-        let decoded = URL_SAFE_NO_PAD
-            .decode(encoded.as_bytes())
-            .context("OAuth credential is not canonical base64url")?;
-        ensure!(
-            decoded.len() == 32 && URL_SAFE_NO_PAD.encode(&decoded) == encoded,
-            "OAuth credential has an invalid encoding or length"
-        );
-        let mut bytes = [0_u8; 32];
-        bytes.copy_from_slice(&decoded);
-        Ok(Self(bytes))
     }
 }
 
@@ -542,12 +529,9 @@ impl DesktopStore {
         Ok(())
     }
 
-    pub fn remove_client(
-        &mut self,
-        client_id: Uuid,
-        authorization: &OwnerAuthorization,
-    ) -> Result<()> {
-        authorization.require(OwnerAuthorizationScope::AgentAccess)?;
+    /// Delete a registration and every credential beneath it. Like revocation,
+    /// this can only reduce authority and deliberately needs no presence token.
+    pub fn remove_client(&mut self, client_id: Uuid) -> Result<()> {
         let changed = self.connection.execute(
             "DELETE FROM mcp_clients WHERE client_id = ?1",
             params![Blob(*client_id.as_bytes())],
@@ -655,11 +639,16 @@ impl DesktopStore {
         );
         let token_hash = decode_and_hash_secret(encoded_refresh_token)?;
         let now = Utc::now();
-        let stored = self
+        // Serialize observation, consumption, and successor minting. With a
+        // deferred transaction two processes can both read an unused token
+        // before either becomes the writer.
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored = transaction
             .query_row(
                 "SELECT t.scope, t.resource, t.expires_at, t.access_token_ttl_seconds,
-                        t.consumed_at
+                        t.consumed_at, t.family_id
                  FROM oauth_refresh_tokens t
                  JOIN mcp_clients c ON c.client_id = t.client_id
                  WHERE t.token_hash = ?1 AND t.client_id = ?2
@@ -672,16 +661,32 @@ impl DesktopStore {
                         row.get::<_, Millis>(2)?.0,
                         row.get::<_, i64>(3)?,
                         row.get::<_, Option<Millis>>(4)?.map(|value| value.0),
+                        Uuid::from_bytes(row.get::<_, Blob<[u8; 16]>>(5)?.0),
                     ))
                 },
             )
             .optional()?
             .context("invalid OAuth refresh token")?;
+        if stored.4.is_some() {
+            // Schema v1 access tokens are not family-attributed. Revoke all
+            // access tokens for this client as the conservative response,
+            // then remove the compromised refresh family. Registration stays
+            // intact so the owner can explicitly authorize it again.
+            transaction.execute(
+                "DELETE FROM oauth_access_tokens WHERE client_id = ?1",
+                [Blob(*client_id.as_bytes())],
+            )?;
+            transaction.execute(
+                "DELETE FROM oauth_refresh_tokens WHERE family_id = ?1",
+                [Blob(*stored.5.as_bytes())],
+            )?;
+            transaction.commit()?;
+            anyhow::bail!("OAuth refresh token reuse detected; its token family was revoked");
+        }
         ensure!(
-            stored.1 == resource && stored.2 > now && stored.4.is_none(),
+            stored.1 == resource && stored.2 > now,
             "OAuth session expired or has the wrong audience"
         );
-        let transaction = self.connection.transaction()?;
         transaction.execute(
             "DELETE FROM oauth_access_tokens WHERE expires_at <= ?1",
             [Millis(now)],
@@ -690,26 +695,24 @@ impl DesktopStore {
             "DELETE FROM oauth_refresh_tokens WHERE expires_at <= ?1",
             [Millis(now)],
         )?;
-        let access = insert_access_token(
+        let changed = transaction.execute(
+            "UPDATE oauth_refresh_tokens SET consumed_at = ?1
+             WHERE token_hash = ?2 AND consumed_at IS NULL",
+            params![Millis(now), token_hash.as_slice()],
+        )?;
+        ensure!(changed == 1, "OAuth refresh token was already consumed");
+        let pair = insert_token_pair(
             &transaction,
             client_id,
             &stored.0,
             resource,
+            stored.5,
             now,
             stored.2,
             Duration::seconds(stored.3),
         )?;
         transaction.commit()?;
-        Ok(OAuthTokenPair {
-            access_token: access.0,
-            // Public desktop clients do not reliably persist rotated refresh
-            // tokens before retrying or restarting. Return the same opaque
-            // credential until the owner's hard session deadline instead of
-            // turning an innocent retry into family-wide revocation.
-            refresh_token: OAuthSecret::from_base64url(encoded_refresh_token)?,
-            expires_in: access.1,
-            scope: stored.0,
-        })
+        Ok(pair)
     }
 
     pub fn authenticate_access_token(

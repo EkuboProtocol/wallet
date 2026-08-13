@@ -35,7 +35,12 @@ fn pending() -> (tempfile::TempDir, Mutex<PendingStore>) {
     let path = directory.path().join("policies.db");
     let mut database = PolicyStore::open(&path, &DatabaseKey::new([9; 32])).unwrap();
     database
-        .put("primary", &WalletPolicy::allow_anything(), None)
+        .put_for_wallet(
+            "primary",
+            plan().sender,
+            &WalletPolicy::allow_anything(),
+            None,
+        )
         .unwrap();
     (directory, Mutex::new(PendingStore::new(database)))
 }

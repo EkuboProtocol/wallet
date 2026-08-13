@@ -1,3 +1,4 @@
+use crate::core::policy::WalletPolicy;
 use crate::{
     config::{ConfigStore, WalletMetadata, WalletSource, validate_wallet_id},
     human_presence::{HumanPresence, PresenceRequest},
@@ -336,11 +337,34 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     pub fn create(&self, wallet_id: &str) -> Result<WalletMetadata> {
         let signer = PrivateKeySigner::random();
         let key = PrivateKeyMaterial::from_bytes(signer.to_bytes().as_slice())?;
-        self.add(wallet_id, &key, WalletSource::Created)
+        self.add(wallet_id, &key, WalletSource::Created, None)
+    }
+
+    /// Create and publish a wallet only after its address-bound fail-closed
+    /// policy exists, all under the lifecycle lock.
+    pub fn create_with_policy(
+        &self,
+        wallet_id: &str,
+        policy: &WalletPolicy,
+    ) -> Result<WalletMetadata> {
+        let signer = PrivateKeySigner::random();
+        let key = PrivateKeyMaterial::from_bytes(signer.to_bytes().as_slice())?;
+        self.add(wallet_id, &key, WalletSource::Created, Some(policy))
     }
 
     pub fn import(&self, wallet_id: &str, key: PrivateKeyMaterial) -> Result<WalletMetadata> {
-        let result = self.add(wallet_id, &key, WalletSource::Imported);
+        let result = self.add(wallet_id, &key, WalletSource::Imported, None);
+        drop(key);
+        result
+    }
+
+    pub fn import_with_policy(
+        &self,
+        wallet_id: &str,
+        key: PrivateKeyMaterial,
+        policy: &WalletPolicy,
+    ) -> Result<WalletMetadata> {
+        let result = self.add(wallet_id, &key, WalletSource::Imported, Some(policy));
         drop(key);
         result
     }
@@ -350,6 +374,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         wallet_id: &str,
         key: &PrivateKeyMaterial,
         source: WalletSource,
+        policy: Option<&WalletPolicy>,
     ) -> Result<WalletMetadata> {
         validate_wallet_id(wallet_id)?;
         let address = key.signer().address();
@@ -366,22 +391,41 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         // "credential store already contains wallet" check, both wrote, and
         // the loser's rollback deleted the winner's key.
         self.config.with_lifecycle_lock(|| {
+            let current = self.config.load()?;
+            ensure!(
+                !current.wallets.iter().any(|wallet| wallet.id == wallet_id),
+                "wallet {wallet_id} already exists"
+            );
+            ensure!(
+                !current
+                    .wallets
+                    .iter()
+                    .any(|wallet| wallet.address == address),
+                "address {address} is already configured"
+            );
             self.keys.insert_new(wallet_id, key)?;
-            let update = self.config.update(|config| {
-                ensure!(
-                    !config.wallets.iter().any(|wallet| wallet.id == wallet_id),
-                    "wallet {wallet_id} already exists"
-                );
-                ensure!(
-                    !config
-                        .wallets
-                        .iter()
-                        .any(|wallet| wallet.address == address),
-                    "address {address} is already configured"
-                );
-                config.wallets.push(metadata.clone());
-                Ok(())
-            });
+            let update = (|| {
+                if let Some(policy) = policy {
+                    let mut policies = self.config.policy_store()?;
+                    policies.purge(wallet_id)?;
+                    policies.initialize_policy(wallet_id, address, policy)?;
+                }
+                self.config.update(|config| {
+                    ensure!(
+                        !config.wallets.iter().any(|wallet| wallet.id == wallet_id),
+                        "wallet {wallet_id} already exists"
+                    );
+                    ensure!(
+                        !config
+                            .wallets
+                            .iter()
+                            .any(|wallet| wallet.address == address),
+                        "address {address} is already configured"
+                    );
+                    config.wallets.push(metadata.clone());
+                    Ok(())
+                })
+            })();
             if let Err(error) = update {
                 // An error is not proof that nothing was written. The metadata
                 // write commits when the replacement file lands, and steps
@@ -403,6 +447,16 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                     return Err(error).context(format!(
                         "wallet {wallet_id} was created and its key is stored, but the write \
                          reported an error; verify it in the Accounts screen before retrying"
+                    ));
+                }
+                if policy.is_some()
+                    && let Err(cleanup) = self
+                        .config
+                        .policy_store()
+                        .and_then(|mut policies| policies.purge(wallet_id))
+                {
+                    return Err(error).context(format!(
+                        "wallet publication failed and policy rollback also failed: {cleanup:#}"
                     ));
                 }
                 // Addressed by the key this call inserted, never by the id
@@ -577,7 +631,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 }
             }
         }
-        match self.keys.delete_matching(wallet_id, metadata.address) {
+        let removed = match self.keys.delete_matching(wallet_id, metadata.address) {
             Ok(Deletion::Removed | Deletion::Absent) => Ok(metadata.clone()),
             // Something else holds this id now. The approval was for
             // `metadata.address`, so that credential is not this call's to
@@ -633,7 +687,11 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                     )),
                 }
             }
-        }
+        }?;
+        // Still inside the lifecycle lock: a replacement cannot publish under
+        // this reusable name until every predecessor authority row is gone.
+        self.config.policy_store()?.purge(wallet_id)?;
+        Ok(removed)
     }
 }
 

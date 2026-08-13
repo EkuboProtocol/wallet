@@ -119,6 +119,7 @@ fn policy_context() -> ekubo_wallet::core::predicate::PolicyContext {
 fn policy() -> StoredPolicy {
     StoredPolicy {
         wallet_id: "live-matrix".into(),
+        wallet_address: sender(),
         policy: WalletPolicy::allow_anything(),
         revision: 1,
         updated_at: Utc::now(),

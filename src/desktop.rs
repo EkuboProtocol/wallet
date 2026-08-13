@@ -1049,6 +1049,43 @@ const fn transaction_status_tone(status: PendingStatus) -> StatusTone {
     }
 }
 
+fn transaction_receipt_is_provisional(record: &PendingTransaction) -> bool {
+    matches!(
+        record.status,
+        PendingStatus::Confirmed | PendingStatus::Reverted | PendingStatus::Cancelled
+    ) && record.settlement_transaction_hash.is_some()
+        && record.finalized_at.is_none()
+}
+
+fn transaction_record_tone(record: &PendingTransaction) -> StatusTone {
+    if transaction_receipt_is_provisional(record) {
+        StatusTone::Working
+    } else {
+        transaction_status_tone(record.status)
+    }
+}
+
+fn transaction_record_label(record: &PendingTransaction) -> &'static str {
+    if transaction_receipt_is_provisional(record) {
+        match record.status {
+            PendingStatus::Confirmed => "Succeeded, confirming",
+            PendingStatus::Reverted => "Failed on chain, confirming",
+            PendingStatus::Cancelled => "Cancellation confirming",
+            _ => record.status.label(),
+        }
+    } else {
+        record.status.label()
+    }
+}
+
+fn transaction_record_explanation(record: &PendingTransaction) -> &'static str {
+    if transaction_receipt_is_provisional(record) {
+        "A receipt was observed, but its block is not final yet. The wallet is rechecking it and will not sign another transaction for this account and network meanwhile."
+    } else {
+        record.status.explanation()
+    }
+}
+
 const fn message_status_tone(status: MessageStatus) -> StatusTone {
     match status {
         MessageStatus::AwaitingApproval => StatusTone::NeedsYou,
@@ -1155,7 +1192,7 @@ fn upsert_detected_agents() -> Result<String> {
     let detected = adapters.len();
     let previews = adapters
         .into_iter()
-        .map(|adapter| adapter.preview_install(true))
+        .map(|adapter| adapter.preview_install(false))
         .collect::<Result<Vec<_>>>()?;
     let changed = previews
         .iter()
@@ -1179,7 +1216,7 @@ fn detect_agents() -> Result<Vec<DetectedAgent>> {
             display_name: adapter.display_name,
             config_path: adapter.config_path.display().to_string(),
             installed: adapter
-                .preview_install(true)
+                .preview_install(false)
                 .map(|preview| !preview.has_changes())
                 .map_err(|error| format!("{error:#}").into()),
         })
@@ -2135,8 +2172,8 @@ fn activity_row_summary(
                 activity_source_label(item.plan_source.as_deref(), agent),
                 relative_time_label(item.created_at, now)
             ),
-            status: item.status.label(),
-            tone: transaction_status_tone(item.status),
+            status: transaction_record_label(item),
+            tone: transaction_record_tone(item),
         },
         OwnerActivityRecord::Message(item) => ActivityRowSummary {
             title: "Message signature".to_owned(),
@@ -2869,6 +2906,7 @@ fn parse_network_editor_draft(
     disabled: bool,
     testnet: bool,
     rpc_strategy: RpcStrategy,
+    finality_confirmations: u16,
 ) -> (Option<NetworkConfig>, NetworkEditorErrors) {
     let mut errors = NetworkEditorErrors::default();
     let name = draft.name.trim();
@@ -3071,6 +3109,7 @@ fn parse_network_editor_draft(
         chain_id: chain_id.expect("validated above"),
         rpc_urls,
         rpc_strategy,
+        finality_confirmations,
         max_gas_limit,
         max_fee_per_gas,
         native_currency,
@@ -6116,6 +6155,10 @@ impl WalletWindow {
             self.network_editor_disabled,
             self.network_editor_testnet,
             self.network_editor_rpc_strategy,
+            self.network_editor_original.as_ref().map_or(
+                ekubo_wallet_core::config::DEFAULT_FINALITY_CONFIRMATIONS,
+                |network| network.finality_confirmations,
+            ),
         );
         // An error under a collapsed disclosure is invisible, so a rejected
         // save always reveals the field it is complaining about.
@@ -7939,9 +7982,9 @@ impl WalletWindow {
                     .gap_4()
                     .child(header(
                         "Transaction",
-                        item.status.label(),
-                        transaction_status_tone(item.status),
-                        item.status.explanation(),
+                        transaction_record_label(item),
+                        transaction_record_tone(item),
+                        transaction_record_explanation(item),
                         format!(
                             "{} · {} · requested {} · last changed {}",
                             item.wallet_id,
@@ -13285,10 +13328,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                 } => Some(*request_id),
                                 _ => None,
                             };
-                            let agent_connection_changed = matches!(
-                                &event.kind,
-                                crate::events::DomainEventKind::AgentConnectionChanged { .. }
-                            );
                             if matches!(
                                 &event.kind,
                                 crate::events::DomainEventKind::OAuthAuthorizationRequested { .. }
@@ -13349,32 +13388,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                                         }
                                     }
                                 });
-                            }
-                            if agent_connection_changed {
-                                let owner = event_owner.clone();
-                                let login_result = event_tokio
-                                    .spawn_blocking(move || {
-                                        if owner.clients()?.iter().any(|client| {
-                                            client.authorized_at.is_some()
-                                                && client.revoked_at.is_none()
-                                        }) {
-                                            crate::launch_at_login::enable()?;
-                                        }
-                                        Ok::<_, anyhow::Error>(())
-                                    })
-                                    .await;
-                                if let Err(error) = login_result
-                                    .context("launch-at-login task failed")
-                                    .and_then(|result| result)
-                                {
-                                    event_view.update(cx, |view, cx| {
-                                        view.set_route_error(
-                                            Route::Settings,
-                                            format!("Could not enable launch at login: {error:#}"),
-                                        );
-                                        cx.notify();
-                                    });
-                                }
                             }
                             true
                         }

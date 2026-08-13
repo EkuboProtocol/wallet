@@ -72,6 +72,8 @@ fn a_rejected_send_whose_transaction_landed_is_reported_as_mined() {
             Some(crate::rpc::ReceiptStatus {
                 succeeded: true,
                 block_number: 27_923_617,
+                block_hash: alloy::primitives::B256::ZERO,
+                head_block_number: 27_923_617,
                 gas_used: 21_000,
                 effective_gas_price: 1_000_000_000,
             }),
@@ -94,6 +96,8 @@ fn a_rejected_send_whose_transaction_reverted_reports_the_revert_not_the_rejecti
         Some(crate::rpc::ReceiptStatus {
             succeeded: false,
             block_number: 42,
+            block_hash: alloy::primitives::B256::ZERO,
+            head_block_number: 42,
             gas_used: 21_000,
             effective_gas_price: 1_000_000_000,
         }),

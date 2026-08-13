@@ -359,7 +359,7 @@ fn authorization_codes_are_one_time_and_pkce_bound() {
 }
 
 #[test]
-fn refresh_token_is_stable_and_reusable_across_client_restarts() {
+fn refresh_token_rotates_and_reuse_revokes_the_family() {
     let mut store = store(33);
     let client = register(&mut store);
     let first = authorize_and_exchange(&mut store, &client);
@@ -367,22 +367,50 @@ fn refresh_token_is_stable_and_reusable_across_client_restarts() {
     let second = store
         .refresh_access_token(&first_refresh, client.id, MCP_RESOURCE)
         .unwrap();
-    assert_eq!(second.refresh_token.expose_base64url(), first_refresh);
-    let third = store
-        .refresh_access_token(&first_refresh, client.id, MCP_RESOURCE)
-        .unwrap();
-    assert_eq!(third.refresh_token.expose_base64url(), first_refresh);
+    let second_refresh = second.refresh_token.expose_base64url();
+    assert_ne!(second_refresh, first_refresh);
+    let replay = store.refresh_access_token(&first_refresh, client.id, MCP_RESOURCE);
+    assert!(replay.is_err_and(|error| error.to_string().contains("reuse detected")));
     assert!(
         store
             .authenticate_access_token(&second.access_token.expose_base64url(), MCP_RESOURCE)
             .unwrap()
-            .is_some()
+            .is_none()
     );
     assert!(
         store
-            .authenticate_access_token(&third.access_token.expose_base64url(), MCP_RESOURCE)
-            .unwrap()
-            .is_some()
+            .refresh_access_token(&second_refresh, client.id, MCP_RESOURCE)
+            .is_err()
+    );
+}
+
+#[test]
+fn concurrent_refresh_exchanges_cannot_both_succeed() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("wallet.db");
+    let mut store = DesktopStore::open(&path, &DatabaseKey::new([44; 32])).unwrap();
+    let client = register(&mut store);
+    let refresh = authorize_and_exchange(&mut store, &client)
+        .refresh_token
+        .expose_base64url();
+    drop(store);
+
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let run = || {
+            barrier.wait();
+            DesktopStore::open(&path, &DatabaseKey::new([44; 32]))
+                .unwrap()
+                .refresh_access_token(&refresh, client.id, MCP_RESOURCE)
+                .is_ok()
+        };
+        let first = scope.spawn(run);
+        let second = scope.spawn(run);
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(
+        outcomes.into_iter().filter(|succeeded| *succeeded).count(),
+        1
     );
 }
 
@@ -433,23 +461,11 @@ fn revocation_invalidates_access_without_removing_harness_registration() {
 }
 
 #[test]
-fn removal_requires_agent_authorization_and_deletes_every_oauth_credential() {
+fn removal_is_authorization_free_and_deletes_every_oauth_credential() {
     let mut store = store(39);
     let client = register(&mut store);
     let pair = authorize_and_exchange(&mut store, &client);
-    let wrong_scope = OwnerAuthorization::for_test(OwnerAuthorizationScope::NetworkSettings);
-
-    assert!(store.remove_client(client.id, &wrong_scope).is_err());
-    assert!(
-        store
-            .authenticate_access_token(&pair.access_token.expose_base64url(), MCP_RESOURCE)
-            .unwrap()
-            .is_some()
-    );
-
-    store
-        .remove_client(client.id, &agent_authorization())
-        .unwrap();
+    store.remove_client(client.id).unwrap();
     assert!(store.clients().unwrap().is_empty());
     assert!(
         store
@@ -559,9 +575,10 @@ fn attribution_names_the_asker_even_when_its_registration_no_longer_counts() {
             .connection
             .execute(
                 "INSERT INTO pending_transactions(
-                     request_id, wallet_id, network_name, chain_id, plan_json,
+                     request_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
                      plan_digest, policy_revision, status, created_at, updated_at
-                 ) VALUES (?1, 'primary', 'ethereum', 1, '{}', ?2, 1, 'awaiting_approval', ?3, ?3)",
+                 ) VALUES (?1, 'primary', '0x0000000000000000000000000000000000000000',
+                           'ethereum', 1, '{}', ?2, 1, 'awaiting_approval', ?3, ?3)",
                 params![
                     Blob(*request_id.as_bytes()),
                     Blob([digest; 32]),
@@ -575,9 +592,10 @@ fn attribution_names_the_asker_even_when_its_registration_no_longer_counts() {
         .connection
         .execute(
             "INSERT INTO pending_typed_data(
-                 request_id, wallet_id, chain_id, typed_data_json, digest, status,
+                 request_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
                  created_at, updated_at
-             ) VALUES (?1, 'primary', 1, '{}', ?2, 'awaiting_approval', ?3, ?3)",
+             ) VALUES (?1, 'primary', '0x0000000000000000000000000000000000000000',
+                       1, '{}', ?2, 'awaiting_approval', ?3, ?3)",
             params![
                 Blob(*signature_request.as_bytes()),
                 Blob([8_u8; 32]),

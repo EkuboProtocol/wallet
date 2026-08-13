@@ -152,6 +152,7 @@ fn network_with(chain_id: u64, rpc_urls: Vec<Url>) -> NetworkConfig {
         chain_id,
         rpc_urls,
         rpc_strategy: crate::config::RpcStrategy::Ordered,
+        finality_confirmations: crate::config::DEFAULT_FINALITY_CONFIRMATIONS,
         max_gas_limit: None,
         max_fee_per_gas: None,
         native_currency: None,
@@ -294,6 +295,8 @@ fn receipt_stub(chain_id: u64, receipt_for: B256) -> (Url, std::thread::JoinHand
             let request = String::from_utf8_lossy(&buffer[..read]).to_string();
             let body = if request.contains("eth_chainId") {
                 format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"{chain_id:#x}\"}}")
+            } else if request.contains("eth_blockNumber") {
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x64\"}".to_owned()
             } else {
                 format!(
                     "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\

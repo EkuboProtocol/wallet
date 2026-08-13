@@ -39,7 +39,12 @@ fn store() -> (tempfile::TempDir, PendingStore) {
     let path = directory.path().join("policies.db");
     let mut database = PolicyStore::open(&path, &DatabaseKey::new([9; 32])).unwrap();
     database
-        .put("primary", &WalletPolicy::allow_anything(), None)
+        .put_for_wallet(
+            "primary",
+            plan().sender,
+            &WalletPolicy::allow_anything(),
+            None,
+        )
         .unwrap();
     (directory, PendingStore::new(database))
 }
@@ -313,7 +318,12 @@ fn ambiguous_broadcast_can_only_reclaim_the_same_signed_bytes() {
     let current = store.database.get("primary").unwrap().unwrap();
     store
         .database
-        .put("primary", &current.policy, Some(current.revision))
+        .put_for_wallet(
+            "primary",
+            plan().sender,
+            &current.policy,
+            Some(current.revision),
+        )
         .unwrap();
     let reclaimed = store.claim_broadcast_retry(signed.request_id).unwrap();
     assert_eq!(reclaimed.status, PendingStatus::Submitting);
@@ -452,6 +462,87 @@ fn broadcast_original(store: &mut PendingStore) -> Uuid {
         )
         .unwrap();
     signed.request_id
+}
+
+fn receipt(
+    succeeded: bool,
+    block_hash_byte: u8,
+    head_block_number: u64,
+) -> crate::rpc::ReceiptStatus {
+    crate::rpc::ReceiptStatus {
+        succeeded,
+        block_number: 100,
+        block_hash: B256::repeat_byte(block_hash_byte),
+        head_block_number,
+        gas_used: 21_000,
+        effective_gas_price: 1_000_000_000,
+    }
+}
+
+#[test]
+fn provisional_original_receipts_hold_the_slot_roll_back_and_only_then_finalize() {
+    let (_directory, mut store) = store();
+    let request_id = broadcast_original(&mut store);
+    let transaction_hash = hash_of(ORIGINAL_BYTES);
+
+    let observed = store
+        .record_original_receipt(request_id, &transaction_hash, &receipt(true, 1, 100), 12)
+        .unwrap();
+    assert_eq!(observed.status, PendingStatus::Confirmed);
+    assert!(observed.finalized_at.is_none());
+    assert_eq!(
+        observed.block_hash.as_deref(),
+        Some(format!("{:#x}", B256::repeat_byte(1)).as_str())
+    );
+    assert_eq!(
+        store.in_flight("primary", "1").unwrap().unwrap().request_id,
+        request_id,
+        "a shallow success must not admit another signature"
+    );
+    assert_eq!(store.clear_terminal_history(Some("primary")).unwrap(), 0);
+
+    let rolled_back = store
+        .rollback_provisional_receipt(request_id, &transaction_hash)
+        .unwrap();
+    assert_eq!(rolled_back.status, PendingStatus::Broadcast);
+    assert!(rolled_back.block_hash.is_none());
+
+    let moved_and_reverted = store
+        .record_original_receipt(request_id, &transaction_hash, &receipt(false, 2, 100), 12)
+        .unwrap();
+    assert_eq!(moved_and_reverted.status, PendingStatus::Reverted);
+    assert!(moved_and_reverted.finalized_at.is_none());
+    let finalized = store
+        .record_original_receipt(request_id, &transaction_hash, &receipt(false, 2, 111), 12)
+        .unwrap();
+    assert!(finalized.finalized_at.is_some());
+    assert!(store.in_flight("primary", "1").unwrap().is_none());
+}
+
+#[test]
+fn provisional_cancellation_receipts_roll_back_to_the_race() {
+    let (_directory, mut store) = store();
+    let request_id = broadcast_original(&mut store);
+    let cancellation_hash = hash_of(CANCEL_BYTES_ONE);
+    store
+        .store_cancellation(request_id, None, CANCEL_BYTES_ONE, &cancellation_hash)
+        .unwrap();
+
+    let observed = store
+        .record_cancellation_receipt(request_id, &cancellation_hash, &receipt(true, 3, 100), 12)
+        .unwrap();
+    assert_eq!(observed.status, PendingStatus::Cancelled);
+    assert!(observed.finalized_at.is_none());
+    let rolled_back = store
+        .rollback_provisional_receipt(request_id, &cancellation_hash)
+        .unwrap();
+    assert_eq!(rolled_back.status, PendingStatus::Cancelling);
+
+    let finalized = store
+        .record_cancellation_receipt(request_id, &cancellation_hash, &receipt(false, 4, 111), 12)
+        .unwrap();
+    assert_eq!(finalized.status, PendingStatus::Cancelled);
+    assert!(finalized.finalized_at.is_some());
 }
 
 #[test]
@@ -658,7 +749,12 @@ fn policy_change_cancels_signed_transaction_before_submission() {
     let current = store.database.get("primary").unwrap().unwrap();
     store
         .database
-        .put("primary", &current.policy, Some(current.revision))
+        .put_for_wallet(
+            "primary",
+            plan().sender,
+            &current.policy,
+            Some(current.revision),
+        )
         .unwrap();
     assert_eq!(
         store.get(request.request_id).unwrap().status,
@@ -701,7 +797,12 @@ fn policy_change_preserves_a_claimed_submission_for_hash_reconciliation() {
     let current = store.database.get("primary").unwrap().unwrap();
     store
         .database
-        .put("primary", &current.policy, Some(current.revision))
+        .put_for_wallet(
+            "primary",
+            plan().sender,
+            &current.policy,
+            Some(current.revision),
+        )
         .unwrap();
     assert_eq!(
         store.get(signed.request_id).unwrap().status,
@@ -782,7 +883,12 @@ fn policy_change_replaces_stale_duplicate_approval_request() {
     let current = store.database.get("primary").unwrap().unwrap();
     store
         .database
-        .put("primary", &current.policy, Some(current.revision))
+        .put_for_wallet(
+            "primary",
+            plan().sender,
+            &current.policy,
+            Some(current.revision),
+        )
         .unwrap();
 
     assert_eq!(
@@ -1233,10 +1339,11 @@ fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
         connection
             .execute(
                 "INSERT INTO pending_transactions(
-                    request_id, wallet_id, network_name, chain_id, plan_json,
+                    request_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
                     plan_digest, policy_revision, status, created_at, updated_at,
                     decided_at, approval_required
-                 ) VALUES (?1, 'primary', 'ethereum', 1, '{}', ?2, 1, 'confirmed', ?3, ?3, ?3, 1)",
+                 ) VALUES (?1, 'primary', '0x1111111111111111111111111111111111111111',
+                           'ethereum', 1, '{}', ?2, 1, 'confirmed', ?3, ?3, ?3, 1)",
                 params![
                     uuid::Uuid::new_v4(),
                     Blob(B256::repeat_byte(1)),

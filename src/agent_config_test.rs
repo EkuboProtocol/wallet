@@ -120,7 +120,7 @@ fn managed_codex_diff_does_not_echo_static_credentials_or_unrelated_settings() {
 }
 
 #[test]
-fn a_failed_install_restores_the_timestamped_backup() {
+fn a_failed_install_restores_without_persisting_a_credential_backup() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("mcp.json");
     fs::write(&path, "{\"keep\":true}\n").unwrap();
@@ -141,7 +141,55 @@ fn a_failed_install_restores_the_timestamped_backup() {
         .filter_map(std::result::Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().contains(".backup-"))
         .count();
-    assert_eq!(backups, 1);
+    assert_eq!(backups, 0);
+}
+
+#[test]
+fn successful_install_keeps_secret_prior_bytes_only_in_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mcp.json");
+    let secret = "Bearer must-not-be-copied";
+    fs::write(
+        &path,
+        format!(r#"{{"mcpServers":{{"other":{{"headers":{{"Authorization":"{secret}"}}}}}}}}"#),
+    )
+    .unwrap();
+    let preview = AgentAdapter {
+        kind: AgentKind::Cursor,
+        display_name: "Cursor",
+        config_path: path,
+    }
+    .preview_install(false)
+    .unwrap();
+
+    ConfigBatchInstall::install(vec![preview]).unwrap().commit();
+
+    let files = fs::read_dir(directory.path())
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    assert!(files[0].file_name().to_string_lossy().eq("mcp.json"));
+}
+
+#[test]
+fn startup_shape_does_not_add_or_restore_the_remote_companion() {
+    for (root, shape) in [
+        ("mcpServers", JsonShape::Url),
+        ("mcpServers", JsonShape::HttpUrl),
+        ("mcp", JsonShape::Remote),
+    ] {
+        let output = merge_json("{}", root, shape, "http://127.0.0.1:61744/mcp", false).unwrap();
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed[root].get(COMPANION_SERVER_NAME).is_none());
+        assert_eq!(
+            parsed[root][LOCAL_SERVER_NAME]
+                .get("url")
+                .or_else(|| parsed[root][LOCAL_SERVER_NAME].get("httpUrl"))
+                .and_then(Value::as_str),
+            Some("http://127.0.0.1:61744/mcp")
+        );
+    }
 }
 
 #[test]
