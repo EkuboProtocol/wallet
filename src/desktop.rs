@@ -33,7 +33,6 @@ use ekubo_wallet_core::custody::PrivateKeyMaterial;
 use ekubo_wallet_core::desktop_store::{AgentKind, AppearancePreference, MCP_RESOURCE, McpClient};
 use ekubo_wallet_core::legal::{LegalDocument, LegalStatus};
 use ekubo_wallet_core::message::MessageStatus;
-use ekubo_wallet_core::networks::NetworkProfile;
 use ekubo_wallet_core::pending::{PendingStatus, PendingTransaction};
 use ekubo_wallet_core::policy_store::{PolicyProposal, StoredPolicy};
 use ekubo_wallet_core::token_store::{ListedToken, StoredToken, TokenProposal};
@@ -1417,14 +1416,6 @@ pub struct WalletWindow {
     network_native_decimals_input: Option<Entity<InputState>>,
     network_explorer_url_input: Option<Entity<InputState>>,
     network_documentation_url_input: Option<Entity<InputState>>,
-    network_presets: Arc<[NetworkProfile]>,
-    network_preset_search_input: Option<Entity<InputState>>,
-    network_preset_search_subscription: Option<Subscription>,
-    network_preset_busy: Option<u64>,
-    network_preset_error: Option<SharedString>,
-    network_reset_error: Option<SharedString>,
-    pending_network_reset: Option<Vec<NetworkConfig>>,
-    network_reset_busy: bool,
     network_action_busy: BTreeSet<String>,
     network_action_errors: BTreeMap<String, SharedString>,
     network_proposal_error: Option<SharedString>,
@@ -1680,7 +1671,6 @@ struct PolicyEditor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Kept for the disabled "Coming soon" guided editor branch.
 enum PolicyEditorMode {
     Guided,
     Advanced,
@@ -2876,87 +2866,6 @@ fn block_explorer_resource_url(base: &url::Url, resource: &str, identifier: &str
     url.into()
 }
 
-fn network_preset_match_rank(profile: &NetworkProfile, query: &str) -> Option<(usize, usize)> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return Some((usize::from(!profile.is_default), 0));
-    }
-    let chain_id = profile.config.chain_id.to_string();
-    let display_name = profile
-        .config
-        .display_name
-        .as_deref()
-        .unwrap_or_default()
-        .to_lowercase();
-    let name = profile.config.name.to_lowercase();
-    let aliases = profile
-        .config
-        .aliases
-        .iter()
-        .map(|alias| alias.to_lowercase())
-        .collect::<Vec<_>>();
-    std::iter::once(chain_id.as_str())
-        .chain(std::iter::once(name.as_str()))
-        .chain(std::iter::once(display_name.as_str()))
-        .chain(aliases.iter().map(String::as_str))
-        .filter_map(|value| {
-            let position = value.find(&query)?;
-            let kind = if value.len() == query.len() {
-                0
-            } else if position == 0 {
-                1
-            } else {
-                2
-            };
-            Some((kind, position))
-        })
-        .min()
-}
-
-fn network_presets_for_display<'a>(
-    presets: &'a [NetworkProfile],
-    configured: &[NetworkConfig],
-    query: &str,
-    limit: usize,
-    testnet_mode: bool,
-) -> Vec<&'a NetworkProfile> {
-    let configured_chains = configured
-        .iter()
-        .map(|network| network.chain_id)
-        .collect::<BTreeSet<_>>();
-    let mut matches = presets
-        .iter()
-        .filter(|profile| testnet_mode || !profile.config.testnet)
-        .filter_map(|profile| network_preset_match_rank(profile, query).map(|rank| (rank, profile)))
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|(rank, profile)| {
-        (
-            *rank,
-            profile.config.testnet,
-            configured_chains.contains(&profile.config.chain_id),
-            profile.config.chain_id,
-        )
-    });
-    matches
-        .into_iter()
-        .take(limit)
-        .map(|(_, profile)| profile)
-        .collect()
-}
-
-fn networks_discarded_by_default_reset(
-    configured: &[NetworkConfig],
-    defaults: &[NetworkConfig],
-) -> Vec<String> {
-    let mut discarded = configured
-        .iter()
-        .filter(|network| !defaults.contains(network))
-        .map(|network| network.name.clone())
-        .collect::<Vec<_>>();
-    discarded.sort();
-    discarded
-}
-
 fn parse_network_editor_draft(
     draft: &NetworkEditorDraft,
     disabled: bool,
@@ -4110,7 +4019,6 @@ impl WalletWindow {
     ) -> Self {
         let appearance_preference = owner.appearance_preference().unwrap_or_default();
         let testnet_mode = owner.testnet_mode().unwrap_or(false);
-        let network_presets = Arc::from(owner.network_presets());
         let route_scroll_handle = ScrollHandle::new();
         let sidebar_logo_light =
             render_embedded_png(include_bytes!("../assets/tray/light_mode_tray_icon.png"))
@@ -4213,14 +4121,6 @@ impl WalletWindow {
             network_native_decimals_input: None,
             network_explorer_url_input: None,
             network_documentation_url_input: None,
-            network_presets,
-            network_preset_search_input: None,
-            network_preset_search_subscription: None,
-            network_preset_busy: None,
-            network_preset_error: None,
-            network_reset_error: None,
-            pending_network_reset: None,
-            network_reset_busy: false,
             network_action_busy: BTreeSet::new(),
             network_action_errors: BTreeMap::new(),
             network_proposal_error: None,
@@ -5652,7 +5552,6 @@ impl WalletWindow {
         cx.notify();
     }
 
-    #[allow(dead_code)] // Re-enabled with the guided editor when that workflow is ready.
     fn set_policy_editor_mode(&mut self, mode: PolicyEditorMode, cx: &mut Context<Self>) {
         let Some(editor) = self.policy_editor.as_mut() else {
             return;
@@ -6721,102 +6620,6 @@ impl WalletWindow {
                     Err(error) => {
                         view.network_editor_errors.form =
                             Some(format!("Network was not saved: {error:#}"));
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn install_network_preset(&mut self, chain_id: u64, cx: &mut Context<Self>) {
-        if self.network_preset_busy.is_some() || self.network_reset_busy {
-            return;
-        }
-        self.network_preset_busy = Some(chain_id);
-        self.network_preset_error = None;
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.install_network_preset(chain_id).await
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                if view.network_preset_busy != Some(chain_id) {
-                    return;
-                }
-                view.network_preset_busy = None;
-                match result {
-                    Ok(_) => view.network_preset_error = None,
-                    Err(error) => {
-                        view.network_preset_error =
-                            Some(format!("Could not install the network preset: {error:#}").into());
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn begin_network_reset(&mut self, cx: &mut Context<Self>) {
-        if self.network_preset_busy.is_some() || self.network_reset_busy {
-            return;
-        }
-        match self.cached_networks() {
-            Ok(networks) => {
-                self.pending_network_reset = Some(networks.to_vec());
-                self.network_reset_error = None;
-            }
-            Err(error) => {
-                self.network_reset_error =
-                    Some(format!("Could not prepare the network reset: {error:#}").into());
-            }
-        }
-        cx.notify();
-    }
-
-    fn cancel_network_reset(&mut self, cx: &mut Context<Self>) {
-        if self.network_reset_busy {
-            return;
-        }
-        self.pending_network_reset = None;
-        cx.notify();
-    }
-
-    fn confirm_network_reset(&mut self, cx: &mut Context<Self>) {
-        let Some(reviewed_networks) = self.pending_network_reset.clone() else {
-            return;
-        };
-        if self.network_reset_busy || self.network_preset_busy.is_some() {
-            return;
-        }
-        self.network_reset_busy = true;
-        self.network_reset_error = None;
-        let owner = self.owner.clone();
-        let task = gpui_tokio::Tokio::spawn_result(cx, async move {
-            owner.reset_networks_to_defaults(&reviewed_networks).await
-        });
-        cx.spawn(async move |view, cx| {
-            let result = task.await;
-            let _ = view.update(cx, |view, cx| {
-                view.network_reset_busy = false;
-                match result {
-                    Ok(_) => {
-                        view.pending_network_reset = None;
-                        view.network_reset_error = None;
-                        view.invalidate_portfolio();
-                    }
-                    Err(error) => {
-                        view.pending_network_reset = None;
-                        view.network_reset_error = Some(
-                            format!(
-                                "Networks were not reset; review the current configuration and try again: {error:#}"
-                            )
-                            .into(),
-                        );
                     }
                 }
                 cx.notify();
@@ -11713,280 +11516,6 @@ impl WalletWindow {
                     }),
             )
     }
-
-    #[allow(dead_code)]
-    fn render_network_registry(
-        &self,
-        configured: &[NetworkConfig],
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let mut registry = div().flex().flex_col().gap_4();
-        if let Some(search) = self.network_preset_search_input.as_ref() {
-            let query = search.read(cx).value().to_string();
-            let matches = network_presets_for_display(
-                self.network_presets.as_ref(),
-                configured,
-                &query,
-                10,
-                self.testnet_mode,
-            );
-            let mut rows = div().flex().flex_col().gap_2();
-            if matches.is_empty() {
-                rows = rows.child(div().py_3().text_color(cx.theme().muted_foreground).child(
-                    selectable_label("No built-in network preset matches this search."),
-                ));
-            }
-            for profile in matches {
-                let chain_id = profile.config.chain_id;
-                let configured_network = configured
-                    .iter()
-                    .find(|network| network.chain_id == chain_id);
-                let exact = configured_network == Some(&profile.config);
-                let installing = self.network_preset_busy == Some(chain_id);
-                let any_action_busy = self.network_preset_busy.is_some() || self.network_reset_busy;
-                let title = profile
-                    .config
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&profile.config.name)
-                    .to_owned();
-                let mut rpc_urls = div().flex().flex_col().gap_1();
-                for (index, url) in profile.config.rpc_urls.iter().enumerate() {
-                    rpc_urls = rpc_urls.child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "network-preset-{chain_id}-rpc-{index}"
-                            )))
-                            .max_w_full()
-                            .overflow_x_scroll()
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_text(
-                                format!("network-preset-{chain_id}-rpc-text-{index}"),
-                                url.as_str(),
-                            )),
-                    );
-                }
-                rows = rows.child(
-                    div()
-                        .p_3()
-                        .rounded(cx.theme().radius_lg)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .flex_wrap()
-                                .items_start()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .flex_basis(px(220.0))
-                                        .child(div().font_semibold().child(selectable_text(
-                                            format!("network-preset-title-{chain_id}"),
-                                            &title,
-                                        )))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(selectable_text(
-                                                    format!("network-preset-metadata-{chain_id}"),
-                                                    &format!(
-                                                        "{} · chain {}{}",
-                                                        profile.config.name,
-                                                        chain_id,
-                                                        if profile.config.testnet {
-                                                            " · testnet"
-                                                        } else {
-                                                            ""
-                                                        }
-                                                    ),
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "install-network-preset-{chain_id}"
-                                    )))
-                                    .label(if installing {
-                                        "Authenticating…"
-                                    } else if exact {
-                                        "Current preset"
-                                    } else if configured_network.is_some() {
-                                        "Restore preset"
-                                    } else {
-                                        "Install preset"
-                                    })
-                                    .primary()
-                                    .disabled(any_action_busy || exact)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.install_network_preset(chain_id, cx);
-                                    })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(if profile.simulate_endpoints == 0 {
-                                    cx.theme().warning
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .child(selectable_text(
-                                    format!("network-preset-capabilities-{chain_id}"),
-                                    &if profile.simulate_endpoints == 0 {
-                                        "No bundled endpoint currently supports the simulation method required for signing. Install only for read access, then configure a compatible RPC."
-                                            .to_owned()
-                                    } else {
-                                        format!(
-                                            "{} measured · {} able to simulate a fork",
-                                            pluralize(profile.simulate_endpoints, "endpoint"),
-                                            profile.fork_endpoints
-                                        )
-                                    },
-                                )),
-                        )
-                        .child(rpc_urls),
-                );
-            }
-            registry = registry.child(
-                GroupBox::new()
-                    .id("network-preset-registry")
-                    .outline()
-                    .title("Built-in network presets")
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label("Search the bundled registry instead of finding RPC URLs yourself. The wallet verifies the chain ID before asking you to authenticate the change. RPC URLs are shown in full because they supply security-sensitive simulation results.")),
-                    )
-                    .child(
-                        app_input(search, cx)
-                            .aria_label("Search built-in network presets")
-                            .cleanable(true),
-                    )
-                    .when_some(self.network_preset_error.clone(), |panel, error| {
-                        panel.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child(selectable_label(error)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(selectable_label("Showing up to 10 matches.")),
-                    )
-                    .child(rows),
-            );
-        }
-
-        let defaults = ekubo_wallet_core::config::default_networks();
-        let pending = self.pending_network_reset.as_deref();
-        let discarded = pending
-            .map(|reviewed| networks_discarded_by_default_reset(reviewed, &defaults))
-            .unwrap_or_default();
-        let reset_panel = GroupBox::new()
-            .id("network-default-reset")
-            .outline()
-            .title("Reset network configuration")
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label(format!(
-                        "Replace every configured network with fresh copies of the {} built-in defaults. Accounts, policies, tokens, and activity are untouched.",
-                        defaults.len()
-                    ))),
-            )
-            .when_some(self.network_reset_error.clone(), |panel, error| {
-                panel.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().danger)
-                        .child(selectable_label(error)),
-                )
-            })
-            .when(pending.is_none(), |panel| {
-                panel.child(
-                    app_button("prepare-network-reset")
-                        .label("Review reset")
-                        .danger()
-                        .disabled(self.network_preset_busy.is_some() || self.network_reset_busy)
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.begin_network_reset(cx);
-                        })),
-                )
-            })
-            .when_some(pending, |panel, _| {
-                panel
-                    .child(
-                        div()
-                            .p_3()
-                            .rounded(cx.theme().radius_lg)
-                            .border_1()
-                            .border_color(cx.theme().danger)
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .font_semibold()
-                                    .child(selectable_label("Confirm complete network reset")),
-                            )
-                            .child(selectable_label(if discarded.is_empty() {
-                                "The configured rows already match the shipped defaults. Resetting will still restore their shipped enabled/disabled state and exact RPC lists."
-                                    .to_owned()
-                            } else {
-                                format!(
-                                    "Custom or modified configuration will be discarded for: {}.",
-                                    discarded.join(", ")
-                                )
-                            }))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .child(
-                                        app_button("confirm-network-reset")
-                                            .label(if self.network_reset_busy {
-                                                "Authenticating…"
-                                            } else {
-                                                "Authenticate & reset"
-                                            })
-                                            .danger()
-                                            .disabled(self.network_reset_busy)
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.confirm_network_reset(cx);
-                                            })),
-                                    )
-                                    .child(
-                                        app_button("cancel-network-reset")
-                                            .label("Cancel")
-                                            .disabled(self.network_reset_busy)
-                                            .on_click(cx.listener(|view, _, _, cx| {
-                                                view.cancel_network_reset(cx);
-                                            })),
-                                    ),
-                            ),
-                    )
-            });
-        registry.child(reset_panel)
-    }
-
     fn render_networks(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_4();
         match self.cached_reviews().map(|reviews| {
@@ -14441,8 +13970,6 @@ fn show_wallet_window(
         view.network_native_decimals_input = None;
         view.network_explorer_url_input = None;
         view.network_documentation_url_input = None;
-        view.network_preset_search_input = None;
-        view.network_preset_search_subscription = None;
         view.network_editor_open = false;
         view.network_editor_original = None;
         view.policy_json_input = None;

@@ -182,50 +182,6 @@ fn the_install_button_reflects_what_is_left_to_install() {
 }
 
 #[test]
-fn network_preset_search_prefers_exact_names_and_chain_ids() {
-    let presets = ekubo_wallet_core::networks::known_networks();
-    let configured = ekubo_wallet_core::config::default_networks();
-
-    let by_chain = network_presets_for_display(presets, &configured, "8453", 10, false);
-    assert_eq!(by_chain[0].config.chain_id, 8453);
-
-    let by_name = network_presets_for_display(presets, &configured, "base", 10, false);
-    assert_eq!(by_name[0].config.name, "base");
-    assert!(
-        by_name
-            .iter()
-            .all(|profile| { network_preset_match_rank(profile, "base").is_some() })
-    );
-}
-
-#[test]
-fn network_reset_preview_names_every_custom_or_modified_row() {
-    let defaults = ekubo_wallet_core::config::default_networks();
-    let mut configured = defaults.clone();
-    configured[0].rpc_urls = vec!["https://owner-rpc.example".parse().unwrap()];
-    configured.push(NetworkConfig {
-        name: "owner-chain".into(),
-        disabled: true,
-        testnet: false,
-        display_name: Some("Owner Chain".into()),
-        aliases: Vec::new(),
-        chain_id: 9_999_991,
-        rpc_urls: vec!["https://owner-chain.example".parse().unwrap()],
-        rpc_strategy: RpcStrategy::default(),
-        max_gas_limit: None,
-        max_fee_per_gas: None,
-        native_currency: None,
-        block_explorer_url: None,
-        documentation_url: None,
-    });
-
-    let discarded = networks_discarded_by_default_reset(&configured, &defaults);
-    assert!(discarded.contains(&configured[0].name));
-    assert!(discarded.contains(&"owner-chain".to_owned()));
-    assert_eq!(discarded.len(), 2);
-}
-
-#[test]
 fn structured_network_editor_builds_the_complete_network_configuration() {
     let draft = NetworkEditorDraft {
         name: "owner-chain".into(),
