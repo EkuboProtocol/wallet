@@ -1,0 +1,14 @@
+{
+  "name": "ekubo-wallet-claude-desktop",
+  "private": true,
+  "version": "1.0.0-rc.6",
+  "type": "module",
+  "scripts": {
+    "test": "node --test server/index.test.js",
+    "validate": "mcpb validate .",
+    "pack": "mcpb pack . dist/ekubo-wallet.mcpb"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2"
+  }
+}

@@ -5,6 +5,11 @@ on macOS, Windows, and Linux. `cargo-packager` produces DMG, per-user NSIS,
 AppImage and DEB artifacts. Platform signing/notarization is mandatory for
 published desktop artifacts.
 
+The release workflow also tests, validates, and publishes the cross-platform
+`ekubo-wallet.mcpb` Claude Desktop extension. Its manifest and npm package
+versions must match the Rust package version before tagging. The extension has
+no runtime dependency installation and contains no credential material.
+
 Update metadata and packages are signed by a dedicated Minisign key held only
 in the protected release environment. CI compiles the public key into the app,
 publishes signed `latest.json`, retains platform signatures, and attaches

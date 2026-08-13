@@ -14,6 +14,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  claude-desktop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: integrations/claude-desktop/package-lock.json
+      - name: Build Claude Desktop extension
+        working-directory: integrations/claude-desktop
+        run: npm ci && npm test && npm run validate && npm run pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-claude-desktop
+          path: integrations/claude-desktop/dist/ekubo-wallet.mcpb
+          if-no-files-found: error
+
   package:
     environment: release
     strategy:
@@ -153,7 +171,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: package
+    needs: [package, claude-desktop]
     runs-on: ubuntu-24.04
     environment: release
     steps:
