@@ -385,8 +385,10 @@ fn pipeline_server(
     )
     .unwrap();
     let wallet_address = material.address();
-    keys.insert_new("primary", &material).unwrap();
+    let instance_id = uuid::Uuid::new_v4();
+    keys.insert_new(instance_id, &material).unwrap();
     let wallet = WalletMetadata {
+        instance_id,
         id: "primary".into(),
         address: wallet_address,
         created_at: Utc::now(),
@@ -408,9 +410,7 @@ fn pipeline_server(
         .unwrap()
     };
     let mut policies = open();
-    policies
-        .put_for_wallet("primary", wallet.address, policy, None)
-        .unwrap();
+    policies.put_for_instance(&wallet, policy, None).unwrap();
     let server = WalletMcpServer::new(
         config,
         policies,

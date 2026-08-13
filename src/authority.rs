@@ -697,8 +697,8 @@ impl OwnerApi {
 
     pub fn account_removal_document(&self, wallet_id: &str) -> Result<ReviewDocument> {
         let wallet = self.config.wallet(wallet_id)?;
-        let in_flight =
-            PolicyStore::production(self.config.data_dir())?.in_flight_transactions(wallet_id)?;
+        let in_flight = PolicyStore::production(self.config.data_dir())?
+            .in_flight_transactions_for_wallet(&wallet)?;
         let mut request = ApprovalRequest::new(
             ApprovalKind::RemoveWallet,
             "Remove account",
@@ -908,7 +908,11 @@ impl OwnerApi {
 
     pub fn policy(&self, wallet_id: &str) -> Result<Option<StoredPolicy>> {
         let wallet = self.account(wallet_id)?;
-        PolicyStore::production(self.config.data_dir())?.get_for_wallet(wallet_id, wallet.address)
+        PolicyStore::production(self.config.data_dir())?.get_for_wallet(
+            wallet_id,
+            wallet.instance_id,
+            wallet.address,
+        )
     }
 
     pub async fn install_policy(
@@ -931,13 +935,14 @@ impl OwnerApi {
             Some(authorize_owner(OwnerAuthorizationScope::PolicySettings).await?)
         };
         let mut store = PolicyStore::production(self.config.data_dir())?;
-        let current = store.get_for_wallet(wallet_id, wallet.address)?;
+        let current = store.get_for_wallet(wallet_id, wallet.instance_id, wallet.address)?;
         ensure_optional_revision(
             reviewed_revision,
             current.as_ref().map(|policy| policy.revision),
         )?;
-        let installed = store.install_policy(
+        let installed = store.install_policy_for_instance(
             wallet_id,
+            wallet.instance_id,
             wallet.address,
             policy,
             reviewed_revision,
@@ -954,11 +959,12 @@ impl OwnerApi {
     pub async fn apply_policy_proposal(&self, proposal: &PolicyProposal) -> Result<StoredPolicy> {
         let wallet = self.account(&proposal.wallet_id)?;
         ensure!(
-            wallet.address == proposal.wallet_address,
+            wallet.instance_id == proposal.wallet_instance_id
+                && wallet.address == proposal.wallet_address,
             "the proposal belongs to a predecessor wallet identity"
         );
         let before = PolicyStore::production(self.config.data_dir())?
-            .proposal(&proposal.wallet_id)?
+            .proposal_for_instance(proposal.wallet_instance_id)?
             .context("the policy proposal no longer exists")?;
         ensure!(
             before == *proposal,
@@ -1536,10 +1542,11 @@ impl OwnerApi {
         let request = pending.get(request_id)?;
         let data_dir = self.config.data_dir().to_path_buf();
         let wallet_id = request.wallet_id.clone();
+        let wallet_instance_id = request.wallet_instance_id;
         let wallet_address = request.execution_plan.sender;
         let read_policy = move || {
             PolicyStore::production(&data_dir)?
-                .get_for_wallet(&wallet_id, wallet_address)?
+                .get_for_wallet(&wallet_id, wallet_instance_id, wallet_address)?
                 .context("wallet has no installed policy")
         };
         let tokens = TokenStore::production(self.config.data_dir())?;

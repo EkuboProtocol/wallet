@@ -10,6 +10,7 @@ use crate::{config::WalletSource, core::execution_plan::ExecutionPlan};
 use alloy::{primitives::Address, signers::local::PrivateKeySigner};
 use chrono::Utc;
 use serde_json::json;
+use uuid::Uuid;
 
 /// The "already known" family a node answers with when the transaction it
 /// is being asked to accept is already in its mempool or a block.
@@ -166,6 +167,7 @@ fn a_send_whose_absence_could_not_be_observed_says_so() {
 
 fn wallet(signer: &PrivateKeySigner) -> WalletMetadata {
     WalletMetadata {
+        instance_id: Uuid::new_v4(),
         id: "primary".into(),
         address: signer.address(),
         created_at: Utc::now(),

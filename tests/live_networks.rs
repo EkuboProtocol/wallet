@@ -64,6 +64,7 @@ use ekubo_wallet::{
 };
 use serde_json::json;
 use std::{future::Future, time::Duration};
+use uuid::Uuid;
 
 /// Deployed at the same address on every network in this matrix, and writable
 /// without holding any balance: `approve` only records an allowance. That
@@ -104,6 +105,7 @@ fn token() -> Address {
 
 fn wallet() -> WalletMetadata {
     WalletMetadata {
+        instance_id: wallet_instance_id(),
         id: "live-matrix".into(),
         address: sender(),
         created_at: Utc::now(),
@@ -112,12 +114,17 @@ fn wallet() -> WalletMetadata {
     }
 }
 
+fn wallet_instance_id() -> Uuid {
+    Uuid::from_u128(0x11e)
+}
+
 fn policy_context() -> ekubo_wallet::core::predicate::PolicyContext {
     ekubo_wallet::core::predicate::PolicyContext { wallet: sender() }
 }
 
 fn policy() -> StoredPolicy {
     StoredPolicy {
+        wallet_instance_id: wallet_instance_id(),
         wallet_id: "live-matrix".into(),
         wallet_address: sender(),
         policy: WalletPolicy::allow_anything(),
@@ -314,6 +321,7 @@ async fn open_fork(network: &NetworkConfig) -> (ForkStore, ForkSession) {
     let session = store
         .create(
             "live-matrix",
+            wallet_instance_id(),
             sender(),
             network.chain_id,
             parent,

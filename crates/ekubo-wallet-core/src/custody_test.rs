@@ -7,6 +7,9 @@
 
 use super::*;
 use crate::human_presence::{HumanPresenceError, TestHumanPresence};
+use uuid::Uuid;
+
+const TEST_PRIVATE_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 
 /// A presence check that runs an action while the owner is "authenticating".
 /// Every race `remove` has to survive lives in exactly that window, because
@@ -58,12 +61,13 @@ async fn a_refused_creation_still_clears_the_key_it_inserted() {
         .unwrap();
     service
         .keys
-        .delete_matching("primary", first.address)
+        .delete_matching(first.instance_id, first.address)
         .unwrap();
     service
         .config
         .update(|config| {
             config.wallets.push(WalletMetadata {
+                instance_id: Uuid::new_v4(),
                 id: "primary".into(),
                 address: alloy::primitives::Address::repeat_byte(9),
                 created_at: Utc::now(),
@@ -76,7 +80,7 @@ async fn a_refused_creation_still_clears_the_key_it_inserted() {
     assert_ne!(first.address, alloy::primitives::Address::repeat_byte(9));
 
     assert!(service.create("primary").is_err());
-    assert!(service.keys.load("primary").is_err());
+    assert!(service.keys.load(first.instance_id).is_err());
 }
 
 #[tokio::test]
@@ -136,6 +140,48 @@ fn imports_record_their_external_origin() {
 }
 
 #[tokio::test]
+async fn deleting_and_reimporting_the_same_key_creates_a_new_wallet_instance() {
+    let (_directory, service) = service(true);
+    let first = service
+        .import(
+            "primary",
+            PrivateKeyMaterial::from_hex(TEST_PRIVATE_KEY).unwrap(),
+        )
+        .unwrap();
+
+    service.remove("primary").await.unwrap();
+    assert!(service.keys.load(first.instance_id).is_err());
+
+    let second = service
+        .import(
+            "primary",
+            PrivateKeyMaterial::from_hex(TEST_PRIVATE_KEY).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(second.address, first.address);
+    assert_ne!(second.instance_id, first.instance_id);
+    assert_eq!(
+        service.keys.load(second.instance_id).unwrap().address(),
+        second.address
+    );
+
+    let policies = service.config.policy_store().unwrap();
+    let active = policies
+        .get_for_wallet("primary", second.instance_id, second.address)
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.wallet_instance_id, second.instance_id);
+    assert!(
+        policies
+            .get_for_wallet("primary", first.instance_id, first.address)
+            .is_err(),
+        "a retired instance can never become the active policy by reusing its name and address"
+    );
+    let retained = policies.policy_history_count("primary").unwrap();
+    assert_eq!(retained, 2, "both policy lifecycles remain in history");
+}
+
+#[tokio::test]
 async fn an_unreadable_encrypted_database_never_destroys_the_key() {
     // The removal fails *and* the re-read that follows it fails, which is the
     // shape that used to delete a live wallet's only key: `wallet(..).is_ok()`
@@ -162,7 +208,7 @@ async fn an_unreadable_encrypted_database_never_destroys_the_key() {
 
     assert!(service.remove("primary").await.is_err());
     assert_eq!(
-        keys.load("primary").unwrap().signer().address(),
+        keys.load(wallet.instance_id).unwrap().signer().address(),
         wallet.address,
         "the key must survive a removal that could not confirm its row was gone"
     );
@@ -186,6 +232,7 @@ async fn a_replacement_wallet_keeps_its_key() {
 
     let swap_path = path.clone();
     let swap_keys = Arc::clone(&keys);
+    let retiring = original.clone();
     let service = CustodyService::new(
         ConfigStore::new(&path),
         Arc::clone(&keys),
@@ -203,7 +250,13 @@ async fn a_replacement_wallet_keeps_its_key() {
                 })
                 .unwrap();
             swap_keys
-                .delete_matching("primary", original.address)
+                .delete_matching(original.instance_id, original.address)
+                .unwrap();
+            other
+                .config
+                .policy_store()
+                .unwrap()
+                .retire_wallet(&retiring)
                 .unwrap();
             other.create("primary").unwrap();
         })),
@@ -213,9 +266,78 @@ async fn a_replacement_wallet_keeps_its_key() {
     let replacement = ConfigStore::new(&path).wallet("primary").unwrap();
     assert_ne!(replacement.address, original.address);
     assert_eq!(
-        keys.load("primary").unwrap().signer().address(),
+        keys.load(replacement.instance_id)
+            .unwrap()
+            .signer()
+            .address(),
         replacement.address,
         "the replacement wallet's key must outlive an approval given for its predecessor"
+    );
+}
+
+#[tokio::test]
+async fn a_same_key_reimport_is_still_a_different_wallet_during_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_path_buf();
+    let keys = Arc::new(MemoryKeyStore::default());
+    let seed = CustodyService::new(
+        ConfigStore::new(&path),
+        Arc::clone(&keys),
+        Arc::new(TestHumanPresence { allow: true }),
+    );
+    let original = seed
+        .import(
+            "primary",
+            PrivateKeyMaterial::from_hex(TEST_PRIVATE_KEY).unwrap(),
+        )
+        .unwrap();
+
+    let swap_path = path.clone();
+    let swap_keys = Arc::clone(&keys);
+    let retiring = original.clone();
+    let service = CustodyService::new(
+        ConfigStore::new(&path),
+        Arc::clone(&keys),
+        Arc::new(PresenceThen(move || {
+            let other = CustodyService::new(
+                ConfigStore::new(&swap_path),
+                Arc::clone(&swap_keys),
+                Arc::new(TestHumanPresence { allow: true }),
+            );
+            other
+                .config
+                .update(|config| {
+                    config
+                        .wallets
+                        .retain(|wallet| wallet.instance_id != original.instance_id);
+                    Ok(())
+                })
+                .unwrap();
+            swap_keys
+                .delete_matching(original.instance_id, original.address)
+                .unwrap();
+            other
+                .config
+                .policy_store()
+                .unwrap()
+                .retire_wallet(&retiring)
+                .unwrap();
+            other
+                .import(
+                    "primary",
+                    PrivateKeyMaterial::from_hex(TEST_PRIVATE_KEY).unwrap(),
+                )
+                .unwrap();
+        })),
+    );
+
+    assert!(service.remove("primary").await.is_err());
+    let replacement = ConfigStore::new(&path).wallet("primary").unwrap();
+    assert_eq!(replacement.address, original.address);
+    assert_ne!(replacement.instance_id, original.instance_id);
+    assert_eq!(
+        keys.load(replacement.instance_id).unwrap().address(),
+        replacement.address
     );
 }
 
@@ -223,10 +345,12 @@ async fn a_replacement_wallet_keeps_its_key() {
 /// real [`MemoryKeyStore`] that holds the actual material. Every failure below
 /// is a credential store that reported an error without saying what it did,
 /// which is the only thing the removal path cannot observe for itself.
+type DeleteFailure = Box<dyn Fn(&MemoryKeyStore, Uuid) -> anyhow::Error + Send + Sync>;
+
 struct FlakyKeyStore {
     inner: MemoryKeyStore,
     /// Run instead of the real deletion. Returns the error to report.
-    on_delete: Box<dyn Fn(&MemoryKeyStore) -> anyhow::Error + Send + Sync>,
+    on_delete: DeleteFailure,
     /// Fail `address_of` too, so the removal cannot tell what happened.
     blind: bool,
 }
@@ -234,26 +358,26 @@ struct FlakyKeyStore {
 impl crate::sealed::SealedKeyStore for FlakyKeyStore {}
 
 impl KeyStore for FlakyKeyStore {
-    fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
-        self.inner.insert_new(wallet_id, key)
+    fn insert_new(&self, instance_id: Uuid, key: &PrivateKeyMaterial) -> Result<()> {
+        self.inner.insert_new(instance_id, key)
     }
 
-    fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial> {
-        self.inner.load(wallet_id)
+    fn load(&self, instance_id: Uuid) -> Result<PrivateKeyMaterial> {
+        self.inner.load(instance_id)
     }
 
-    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>> {
+    fn address_of(&self, instance_id: Uuid) -> Result<Option<Address>> {
         ensure!(!self.blind, "credential store is unreachable");
-        self.inner.address_of(wallet_id)
+        self.inner.address_of(instance_id)
     }
 
-    fn delete_matching(&self, _wallet_id: &str, _expected: Address) -> Result<Deletion> {
-        Err((self.on_delete)(&self.inner))
+    fn delete_matching(&self, instance_id: Uuid, _expected: Address) -> Result<Deletion> {
+        Err((self.on_delete)(&self.inner, instance_id))
     }
 }
 
 fn flaky(
-    on_delete: impl Fn(&MemoryKeyStore) -> anyhow::Error + Send + Sync + 'static,
+    on_delete: impl Fn(&MemoryKeyStore, Uuid) -> anyhow::Error + Send + Sync + 'static,
     blind: bool,
 ) -> (
     tempfile::TempDir,
@@ -281,19 +405,19 @@ async fn a_deletion_that_destroyed_the_key_before_failing_does_not_relist_the_wa
     // row on the strength of the error alone — an inventory entry that reads
     // as available and can never produce a signature.
     let (directory, keys, service) = flaky(
-        |inner| {
-            let address = inner.address_of("primary").unwrap().unwrap();
-            inner.delete_matching("primary", address).unwrap();
+        |inner, instance_id| {
+            let address = inner.address_of(instance_id).unwrap().unwrap();
+            inner.delete_matching(instance_id, address).unwrap();
             anyhow::anyhow!("credential store failed after deleting")
         },
         false,
     );
-    service.create("primary").unwrap();
+    let wallet = service.create("primary").unwrap();
 
     // The removal the owner asked for did happen, so it is not an error.
     service.remove("primary").await.unwrap();
     assert!(
-        keys.address_of("primary").unwrap().is_none(),
+        keys.address_of(wallet.instance_id).unwrap().is_none(),
         "the credential really is gone"
     );
     assert!(
@@ -310,14 +434,14 @@ async fn a_deletion_that_kept_the_key_restores_the_row() {
     // at all: the credential is still there, so the row has to come back or a
     // reachable key is orphaned with nothing naming it.
     let (directory, keys, service) = flaky(
-        |_| anyhow::anyhow!("credential store failed before deleting"),
+        |_, _| anyhow::anyhow!("credential store failed before deleting"),
         false,
     );
     let wallet = service.create("primary").unwrap();
 
     assert!(service.remove("primary").await.is_err());
     assert_eq!(
-        keys.address_of("primary").unwrap(),
+        keys.address_of(wallet.instance_id).unwrap(),
         Some(wallet.address),
         "the key survived"
     );
@@ -337,7 +461,7 @@ async fn an_unreadable_credential_store_does_not_relist_the_wallet() {
     // on whether the row can ever sign again, so the removal says what it does
     // not know instead of guessing.
     let (directory, _keys, service) = flaky(
-        |_| anyhow::anyhow!("credential store failed at an unknown point"),
+        |_, _| anyhow::anyhow!("credential store failed at an unknown point"),
         true,
     );
     service.create("primary").unwrap();
@@ -376,20 +500,21 @@ fn deletion_is_addressed_by_key_rather_than_by_name() {
     )
     .unwrap();
     let mine_address = mine.address();
-    keys.insert_new("primary", &theirs).unwrap();
+    let instance_id = Uuid::new_v4();
+    keys.insert_new(instance_id, &theirs).unwrap();
 
     assert_eq!(
-        keys.delete_matching("primary", mine_address).unwrap(),
+        keys.delete_matching(instance_id, mine_address).unwrap(),
         Deletion::Mismatched(theirs.address()),
         "a credential belonging to another wallet is reported, not deleted"
     );
     assert_eq!(
-        keys.address_of("primary").unwrap(),
+        keys.address_of(instance_id).unwrap(),
         Some(theirs.address()),
         "and it is still there"
     );
     assert_eq!(
-        keys.delete_matching("absent", mine_address).unwrap(),
+        keys.delete_matching(Uuid::new_v4(), mine_address).unwrap(),
         Deletion::Absent
     );
 }
@@ -413,7 +538,7 @@ async fn a_creation_that_loses_the_configuration_race_keeps_the_winners_key() {
     // insert, so nothing is deleted and the winner is untouched.
     assert!(service.create("primary").is_err());
     assert_eq!(
-        keys.load("primary").unwrap().signer().address(),
+        keys.load(winner.instance_id).unwrap().signer().address(),
         winner.address,
         "the first wallet's key is still the one stored under its id"
     );
@@ -478,6 +603,7 @@ async fn an_export_reveals_only_the_key_that_was_reviewed() {
     let swap_path = path.clone();
     let swap_keys = Arc::clone(&keys);
     let reviewed_address = reviewed.address;
+    let retiring = reviewed.clone();
     let service = CustodyService::new(
         ConfigStore::new(&path),
         Arc::clone(&keys),
@@ -495,7 +621,13 @@ async fn an_export_reveals_only_the_key_that_was_reviewed() {
                 })
                 .unwrap();
             swap_keys
-                .delete_matching("primary", reviewed_address)
+                .delete_matching(reviewed.instance_id, reviewed_address)
+                .unwrap();
+            other
+                .config
+                .policy_store()
+                .unwrap()
+                .retire_wallet(&retiring)
                 .unwrap();
             other.create("primary").unwrap();
         })),

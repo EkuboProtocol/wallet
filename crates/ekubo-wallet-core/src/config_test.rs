@@ -39,7 +39,7 @@ fn configuration_is_encrypted_with_the_wallet_database_key() {
 #[test]
 fn default_networks_have_unique_chain_ids_and_identifiers() {
     validate_config(&WalletConfig {
-        version: 2,
+        version: 3,
         wallets: vec![],
         networks: default_networks(),
     })

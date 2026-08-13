@@ -16,6 +16,7 @@ use crate::{
 };
 use alloy::sol_types::SolError;
 use chrono::Utc;
+use uuid::Uuid;
 
 fn context(wallet: &WalletMetadata) -> PolicyContext {
     PolicyContext {
@@ -267,6 +268,7 @@ fn a_contracts_own_revert_string_is_quoted_rather_than_asserted() {
 #[ignore = "requires an Ethereum RPC with eth_simulateV1 support"]
 async fn live_direct_simulation_uses_eth_simulate_v1() {
     let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
         id: "live-test".into(),
         address: Address::repeat_byte(0x11),
         created_at: Utc::now(),
@@ -274,6 +276,7 @@ async fn live_direct_simulation_uses_eth_simulate_v1() {
         exported_at: None,
     };
     let policy = StoredPolicy {
+        wallet_instance_id: wallet.instance_id,
         wallet_id: wallet.id.clone(),
         wallet_address: wallet.address,
         policy: crate::core::policy::WalletPolicy::allow_anything(),
@@ -298,6 +301,7 @@ async fn live_direct_simulation_uses_eth_simulate_v1() {
 #[ignore = "requires eth_simulateV1 and canonical Calibur on Ethereum"]
 async fn live_batch_simulation_executes_canonical_calibur() {
     let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
         id: "live-batch-test".into(),
         address: Address::repeat_byte(0x11),
         created_at: Utc::now(),
@@ -305,6 +309,7 @@ async fn live_batch_simulation_executes_canonical_calibur() {
         exported_at: None,
     };
     let policy = StoredPolicy {
+        wallet_instance_id: wallet.instance_id,
         wallet_id: wallet.id.clone(),
         wallet_address: wallet.address,
         policy: crate::core::policy::WalletPolicy::allow_anything(),
@@ -330,6 +335,7 @@ async fn live_batch_simulation_executes_canonical_calibur() {
 #[ignore = "requires an Ethereum RPC with eth_simulateV1 support"]
 async fn live_token_balance_probes_use_separate_pinned_simulations() {
     let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
         id: "live-token-test".into(),
         address: Address::repeat_byte(0x11),
         created_at: Utc::now(),
@@ -359,6 +365,7 @@ async fn live_token_balance_probes_use_separate_pinned_simulations() {
         },
     );
     let policy = StoredPolicy {
+        wallet_instance_id: wallet.instance_id,
         wallet_id: wallet.id.clone(),
         wallet_address: wallet.address,
         policy: wallet_policy,
@@ -399,6 +406,7 @@ fn a_failed_batch_says_the_delegation_was_never_observed() {
     // not the same as empty because there is nothing there, and the result now
     // says which one it is.
     let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
         id: "failed-batch".into(),
         address: Address::repeat_byte(0x11),
         created_at: Utc::now(),
@@ -406,6 +414,7 @@ fn a_failed_batch_says_the_delegation_was_never_observed() {
         exported_at: None,
     };
     let policy = StoredPolicy {
+        wallet_instance_id: wallet.instance_id,
         wallet_id: wallet.id.clone(),
         wallet_address: wallet.address,
         policy: crate::core::policy::WalletPolicy::allow_anything(),

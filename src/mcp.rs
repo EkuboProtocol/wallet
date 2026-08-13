@@ -224,7 +224,7 @@ impl WalletMcpServer {
         for wallet in config.load()?.wallets {
             ensure!(
                 policies
-                    .get_for_wallet(&wallet.id, wallet.address)?
+                    .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
                     .is_some(),
                 "wallet {} has no policy in the encrypted database",
                 wallet.id
@@ -1151,7 +1151,7 @@ impl WalletMcpServer {
             .policies
             .lock()
             .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?
-            .get_for_wallet(&wallet_id, wallet.address)
+            .get_for_wallet(&wallet_id, wallet.instance_id, wallet.address)
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| {
                 ErrorData::invalid_params(format!("wallet {wallet_id} has no local policy"), None)
@@ -1235,7 +1235,7 @@ impl WalletMcpServer {
             .policies
             .lock()
             .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?
-            .get_for_wallet(&input.wallet_id, wallet.address)
+            .get_for_wallet(&input.wallet_id, wallet.instance_id, wallet.address)
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| {
                 ErrorData::invalid_params(
@@ -1275,8 +1275,9 @@ impl WalletMcpServer {
             let mut simulations = self.simulations.lock().map_err(|_| {
                 ErrorData::internal_error("simulation registry lock was poisoned", None)
             })?;
-            let recorded = simulations.record(
+            let recorded = simulations.record_for_instance(
                 &wallet.id,
+                wallet.instance_id,
                 &input.chain_id,
                 execution_plan.clone(),
                 Some(plan_source.to_string()),
@@ -1360,7 +1361,7 @@ impl WalletMcpServer {
         self.forks
             .lock()
             .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
-            .ensure_capacity(&wallet_id, Utc::now())
+            .ensure_capacity(&wallet_id, wallet.instance_id, Utc::now())
             .map_err(|error| tool_error(&error))?;
         self.ensure_global_fork_capacity()?;
         let parent = pin_parent_block(&network)
@@ -1372,6 +1373,7 @@ impl WalletMcpServer {
             .map_err(|_| ErrorData::internal_error("fork registry lock was poisoned", None))?
             .create(
                 &wallet_id,
+                wallet.instance_id,
                 wallet.address,
                 network.chain_id,
                 parent,
@@ -2398,18 +2400,19 @@ impl WalletMcpServer {
             .lock()
             .map_err(|_| ErrorData::internal_error("policy database lock was poisoned", None))?;
         let current = policies
-            .get_for_wallet(&wallet.id, wallet.address)
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)
             .map_err(|error| tool_error(&error))?
             .ok_or_else(|| {
                 ErrorData::invalid_params(format!("wallet {} has no local policy", wallet.id), None)
             })?;
         let replaced_previous_proposal = policies
-            .proposal(&wallet.id)
+            .proposal_for_instance(wallet.instance_id)
             .map_err(|error| tool_error(&error))?
             .is_some();
         let proposal = policies
             .put_proposal_for_wallet(
                 &wallet.id,
+                wallet.instance_id,
                 wallet.address,
                 input.source_revision,
                 &proposed,
@@ -2647,8 +2650,14 @@ impl WalletMcpServer {
             "fork was opened for a different chain",
         )?;
         if let Some(wallet_id) = wallet_id {
+            let wallet = self
+                .config
+                .wallet(wallet_id)
+                .map_err(|error| tool_error(&error))?;
             ensure_tool(
-                session.wallet_id == wallet_id,
+                session.wallet_instance_id == wallet.instance_id
+                    && session.wallet_id == wallet_id
+                    && session.wallet_address == wallet.address,
                 "fork was opened for a different wallet",
             )?;
         }
@@ -2684,7 +2693,7 @@ impl WalletMcpServer {
         self.policies
             .lock()
             .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
-            .get_for_wallet(&wallet.id, wallet.address)?
+            .get_for_wallet(&wallet.id, wallet.instance_id, wallet.address)?
             .with_context(|| format!("wallet {} has no local policy", wallet.id))
     }
 
@@ -2712,7 +2721,8 @@ impl WalletMcpServer {
             "pending request network mismatch"
         );
         ensure!(
-            record.execution_plan.sender == wallet.address,
+            record.wallet_instance_id == wallet.instance_id
+                && record.execution_plan.sender == wallet.address,
             "pending request sender no longer matches the configured wallet"
         );
         Ok(record)
@@ -2732,7 +2742,7 @@ impl WalletMcpServer {
             .map_err(|_| anyhow::anyhow!("pending database lock was poisoned"))?
             .get(request_id)?;
         ensure!(
-            record.wallet_id == wallet_id,
+            record.wallet_id == wallet_id && record.wallet_instance_id == wallet.instance_id,
             "pending request wallet mismatch"
         );
         ensure!(
@@ -2811,7 +2821,7 @@ impl WalletMcpServer {
             .take(simulation_id, Utc::now())?;
         self.release_global_simulation(simulation_id);
         ensure!(
-            recorded.wallet_id == wallet.id,
+            recorded.wallet_instance_id == wallet.instance_id && recorded.wallet_id == wallet.id,
             "simulation {simulation_id} was recorded for wallet {}, not {}",
             recorded.wallet_id,
             wallet.id
@@ -3545,7 +3555,7 @@ impl WalletMcpServer {
             .policies
             .lock()
             .map_err(|_| anyhow::anyhow!("policy database lock was poisoned"))?
-            .get_for_wallet(wallet_id, wallet.address)?
+            .get_for_wallet(wallet_id, wallet.instance_id, wallet.address)?
             .is_some();
         anyhow::ensure!(
             present,

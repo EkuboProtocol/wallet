@@ -20,6 +20,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -31,6 +32,12 @@ pub enum WalletSource {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WalletMetadata {
+    /// Immutable identity for this one local custody lifecycle.
+    ///
+    /// Re-importing the same private key creates a new instance. Names and
+    /// addresses can both repeat after retirement, so neither is an authority
+    /// boundary.
+    pub instance_id: Uuid,
     pub id: String,
     #[schemars(with = "String")]
     pub address: Address,
@@ -295,7 +302,7 @@ impl ConfigStore {
         let mut database = self.database()?;
         let Some(config) = database.setting::<WalletConfig>(WALLET_CONFIGURATION_SETTING)? else {
             let config = WalletConfig {
-                version: 2,
+                version: 3,
                 wallets: Vec::new(),
                 networks: default_networks(),
             };
@@ -629,14 +636,31 @@ pub fn default_data_dir() -> Result<PathBuf> {
 pub use crate::networks::default_networks;
 
 pub fn validate_config(config: &WalletConfig) -> Result<()> {
-    ensure!(config.version == 2, "unsupported configuration version");
+    ensure!(config.version == 3, "unsupported configuration version");
     let mut wallet_ids = BTreeSet::new();
+    let mut instance_ids = BTreeSet::new();
+    let mut addresses = BTreeSet::new();
     for wallet in &config.wallets {
         validate_wallet_id(&wallet.id)?;
+        ensure!(
+            !wallet.instance_id.is_nil(),
+            "wallet {} has an invalid nil instance UUID",
+            wallet.id
+        );
         ensure!(
             wallet_ids.insert(&wallet.id),
             "duplicate wallet {}",
             wallet.id
+        );
+        ensure!(
+            instance_ids.insert(wallet.instance_id),
+            "duplicate wallet instance {}",
+            wallet.instance_id
+        );
+        ensure!(
+            addresses.insert(wallet.address),
+            "address {:#x} is already active",
+            wallet.address
         );
     }
     ensure!(

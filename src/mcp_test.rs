@@ -12,6 +12,7 @@ use crate::{
 };
 use alloy::primitives::Address;
 use std::str::FromStr;
+use uuid::Uuid;
 
 #[test]
 fn tool_errors_are_capped_and_stripped() {
@@ -54,15 +55,17 @@ fn tool_input_errors_use_invalid_params_instead_of_internal_error() {
 fn server() -> (tempfile::TempDir, WalletMcpServer) {
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
+    let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
+        id: "primary".into(),
+        address: Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+        created_at: Utc::now(),
+        source: WalletSource::Created,
+        exported_at: None,
+    };
     config
         .update_for_test(|state| {
-            state.wallets.push(WalletMetadata {
-                id: "primary".into(),
-                address: Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
-                created_at: Utc::now(),
-                source: WalletSource::Created,
-                exported_at: None,
-            });
+            state.wallets.push(wallet.clone());
             Ok(())
         })
         .unwrap();
@@ -72,12 +75,7 @@ fn server() -> (tempfile::TempDir, WalletMcpServer) {
     )
     .unwrap();
     policies
-        .put_for_wallet(
-            "primary",
-            Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
-            &WalletPolicy::allow_anything(),
-            None,
-        )
+        .put_for_instance(&wallet, &WalletPolicy::allow_anything(), None)
         .unwrap();
     let pending_database = PolicyStore::open(
         &directory.path().join("policies.db"),
@@ -320,13 +318,16 @@ fn tool_schemas_contain_no_boolean_schemas() {
 fn insert_fork(server: &WalletMcpServer, wallet_id: &str, chain_id: u64) -> uuid::Uuid {
     use crate::fork::ForkParent;
 
+    let wallet = server.config.wallet(wallet_id).unwrap();
+
     server
         .forks
         .lock()
         .unwrap()
         .create(
             wallet_id,
-            Address::from_str("0x1111111111111111111111111111111111111111").unwrap(),
+            wallet.instance_id,
+            wallet.address,
             chain_id,
             ForkParent {
                 number: 1_000,
@@ -357,7 +358,27 @@ fn a_fork_only_answers_for_the_wallet_and_chain_it_was_opened_for() {
     let wrong_wallet = server
         .fork_session(Some(fork_id), "1", Some("other"))
         .expect_err("a fork must not answer for another wallet");
-    assert!(format!("{wrong_wallet:?}").contains("different wallet"));
+    assert!(format!("{wrong_wallet:?}").contains("unknown wallet"));
+}
+
+#[test]
+fn a_fork_does_not_follow_a_deleted_and_reimported_wallet() {
+    let (_directory, server) = server();
+    let fork_id = insert_fork(&server, "primary", 1);
+    let replacement_instance = Uuid::new_v4();
+
+    server
+        .config
+        .update_for_test(|state| {
+            state.wallets[0].instance_id = replacement_instance;
+            Ok(())
+        })
+        .unwrap();
+
+    let error = server
+        .fork_session(Some(fork_id), "1", Some("primary"))
+        .expect_err("an old fork must not attach to a replacement wallet instance");
+    assert!(format!("{error:?}").contains("different wallet"));
 }
 
 #[test]
@@ -829,23 +850,26 @@ async fn network_add_admits_an_endpoint_before_contacting_it() {
 fn startup_fails_closed_when_a_configured_wallet_has_no_policy() {
     let directory = tempfile::tempdir().unwrap();
     let config = ConfigStore::new(directory.path());
+    let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
+        id: "orphan".into(),
+        address: Address::repeat_byte(0x22),
+        created_at: Utc::now(),
+        source: WalletSource::Created,
+        exported_at: None,
+    };
     config
         .update_for_test(|state| {
-            state.wallets.push(WalletMetadata {
-                id: "orphan".into(),
-                address: Address::repeat_byte(0x22),
-                created_at: Utc::now(),
-                source: WalletSource::Created,
-                exported_at: None,
-            });
+            state.wallets.push(wallet.clone());
             Ok(())
         })
         .unwrap();
-    let policies = PolicyStore::open(
+    let mut policies = PolicyStore::open(
         &directory.path().join("policies.db"),
         &DatabaseKey::new([5; 32]),
     )
     .unwrap();
+    policies.register_wallet_without_policy(&wallet).unwrap();
     let pending_database = PolicyStore::open(
         &directory.path().join("policies.db"),
         &DatabaseKey::new([5; 32]),
@@ -1172,8 +1196,10 @@ async fn a_recorded_simulation_is_sent_without_simulating_again_and_only_once() 
     let (_directory, server) = server();
     accept_legal(&server);
     let plan = sendable_plan();
-    let recorded = server.simulations.lock().unwrap().record(
-        "primary",
+    let wallet = server.config.wallet("primary").unwrap();
+    let recorded = server.simulations.lock().unwrap().record_for_instance(
+        &wallet.id,
+        wallet.instance_id,
         "1",
         plan.clone(),
         Some("mcp.ekubo.org".into()),
@@ -1215,8 +1241,10 @@ async fn a_simulation_evaluated_under_a_superseded_policy_is_refused() {
     let (_directory, server) = server();
     accept_legal(&server);
     let plan = sendable_plan();
-    let recorded = server.simulations.lock().unwrap().record(
-        "primary",
+    let wallet = server.config.wallet("primary").unwrap();
+    let recorded = server.simulations.lock().unwrap().record_for_instance(
+        &wallet.id,
+        wallet.instance_id,
         "1",
         plan.clone(),
         Some("mcp.ekubo.org".into()),
@@ -1227,9 +1255,8 @@ async fn a_simulation_evaluated_under_a_superseded_policy_is_refused() {
         let mut policies = server.policies.lock().unwrap();
         let current = policies.get("primary").unwrap().unwrap();
         policies
-            .put_for_wallet(
-                "primary",
-                server.config.wallet("primary").unwrap().address,
+            .put_for_instance(
+                &wallet,
                 &WalletPolicy::require_approval_for_everything(),
                 Some(current.revision),
             )
@@ -1263,8 +1290,10 @@ async fn a_fork_result_can_never_be_sent_even_if_one_reaches_the_registry() {
         expires_at: Utc::now(),
         note: crate::fork::FORK_NOTE.into(),
     });
-    let recorded = server.simulations.lock().unwrap().record(
-        "primary",
+    let wallet = server.config.wallet("primary").unwrap();
+    let recorded = server.simulations.lock().unwrap().record_for_instance(
+        &wallet.id,
+        wallet.instance_id,
         "1",
         plan,
         None,

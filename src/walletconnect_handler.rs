@@ -586,7 +586,11 @@ impl DesktopSession {
         let config = self.owner.config_store();
         let network = config.network_by_chain_id(&chain_id.to_string())?;
         let stored_policy = PolicyStore::production(config.data_dir())?
-            .get_for_wallet(&self.wallet().id, self.wallet().address)?
+            .get_for_wallet(
+                &self.wallet().id,
+                self.wallet().instance_id,
+                self.wallet().address,
+            )?
             .with_context(|| format!("wallet {} has no local policy", self.wallet().id))?;
         let policy_context = ekubo_wallet_core::core::predicate::PolicyContext {
             wallet: self.wallet().address,

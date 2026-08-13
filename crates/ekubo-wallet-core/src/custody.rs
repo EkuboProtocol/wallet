@@ -8,9 +8,10 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use keyring::{Entry, Error as KeyringError};
 use std::{fmt, sync::Arc};
+use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key";
+const KEYRING_SERVICE: &str = "org.ekubo.wallet.private-key.instance";
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PrivateKeyMaterial([u8; 32]);
@@ -101,7 +102,7 @@ pub(crate) fn load_matching_signer<K: KeyStore + ?Sized>(
     keys: &K,
     wallet: &WalletMetadata,
 ) -> Result<PrivateKeySigner> {
-    let material = keys.load(&wallet.id)?;
+    let material = keys.load(wallet.instance_id)?;
     let signer = material.signer();
     ensure!(
         signer.address() == wallet.address,
@@ -118,8 +119,8 @@ pub(crate) fn load_matching_signer<K: KeyStore + ?Sized>(
 /// whether `delete` really removed one, which is not a decision presentation
 /// code gets to make. See [`crate::sealed`] for the full reasoning.
 pub trait KeyStore: crate::sealed::SealedKeyStore + Send + Sync {
-    fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()>;
-    fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial>;
+    fn insert_new(&self, instance_id: Uuid, key: &PrivateKeyMaterial) -> Result<()>;
+    fn load(&self, instance_id: Uuid) -> Result<PrivateKeyMaterial>;
 
     /// Which address the stored credential controls, or `None` when this id
     /// names no credential.
@@ -127,9 +128,9 @@ pub trait KeyStore: crate::sealed::SealedKeyStore + Send + Sync {
     /// An `Err` means the store could not answer. It never means "empty":
     /// conflating the two is how a removal that could not read the credential
     /// store concluded the key was already gone.
-    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>>;
+    fn address_of(&self, instance_id: Uuid) -> Result<Option<Address>>;
 
-    /// Delete the credential under `wallet_id`, but only if it controls
+    /// Delete the credential under `instance_id`, but only if it controls
     /// `expected`.
     ///
     /// There is deliberately no `delete(wallet_id)`. A wallet id is reusable,
@@ -137,9 +138,9 @@ pub trait KeyStore: crate::sealed::SealedKeyStore + Send + Sync {
     /// to be there when it lands — which is how an authorization to remove one
     /// wallet destroyed the key of the wallet that replaced it, and how a
     /// creation that lost a race deleted the winner's key. Requiring the
-    /// address makes that sentence impossible to write: a caller must say
-    /// which key it means, and a store that finds a different one refuses.
-    fn delete_matching(&self, wallet_id: &str, expected: Address) -> Result<Deletion>;
+    /// UUID makes that sentence impossible to write; the address check is a
+    /// second integrity guard that refuses corrupted or swapped key material.
+    fn delete_matching(&self, instance_id: Uuid, expected: Address) -> Result<Deletion>;
 }
 
 /// What a credential-store write that reported an error actually did.
@@ -190,8 +191,7 @@ pub struct OsKeyStore;
 impl crate::sealed::SealedKeyStore for OsKeyStore {}
 
 impl OsKeyStore {
-    fn entry(wallet_id: &str) -> Result<Entry> {
-        validate_wallet_id(wallet_id)?;
+    fn entry(instance_id: Uuid) -> Result<Entry> {
         // The credential store is machine-wide, so an account created in a
         // scratch directory would outlive the `rm -rf` that discards it — a
         // private key with no wallet left to name it. Refusing is honest about
@@ -203,7 +203,8 @@ impl OsKeyStore {
             "this is an ephemeral session, which never touches the platform credential store; \
 account operations need an ordinary session, so drop --ephemeral"
         );
-        Entry::new(KEYRING_SERVICE, wallet_id).context("platform credential store is unavailable")
+        Entry::new(KEYRING_SERVICE, &instance_id.to_string())
+            .context("platform credential store is unavailable")
     }
 }
 
@@ -214,13 +215,13 @@ impl KeyStore for OsKeyStore {
     // needs it -- `keyring`'s Linux backend starts a second, nested runtime
     // on first use, which Tokio otherwise refuses unconditionally.
 
-    fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
+    fn insert_new(&self, instance_id: Uuid, key: &PrivateKeyMaterial) -> Result<()> {
         tokio::task::block_in_place(|| {
-            let entry = Self::entry(wallet_id)?;
+            let entry = Self::entry(instance_id)?;
             match entry.get_secret() {
                 Ok(mut existing) => {
                     existing.zeroize();
-                    bail!("credential store already contains wallet {wallet_id}");
+                    bail!("credential store already contains wallet instance {instance_id}");
                 }
                 Err(KeyringError::NoEntry) => {}
                 Err(error) => {
@@ -256,32 +257,32 @@ impl KeyStore for OsKeyStore {
                     Err(error).context("failed to save private key in platform credential store")
                 }
                 FailedWrite::Conflicting => Err(error).context(format!(
-                    "failed to save the private key for wallet {wallet_id}, and the credential \
+                    "failed to save the private key for wallet instance {instance_id}, and the credential \
                      store now holds a different secret under that name; resolve it there before \
                      retrying"
                 )),
                 FailedWrite::Unknown(unreadable) => Err(error).context(format!(
-                    "failed to save the private key for wallet {wallet_id}, and the credential \
+                    "failed to save the private key for wallet instance {instance_id}, and the credential \
                      store could not be re-read to establish whether it was written anyway; \
-                     check for an entry named {wallet_id} before retrying: {unreadable:#}"
+                     check for an entry named {instance_id} before retrying: {unreadable:#}"
                 )),
             }
         })
     }
 
-    fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial> {
+    fn load(&self, instance_id: Uuid) -> Result<PrivateKeyMaterial> {
         tokio::task::block_in_place(|| {
-            let mut bytes = Self::entry(wallet_id)?
-                .get_secret()
-                .with_context(|| format!("failed to load private key for wallet {wallet_id}"))?;
+            let mut bytes = Self::entry(instance_id)?.get_secret().with_context(|| {
+                format!("failed to load private key for wallet instance {instance_id}")
+            })?;
             let result = PrivateKeyMaterial::from_bytes(&bytes);
             bytes.zeroize();
             result
         })
     }
 
-    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>> {
-        tokio::task::block_in_place(|| match Self::entry(wallet_id)?.get_secret() {
+    fn address_of(&self, instance_id: Uuid) -> Result<Option<Address>> {
+        tokio::task::block_in_place(|| match Self::entry(instance_id)?.get_secret() {
             Ok(mut bytes) => {
                 let material = PrivateKeyMaterial::from_bytes(&bytes);
                 bytes.zeroize();
@@ -292,9 +293,9 @@ impl KeyStore for OsKeyStore {
         })
     }
 
-    fn delete_matching(&self, wallet_id: &str, expected: Address) -> Result<Deletion> {
+    fn delete_matching(&self, instance_id: Uuid, expected: Address) -> Result<Deletion> {
         tokio::task::block_in_place(|| {
-            let entry = Self::entry(wallet_id)?;
+            let entry = Self::entry(instance_id)?;
             let mut bytes = match entry.get_secret() {
                 Ok(bytes) => bytes,
                 Err(KeyringError::NoEntry) => return Ok(Deletion::Absent),
@@ -379,6 +380,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
         validate_wallet_id(wallet_id)?;
         let address = key.signer().address();
         let metadata = WalletMetadata {
+            instance_id: Uuid::new_v4(),
             id: wallet_id.into(),
             address,
             created_at: Utc::now(),
@@ -403,13 +405,17 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                     .any(|wallet| wallet.address == address),
                 "address {address} is already configured"
             );
-            self.keys.insert_new(wallet_id, key)?;
+            self.keys.insert_new(metadata.instance_id, key)?;
             let update = (|| {
-                if let Some(policy) = policy {
-                    let mut policies = self.config.policy_store()?;
-                    policies.purge(wallet_id)?;
-                    policies.initialize_policy(wallet_id, address, policy)?;
-                }
+                let fail_closed;
+                let initial_policy = if let Some(policy) = policy {
+                    policy
+                } else {
+                    fail_closed = WalletPolicy::require_approval_for_everything();
+                    &fail_closed
+                };
+                let mut policies = self.config.policy_store()?;
+                policies.initialize_policy(&metadata, initial_policy)?;
                 self.config.update(|config| {
                     ensure!(
                         !config.wallets.iter().any(|wallet| wallet.id == wallet_id),
@@ -449,11 +455,10 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                          reported an error; verify it in the Accounts screen before retrying"
                     ));
                 }
-                if policy.is_some()
-                    && let Err(cleanup) = self
-                        .config
-                        .policy_store()
-                        .and_then(|mut policies| policies.purge(wallet_id))
+                if let Err(cleanup) = self
+                    .config
+                    .policy_store()
+                    .and_then(|mut policies| policies.abandon_unpublished(metadata.instance_id))
                 {
                     return Err(error).context(format!(
                         "wallet publication failed and policy rollback also failed: {cleanup:#}"
@@ -463,7 +468,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 // alone: if anything else now occupies the id, that credential
                 // belongs to another wallet and this rollback is not entitled
                 // to it.
-                match self.keys.delete_matching(wallet_id, address) {
+                match self.keys.delete_matching(metadata.instance_id, address) {
                     Ok(Deletion::Removed | Deletion::Absent) => {}
                     Ok(Deletion::Mismatched(other)) => {
                         return Err(error).context(format!(
@@ -511,19 +516,26 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
     /// because the lock is not held across the prompt: it is the answer to
     /// concurrency, not to time.
     pub async fn export(&self, wallet_id: &str, expected: Address) -> Result<Zeroizing<String>> {
-        Self::ensure_reviewed(&self.config.wallet(wallet_id)?, wallet_id, expected)?;
+        let reviewed = self.config.wallet(wallet_id)?;
+        Self::ensure_reviewed(&reviewed, &reviewed, wallet_id, expected)?;
         self.presence
             .confirm(&PresenceRequest::ExportPrivateKey {
                 wallet: wallet_id.into(),
             })
             .await?;
         self.config
-            .with_lifecycle_lock(|| self.export_locked(wallet_id, expected))
+            .with_lifecycle_lock(|| self.export_locked(wallet_id, expected, &reviewed))
     }
 
-    fn export_locked(&self, wallet_id: &str, expected: Address) -> Result<Zeroizing<String>> {
-        Self::ensure_reviewed(&self.config.wallet(wallet_id)?, wallet_id, expected)?;
-        let key = self.keys.load(wallet_id)?;
+    fn export_locked(
+        &self,
+        wallet_id: &str,
+        expected: Address,
+        reviewed: &WalletMetadata,
+    ) -> Result<Zeroizing<String>> {
+        let metadata = self.config.wallet(wallet_id)?;
+        Self::ensure_reviewed(&metadata, reviewed, wallet_id, expected)?;
+        let key = self.keys.load(metadata.instance_id)?;
         ensure!(
             key.signer().address() == expected,
             "the credential stored under {wallet_id} controls {} rather than the {expected} that \
@@ -540,7 +552,11 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
             let wallet = config
                 .wallets
                 .iter_mut()
-                .find(|wallet| wallet.id == wallet_id && wallet.address == expected)
+                .find(|wallet| {
+                    wallet.instance_id == reviewed.instance_id
+                        && wallet.id == wallet_id
+                        && wallet.address == expected
+                })
                 .with_context(|| {
                     format!("no wallet {wallet_id} holds the reviewed address {expected}")
                 })?;
@@ -552,15 +568,16 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 
     /// Refuse a wallet that is no longer the one the owner reviewed.
     fn ensure_reviewed(
-        metadata: &WalletMetadata,
+        current: &WalletMetadata,
+        reviewed: &WalletMetadata,
         wallet_id: &str,
         expected: Address,
     ) -> Result<()> {
         ensure!(
-            metadata.address == expected,
-            "wallet {wallet_id} now holds address {} rather than the {expected} that was \
-             reviewed; it was replaced while this export was being authorized",
-            metadata.address
+            current.instance_id == reviewed.instance_id && current.address == expected,
+            "wallet {wallet_id} is no longer instance {} at {expected}; it was replaced while \
+             this export was being authorized",
+            reviewed.instance_id
         );
         Ok(())
     }
@@ -601,10 +618,11 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 .position(|wallet| wallet.id == wallet_id)
                 .with_context(|| format!("unknown wallet {wallet_id}"))?;
             ensure!(
-                config.wallets[index].address == metadata.address,
-                "wallet {wallet_id} now holds address {} rather than the {} that was reviewed; \
-                 it was replaced while this removal was being authorized",
-                config.wallets[index].address,
+                config.wallets[index].instance_id == metadata.instance_id
+                    && config.wallets[index].address == metadata.address,
+                "wallet {wallet_id} is no longer instance {} at {}; it was replaced while this \
+                 removal was being authorized",
+                metadata.instance_id,
                 metadata.address
             );
             config.wallets.remove(index);
@@ -631,7 +649,10 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 }
             }
         }
-        let removed = match self.keys.delete_matching(wallet_id, metadata.address) {
+        let removed = match self
+            .keys
+            .delete_matching(metadata.instance_id, metadata.address)
+        {
             Ok(Deletion::Removed | Deletion::Absent) => Ok(metadata.clone()),
             // Something else holds this id now. The approval was for
             // `metadata.address`, so that credential is not this call's to
@@ -652,7 +673,7 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 //
                 // Ask the store what is actually there, and restore only on a
                 // positive answer that the reviewed key survived.
-                match self.keys.address_of(wallet_id) {
+                match self.keys.address_of(metadata.instance_id) {
                     Ok(Some(surviving)) if surviving == metadata.address => {
                         let rollback = self.config.update(|config| {
                             ensure!(
@@ -688,9 +709,10 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
                 }
             }
         }?;
-        // Still inside the lifecycle lock: a replacement cannot publish under
-        // this reusable name until every predecessor authority row is gone.
-        self.config.policy_store()?.purge(wallet_id)?;
+        // Still inside the lifecycle lock: retire this immutable instance but
+        // retain its policies and activity as history. A re-import receives a
+        // new UUID and cannot inherit any of it.
+        self.config.policy_store()?.retire_wallet(metadata)?;
         Ok(removed)
     }
 }
@@ -699,43 +721,43 @@ impl<K: KeyStore, H: HumanPresence> CustodyService<K, H> {
 /// no credential-store side effects.
 #[cfg(any(test, feature = "test-hooks"))]
 #[derive(Default)]
-pub struct MemoryKeyStore(std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+pub struct MemoryKeyStore(std::sync::Mutex<std::collections::BTreeMap<Uuid, Vec<u8>>>);
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl crate::sealed::SealedKeyStore for MemoryKeyStore {}
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl KeyStore for MemoryKeyStore {
-    fn insert_new(&self, wallet_id: &str, key: &PrivateKeyMaterial) -> Result<()> {
+    fn insert_new(&self, instance_id: Uuid, key: &PrivateKeyMaterial) -> Result<()> {
         let mut keys = self.0.lock().unwrap();
-        ensure!(!keys.contains_key(wallet_id), "duplicate key");
-        keys.insert(wallet_id.into(), key.as_bytes().to_vec());
+        ensure!(!keys.contains_key(&instance_id), "duplicate key");
+        keys.insert(instance_id, key.as_bytes().to_vec());
         Ok(())
     }
 
-    fn load(&self, wallet_id: &str) -> Result<PrivateKeyMaterial> {
+    fn load(&self, instance_id: Uuid) -> Result<PrivateKeyMaterial> {
         let keys = self.0.lock().unwrap();
-        PrivateKeyMaterial::from_bytes(keys.get(wallet_id).context("missing test key")?)
+        PrivateKeyMaterial::from_bytes(keys.get(&instance_id).context("missing test key")?)
     }
 
-    fn address_of(&self, wallet_id: &str) -> Result<Option<Address>> {
+    fn address_of(&self, instance_id: Uuid) -> Result<Option<Address>> {
         let keys = self.0.lock().unwrap();
-        match keys.get(wallet_id) {
+        match keys.get(&instance_id) {
             None => Ok(None),
             Some(bytes) => Ok(Some(PrivateKeyMaterial::from_bytes(bytes)?.address())),
         }
     }
 
-    fn delete_matching(&self, wallet_id: &str, expected: Address) -> Result<Deletion> {
+    fn delete_matching(&self, instance_id: Uuid, expected: Address) -> Result<Deletion> {
         let mut keys = self.0.lock().unwrap();
-        let Some(bytes) = keys.get(wallet_id) else {
+        let Some(bytes) = keys.get(&instance_id) else {
             return Ok(Deletion::Absent);
         };
         let actual = PrivateKeyMaterial::from_bytes(bytes)?.address();
         if actual != expected {
             return Ok(Deletion::Mismatched(actual));
         }
-        keys.remove(wallet_id);
+        keys.remove(&instance_id);
         Ok(Deletion::Removed)
     }
 }

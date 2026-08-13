@@ -163,14 +163,14 @@ impl PendingStatus {
 /// somebody has to remember to run.
 fn prune_terminal_history(
     transaction: &rusqlite::Transaction<'_>,
-    wallet_id: &str,
+    wallet_instance_id: Uuid,
 ) -> Result<usize> {
     let removed = transaction.execute(
         &format!(
             "DELETE FROM pending_transactions
              WHERE request_id IN (
                  SELECT request_id FROM pending_transactions
-                 WHERE wallet_id = ?1
+                 WHERE wallet_instance_id = ?1
                    AND status IN ({TERMINAL_STATUS_LIST})
                    AND NOT (
                        status IN ('confirmed', 'reverted', 'cancelled')
@@ -181,7 +181,10 @@ fn prune_terminal_history(
                  LIMIT -1 OFFSET ?2
              )"
         ),
-        params![wallet_id, MAX_TERMINAL_HISTORY_PER_WALLET],
+        params![
+            wallet_instance_id.to_string(),
+            MAX_TERMINAL_HISTORY_PER_WALLET
+        ],
     )?;
     Ok(removed)
 }
@@ -189,6 +192,7 @@ fn prune_terminal_history(
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 pub struct PendingTransaction {
     pub request_id: Uuid,
+    pub wallet_instance_id: Uuid,
     pub wallet_id: String,
     #[schemars(with = "String")]
     pub wallet_address: Address,
@@ -275,9 +279,10 @@ impl PendingStore {
         Self { database }
     }
 
-    pub fn create(
+    pub fn create_for_instance(
         &mut self,
         wallet_id: &str,
+        wallet_instance_id: Uuid,
         network_name: &str,
         plan: &ExecutionPlan,
         plan_source: Option<&str>,
@@ -295,9 +300,12 @@ impl PendingStore {
         let transaction = self.database.connection.transaction()?;
         let stored_revision: Option<i64> = transaction
             .query_row(
-                "SELECT revision FROM wallet_policies
-                 WHERE wallet_id = ?1 AND wallet_address = ?2",
-                params![wallet_id, format!("{:#x}", plan.sender)],
+                "SELECT policies.revision FROM wallet_policies AS policies
+                 JOIN wallet_instances AS instances
+                   ON instances.instance_id = policies.wallet_instance_id
+                 WHERE policies.wallet_instance_id = ?1 AND instances.retired_at IS NULL
+                 ORDER BY policies.revision DESC LIMIT 1",
+                [wallet_instance_id.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -312,9 +320,9 @@ impl PendingStore {
         let existing: Option<Uuid> = transaction
             .query_row(
                 "SELECT request_id FROM pending_transactions
-                 WHERE wallet_id = ?1 AND chain_id = ?2 AND plan_digest = ?3
+                 WHERE wallet_instance_id = ?1 AND chain_id = ?2 AND plan_digest = ?3
                    AND status = 'awaiting_approval'",
-                params![wallet_id, chain_id, Blob(digest)],
+                params![wallet_instance_id.to_string(), chain_id, Blob(digest)],
                 |row| row.get(0),
             )
             .optional()?;
@@ -324,8 +332,8 @@ impl PendingStore {
         }
         let awaiting: i64 = transaction.query_row(
             "SELECT COUNT(*) FROM pending_transactions
-             WHERE wallet_id = ?1 AND status = 'awaiting_approval'",
-            [wallet_id],
+             WHERE wallet_instance_id = ?1 AND status = 'awaiting_approval'",
+            [wallet_instance_id.to_string()],
             |row| row.get(0),
         )?;
         ensure!(
@@ -333,17 +341,18 @@ impl PendingStore {
             "wallet already has {MAX_AWAITING_APPROVALS_PER_WALLET} requests awaiting approval"
         );
 
-        prune_terminal_history(&transaction, wallet_id)?;
+        prune_terminal_history(&transaction, wallet_instance_id)?;
 
         let request_id = Uuid::new_v4();
         let plan_json = serde_json::to_string(plan)?;
         transaction.execute(
             "INSERT INTO pending_transactions(
-                request_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
+                request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
                 plan_digest, plan_source, policy_revision, status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'awaiting_approval', ?10, ?10)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'awaiting_approval', ?11, ?11)",
             params![
                 request_id,
+                wallet_instance_id.to_string(),
                 wallet_id,
                 format!("{:#x}", plan.sender),
                 network_name,
@@ -359,13 +368,38 @@ impl PendingStore {
         self.get(request_id)
     }
 
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn create(
+        &mut self,
+        wallet_id: &str,
+        network_name: &str,
+        plan: &ExecutionPlan,
+        plan_source: Option<&str>,
+        policy_revision: u64,
+    ) -> Result<PendingTransaction> {
+        let instance_id = self
+            .database
+            .get(wallet_id)?
+            .context("wallet policy is missing")?
+            .wallet_instance_id;
+        self.create_for_instance(
+            wallet_id,
+            instance_id,
+            network_name,
+            plan,
+            plan_source,
+            policy_revision,
+        )
+    }
+
     /// Persist an automatically authorized signature before the first RPC
     /// submission. It is recorded in the same lifecycle table but never
     /// appears in the exceptional-approval queue.
     #[allow(clippy::too_many_arguments)]
-    pub fn record_automatic_signed(
+    pub fn record_automatic_signed_for_instance(
         &mut self,
         wallet_id: &str,
+        wallet_instance_id: Uuid,
         network_name: &str,
         plan: &ExecutionPlan,
         plan_source: Option<&str>,
@@ -386,9 +420,12 @@ impl PendingStore {
         let transaction = self.database.connection.transaction()?;
         let active_revision: Option<i64> = transaction
             .query_row(
-                "SELECT revision FROM wallet_policies
-                 WHERE wallet_id = ?1 AND wallet_address = ?2",
-                params![wallet_id, format!("{:#x}", plan.sender)],
+                "SELECT policies.revision FROM wallet_policies AS policies
+                 JOIN wallet_instances AS instances
+                   ON instances.instance_id = policies.wallet_instance_id
+                 WHERE policies.wallet_instance_id = ?1 AND instances.retired_at IS NULL
+                 ORDER BY policies.revision DESC LIMIT 1",
+                [wallet_instance_id.to_string()],
                 |row| row.get(0),
             )
             .optional()?;
@@ -397,7 +434,7 @@ impl PendingStore {
             "active policy revision changed before signed transaction persistence"
         );
 
-        prune_terminal_history(&transaction, wallet_id)?;
+        prune_terminal_history(&transaction, wallet_instance_id)?;
 
         let request_id = Uuid::new_v4();
         let created_at = sql::now();
@@ -405,12 +442,13 @@ impl PendingStore {
         transaction
             .execute(
                 "INSERT INTO pending_transactions(
-                request_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
+                request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
                 plan_digest, plan_source, policy_revision, status, created_at, updated_at,
                 serialized_transaction, signed_transaction_hash, approval_required
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'signed', ?10, ?10, ?11, ?12, 0)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'signed', ?11, ?11, ?12, ?13, 0)",
                 params![
                     request_id,
+                    wallet_instance_id.to_string(),
                     wallet_id,
                     format!("{:#x}", plan.sender),
                     network_name,
@@ -424,9 +462,38 @@ impl PendingStore {
                     Blob(envelope.hash),
                 ],
             )
-            .with_context(|| in_flight_conflict(&transaction, wallet_id, chain_id))?;
+            .with_context(|| in_flight_conflict(&transaction, plan.sender, chain_id))?;
         transaction.commit()?;
         self.get(request_id)
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_automatic_signed(
+        &mut self,
+        wallet_id: &str,
+        network_name: &str,
+        plan: &ExecutionPlan,
+        plan_source: Option<&str>,
+        policy_revision: u64,
+        serialized_transaction: &str,
+        transaction_hash: &str,
+    ) -> Result<PendingTransaction> {
+        let instance_id = self
+            .database
+            .get(wallet_id)?
+            .context("wallet policy is missing")?
+            .wallet_instance_id;
+        self.record_automatic_signed_for_instance(
+            wallet_id,
+            instance_id,
+            network_name,
+            plan,
+            plan_source,
+            policy_revision,
+            serialized_transaction,
+            transaction_hash,
+        )
     }
 
     /// The one record occupying this wallet and chain's in-flight slot, if
@@ -434,6 +501,29 @@ impl PendingStore {
     /// broadcast, or cancelling state. Senders reconcile this record against
     /// the chain before creating a new signature, so a predecessor that
     /// already mined (or was replaced) never blocks the next transaction.
+    pub fn in_flight_for_address(
+        &self,
+        wallet_address: Address,
+        chain_id: &str,
+    ) -> Result<Option<PendingTransaction>> {
+        let request_id: Option<Uuid> = self
+            .database
+            .connection
+            .query_row(
+                "SELECT request_id FROM pending_transactions
+                 WHERE wallet_address = ?1 AND chain_id = ?2
+                   AND (status IN ('signed', 'submitting', 'broadcast', 'cancelling')
+                        OR (status IN ('confirmed', 'reverted', 'cancelled')
+                            AND settlement_transaction_hash IS NOT NULL
+                            AND finalized_at IS NULL))",
+                params![format!("{wallet_address:#x}"), parse_chain_id(chain_id)?],
+                |row| row.get(0),
+            )
+            .optional()?;
+        request_id.map(|value| self.get(value)).transpose()
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
     pub fn in_flight(&self, wallet_id: &str, chain_id: &str) -> Result<Option<PendingTransaction>> {
         validate_wallet_id(wallet_id)?;
         let request_id: Option<Uuid> = self
@@ -441,11 +531,11 @@ impl PendingStore {
             .connection
             .query_row(
                 "SELECT request_id FROM pending_transactions
-                 WHERE wallet_id = ?1 AND chain_id = ?2
-                   AND (status IN ('signed', 'submitting', 'broadcast', 'cancelling')
-                        OR (status IN ('confirmed', 'reverted', 'cancelled')
-                            AND settlement_transaction_hash IS NOT NULL
-                            AND finalized_at IS NULL))",
+             WHERE wallet_id = ?1 AND chain_id = ?2
+               AND (status IN ('signed', 'submitting', 'broadcast', 'cancelling')
+                    OR (status IN ('confirmed', 'reverted', 'cancelled')
+                        AND settlement_transaction_hash IS NOT NULL
+                        AND finalized_at IS NULL))",
                 params![wallet_id, parse_chain_id(chain_id)?],
                 |row| row.get(0),
             )
@@ -558,7 +648,7 @@ impl PendingStore {
         let expected_digest = parse_hash(expected_digest)?;
         let transaction = self.database.connection.transaction()?;
         let (
-            wallet_id,
+            wallet_instance_id,
             wallet_address,
             chain_id,
             digest,
@@ -567,7 +657,8 @@ impl PendingStore {
             approval_required,
         ): (String, String, i64, Blob<B256>, i64, String, i64) = transaction
             .query_row(
-                "SELECT wallet_id, wallet_address, chain_id, plan_digest, policy_revision, status,
+                "SELECT wallet_instance_id, wallet_address, chain_id, plan_digest,
+                        policy_revision, status,
                         approval_required
                  FROM pending_transactions WHERE request_id = ?1",
                 [request_id],
@@ -584,6 +675,8 @@ impl PendingStore {
                 },
             )
             .with_context(|| format!("unknown pending request {request_id}"))?;
+        let wallet_address = Address::from_str(&wallet_address)
+            .context("pending request wallet address is invalid")?;
         ensure!(
             approval_required == 1,
             "transaction did not require approval"
@@ -598,9 +691,12 @@ impl PendingStore {
         );
         let active_revision: Option<i64> = transaction
             .query_row(
-                "SELECT revision FROM wallet_policies
-                 WHERE wallet_id = ?1 AND wallet_address = ?2",
-                params![wallet_id, wallet_address],
+                "SELECT policies.revision FROM wallet_policies AS policies
+                 JOIN wallet_instances AS instances
+                   ON instances.instance_id = policies.wallet_instance_id
+                 WHERE policies.wallet_instance_id = ?1 AND instances.retired_at IS NULL
+                 ORDER BY policies.revision DESC LIMIT 1",
+                [wallet_instance_id],
                 |row| row.get(0),
             )
             .optional()?;
@@ -623,7 +719,7 @@ impl PendingStore {
                     Blob(review_digest),
                 ],
             )
-            .with_context(|| in_flight_conflict(&transaction, &wallet_id, chain_id))?;
+            .with_context(|| in_flight_conflict(&transaction, wallet_address, chain_id))?;
         transaction.commit()?;
         self.get(request_id)
     }
@@ -632,24 +728,26 @@ impl PendingStore {
     /// the exact signed hash with the chain before invoking this method.
     pub fn claim_for_submission(&mut self, request_id: Uuid) -> Result<PendingTransaction> {
         let transaction = self.database.connection.transaction()?;
-        let (wallet_id, wallet_address, policy_revision, status): (String, String, i64, String) =
-            transaction
-                .query_row(
-                    "SELECT wallet_id, wallet_address, policy_revision, status
+        let (wallet_instance_id, policy_revision, status): (String, i64, String) = transaction
+            .query_row(
+                "SELECT wallet_instance_id, policy_revision, status
                  FROM pending_transactions WHERE request_id = ?1",
-                    [request_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-                .with_context(|| format!("unknown pending request {request_id}"))?;
+                [request_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .with_context(|| format!("unknown pending request {request_id}"))?;
         ensure!(
             PendingStatus::parse(&status)? == PendingStatus::Signed,
             "pending transaction is not ready for submission"
         );
         let active_revision: Option<i64> = transaction
             .query_row(
-                "SELECT revision FROM wallet_policies
-                 WHERE wallet_id = ?1 AND wallet_address = ?2",
-                params![wallet_id, wallet_address],
+                "SELECT policies.revision FROM wallet_policies AS policies
+                 JOIN wallet_instances AS instances
+                   ON instances.instance_id = policies.wallet_instance_id
+                 WHERE policies.wallet_instance_id = ?1 AND instances.retired_at IS NULL
+                 ORDER BY policies.revision DESC LIMIT 1",
+                [wallet_instance_id],
                 |row| row.get(0),
             )
             .optional()?;
@@ -1128,7 +1226,7 @@ impl PendingStore {
             .database
             .connection
             .query_row(
-                "SELECT wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
+                "SELECT wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
                         policy_revision, status, created_at, updated_at,
                         decided_at, serialized_transaction,
                         signed_transaction_hash, broadcast_transaction_hash, block_number,
@@ -1139,32 +1237,33 @@ impl PendingStore {
                 [request_id],
                 |row| {
                     Ok(PendingRow {
-                        wallet_id: row.get(0)?,
-                        wallet_address: row.get(1)?,
-                        network_name: row.get(2)?,
-                        chain_id: row.get(3)?,
-                        plan_json: row.get(4)?,
-                        digest: row.blob(5)?,
-                        policy_revision: row.get(6)?,
-                        status: row.get(7)?,
-                        created_at: row.time(8)?,
-                        updated_at: row.time(9)?,
-                        decided_at: row.time_opt(10)?,
-                        serialized_transaction: row.blob_opt(11)?,
-                        signed_transaction_hash: row.blob_opt(12)?,
-                        broadcast_transaction_hash: row.blob_opt(13)?,
-                        block_number: row.get(14)?,
-                        approval_required: row.get(15)?,
-                        review_digest: row.blob_opt(16)?,
-                        cancel_serialized_transaction: row.blob_opt(17)?,
-                        cancel_transaction_hashes: row.get(18)?,
-                        gas_used: row.get(19)?,
-                        effective_gas_price: row.blob_opt(20)?,
-                        plan_source: row.get(21)?,
-                        generation: row.get(22)?,
-                        block_hash: row.blob_opt(23)?,
-                        settlement_transaction_hash: row.blob_opt(24)?,
-                        finalized_at: row.time_opt(25)?,
+                        wallet_instance_id: row.get(0)?,
+                        wallet_id: row.get(1)?,
+                        wallet_address: row.get(2)?,
+                        network_name: row.get(3)?,
+                        chain_id: row.get(4)?,
+                        plan_json: row.get(5)?,
+                        digest: row.blob(6)?,
+                        policy_revision: row.get(7)?,
+                        status: row.get(8)?,
+                        created_at: row.time(9)?,
+                        updated_at: row.time(10)?,
+                        decided_at: row.time_opt(11)?,
+                        serialized_transaction: row.blob_opt(12)?,
+                        signed_transaction_hash: row.blob_opt(13)?,
+                        broadcast_transaction_hash: row.blob_opt(14)?,
+                        block_number: row.get(15)?,
+                        approval_required: row.get(16)?,
+                        review_digest: row.blob_opt(17)?,
+                        cancel_serialized_transaction: row.blob_opt(18)?,
+                        cancel_transaction_hashes: row.get(19)?,
+                        gas_used: row.get(20)?,
+                        effective_gas_price: row.blob_opt(21)?,
+                        plan_source: row.get(22)?,
+                        generation: row.get(23)?,
+                        block_hash: row.blob_opt(24)?,
+                        settlement_transaction_hash: row.blob_opt(25)?,
+                        finalized_at: row.time_opt(26)?,
                     })
                 },
             )
@@ -1177,6 +1276,7 @@ impl PendingStore {
 /// column declares, so [`PendingRow::parse`] checks how the values relate to
 /// each other rather than re-checking what each one is.
 struct PendingRow {
+    wallet_instance_id: String,
     wallet_id: String,
     wallet_address: String,
     network_name: String,
@@ -1382,6 +1482,8 @@ impl PendingRow {
         );
         Ok(PendingTransaction {
             request_id,
+            wallet_instance_id: Uuid::parse_str(&self.wallet_instance_id)
+                .context("stored pending wallet instance is invalid")?,
             generation: self.generation,
             wallet_id: self.wallet_id,
             wallet_address,
@@ -1642,18 +1744,18 @@ fn stored_fee(fee: &MinedFee) -> Result<(i64, u128)> {
 /// discloses nothing the caller could not already read for its own wallet.
 fn in_flight_conflict(
     transaction: &rusqlite::Transaction<'_>,
-    wallet_id: &str,
+    wallet_address: Address,
     chain_id: i64,
 ) -> String {
     let blocker: Option<(Uuid, String)> = transaction
         .query_row(
             "SELECT request_id, status FROM pending_transactions
-             WHERE wallet_id = ?1 AND chain_id = ?2
+             WHERE wallet_address = ?1 AND chain_id = ?2
                AND (status IN ('signed', 'submitting', 'broadcast', 'cancelling')
                     OR (status IN ('confirmed', 'reverted', 'cancelled')
                         AND settlement_transaction_hash IS NOT NULL
                         AND finalized_at IS NULL))",
-            params![wallet_id, chain_id],
+            params![format!("{wallet_address:#x}"), chain_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()

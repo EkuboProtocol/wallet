@@ -568,6 +568,15 @@ fn attribution_names_the_asker_even_when_its_registration_no_longer_counts() {
 
     let attributed = Uuid::new_v4();
     let anonymous = Uuid::new_v4();
+    let wallet_instance_id = Uuid::new_v4();
+    store
+        .connection
+        .execute(
+            "INSERT INTO wallet_instances(instance_id, wallet_id, wallet_address, created_at)
+         VALUES (?1, 'primary', '0x0000000000000000000000000000000000000000', ?2)",
+            params![wallet_instance_id.to_string(), Millis(Utc::now())],
+        )
+        .unwrap();
     // Distinct plan digests: two awaiting rows for one wallet and chain may
     // not name the same plan.
     for (digest, request_id) in [(6_u8, attributed), (7, anonymous)] {
@@ -575,12 +584,13 @@ fn attribution_names_the_asker_even_when_its_registration_no_longer_counts() {
             .connection
             .execute(
                 "INSERT INTO pending_transactions(
-                     request_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
+                     request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
                      plan_digest, policy_revision, status, created_at, updated_at
-                 ) VALUES (?1, 'primary', '0x0000000000000000000000000000000000000000',
-                           'ethereum', 1, '{}', ?2, 1, 'awaiting_approval', ?3, ?3)",
+                 ) VALUES (?1, ?2, 'primary', '0x0000000000000000000000000000000000000000',
+                           'ethereum', 1, '{}', ?3, 1, 'awaiting_approval', ?4, ?4)",
                 params![
                     Blob(*request_id.as_bytes()),
+                    wallet_instance_id.to_string(),
                     Blob([digest; 32]),
                     Millis(Utc::now()),
                 ],
@@ -592,12 +602,13 @@ fn attribution_names_the_asker_even_when_its_registration_no_longer_counts() {
         .connection
         .execute(
             "INSERT INTO pending_typed_data(
-                 request_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
+                 request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
                  created_at, updated_at
-             ) VALUES (?1, 'primary', '0x0000000000000000000000000000000000000000',
-                       1, '{}', ?2, 'awaiting_approval', ?3, ?3)",
+             ) VALUES (?1, ?2, 'primary', '0x0000000000000000000000000000000000000000',
+                       1, '{}', ?3, 'awaiting_approval', ?4, ?4)",
             params![
                 Blob(*signature_request.as_bytes()),
+                wallet_instance_id.to_string(),
                 Blob([8_u8; 32]),
                 Millis(Utc::now()),
             ],

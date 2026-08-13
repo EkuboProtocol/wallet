@@ -19,6 +19,14 @@ fn parent() -> ForkParent {
     }
 }
 
+fn wallet_a() -> Uuid {
+    Uuid::from_u128(0xa)
+}
+
+fn wallet_b() -> Uuid {
+    Uuid::from_u128(0xb)
+}
+
 fn plan(calls: usize) -> ExecutionPlan {
     let sender = Address::repeat_byte(0x11);
     ExecutionPlan {
@@ -51,7 +59,14 @@ fn store_with_fork() -> (ForkStore, ForkSession, DateTime<Utc>) {
     let now = Utc::now();
     let mut store = ForkStore::new();
     let session = store
-        .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+        .create(
+            "wallet-a",
+            wallet_a(),
+            Address::repeat_byte(0x11),
+            1,
+            parent(),
+            now,
+        )
         .unwrap();
     (store, session, now)
 }
@@ -116,24 +131,38 @@ fn capacity_is_refusable_before_a_parent_block_is_pinned() {
     let now = Utc::now();
     let mut store = ForkStore::new();
     for _ in 0..MAX_FORKS_PER_WALLET {
-        store.ensure_capacity("wallet-a", now).unwrap();
+        store.ensure_capacity("wallet-a", wallet_a(), now).unwrap();
         store
-            .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+            .create(
+                "wallet-a",
+                wallet_a(),
+                Address::repeat_byte(0x11),
+                1,
+                parent(),
+                now,
+            )
             .unwrap();
     }
     // Same answer `create` would give, reached without the RPC round trip
     // that pinning a parent block costs.
     let error = store
-        .ensure_capacity("wallet-a", now)
+        .ensure_capacity("wallet-a", wallet_a(), now)
         .expect_err("a wallet at its fork limit must be refused up front");
     assert!(error.to_string().contains("already holds"));
     assert!(
         store
-            .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+            .create(
+                "wallet-a",
+                wallet_a(),
+                Address::repeat_byte(0x11),
+                1,
+                parent(),
+                now,
+            )
             .is_err()
     );
     // Another wallet is unaffected: this is a per-wallet limit.
-    store.ensure_capacity("wallet-b", now).unwrap();
+    store.ensure_capacity("wallet-b", wallet_b(), now).unwrap();
 }
 
 #[test]
@@ -165,16 +194,37 @@ fn forks_are_capped_per_wallet_and_globally() {
     let mut store = ForkStore::new();
     for _ in 0..MAX_FORKS_PER_WALLET {
         store
-            .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+            .create(
+                "wallet-a",
+                wallet_a(),
+                Address::repeat_byte(0x11),
+                1,
+                parent(),
+                now,
+            )
             .unwrap();
     }
     let error = store
-        .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+        .create(
+            "wallet-a",
+            wallet_a(),
+            Address::repeat_byte(0x11),
+            1,
+            parent(),
+            now,
+        )
         .expect_err("the per-wallet cap must hold");
     assert!(error.to_string().contains("already holds"));
     // A different wallet is unaffected until the global cap.
     store
-        .create("wallet-b", Address::repeat_byte(0x22), 1, parent(), now)
+        .create(
+            "wallet-b",
+            wallet_b(),
+            Address::repeat_byte(0x22),
+            1,
+            parent(),
+            now,
+        )
         .unwrap();
     assert_eq!(store.len(), MAX_FORKS_PER_WALLET + 1);
 }
@@ -200,12 +250,26 @@ fn expiry_frees_capacity_for_the_same_wallet() {
     let mut store = ForkStore::new();
     for _ in 0..MAX_FORKS_PER_WALLET {
         store
-            .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), now)
+            .create(
+                "wallet-a",
+                wallet_a(),
+                Address::repeat_byte(0x11),
+                1,
+                parent(),
+                now,
+            )
             .unwrap();
     }
     let later = now + TimeDelta::seconds(FORK_TTL_SECONDS + 1);
     store
-        .create("wallet-a", Address::repeat_byte(0x11), 1, parent(), later)
+        .create(
+            "wallet-a",
+            wallet_a(),
+            Address::repeat_byte(0x11),
+            1,
+            parent(),
+            later,
+        )
         .expect("expired forks are swept before the cap is applied");
     assert_eq!(store.len(), 1);
 }

@@ -10,6 +10,7 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
 };
+use uuid::Uuid;
 
 fn key(byte: u8) -> DatabaseKey {
     DatabaseKey::new([byte; 32])
@@ -124,21 +125,24 @@ fn purging_a_wallet_leaves_nothing_for_the_next_one_to_inherit() {
         .unwrap();
     for statement in [
         "INSERT INTO pending_transactions(
-                 request_id, wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
+                 request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
                  policy_revision, status, created_at, updated_at
-             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+             ) VALUES (randomblob(16), (SELECT instance_id FROM wallet_instances WHERE wallet_id = 'primary'),
+                       'primary', '0x0000000000000000000000000000000000000000',
                        'mainnet', 1, '{}', zeroblob(32), 1,
                        'awaiting_approval', 0, 0)",
         "INSERT INTO pending_typed_data(
-                 request_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
+                 request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, typed_data_json, digest, status,
                  created_at, updated_at
-             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+             ) VALUES (randomblob(16), (SELECT instance_id FROM wallet_instances WHERE wallet_id = 'primary'),
+                       'primary', '0x0000000000000000000000000000000000000000',
                        1, '{}', zeroblob(32),
                        'awaiting_approval', 0, 0)",
         "INSERT INTO pending_messages(
-                 request_id, wallet_id, wallet_address, chain_id, message, message_encoding, digest,
+                 request_id, wallet_instance_id, wallet_id, wallet_address, chain_id, message, message_encoding, digest,
                  status, created_at, updated_at
-             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+             ) VALUES (randomblob(16), (SELECT instance_id FROM wallet_instances WHERE wallet_id = 'primary'),
+                       'primary', '0x0000000000000000000000000000000000000000',
                        1, x'6869', 'text', zeroblob(32),
                        'awaiting_approval', 0, 0)",
     ] {
@@ -185,7 +189,7 @@ fn wallet_names_never_transfer_policy_authority_to_a_replacement_key() {
     let mut store = PolicyStore::open(&path, &key(41)).unwrap();
     let predecessor = Address::repeat_byte(0x11);
     let replacement = Address::repeat_byte(0x22);
-    store
+    let predecessor_policy = store
         .put_for_wallet(
             "primary",
             predecessor,
@@ -195,10 +199,14 @@ fn wallet_names_never_transfer_policy_authority_to_a_replacement_key() {
         .unwrap();
 
     let error = store
-        .get_for_wallet("primary", replacement)
+        .get_for_wallet(
+            "primary",
+            predecessor_policy.wallet_instance_id,
+            replacement,
+        )
         .unwrap_err()
         .to_string();
-    assert!(error.contains("belongs to"), "{error}");
+    assert!(error.contains("not active"), "{error}");
     assert!(
         store
             .install_policy(
@@ -212,10 +220,17 @@ fn wallet_names_never_transfer_policy_authority_to_a_replacement_key() {
     );
 
     store.purge("primary").unwrap();
+    let replacement_wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
+        id: "primary".into(),
+        address: replacement,
+        created_at: Utc::now(),
+        source: crate::config::WalletSource::Imported,
+        exported_at: None,
+    };
     let installed = store
         .initialize_policy(
-            "primary",
-            replacement,
+            &replacement_wallet,
             &WalletPolicy::require_approval_for_everything(),
         )
         .unwrap();
@@ -229,12 +244,16 @@ fn core_requires_authorization_only_when_a_policy_transition_can_widen_authority
     let path = directory.path().join("policies.db");
     let mut store = PolicyStore::open(&path, &key(42)).unwrap();
     let address = Address::repeat_byte(0x11);
+    let wallet = WalletMetadata {
+        instance_id: Uuid::new_v4(),
+        id: "primary".into(),
+        address,
+        created_at: Utc::now(),
+        source: crate::config::WalletSource::Imported,
+        exported_at: None,
+    };
     store
-        .initialize_policy(
-            "primary",
-            address,
-            &WalletPolicy::require_approval_for_everything(),
-        )
+        .initialize_policy(&wallet, &WalletPolicy::require_approval_for_everything())
         .unwrap();
 
     assert!(
@@ -347,61 +366,6 @@ fn a_fresh_database_is_created_at_the_only_schema_there_is() {
             })
             .unwrap_or_else(|error| panic!("{table} missing from a fresh database: {error}"));
     }
-}
-
-#[test]
-fn v1_rows_are_bound_to_the_encrypted_wallet_identity_during_migration() {
-    let directory = tempfile::tempdir().unwrap();
-    let config = crate::config::ConfigStore::new(directory.path());
-    let wallet = crate::config::WalletMetadata {
-        id: "primary".into(),
-        address: Address::repeat_byte(0x11),
-        created_at: Utc::now(),
-        source: crate::config::WalletSource::Created,
-        exported_at: None,
-    };
-    config
-        .update_for_test(|settings| {
-            settings.wallets.push(wallet.clone());
-            Ok(())
-        })
-        .unwrap();
-    let path = directory.path().join(DATABASE_FILE);
-    let mut store = PolicyStore::open(&path, &key(0x43)).unwrap();
-    store
-        .put_for_wallet(
-            &wallet.id,
-            wallet.address,
-            &WalletPolicy::allow_anything(),
-            None,
-        )
-        .unwrap();
-    store
-        .connection
-        .execute_batch(
-            "DROP INDEX pending_transactions_wallet_chain_in_flight;
-             ALTER TABLE wallet_policies DROP COLUMN wallet_address;
-             ALTER TABLE pending_transactions DROP COLUMN wallet_address;
-             ALTER TABLE pending_transactions DROP COLUMN block_hash;
-             ALTER TABLE pending_transactions DROP COLUMN settlement_transaction_hash;
-             ALTER TABLE pending_transactions DROP COLUMN finalized_at;
-             ALTER TABLE pending_typed_data DROP COLUMN wallet_address;
-             ALTER TABLE pending_messages DROP COLUMN wallet_address;
-             ALTER TABLE policy_proposals DROP COLUMN wallet_address;
-             CREATE UNIQUE INDEX pending_transactions_wallet_chain_in_flight
-                 ON pending_transactions(wallet_id, chain_id)
-                 WHERE status IN ('signed', 'submitting', 'broadcast', 'cancelling');
-             UPDATE schema_metadata SET version = 1;",
-        )
-        .unwrap();
-    drop(store);
-
-    let migrated = PolicyStore::open(&path, &key(0x43)).unwrap();
-    assert_eq!(schema_version(&migrated.connection).unwrap(), Some(2));
-    assert_eq!(
-        migrated.get(&wallet.id).unwrap().unwrap().wallet_address,
-        wallet.address
-    );
 }
 
 #[test]
@@ -619,15 +583,19 @@ fn authenticated_page_corruption_fails_closed() {
 fn only_real_decision_states_are_storable() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policies.db");
-    let store = PolicyStore::open(&path, &key(5)).unwrap();
+    let mut store = PolicyStore::open(&path, &key(5)).unwrap();
+    store
+        .put("primary", &WalletPolicy::allow_anything(), None)
+        .unwrap();
     // Each row gets its own chain, so the one-in-flight-per-wallet-and-chain
     // index cannot be what refuses an insert; only the decision check can.
     let insert = |chain: i64, status: &str, approval_required: i64, decided_at: Option<i64>| {
         store.connection.execute(
             "INSERT INTO pending_transactions(
-                 request_id, wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
+                 request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json, plan_digest,
                  policy_revision, status, approval_required, created_at, updated_at, decided_at
-             ) VALUES (randomblob(16), 'primary', '0x0000000000000000000000000000000000000000',
+             ) VALUES (randomblob(16), (SELECT instance_id FROM wallet_instances WHERE wallet_id = 'primary'),
+                       'primary', '0x0000000000000000000000000000000000000000',
                        'mainnet', ?1, '{}', zeroblob(32), 1,
                        ?2, ?3, 0, 0, ?4)",
             rusqlite::params![chain, status, approval_required, decided_at],
@@ -816,20 +784,13 @@ mod first_policy_clears_residue_tests {
         (directory, database)
     }
 
-    /// `purge` runs at wallet creation, but only after a *successful* custody
-    /// create -- and the Accounts screen's repair route reaches `put` without
-    /// it. So a removal whose purge failed, or a creation interrupted between
-    /// the credential and the policy, left the queues and any proposal in place
-    /// under a name that a different key now answers to. The replacement could
-    /// then be shown its predecessor's message or typed-data request and sign
-    /// it after an ordinary review.
-    ///
-    /// A wallet with no policy cannot sign anything, so nothing here belongs to
-    /// it: everything under the name is the predecessor's.
+    /// Retirement frees the display name without transferring any authority.
+    /// The old policy remains as immutable history, while transient proposals
+    /// are consumed and the replacement receives a fresh instance UUID.
     #[test]
-    fn installing_a_first_policy_clears_what_the_name_still_held() {
+    fn retiring_then_reusing_a_name_keeps_policy_history_separate() {
         let (_directory, mut database) = store();
-        database
+        let predecessor = database
             .put("primary", &WalletPolicy::allow_anything(), None)
             .unwrap();
         database
@@ -842,33 +803,39 @@ mod first_policy_clears_residue_tests {
             .unwrap();
         assert!(database.proposal("primary").unwrap().is_some());
 
-        // The wallet is retired, but the purge that should follow does not
-        // land -- a database that would not open, a commit that failed.
-        database
-            .connection
-            .execute(
-                "DELETE FROM wallet_policies WHERE wallet_id = ?1",
-                ["primary"],
-            )
-            .unwrap();
-        assert!(
-            database.proposal("primary").unwrap().is_some(),
-            "the proposal outlived the policy, which is the state this is about"
-        );
-
-        // A replacement takes the name and its policy is installed -- through
-        // the repair route, which does not purge.
-        database
+        let predecessor_wallet = WalletMetadata {
+            instance_id: predecessor.wallet_instance_id,
+            id: predecessor.wallet_id.clone(),
+            address: predecessor.wallet_address,
+            created_at: predecessor.updated_at,
+            source: crate::config::WalletSource::Imported,
+            exported_at: None,
+        };
+        database.retire_wallet(&predecessor_wallet).unwrap();
+        let replacement = database
             .put(
                 "primary",
                 &WalletPolicy::require_approval_for_everything(),
                 None,
             )
             .unwrap();
+        assert_ne!(
+            replacement.wallet_instance_id,
+            predecessor.wallet_instance_id
+        );
         assert!(
             database.proposal("primary").unwrap().is_none(),
             "the predecessor's proposal must not survive into the replacement"
         );
+        let policy_rows: i64 = database
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM wallet_policies WHERE wallet_id = 'primary'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(policy_rows, 2, "both lifecycle policies remain auditable");
     }
 
     /// And an ordinary policy update leaves everything alone. Clearing on

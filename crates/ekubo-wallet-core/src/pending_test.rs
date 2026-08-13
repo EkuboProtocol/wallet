@@ -1339,10 +1339,11 @@ fn terminal_history_is_bounded_while_live_rows_are_left_alone() {
         connection
             .execute(
                 "INSERT INTO pending_transactions(
-                    request_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
+                    request_id, wallet_instance_id, wallet_id, wallet_address, network_name, chain_id, plan_json,
                     plan_digest, policy_revision, status, created_at, updated_at,
                     decided_at, approval_required
-                 ) VALUES (?1, 'primary', '0x1111111111111111111111111111111111111111',
+                 ) VALUES (?1, (SELECT instance_id FROM wallet_instances WHERE wallet_id = 'primary'),
+                           'primary', '0x1111111111111111111111111111111111111111',
                            'ethereum', 1, '{}', ?2, 1, 'confirmed', ?3, ?3, ?3, 1)",
                 params![
                     uuid::Uuid::new_v4(),
