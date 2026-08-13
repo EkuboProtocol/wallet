@@ -663,7 +663,7 @@ async fn transaction_approval_request(
     let mut request =
         ApprovalRequest::new(ApprovalKind::PolicyException, "Review transaction", summary)
             .fact("Wallet", &pending.wallet_id)
-            .fact("Network", &pending.network_name)
+            .fact("Network", network.display_label())
             .fact("Chain ID", &pending.chain_id)
             // The vetted TLS host the plan body was fetched from, "inline data URI"
             // for an agent-held plan, or "a file on this machine" for one read off

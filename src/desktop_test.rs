@@ -513,12 +513,45 @@ fn command_palette_reaches_every_desktop_route() {
     assert_eq!(Route::ALL.len(), 8);
     assert!(Route::ALL.contains(&Route::Settings));
     assert!(Route::ALL.contains(&Route::WalletConnect));
-    assert_eq!(Route::ALL.first(), Some(&Route::Activity));
     assert_eq!(Route::Activity.label(), "Inbox");
     assert_eq!(Route::Overview.label(), "Portfolio");
     assert!(NAVIGATION_RAIL_WIDTH >= px(80.0));
     assert!(NAVIGATION_BUTTON_SIZE >= px(52.0));
     assert_eq!(Route::ALL.last(), Some(&Route::Settings));
+}
+
+#[test]
+fn the_rail_opens_on_accounts_because_nothing_works_without_one() {
+    assert_eq!(Route::ALL.first(), Some(&Route::Accounts));
+    // The window's landing screen and the first rail entry are the same
+    // thing on purpose: a new install has no account, and every other
+    // screen is empty until it does.
+    assert_eq!(Route::DEFAULT, Route::Accounts);
+    // The requests an agent is waiting on sit directly below setup, ahead
+    // of the read-only and configuration screens.
+    assert_eq!(Route::ALL.get(1), Some(&Route::Activity));
+}
+
+#[test]
+fn every_route_explains_itself_in_one_sentence() {
+    for route in Route::ALL {
+        let description = route.description();
+        assert!(
+            description.len() > 30,
+            "{} has no usable description",
+            route.label()
+        );
+        assert!(
+            description.ends_with('.'),
+            "{} description is not a sentence",
+            route.label()
+        );
+        assert!(
+            !description.contains(route.label()),
+            "{} description only repeats its own title",
+            route.label()
+        );
+    }
 }
 
 #[test]
@@ -560,12 +593,51 @@ fn route_shortcuts_preserve_standard_text_editing_bindings() {
         ("Ctrl+8 / Ctrl+,", "ctrl-8"),
     ];
 
-    let actual = Route::ALL.map(|route| (route.shortcut(), route.key_binding()));
-    assert_eq!(actual, expected);
+    let actual = Route::ALL.map(|route| (route.shortcut().to_string(), route.key_binding()));
+    for (index, (shortcut, binding)) in expected.into_iter().enumerate() {
+        assert_eq!(actual[index], (shortcut.to_owned(), binding));
+    }
     #[cfg(target_os = "macos")]
     assert_eq!(SETTINGS_ALTERNATE_KEY_BINDING, "cmd-,");
     #[cfg(not(target_os = "macos"))]
     assert_eq!(SETTINGS_ALTERNATE_KEY_BINDING, "ctrl-,");
+}
+
+#[test]
+fn shortcuts_follow_rail_position_so_reordering_tabs_cannot_desynchronize_them() {
+    // Both the displayed hint and the registered binding are derived from
+    // the route's index in `ALL`. Nothing is spelled out per variant, so a
+    // future reorder can never leave the first tab answering to ⌘3.
+    for (index, route) in Route::ALL.into_iter().enumerate() {
+        let digit = (index + 1).to_string();
+        assert!(
+            route.shortcut().contains(&digit),
+            "{} shows a shortcut that does not match its rail position",
+            route.label()
+        );
+        assert!(
+            route.key_binding().ends_with(&digit),
+            "{} is bound to a key that does not match its rail position",
+            route.label()
+        );
+    }
+    // The platform preferences shortcut belongs to Settings itself, not to
+    // whichever slot Settings happens to occupy.
+    assert!(
+        Route::Settings
+            .shortcut()
+            .contains(SETTINGS_ALTERNATE_SHORTCUT)
+    );
+    for route in Route::ALL
+        .into_iter()
+        .filter(|route| *route != Route::Settings)
+    {
+        assert!(
+            !route.shortcut().contains(SETTINGS_ALTERNATE_SHORTCUT),
+            "{} claims the preferences shortcut",
+            route.label()
+        );
+    }
 }
 
 #[test]
@@ -1175,4 +1247,175 @@ fn changing_routes_resets_scroll_without_disturbing_the_current_route() {
 
     reset_route_scroll_if_changed(Route::Networks, Route::Tokens, &scroll);
     assert_eq!(scroll.offset(), gpui::point(px(0.0), px(0.0)));
+}
+
+#[test]
+fn every_lifecycle_state_reads_as_english_rather_than_its_variant_name() {
+    for status in [
+        PendingStatus::AwaitingApproval,
+        PendingStatus::Rejected,
+        PendingStatus::Signed,
+        PendingStatus::Submitting,
+        PendingStatus::Broadcast,
+        PendingStatus::Confirmed,
+        PendingStatus::Reverted,
+        PendingStatus::Cancelled,
+        PendingStatus::Replaced,
+        PendingStatus::Cancelling,
+    ] {
+        let label = status.label();
+        let debug = format!("{status:?}");
+        // A few variants are already ordinary words ("Rejected"), so the
+        // test that matters is that none of them still reads as an
+        // identifier — no run-together capitals, and nothing left of
+        // `AwaitingApproval` shape.
+        assert!(
+            !label.chars().skip(1).any(char::is_uppercase),
+            "{label} is CamelCase rather than a phrase"
+        );
+        assert!(
+            debug
+                .chars()
+                .filter(|character| character.is_uppercase())
+                .count()
+                < 2
+                || label != debug,
+            "{debug} is still shown as its variant name"
+        );
+        assert!(
+            status.explanation().ends_with('.'),
+            "{debug} has no explanatory sentence"
+        );
+    }
+
+    // The four outcomes a reader cares most about are the ones the wallet
+    // used to spell in lifecycle vocabulary.
+    assert_eq!(PendingStatus::Confirmed.label(), "Succeeded");
+    assert_eq!(PendingStatus::Reverted.label(), "Failed on chain");
+    assert_eq!(PendingStatus::Broadcast.label(), "Waiting to be mined");
+    assert_eq!(PendingStatus::AwaitingApproval.label(), "Waiting for you");
+}
+
+#[test]
+fn status_colour_separates_success_from_waiting_from_failure() {
+    assert_eq!(
+        transaction_status_tone(PendingStatus::Confirmed),
+        StatusTone::Done
+    );
+    assert_eq!(
+        transaction_status_tone(PendingStatus::AwaitingApproval),
+        StatusTone::NeedsYou
+    );
+    // A signed-but-unsent transaction is stalled on the owner, not on the
+    // network, so it is coloured like a decision rather than like progress.
+    assert_eq!(
+        transaction_status_tone(PendingStatus::Signed),
+        StatusTone::NeedsYou
+    );
+    assert_eq!(
+        transaction_status_tone(PendingStatus::Broadcast),
+        StatusTone::Working
+    );
+    for status in [
+        PendingStatus::Rejected,
+        PendingStatus::Reverted,
+        PendingStatus::Cancelled,
+        PendingStatus::Replaced,
+    ] {
+        assert_eq!(transaction_status_tone(status), StatusTone::Failed);
+    }
+    assert_eq!(message_status_tone(MessageStatus::Signed), StatusTone::Done);
+    assert_eq!(
+        typed_data_status_tone(TypedDataStatus::AwaitingApproval),
+        StatusTone::NeedsYou
+    );
+}
+
+#[test]
+fn ages_read_as_elapsed_time_until_they_are_old_enough_to_need_a_date() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-08-12T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let ago = |seconds: i64| now - chrono::Duration::seconds(seconds);
+
+    assert_eq!(relative_time_label(now, now), "just now");
+    assert_eq!(relative_time_label(ago(30), now), "just now");
+    // Clock skew between the writing process and this render must not
+    // produce "-1 minutes ago".
+    assert_eq!(
+        relative_time_label(now + chrono::Duration::seconds(90), now),
+        "just now"
+    );
+    assert_eq!(relative_time_label(ago(60), now), "1 minute ago");
+    assert_eq!(relative_time_label(ago(3 * 60), now), "3 minutes ago");
+    assert_eq!(relative_time_label(ago(3_600), now), "1 hour ago");
+    assert_eq!(relative_time_label(ago(5 * 3_600), now), "5 hours ago");
+    assert_eq!(relative_time_label(ago(86_400), now), "1 day ago");
+    assert_eq!(relative_time_label(ago(3 * 86_400), now), "3 days ago");
+    // Past a week, "63 days ago" is not something a person can place.
+    let old = relative_time_label(ago(60 * 86_400), now);
+    assert!(!old.contains("ago"), "{old} should be a calendar date");
+    assert!(old.contains("2026"), "{old} should name its year");
+}
+
+#[test]
+fn counts_are_written_the_way_a_person_would_say_them() {
+    assert_eq!(pluralize(0, "request"), "0 requests");
+    assert_eq!(pluralize(1, "request"), "1 request");
+    assert_eq!(pluralize(2, "request"), "2 requests");
+    assert_eq!(pluralize(1, "token name"), "1 token name");
+    assert_eq!(pluralize(4, "token name"), "4 token names");
+}
+
+#[test]
+fn chains_are_named_when_configured_and_numbered_only_as_a_last_resort() {
+    let mut networks = BTreeMap::new();
+    networks.insert(1_u64, SharedString::from("Ethereum"));
+
+    assert_eq!(chain_label(Some(1), &networks), "Ethereum");
+    assert_eq!(chain_label(Some(8_453), &networks), "chain 8453");
+    assert_eq!(chain_label(None, &networks), "no network");
+}
+
+#[test]
+fn the_rpc_endpoint_field_holds_text_only_a_multi_line_input_can_shape() {
+    // gpui shapes a single-line input with `shape_line`, which panics on a
+    // newline instead of wrapping or truncating — opening the network editor
+    // aborted the process. Both the placeholder and the value seeded from an
+    // existing network span lines, so the field must be built with
+    // `.multi_line(true)`; `.rows(n)` alone does not change the mode.
+    assert!(RPC_URLS_PLACEHOLDER.contains('\n'));
+
+    let seeded = rpc_urls_for_editor(&[
+        "https://rpc-one.example/".parse().unwrap(),
+        "https://rpc-two.example/".parse().unwrap(),
+    ]);
+    assert!(seeded.contains('\n'));
+
+    // The editor has to read back what it wrote, newlines and all.
+    let draft = NetworkEditorDraft {
+        name: "owner-chain".into(),
+        display_name: "Owner Chain".into(),
+        aliases: String::new(),
+        chain_id: "9999991".into(),
+        rpc_urls: seeded,
+        max_gas_limit: "30000000".into(),
+        max_fee_per_gas: "100000000000".into(),
+        native_currency_name: "Ether".into(),
+        native_currency_symbol: "ETH".into(),
+        native_currency_decimals: "18".into(),
+        block_explorer_url: "https://explorer.example".into(),
+        documentation_url: "https://docs.example/network".into(),
+    };
+    let (network, errors) = parse_network_editor_draft(&draft, false, false, RpcStrategy::Ordered);
+    assert_eq!(errors, NetworkEditorErrors::default());
+    assert_eq!(
+        network
+            .unwrap()
+            .rpc_urls
+            .iter()
+            .map(url::Url::as_str)
+            .collect::<Vec<_>>(),
+        ["https://rpc-one.example/", "https://rpc-two.example/"]
+    );
 }

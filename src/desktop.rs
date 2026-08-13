@@ -11,7 +11,8 @@ use crate::{
     http_server::McpHttpServer,
     notifications::{
         NotificationPreferences, NotificationRoute, NotificationService as _,
-        PlatformNotificationService, initialize_platform_notifications, notification_for,
+        PlatformNotificationService, TransactionContext, initialize_platform_notifications,
+        notification_for,
     },
     release_check::ReleaseCheck,
     review::ReviewState,
@@ -776,6 +777,141 @@ fn transaction_actions(status: PendingStatus) -> TransactionActions {
     }
 }
 
+/// How a lifecycle state should read to the eye before it is read as words.
+/// Kept separate from the theme so the mapping stays a pure, testable fact
+/// about the state rather than about the palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusTone {
+    /// Finished, and it did what it said it would.
+    Done,
+    /// Nothing is moving until the owner decides something.
+    NeedsYou,
+    /// Moving on its own; no decision is required right now.
+    Working,
+    /// Finished badly, or ended without doing anything.
+    Failed,
+}
+
+impl StatusTone {
+    fn color(self, cx: &App) -> gpui::Hsla {
+        match self {
+            Self::Done => cx.theme().primary,
+            Self::NeedsYou => cx.theme().warning,
+            Self::Working => cx.theme().muted_foreground,
+            Self::Failed => cx.theme().danger,
+        }
+    }
+}
+
+const fn transaction_status_tone(status: PendingStatus) -> StatusTone {
+    match status {
+        PendingStatus::Confirmed => StatusTone::Done,
+        PendingStatus::AwaitingApproval | PendingStatus::Signed => StatusTone::NeedsYou,
+        PendingStatus::Submitting | PendingStatus::Broadcast | PendingStatus::Cancelling => {
+            StatusTone::Working
+        }
+        PendingStatus::Rejected
+        | PendingStatus::Reverted
+        | PendingStatus::Cancelled
+        | PendingStatus::Replaced => StatusTone::Failed,
+    }
+}
+
+const fn message_status_tone(status: MessageStatus) -> StatusTone {
+    match status {
+        MessageStatus::AwaitingApproval => StatusTone::NeedsYou,
+        MessageStatus::Rejected => StatusTone::Failed,
+        MessageStatus::Signed => StatusTone::Done,
+    }
+}
+
+const fn message_status_explanation(status: MessageStatus) -> &'static str {
+    match status {
+        MessageStatus::AwaitingApproval => {
+            "Nothing has been signed. This message is waiting for your decision."
+        }
+        MessageStatus::Rejected => "You turned this down, so no signature was ever produced.",
+        MessageStatus::Signed => {
+            "You approved this and the wallet signed it. The signature was returned to whoever asked."
+        }
+    }
+}
+
+const fn typed_data_status_tone(status: TypedDataStatus) -> StatusTone {
+    match status {
+        TypedDataStatus::AwaitingApproval => StatusTone::NeedsYou,
+        TypedDataStatus::Rejected => StatusTone::Failed,
+        TypedDataStatus::Signed => StatusTone::Done,
+    }
+}
+
+const fn typed_data_status_explanation(status: TypedDataStatus) -> &'static str {
+    match status {
+        TypedDataStatus::AwaitingApproval => {
+            "Nothing has been signed. This structured message is waiting for your decision."
+        }
+        TypedDataStatus::Rejected => "You turned this down, so no signature was ever produced.",
+        TypedDataStatus::Signed => {
+            "You approved this and the wallet signed it. A signed permission of this kind can usually be used until it expires."
+        }
+    }
+}
+
+/// "3 minutes ago" instead of an RFC 3339 timestamp. Anything older than a
+/// week reads as a calendar date, because "63 days ago" is not something a
+/// person can place.
+fn relative_time_label(
+    moment: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let elapsed = now.signed_duration_since(moment);
+    let seconds = elapsed.num_seconds();
+    if seconds < 45 {
+        // Clock skew between the writer and this render can make a fresh
+        // record look like it arrived from the future. "Just now" is true
+        // either way, and a negative age never reaches the arms below.
+        return "just now".to_owned();
+    }
+    let plural = |count: i64, unit: &str| {
+        if count == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{count} {unit}s ago")
+        }
+    };
+    if seconds < 3_600 {
+        return plural(elapsed.num_minutes().max(1), "minute");
+    }
+    if seconds < 86_400 {
+        return plural(elapsed.num_hours(), "hour");
+    }
+    if seconds < 7 * 86_400 {
+        return plural(elapsed.num_days(), "day");
+    }
+    moment
+        .with_timezone(&chrono::Local)
+        .format("%-d %b %Y")
+        .to_string()
+}
+
+/// The exact moment in the reader's own timezone. UTC is precise and useless
+/// for placing an event against your own day, so it is not shown.
+fn absolute_time_label(moment: chrono::DateTime<chrono::Utc>) -> String {
+    moment
+        .with_timezone(&chrono::Local)
+        .format("%-d %b %Y at %H:%M")
+        .to_string()
+}
+
+/// "1 request" / "3 requests" — the `(s)` suffix reads like a form field.
+fn pluralize(count: usize, singular: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {singular}s")
+    }
+}
+
 fn upsert_detected_agents() -> Result<String> {
     let adapters = AgentAdapter::supported()?
         .into_iter()
@@ -796,7 +932,9 @@ fn upsert_detected_agents() -> Result<String> {
     let batch = crate::agent_config::ConfigBatchInstall::install(previews)?;
     batch.commit();
     Ok(format!(
-        "OAuth MCP URL is installed for {detected} detected agent(s); {changed} configuration file(s) changed. Authenticate from each agent when needed."
+        "Set up {} that this machine has installed; {} changed. Sign in from each agent when you next use it.",
+        pluralize(detected, "agent"),
+        pluralize(changed, "configuration file")
     ))
 }
 
@@ -829,16 +967,26 @@ pub enum Route {
 }
 
 impl Route {
+    /// Rail order, top to bottom, and therefore also the numeric shortcut
+    /// order. It runs setup → activity → rules → connections → reference data:
+    /// an account has to exist before anything else in the wallet can happen,
+    /// so `Accounts` is both the first tab and the screen a new install opens
+    /// on. `Activity` follows because it is where an agent's requests land and
+    /// where the day's decisions are made.
     const ALL: [Self; 8] = [
+        Self::Accounts,
         Self::Activity,
         Self::Overview,
-        Self::Accounts,
         Self::Policies,
-        Self::Networks,
-        Self::Tokens,
         Self::WalletConnect,
+        Self::Tokens,
+        Self::Networks,
         Self::Settings,
     ];
+
+    /// The screen a freshly opened window shows when nothing has asked for a
+    /// particular one. It is deliberately the same as the first rail entry.
+    const DEFAULT: Self = Self::ALL[0];
 
     const fn label(self) -> &'static str {
         match self {
@@ -850,6 +998,33 @@ impl Route {
             Self::Tokens => "Tokens",
             Self::WalletConnect => "WalletConnect",
             Self::Settings => "Settings",
+        }
+    }
+
+    /// One line under the page title saying what the screen is for. Every
+    /// route names the reader's own task, not the data structure behind it.
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Accounts => {
+                "The keys this wallet holds. Create or import an account before connecting an agent."
+            }
+            Self::Activity => {
+                "Requests waiting on your decision, and everything this wallet has signed or sent."
+            }
+            Self::Overview => "What each account holds, across every network you have enabled.",
+            Self::Policies => {
+                "The rules that decide which agent requests go through, which need you, and which are refused."
+            }
+            Self::WalletConnect => {
+                "Agents and dapps that can reach this wallet right now, and how to connect another."
+            }
+            Self::Tokens => {
+                "Token names and decimals this wallet trusts when it describes an amount to you."
+            }
+            Self::Networks => {
+                "The chains this wallet will sign for, and the RPC endpoints it uses."
+            }
+            Self::Settings => "Appearance, agent setup, updates, and the legal documents.",
         }
     }
 
@@ -873,60 +1048,44 @@ impl Route {
         }
     }
 
+    /// Rail position drives both the displayed shortcut and the registered
+    /// binding, so reordering `ALL` can never leave the first tab on ⌘3.
     #[cfg(target_os = "macos")]
-    const fn shortcut(self) -> &'static str {
-        match self {
-            Self::Overview => "⌘2",
-            Self::Activity => "⌘1",
-            Self::Accounts => "⌘3",
-            Self::Policies => "⌘4",
-            Self::Networks => "⌘5",
-            Self::Tokens => "⌘6",
-            Self::WalletConnect => "⌘7",
-            Self::Settings => "⌘8 / ⌘,",
-        }
-    }
-
+    const SHORTCUT_KEYS: [&'static str; 8] = ["⌘1", "⌘2", "⌘3", "⌘4", "⌘5", "⌘6", "⌘7", "⌘8"];
     #[cfg(not(target_os = "macos"))]
-    const fn shortcut(self) -> &'static str {
-        match self {
-            Self::Overview => "Ctrl+2",
-            Self::Activity => "Ctrl+1",
-            Self::Accounts => "Ctrl+3",
-            Self::Policies => "Ctrl+4",
-            Self::Networks => "Ctrl+5",
-            Self::Tokens => "Ctrl+6",
-            Self::WalletConnect => "Ctrl+7",
-            Self::Settings => "Ctrl+8 / Ctrl+,",
-        }
-    }
+    const SHORTCUT_KEYS: [&'static str; 8] = [
+        "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8",
+    ];
 
     #[cfg(target_os = "macos")]
-    const fn key_binding(self) -> &'static str {
-        match self {
-            Self::Overview => "cmd-2",
-            Self::Activity => "cmd-1",
-            Self::Accounts => "cmd-3",
-            Self::Policies => "cmd-4",
-            Self::Networks => "cmd-5",
-            Self::Tokens => "cmd-6",
-            Self::WalletConnect => "cmd-7",
-            Self::Settings => "cmd-8",
+    const KEY_BINDINGS: [&'static str; 8] = [
+        "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7", "cmd-8",
+    ];
+    #[cfg(not(target_os = "macos"))]
+    const KEY_BINDINGS: [&'static str; 8] = [
+        "ctrl-1", "ctrl-2", "ctrl-3", "ctrl-4", "ctrl-5", "ctrl-6", "ctrl-7", "ctrl-8",
+    ];
+
+    fn shortcut(self) -> SharedString {
+        let key = Self::SHORTCUT_KEYS
+            .get(self.menu_order())
+            .copied()
+            .unwrap_or_default();
+        if self == Self::Settings {
+            // The platform's own preferences shortcut also opens Settings, and
+            // it stays with the route rather than with whichever slot it sits
+            // in.
+            SharedString::from(format!("{key} / {SETTINGS_ALTERNATE_SHORTCUT}"))
+        } else {
+            SharedString::from(key)
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    const fn key_binding(self) -> &'static str {
-        match self {
-            Self::Overview => "ctrl-2",
-            Self::Activity => "ctrl-1",
-            Self::Accounts => "ctrl-3",
-            Self::Policies => "ctrl-4",
-            Self::Networks => "ctrl-5",
-            Self::Tokens => "ctrl-6",
-            Self::WalletConnect => "ctrl-7",
-            Self::Settings => "ctrl-8",
-        }
+    fn key_binding(self) -> &'static str {
+        Self::KEY_BINDINGS
+            .get(self.menu_order())
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -934,6 +1093,10 @@ impl Route {
 const SETTINGS_ALTERNATE_KEY_BINDING: &str = "cmd-,";
 #[cfg(not(target_os = "macos"))]
 const SETTINGS_ALTERNATE_KEY_BINDING: &str = "ctrl-,";
+#[cfg(target_os = "macos")]
+const SETTINGS_ALTERNATE_SHORTCUT: &str = "⌘,";
+#[cfg(not(target_os = "macos"))]
+const SETTINGS_ALTERNATE_SHORTCUT: &str = "Ctrl+,";
 
 fn reset_route_scroll_if_changed(current: Route, next: Route, scroll: &ScrollHandle) {
     if current != next {
@@ -984,6 +1147,10 @@ pub struct WalletWindow {
     activity_busy: BTreeSet<uuid::Uuid>,
     activity_feedback: BTreeMap<uuid::Uuid, ActivityFeedback>,
     activity_inspections: BTreeMap<uuid::Uuid, ActivityInspectionState>,
+    /// Records whose exact machine payload the owner has asked to see. The
+    /// bytes stay collapsed by default so the human account of what happened
+    /// is what a reader meets first.
+    activity_payloads_expanded: BTreeSet<(uuid::Uuid, String)>,
     active_review: Option<ActiveReview>,
     queued_reviews: SerialQueue<QueuedReview>,
     review_flow: ReviewFlowState,
@@ -1009,7 +1176,6 @@ pub struct WalletWindow {
     portfolio: PortfolioState,
     portfolio_generation: u64,
     portfolio_account_index: usize,
-    initial_route_resolved: bool,
     route_scroll_handle: ScrollHandle,
     policy_editor_anchor: ScrollAnchor,
     modal_focus: FocusHandle,
@@ -1570,32 +1736,127 @@ fn review_document_is_visible(
         .all(|chain_id| chain_is_visible(Some(chain_id), &visible_chain_ids, &configured_chain_ids))
 }
 
-fn transaction_notification_is_visible(
+/// Decide whether this lifecycle change deserves a banner, and if so read the
+/// two facts the banner will name.
+///
+/// One lookup answers both questions: the record has to be fetched anyway to
+/// check that its chain is one the owner has chosen to see, and it is also
+/// where the account and network names live.
+fn transaction_notification_context(
     owner: &OwnerApi,
     event: &crate::events::DomainEvent,
-) -> bool {
+) -> Option<TransactionContext> {
     let crate::events::DomainEventKind::Transaction { request_id, .. } = &event.kind else {
-        return false;
+        return None;
     };
-    let Ok(record) = owner.transaction(*request_id) else {
-        return false;
-    };
-    let Ok(networks) = owner.networks() else {
-        return false;
-    };
-    let Ok(testnet_mode) = owner.testnet_mode() else {
-        return false;
-    };
+    let record = owner.transaction(*request_id).ok()?;
+    let networks = owner.networks().ok()?;
+    let testnet_mode = owner.testnet_mode().ok()?;
     let visible_chain_ids = visible_network_chain_ids(&networks, testnet_mode);
     let configured_chain_ids = networks
         .iter()
         .map(|network| network.chain_id)
         .collect::<BTreeSet<_>>();
-    chain_is_visible(
-        record.chain_id.parse().ok(),
-        &visible_chain_ids,
-        &configured_chain_ids,
-    )
+    let chain_id = record.chain_id.parse().ok();
+    if !chain_is_visible(chain_id, &visible_chain_ids, &configured_chain_ids) {
+        return None;
+    }
+    Some(TransactionContext {
+        account: record.wallet_id,
+        // Not `record.network_name`. That is the internal handle an agent
+        // types — "robinhood" — and aliases exist so a person can abbreviate
+        // in conversation, not so the wallet can abbreviate back at them. A
+        // banner says the name the network is actually called.
+        network: chain_label(chain_id, &token_network_names(&networks)),
+    })
+}
+
+/// A coloured dot beside a plain word. It repeats the state in two channels so
+/// the row is scannable at a glance and still readable without colour.
+fn status_pill(label: &'static str, tone: StatusTone, cx: &App) -> gpui::Div {
+    let color = tone.color(cx);
+    h_flex()
+        .flex_none()
+        .items_center()
+        .gap_1p5()
+        .px_2()
+        .py_0p5()
+        .rounded_full()
+        .border_1()
+        .border_color(color.opacity(0.35))
+        .bg(color.opacity(0.12))
+        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(color))
+        .child(div().text_xs().font_medium().text_color(color).child(label))
+}
+
+/// The chain's configured display name, falling back to the bare number only
+/// when the wallet has no network configured for it.
+fn chain_label(chain_id: Option<u64>, networks: &BTreeMap<u64, SharedString>) -> String {
+    match chain_id {
+        Some(chain_id) => networks
+            .get(&chain_id)
+            .map_or_else(|| format!("chain {chain_id}"), ToString::to_string),
+        None => "no network".to_owned(),
+    }
+}
+
+/// Title, subtitle, state word, and state colour for one inbox row.
+///
+/// Every field is a sentence a person could have written. The request UUID is
+/// deliberately absent: it identifies the row to the wallet, never to the
+/// reader, and it used to be the most prominent thing on the card.
+struct ActivityRowSummary {
+    title: String,
+    subtitle: String,
+    status: &'static str,
+    tone: StatusTone,
+}
+
+fn activity_row_summary(
+    record: &OwnerActivityRecord,
+    networks: &BTreeMap<u64, SharedString>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ActivityRowSummary {
+    match record {
+        OwnerActivityRecord::Transaction(item) => ActivityRowSummary {
+            title: format!(
+                "Transaction on {}",
+                chain_label(item.chain_id.parse().ok(), networks)
+            ),
+            subtitle: format!(
+                "{} · {}",
+                item.wallet_id,
+                relative_time_label(item.created_at, now)
+            ),
+            status: item.status.label(),
+            tone: transaction_status_tone(item.status),
+        },
+        OwnerActivityRecord::Message(item) => ActivityRowSummary {
+            title: "Message signature".to_owned(),
+            subtitle: format!(
+                "{} · {} · {}",
+                item.wallet_id,
+                item.requester.as_deref().unwrap_or("unnamed requester"),
+                relative_time_label(item.created_at, now)
+            ),
+            status: item.status.label(),
+            tone: message_status_tone(item.status),
+        },
+        OwnerActivityRecord::TypedData(item) => ActivityRowSummary {
+            title: format!(
+                "Typed-data signature on {}",
+                chain_label(item.chain_id.parse().ok(), networks)
+            ),
+            subtitle: format!(
+                "{} · {} · {}",
+                item.wallet_id,
+                item.requester.as_deref().unwrap_or("unnamed requester"),
+                relative_time_label(item.created_at, now)
+            ),
+            status: item.status.label(),
+            tone: typed_data_status_tone(item.status),
+        },
+    }
 }
 
 fn render_activity_row(
@@ -1603,292 +1864,245 @@ fn render_activity_row(
     selected: bool,
     busy: bool,
     feedback: Option<ActivityFeedback>,
+    networks: &BTreeMap<u64, SharedString>,
+    now: chrono::DateTime<chrono::Utc>,
     editor: WeakEntity<WalletWindow>,
     cx: &mut App,
 ) -> gpui::Div {
     let request_id = record.request_id();
-    let base = div().h(px(152.0)).pb_2();
-    let card = match record {
+    let summary = activity_row_summary(record, networks, now);
+    // Always "Details": the detail opens over the list, so the row's own
+    // button is never the thing that closes it.
+    let detail_label = "Details";
+    let actions = match record {
         OwnerActivityRecord::Transaction(item) => {
             let status = item.status;
-            let actions = transaction_actions(item.status);
+            let available = transaction_actions(status);
             let inspect_editor = editor.clone();
             let refresh_editor = editor.clone();
             let send_editor = editor.clone();
             let cancel_editor = editor.clone();
             let discard_editor = editor;
             h_flex()
-                .w_full()
                 .flex_wrap()
-                .justify_between()
-                .gap_4()
+                .justify_end()
+                .gap_2()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(selectable_text(
-                            format!("activity-row-title-{request_id}"),
-                            &format!(
-                                "{:?} · transaction · {} · {}",
-                                item.status, item.wallet_id, item.network_name
-                            ),
-                        ))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .font_family(MONO_FONT_FAMILY)
-                                .truncate()
-                                .child(selectable_text(
-                                    format!("activity-row-request-{request_id}"),
-                                    &request_id.to_string(),
-                                )),
-                        ),
+                    app_button(SharedString::from(format!(
+                        "inspect-transaction-{request_id}"
+                    )))
+                    .label(detail_label)
+                    .on_click(move |_, _, cx| {
+                        let _ = inspect_editor.update(cx, |view, cx| {
+                            view.inspect_transaction(request_id, cx);
+                        });
+                    }),
                 )
-                .child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            app_button(SharedString::from(format!(
-                                "inspect-transaction-{request_id}"
-                            )))
-                            .label(if selected { "Hide details" } else { "Inspect" })
+                .when(available.refresh, |buttons| {
+                    buttons.child(
+                        app_button(SharedString::from(format!(
+                            "refresh-transaction-{request_id}"
+                        )))
+                        .label(if busy { "Checking…" } else { "Check status" })
+                        .disabled(busy)
+                        .on_click(move |_, _, cx| {
+                            let _ = refresh_editor.update(cx, |view, cx| {
+                                view.refresh_transaction(request_id, cx);
+                            });
+                        }),
+                    )
+                })
+                .when(available.send, |buttons| {
+                    buttons.child(
+                        app_button(SharedString::from(format!(
+                            "rebroadcast-transaction-{request_id}"
+                        )))
+                        .label(if status == PendingStatus::Signed {
+                            "Send now"
+                        } else {
+                            "Send again"
+                        })
+                        .disabled(busy)
+                        .on_click(move |_, _, cx| {
+                            let _ = send_editor.update(cx, |view, cx| {
+                                view.rebroadcast_transaction(request_id, cx);
+                            });
+                        }),
+                    )
+                })
+                .when(available.cancel, |buttons| {
+                    buttons.child(
+                        app_button(SharedString::from(format!(
+                            "cancel-transaction-{request_id}"
+                        )))
+                        .label(if status == PendingStatus::Cancelling {
+                            "Try cancelling again"
+                        } else {
+                            "Cancel"
+                        })
+                        .danger()
+                        .disabled(busy)
+                        .on_click(move |_, window, cx| {
+                            let _ = cancel_editor.update(cx, |view, cx| {
+                                view.confirm_transaction_cancellation(request_id, window, cx);
+                            });
+                        }),
+                    )
+                })
+                .when(available.discard, |buttons| {
+                    buttons.child(
+                        app_button(SharedString::from(format!("discard-{request_id}")))
+                            .label("Discard")
+                            .danger()
+                            .disabled(busy)
                             .on_click(move |_, _, cx| {
-                                let _ = inspect_editor.update(cx, |view, cx| {
-                                    view.inspect_transaction(request_id, cx);
+                                let _ = discard_editor.update(cx, |view, cx| {
+                                    view.discard_unsent_transaction(request_id, cx);
                                 });
                             }),
-                        )
-                        .when(actions.refresh, |buttons| {
-                            buttons.child(
-                                app_button(SharedString::from(format!(
-                                    "refresh-transaction-{request_id}"
-                                )))
-                                .label(if busy { "Working…" } else { "Refresh" })
-                                .disabled(busy)
-                                .on_click(move |_, _, cx| {
-                                    let _ = refresh_editor.update(cx, |view, cx| {
-                                        view.refresh_transaction(request_id, cx);
-                                    });
-                                }),
-                            )
-                        })
-                        .when(actions.send, |buttons| {
-                            buttons.child(
-                                app_button(SharedString::from(format!(
-                                    "rebroadcast-transaction-{request_id}"
-                                )))
-                                .label(if status == PendingStatus::Signed {
-                                    "Send signed bytes"
-                                } else {
-                                    "Rebroadcast"
-                                })
-                                .disabled(busy)
-                                .on_click(move |_, _, cx| {
-                                    let _ = send_editor.update(cx, |view, cx| {
-                                        view.rebroadcast_transaction(request_id, cx);
-                                    });
-                                }),
-                            )
-                        })
-                        .when(actions.cancel, |buttons| {
-                            buttons.child(
-                                app_button(SharedString::from(format!(
-                                    "cancel-transaction-{request_id}"
-                                )))
-                                .label(if status == PendingStatus::Cancelling {
-                                    "Retry cancellation"
-                                } else {
-                                    "Cancel transaction"
-                                })
-                                .danger()
-                                .disabled(busy)
-                                .on_click(
-                                    move |_, window, cx| {
-                                        let _ = cancel_editor.update(cx, |view, cx| {
-                                            view.confirm_transaction_cancellation(
-                                                request_id, window, cx,
-                                            );
-                                        });
-                                    },
-                                ),
-                            )
-                        })
-                        .when(actions.discard, |buttons| {
-                            buttons.child(
-                                app_button(SharedString::from(format!("discard-{request_id}")))
-                                    .label("Discard unsent signature")
-                                    .danger()
-                                    .disabled(busy)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = discard_editor.update(cx, |view, cx| {
-                                            view.discard_unsent_transaction(request_id, cx);
-                                        });
-                                    }),
-                            )
-                        }),
-                )
-                .into_any_element()
+                    )
+                })
         }
         OwnerActivityRecord::Message(item) => {
+            let awaiting = item.status == MessageStatus::AwaitingApproval;
             let inspect_editor = editor.clone();
             let review_editor = editor;
             h_flex()
-                .w_full()
                 .flex_wrap()
-                .justify_between()
-                .gap_4()
+                .justify_end()
+                .gap_2()
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(selectable_text(
-                            format!("activity-row-title-{request_id}"),
-                            &format!("{:?} · message signature · {}", item.status, item.wallet_id),
-                        ))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .font_family(MONO_FONT_FAMILY)
-                                .truncate()
-                                .child(selectable_text(
-                                    format!("activity-row-request-{request_id}"),
-                                    &request_id.to_string(),
-                                )),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            app_button(SharedString::from(format!("inspect-message-{request_id}")))
-                                .label(if selected { "Hide details" } else { "Inspect" })
-                                .on_click(move |_, _, cx| {
-                                    let _ = inspect_editor.update(cx, |view, cx| {
-                                        view.toggle_activity_detail(request_id, cx);
-                                    });
-                                }),
-                        )
-                        .when(item.status == MessageStatus::AwaitingApproval, |buttons| {
-                            buttons.child(
-                                app_button(SharedString::from(format!(
-                                    "review-message-activity-{request_id}"
-                                )))
-                                .label("Review")
-                                .on_click(move |_, _, cx| {
-                                    let _ = review_editor.update(cx, |view, cx| {
-                                        view.begin_message_review(request_id, cx);
-                                    });
-                                }),
-                            )
+                    app_button(SharedString::from(format!("inspect-message-{request_id}")))
+                        .label(detail_label)
+                        .on_click(move |_, _, cx| {
+                            let _ = inspect_editor.update(cx, |view, cx| {
+                                view.toggle_activity_detail(request_id, cx);
+                            });
                         }),
                 )
-                .into_any_element()
+                .when(awaiting, |buttons| {
+                    buttons.child(
+                        app_button(SharedString::from(format!(
+                            "review-message-activity-{request_id}"
+                        )))
+                        .label("Review")
+                        .primary()
+                        .on_click(move |_, _, cx| {
+                            let _ = review_editor.update(cx, |view, cx| {
+                                view.begin_message_review(request_id, cx);
+                            });
+                        }),
+                    )
+                })
         }
         OwnerActivityRecord::TypedData(item) => {
+            let awaiting = item.status == TypedDataStatus::AwaitingApproval;
             let inspect_editor = editor.clone();
             let review_editor = editor;
             h_flex()
+                .flex_wrap()
+                .justify_end()
+                .gap_2()
+                .child(
+                    app_button(SharedString::from(format!(
+                        "inspect-typed-data-{request_id}"
+                    )))
+                    .label(detail_label)
+                    .on_click(move |_, _, cx| {
+                        let _ = inspect_editor.update(cx, |view, cx| {
+                            view.toggle_activity_detail(request_id, cx);
+                        });
+                    }),
+                )
+                .when(awaiting, |buttons| {
+                    buttons.child(
+                        app_button(SharedString::from(format!(
+                            "review-typed-data-activity-{request_id}"
+                        )))
+                        .label("Review")
+                        .primary()
+                        .on_click(move |_, _, cx| {
+                            let _ = review_editor.update(cx, |view, cx| {
+                                view.begin_typed_data_review(request_id, cx);
+                            });
+                        }),
+                    )
+                })
+        }
+    };
+
+    let mut card = div()
+        .w_full()
+        .min_w_0()
+        .p_3()
+        .rounded(cx.theme().radius_lg)
+        .border_1()
+        .border_color(if selected {
+            cx.theme().primary
+        } else {
+            cx.theme().border
+        })
+        .bg(cx.theme().secondary)
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            h_flex()
                 .w_full()
                 .flex_wrap()
+                .items_start()
                 .justify_between()
-                .gap_4()
+                .gap_3()
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(selectable_text(
-                            format!("activity-row-title-{request_id}"),
-                            &format!(
-                                "{:?} · typed-data signature · {} · chain {}",
-                                item.status, item.wallet_id, item.chain_id
-                            ),
-                        ))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(status_pill(summary.status, summary.tone, cx))
+                                .child(
+                                    selectable_text(
+                                        format!("activity-row-title-{request_id}"),
+                                        &summary.title,
+                                    )
+                                    .font_medium(),
+                                ),
+                        )
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .font_family(MONO_FONT_FAMILY)
-                                .truncate()
                                 .child(selectable_text(
-                                    format!("activity-row-request-{request_id}"),
-                                    &request_id.to_string(),
+                                    format!("activity-row-meta-{request_id}"),
+                                    &summary.subtitle,
                                 )),
                         ),
                 )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            app_button(SharedString::from(format!(
-                                "inspect-typed-data-{request_id}"
-                            )))
-                            .label(if selected { "Hide details" } else { "Inspect" })
-                            .on_click(move |_, _, cx| {
-                                let _ = inspect_editor.update(cx, |view, cx| {
-                                    view.toggle_activity_detail(request_id, cx);
-                                });
-                            }),
-                        )
-                        .when(
-                            item.status == TypedDataStatus::AwaitingApproval,
-                            |buttons| {
-                                buttons.child(
-                                    app_button(SharedString::from(format!(
-                                        "review-typed-data-activity-{request_id}"
-                                    )))
-                                    .label("Review")
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            let _ = review_editor.update(cx, |view, cx| {
-                                                view.begin_typed_data_review(request_id, cx);
-                                            });
-                                        },
-                                    ),
-                                )
-                            },
-                        ),
-                )
-                .into_any_element()
-        }
-    };
-    base.map(|outer| {
-        let mut card_container = div()
-            .size_full()
-            .p_3()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(if selected {
-                cx.theme().primary
-            } else {
-                cx.theme().border
-            })
-            .bg(cx.theme().secondary)
-            .flex()
-            .flex_col()
-            .justify_center()
-            .gap_2()
-            .child(card);
-        if let Some(feedback) = feedback {
-            card_container = card_container.child(
-                div()
-                    .text_sm()
-                    .truncate()
-                    .text_color(if feedback.error {
-                        cx.theme().danger
-                    } else {
-                        cx.theme().muted_foreground
-                    })
-                    .child(selectable_text(
-                        format!("activity-feedback-{request_id}"),
-                        &feedback.message,
-                    )),
-            );
-        }
-        outer.child(card_container)
-    })
+                .child(actions),
+        );
+    if let Some(feedback) = feedback {
+        card = card.child(
+            div()
+                .text_sm()
+                .whitespace_normal()
+                .text_color(if feedback.error {
+                    cx.theme().danger
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .child(selectable_text(
+                    format!("activity-feedback-{request_id}"),
+                    &feedback.message,
+                )),
+        );
+    }
+    div().w_full().min_w_0().pb_2().child(card)
 }
 
 #[derive(Clone)]
@@ -2022,11 +2236,7 @@ fn token_network_names(networks: &[NetworkConfig]) -> BTreeMap<u64, SharedString
         .map(|network| {
             (
                 network.chain_id,
-                network
-                    .display_name
-                    .clone()
-                    .unwrap_or_else(|| network.name.clone())
-                    .into(),
+                SharedString::from(network.display_label().to_owned()),
             )
         })
         .collect()
@@ -2675,12 +2885,23 @@ fn replace_input_value(
     }
 }
 
+/// One endpoint per line, which is the only readable shape for a field that
+/// routinely holds three or four URLs. It is also why the field it fills has
+/// to be a multi-line input: see `RPC_URLS_PLACEHOLDER`.
 fn rpc_urls_for_editor(urls: &[url::Url]) -> String {
     urls.iter()
         .map(url::Url::as_str)
         .collect::<Vec<_>>()
         .join(",\n")
 }
+
+/// Shows the same one-per-line shape the field accepts.
+///
+/// Kept next to `rpc_urls_for_editor` because the two together are the reason
+/// this field cannot be a single-line input: gpui shapes a single line with
+/// `shape_line`, which panics on a newline rather than wrapping or truncating.
+const RPC_URLS_PLACEHOLDER: &str =
+    "https://rpc.my-rollup.example,\nhttps://rpc-backup.my-rollup.example";
 
 const TOKEN_INVENTORY_PAGE_SIZE: usize = 10_000;
 const MAX_DESKTOP_TOKEN_INVENTORY: usize = 100_000;
@@ -3589,7 +3810,7 @@ impl WalletWindow {
             sidebar_logo_dark,
             appearance_subscription: None,
             review_presenter,
-            route: Route::Overview,
+            route: Route::DEFAULT,
             command_palette: false,
             command_palette_list: None,
             command_palette_subscription: None,
@@ -3616,6 +3837,7 @@ impl WalletWindow {
             activity_busy: BTreeSet::new(),
             activity_feedback: BTreeMap::new(),
             activity_inspections: BTreeMap::new(),
+            activity_payloads_expanded: BTreeSet::new(),
             active_review: None,
             queued_reviews: SerialQueue::default(),
             review_flow: ReviewFlowState::Ready,
@@ -3641,7 +3863,6 @@ impl WalletWindow {
             portfolio: PortfolioState::Idle,
             portfolio_generation: 0,
             portfolio_account_index: 0,
-            initial_route_resolved: false,
             policy_editor_anchor: ScrollAnchor::for_handle(route_scroll_handle.clone()),
             route_scroll_handle,
             modal_focus: cx.focus_handle(),
@@ -3902,9 +4123,16 @@ impl WalletWindow {
         }
         if self.network_rpc_urls_input.is_none() {
             self.network_rpc_urls_input = Some(cx.new(|cx| {
-                InputState::new(window, cx).rows(5).placeholder(
-                    "https://rpc.my-rollup.example,\nhttps://rpc-backup.my-rollup.example",
-                )
+                InputState::new(window, cx)
+                    // `rows` alone leaves the field single-line, and a
+                    // single-line input shapes its text with `shape_line`,
+                    // which panics on a newline instead of degrading. Both
+                    // this placeholder and the value the editor seeds from an
+                    // existing network span lines, so opening the network
+                    // editor aborted the process without this.
+                    .multi_line(true)
+                    .rows(5)
+                    .placeholder(RPC_URLS_PLACEHOLDER)
             }));
         }
         if self.network_max_gas_limit_input.is_none() {
@@ -4050,14 +4278,6 @@ impl WalletWindow {
                 view.desktop_snapshot_loading = false;
                 match result {
                     Ok(snapshot) => {
-                        if !view.initial_route_resolved
-                            && let Ok(accounts) = &snapshot.accounts
-                        {
-                            view.initial_route_resolved = true;
-                            if accounts.is_empty() && view.route == Route::Overview {
-                                view.set_route(Route::Accounts);
-                            }
-                        }
                         if let Ok(clients) = &snapshot.clients {
                             view.hidden_agent_sessions.retain(|client_id| {
                                 clients.iter().any(|client| {
@@ -4160,6 +4380,14 @@ impl WalletWindow {
             .networks
             .as_deref()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    /// Chain IDs mapped to the names the owner configured for them, so no
+    /// surface has to print a bare number at a reader.
+    fn network_display_names(&self) -> BTreeMap<u64, SharedString> {
+        self.cached_networks()
+            .map(token_network_names)
+            .unwrap_or_default()
     }
 
     fn chain_id_is_visible(&self, chain_id: Option<u64>) -> bool {
@@ -5631,6 +5859,12 @@ impl WalletWindow {
             self.legal_review = None;
             cx.notify();
         }
+        // Escape dismisses the record detail. It is read-only, so unlike the
+        // security review there is nothing to decide before leaving it.
+        if self.selected_record.is_some() {
+            self.selected_record = None;
+            cx.notify();
+        }
     }
 
     fn reinstall_detected_agents(&mut self, cx: &mut Context<Self>) {
@@ -5862,16 +6096,18 @@ impl WalletWindow {
                 let vertical_inset = viewport.height.min(px(32.0));
                 let dialog_width = (viewport.width - horizontal_inset).min(px(760.0));
                 let dialog_height = viewport.height - vertical_inset;
-                let form_height = (dialog_height - px(150.0)).max(px(0.0));
                 let (busy, editing, form, footer) = {
                     let wallet = entity.read(cx);
                     (
                         wallet.network_editor_busy,
                         wallet.network_editor_original.is_some(),
-                        wallet
-                            .render_network_editor_form(&view, cx)
-                            .max_h(form_height)
-                            .overflow_y_scrollbar(),
+                        // No scroll container here. `Dialog` already gives its
+                        // body one, and a second nested inside it captured the
+                        // wheel while the outer one was the one with anywhere
+                        // to go — which left the form unscrollable. The form
+                        // is laid out to fit without scrolling anyway; the
+                        // dialog's own area covers short windows.
+                        wallet.render_network_editor_form(&view, cx),
                         wallet.render_network_editor_footer(&view),
                     )
                 };
@@ -6563,11 +6799,15 @@ impl WalletWindow {
                     request_id,
                     match result {
                         Ok(record) => ActivityFeedback {
-                            message: format!("Refreshed chain status: {:?}.", record.status).into(),
+                            message: format!(
+                                "Checked with the network. {}",
+                                record.status.explanation()
+                            )
+                            .into(),
                             error: false,
                         },
                         Err(error) => ActivityFeedback {
-                            message: format!("Could not refresh transaction: {error:#}").into(),
+                            message: format!("The network could not be reached: {error:#}").into(),
                             error: true,
                         },
                     },
@@ -6610,8 +6850,8 @@ impl WalletWindow {
                         },
                         None => ActivityFeedback {
                             message: format!(
-                                "Exact signed bytes reconciled with status {:?}.",
-                                action.record.status
+                                "Nothing new was sent. {}",
+                                action.record.status.explanation()
                             )
                             .into(),
                             error: false,
@@ -6692,8 +6932,8 @@ impl WalletWindow {
                         },
                         None => ActivityFeedback {
                             message: format!(
-                                "Cancellation reconciled with status {:?}.",
-                                action.record.status
+                                "No cancellation was needed. {}",
+                                action.record.status.explanation()
                             )
                             .into(),
                             error: false,
@@ -7365,6 +7605,12 @@ impl WalletWindow {
         if self.network_editor_open && route != self.route {
             return;
         }
+        if route != self.route {
+            // The record detail belongs to the inbox. Leaving that screen with
+            // it still open would strand a modal about a row nobody can see
+            // over whichever page was asked for.
+            self.selected_record = None;
+        }
         reset_route_scroll_if_changed(self.route, route, &self.route_scroll_handle);
         self.route = route;
     }
@@ -7383,16 +7629,18 @@ impl WalletWindow {
 
     fn open_notification(&mut self, route: NotificationRoute, cx: &mut Context<Self>) {
         self.command_palette = false;
+        self.set_route(Route::Activity);
         match route {
             NotificationRoute::Review(request_id) => {
-                self.set_route(Route::Activity);
-                self.selected_record = None;
+                // No record selection here. A waiting request is answered in
+                // the review surface, and pre-selecting it would raise the
+                // read-only detail modal over the inbox the moment whichever
+                // review is already open finishes.
                 if self.active_review.is_none() && !self.review_flow.is_in_progress() {
                     self.begin_transaction_review(request_id, cx);
                 }
             }
             NotificationRoute::Activity(request_id) => {
-                self.set_route(Route::Activity);
                 self.selected_record = Some(request_id);
                 self.load_transaction_inspection(request_id, cx);
             }
@@ -7500,6 +7748,15 @@ impl WalletWindow {
                 ))
             })
             .unwrap_or_default();
+        // The mark identifies the application rather than any one screen, so
+        // it sits above the rail instead of standing in for a tab's icon. That
+        // also frees `Inbox` to carry the icon it has always had, and lets the
+        // tab order change without moving the branding.
+        let logo = if cx.theme().is_dark() {
+            self.sidebar_logo_dark.clone()
+        } else {
+            self.sidebar_logo_light.clone()
+        };
         let mut menu = div()
             .id("wallet-sidebar")
             .w(NAVIGATION_RAIL_WIDTH)
@@ -7513,7 +7770,19 @@ impl WalletWindow {
             .flex()
             .flex_col()
             .items_center()
-            .gap_2();
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .mb_1()
+                    .pb_2()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .border_b_1()
+                    .border_color(cx.theme().sidebar_border)
+                    .child(img(logo).w(px(36.0)).h(px(36.0))),
+            );
         for route in Route::ALL {
             let button = app_button(SharedString::from(format!(
                 "sidebar-route-{}",
@@ -7529,20 +7798,7 @@ impl WalletWindow {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.navigate_route(route, cx);
             }))
-            .when(
-                route == Route::Activity && route == self.route,
-                ButtonVariants::primary,
-            );
-            let button = if route == Route::Activity {
-                let logo = if cx.theme().is_dark() || route == self.route {
-                    self.sidebar_logo_dark.clone()
-                } else {
-                    self.sidebar_logo_light.clone()
-                };
-                button.child(img(logo).w(px(49.0)).h(px(49.0)))
-            } else {
-                button.child(Icon::new(route.icon()).size(px(30.0)))
-            };
+            .child(Icon::new(route.icon()).size(px(30.0)));
             let button = accessible_button(button, route.label());
             if route == Route::Activity {
                 let count = if pending_reviews > 99 {
@@ -7579,8 +7835,59 @@ impl WalletWindow {
         menu
     }
 
+    /// One waiting request: what it is, who asked and when, and the single
+    /// button that acts on it. Every queue uses the same card so the section
+    /// reads as one list rather than six differently-worded ones.
+    fn render_review_card(
+        id: &SharedString,
+        title: &str,
+        subtitle: &str,
+        button: Button,
+        cx: &App,
+    ) -> gpui::Div {
+        div()
+            .w_full()
+            .min_w_0()
+            .max_w_full()
+            .p_3()
+            .border_1()
+            .rounded(cx.theme().radius_lg)
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary)
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        selectable_text(SharedString::from(format!("{id}-title")), title)
+                            .font_medium()
+                            .whitespace_normal(),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                selectable_text(SharedString::from(format!("{id}-meta")), subtitle)
+                                    .whitespace_normal(),
+                            ),
+                    ),
+            )
+            .child(button)
+    }
+
     fn render_reviews(&self, cx: &mut Context<Self>) -> gpui::Div {
         let mut content = div().flex().flex_col().gap_3();
+        let networks = self.network_display_names();
+        let now = chrono::Utc::now();
         match self.cached_reviews() {
             Ok(queues) => {
                 let total = self.cached_networks().map_or(0, |networks| {
@@ -7588,7 +7895,8 @@ impl WalletWindow {
                 });
                 if total > 0 {
                     content = content.child(selectable_label(format!(
-                        "{total} request(s) need your attention."
+                        "{} waiting for your decision. Nothing is signed or sent until you say so.",
+                        pluralize(total, "request")
                     )));
                 }
                 for request in queues
@@ -7597,59 +7905,28 @@ impl WalletWindow {
                     .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
                 {
                     let request_id = request.request_id;
-                    content = content.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .max_w_full()
-                            .p_3()
-                            .border_1()
-                            .rounded(cx.theme().radius_lg)
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(selectable_text(
-                                        format!("review-transaction-title-{request_id}"),
-                                        &format!(
-                                            "Transaction · {} · {}",
-                                            request.wallet_id, request.network_name
-                                        ),
-                                    ))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(selectable_text(
-                                                format!("review-transaction-meta-{request_id}"),
-                                                &format!("{} · {}", request_id, request.created_at),
-                                            )),
-                                    ),
-                            )
-                            .child(
-                                app_button(SharedString::from(format!(
-                                    "review-transaction-{request_id}"
-                                )))
-                                .label("Review")
-                                .primary()
-                                .disabled(self.review_flow.is_in_progress())
-                                .on_click(cx.listener(
-                                    move |view, _, _, cx| {
-                                        view.begin_transaction_review(request_id, cx);
-                                    },
-                                )),
-                            ),
-                    );
+                    content = content.child(Self::render_review_card(
+                        &SharedString::from(format!("review-transaction-{request_id}")),
+                        &format!(
+                            "Transaction on {}",
+                            chain_label(request.chain_id.parse().ok(), &networks)
+                        ),
+                        &format!(
+                            "{} · asked {}",
+                            request.wallet_id,
+                            relative_time_label(request.created_at, now)
+                        ),
+                        app_button(SharedString::from(format!(
+                            "review-transaction-{request_id}"
+                        )))
+                        .label("Review")
+                        .primary()
+                        .disabled(self.review_flow.is_in_progress())
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.begin_transaction_review(request_id, cx);
+                        })),
+                        cx,
+                    ));
                 }
                 for request in queues
                     .typed_data
@@ -7657,42 +7934,28 @@ impl WalletWindow {
                     .filter(|request| self.chain_id_is_visible(request.chain_id.parse().ok()))
                 {
                     let request_id = request.request_id;
-                    content =
-                        content.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .p_3()
-                                .border_1()
-                                .rounded(cx.theme().radius_lg)
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(div().min_w_0().flex_1().whitespace_normal().child(
-                                    selectable_text(
-                                        format!("review-typed-data-title-{request_id}"),
-                                        &format!(
-                                            "Typed data · {} · {} · {}",
-                                            request.wallet_id, request.chain_id, request_id
-                                        ),
-                                    ),
-                                ))
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "review-typed-data-{request_id}"
-                                    )))
-                                    .label("Review")
-                                    .primary()
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.begin_typed_data_review(request_id, cx);
-                                    })),
-                                ),
-                        );
+                    content = content.child(Self::render_review_card(
+                        &SharedString::from(format!("review-typed-data-{request_id}")),
+                        &format!(
+                            "Typed-data signature on {}",
+                            chain_label(request.chain_id.parse().ok(), &networks)
+                        ),
+                        &format!(
+                            "{} · {} · asked {}",
+                            request.wallet_id,
+                            request.requester.as_deref().unwrap_or("unnamed requester"),
+                            relative_time_label(request.created_at, now)
+                        ),
+                        app_button(SharedString::from(format!(
+                            "review-typed-data-{request_id}"
+                        )))
+                        .label("Review")
+                        .primary()
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.begin_typed_data_review(request_id, cx);
+                        })),
+                        cx,
+                    ));
                 }
                 for request in queues.messages.iter().filter(|request| {
                     self.chain_id_is_visible(
@@ -7703,80 +7966,44 @@ impl WalletWindow {
                     )
                 }) {
                     let request_id = request.request_id;
-                    content = content.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .max_w_full()
-                            .p_3()
-                            .border_1()
-                            .rounded(cx.theme().radius_lg)
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(div().min_w_0().flex_1().whitespace_normal().child(
-                                selectable_text(
-                                    format!("review-message-title-{request_id}"),
-                                    &format!("Message · {} · {}", request.wallet_id, request_id),
-                                ),
-                            ))
-                            .child(
-                                app_button(SharedString::from(format!(
-                                    "review-message-{request_id}"
-                                )))
-                                .label("Review")
-                                .primary()
-                                .on_click(cx.listener(
-                                    move |view, _, _, cx| {
-                                        view.begin_message_review(request_id, cx);
-                                    },
-                                )),
-                            ),
-                    );
+                    content = content.child(Self::render_review_card(
+                        &SharedString::from(format!("review-message-{request_id}")),
+                        "Message signature",
+                        &format!(
+                            "{} · {} · asked {}",
+                            request.wallet_id,
+                            request.requester.as_deref().unwrap_or("unnamed requester"),
+                            relative_time_label(request.created_at, now)
+                        ),
+                        app_button(SharedString::from(format!("review-message-{request_id}")))
+                            .label("Review")
+                            .primary()
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.begin_message_review(request_id, cx);
+                            })),
+                        cx,
+                    ));
                 }
                 for proposal in &queues.policy_proposals {
                     let wallet_id = proposal.wallet_id.clone();
-                    content =
-                        content.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .p_3()
-                                .border_1()
-                                .rounded(cx.theme().radius_lg)
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(div().min_w_0().flex_1().whitespace_normal().child(
-                                    selectable_text(
-                                        format!("review-policy-title-{wallet_id}"),
-                                        &format!(
-                                            "Policy proposal · {wallet_id} · revision {}",
-                                            proposal.source_revision
-                                        ),
-                                    ),
-                                ))
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "open-policy-proposal-{wallet_id}"
-                                    )))
-                                    .label("Open Policies")
-                                    .primary()
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.set_route(Route::Policies);
-                                        cx.notify();
-                                    })),
-                                ),
-                        );
+                    content = content.child(Self::render_review_card(
+                        &SharedString::from(format!("review-policy-{wallet_id}")),
+                        &format!("Proposed policy change for {wallet_id}"),
+                        &format!(
+                            "An agent has suggested new signing rules, written against revision {}.",
+                            proposal.source_revision
+                        ),
+                        app_button(SharedString::from(format!(
+                            "open-policy-proposal-{wallet_id}"
+                        )))
+                        .label("Open Policies")
+                        .primary()
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.set_route(Route::Policies);
+                            cx.notify();
+                        })),
+                        cx,
+                    ));
                 }
                 for proposal in queues
                     .network_proposals
@@ -7784,43 +8011,23 @@ impl WalletWindow {
                     .filter(|proposal| self.testnet_mode || !proposal.testnet)
                 {
                     let chain_id = proposal.chain_id;
-                    content =
-                        content.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .max_w_full()
-                                .p_3()
-                                .border_1()
-                                .rounded(cx.theme().radius_lg)
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().secondary)
-                                .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(div().min_w_0().flex_1().whitespace_normal().child(
-                                    selectable_text(
-                                        format!("review-network-title-{chain_id}"),
-                                        &format!(
-                                            "Network proposal · {} · chain {chain_id}",
-                                            proposal.name
-                                        ),
-                                    ),
-                                ))
-                                .child(
-                                    app_button(SharedString::from(format!(
-                                        "open-network-proposal-{chain_id}"
-                                    )))
-                                    .label("Open Networks")
-                                    .primary()
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.set_route(Route::Networks);
-                                        cx.notify();
-                                    })),
-                                ),
-                        );
+                    content = content.child(Self::render_review_card(
+                        &SharedString::from(format!("review-network-{chain_id}")),
+                        &format!("Proposed network: {}", proposal.name),
+                        &format!(
+                            "This wallet would start signing for chain {chain_id} once you accept it."
+                        ),
+                        app_button(SharedString::from(format!(
+                            "open-network-proposal-{chain_id}"
+                        )))
+                        .label("Open Networks")
+                        .primary()
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.set_route(Route::Networks);
+                            cx.notify();
+                        })),
+                        cx,
+                    ));
                 }
                 let mut token_groups = std::collections::BTreeMap::<String, usize>::new();
                 for proposal in queues
@@ -7831,37 +8038,19 @@ impl WalletWindow {
                     *token_groups.entry(proposal.source.clone()).or_default() += 1;
                 }
                 for (index, (source, count)) in token_groups.into_iter().enumerate() {
-                    content = content.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .max_w_full()
-                            .p_3()
-                            .border_1()
-                            .rounded(cx.theme().radius_lg)
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().secondary)
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(div().min_w_0().flex_1().whitespace_normal().child(
-                                selectable_text(
-                                    ("review-token-title", index),
-                                    &format!("Token proposal · {source} · {count} name(s)"),
-                                ),
-                            ))
-                            .child(
-                                app_button(("open-token-proposal", index))
-                                    .label("Open Tokens")
-                                    .primary()
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.set_route(Route::Tokens);
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
+                    content = content.child(Self::render_review_card(
+                        &SharedString::from(format!("review-token-{index}")),
+                        &format!("{} proposed by {source}", pluralize(count, "token name")),
+                        "Accepting these only changes how amounts are described to you. It grants nothing.",
+                        app_button(("open-token-proposal", index))
+                            .label("Open Tokens")
+                            .primary()
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.set_route(Route::Tokens);
+                                cx.notify();
+                            })),
+                        cx,
+                    ));
                 }
                 if total == 0 {
                     content = content.child(
@@ -7877,19 +8066,21 @@ impl WalletWindow {
                             .child(
                                 div()
                                     .font_semibold()
-                                    .child(selectable_label("No requests waiting")),
+                                    .child(selectable_label("Nothing needs you right now")),
                             )
                             .child(
                                 div()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(selectable_label("Transactions, messages, typed data, WalletConnect requests, and proposed policy, network, or token changes that need your decision will appear here.")),
+                                    .child(selectable_label("When an agent or a dapp asks this wallet to sign or send something your policy will not decide on its own, it waits here.")),
                             ),
                     );
                 }
             }
             Err(error) => {
-                content =
-                    content.child(selectable_label(format!("Reviews unavailable: {error:#}")));
+                content = content.child(selectable_error_alert(
+                    "review-queue-error",
+                    format!("Waiting requests could not be read: {error:#}"),
+                ));
             }
         }
         content
@@ -7901,25 +8092,35 @@ impl WalletWindow {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let request_id = record.request_id();
-        let header = |title: &'static str, status: String| {
+        // Title, current state, and the one sentence that explains the state.
+        // The request UUID is not here: it names the row to the wallet, not to
+        // the reader, and it used to be the second line of every detail pane.
+        let header = |title: &'static str,
+                      status: &'static str,
+                      tone: StatusTone,
+                      explanation: &'static str,
+                      meta: String| {
             div()
                 .w_full()
                 .min_w_0()
                 .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_4()
+                .flex_col()
+                .gap_2()
                 .child(
                     div()
+                        .w_full()
                         .min_w_0()
-                        .flex_1()
                         .flex()
-                        .flex_col()
-                        .gap_1()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_4()
                         .child(
                             h_flex()
+                                .min_w_0()
+                                .flex_1()
                                 .flex_wrap()
+                                .items_center()
                                 .gap_2()
                                 .child(
                                     selectable_text(
@@ -7931,40 +8132,37 @@ impl WalletWindow {
                                     .text_lg()
                                     .font_semibold(),
                                 )
-                                .child(
-                                    div()
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_full()
-                                        .bg(cx.theme().secondary)
-                                        .text_sm()
-                                        .font_medium()
-                                        .child(status),
-                                ),
+                                .child(status_pill(status, tone, cx)),
                         )
                         .child(
-                            selectable_text(
-                                SharedString::from(format!(
-                                    "activity-heading-request-{request_id}"
-                                )),
-                                &request_id.to_string(),
-                            )
-                            .min_w_0()
-                            .truncate()
-                            .font_family(MONO_FONT_FAMILY)
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground),
+                            app_button(SharedString::from(format!(
+                                "close-activity-detail-{request_id}"
+                            )))
+                            .label("Close")
+                            .on_click(cx.listener(
+                                |view, _, _, cx| {
+                                    view.selected_record = None;
+                                    cx.notify();
+                                },
+                            )),
                         ),
                 )
                 .child(
-                    app_button(SharedString::from(format!(
-                        "close-activity-detail-{request_id}"
-                    )))
-                    .label("Close")
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.selected_record = None;
-                        cx.notify();
-                    })),
+                    selectable_text(
+                        SharedString::from(format!("activity-heading-explanation-{request_id}")),
+                        explanation,
+                    )
+                    .whitespace_normal()
+                    .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    selectable_text(
+                        SharedString::from(format!("activity-heading-meta-{request_id}")),
+                        &meta,
+                    )
+                    .whitespace_normal()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground),
                 )
         };
         match record {
@@ -7973,16 +8171,22 @@ impl WalletWindow {
                     .id(SharedString::from(format!("activity-detail-{request_id}")))
                     .w_full()
                     .min_w_0()
-                    .mb_4()
-                    .p_4()
-                    .rounded(cx.theme().radius_lg)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
                     .flex()
                     .flex_col()
                     .gap_4()
-                    .child(header("Transaction receipt", format!("{:?}", item.status)));
+                    .child(header(
+                        "Transaction",
+                        item.status.label(),
+                        transaction_status_tone(item.status),
+                        item.status.explanation(),
+                        format!(
+                            "{} · {} · requested {} · last changed {}",
+                            item.wallet_id,
+                            chain_label(item.chain_id.parse().ok(), &self.network_display_names()),
+                            absolute_time_label(item.created_at),
+                            relative_time_label(item.updated_at, chrono::Utc::now()),
+                        ),
+                    ));
                 match self.activity_inspections.get(&request_id) {
                     Some(ActivityInspectionState::Loading) => {
                         detail = detail.child(
@@ -7991,7 +8195,7 @@ impl WalletWindow {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(Spinner::new())
                                 .child(selectable_label(
-                                    "Reading the execution plan and querying the mined receipt…",
+                                    "Reading what this transaction did and checking the network for its receipt…",
                                 )),
                         );
                     }
@@ -8006,7 +8210,7 @@ impl WalletWindow {
                                     app_button(SharedString::from(format!(
                                         "retry-transaction-inspection-{request_id}"
                                     )))
-                                    .label("Retry inspection")
+                                    .label("Try again")
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.load_transaction_inspection(request_id, cx);
                                     })),
@@ -8016,14 +8220,6 @@ impl WalletWindow {
                         let document = &inspection.document;
                         detail =
                             detail
-                                .child(
-                                    selectable_text(
-                                        format!("transaction-inspection-summary-{request_id}"),
-                                        &document.request.summary,
-                                    )
-                                    .text_color(cx.theme().muted_foreground)
-                                    .whitespace_normal(),
-                                )
                                 .child(
                                     div()
                                         .flex()
@@ -8051,7 +8247,7 @@ impl WalletWindow {
                                                     app_button(SharedString::from(format!(
                                                         "open-transaction-explorer-{request_id}"
                                                     )))
-                                                    .label("Open in block explorer")
+                                                    .label("View on block explorer")
                                                     .on_click(move |_, _, cx| {
                                                         cx.open_url(&explorer_url);
                                                     }),
@@ -8063,16 +8259,30 @@ impl WalletWindow {
                                                 "refresh-transaction-inspection-{request_id}"
                                             )))
                                             .label(if inspection.receipt_loaded {
-                                                "Refresh receipt"
+                                                "Check the network again"
                                             } else {
-                                                "Check for receipt"
+                                                "Look for a receipt"
                                             })
                                             .on_click(cx.listener(move |view, _, _, cx| {
                                                 view.load_transaction_inspection(request_id, cx);
                                             })),
                                         ),
+                                )
+                                .child(
+                                    selectable_text(
+                                        format!("transaction-inspection-summary-{request_id}"),
+                                        &document.request.summary,
+                                    )
+                                    .text_color(cx.theme().muted_foreground)
+                                    .whitespace_normal(),
                                 );
-                        for (index, section) in document.request.sections.iter().enumerate() {
+                        // What moved first, then what was called, then the fee
+                        // and the raw lifecycle bookkeeping — the same order a
+                        // person asks the questions in.
+                        for (index, section) in review_sections_for_display(document)
+                            .into_iter()
+                            .enumerate()
+                        {
                             detail = detail.child(Self::render_review_section(
                                 section,
                                 &format!("activity-{request_id}-{index}"),
@@ -8090,7 +8300,7 @@ impl WalletWindow {
                                             .gap_2()
                                             .text_color(cx.theme().warning)
                                             .child(Icon::new(IconName::TriangleAlert).small())
-                                            .child(div().font_semibold().child("Important notes")),
+                                            .child(div().font_semibold().child("Worth knowing")),
                                     )
                                     .children(document.request.warnings.iter().enumerate().map(
                                         |(index, warning)| {
@@ -8113,7 +8323,7 @@ impl WalletWindow {
                             detail = detail.child(Self::render_review_section(
                                 &ApprovalSection {
                                     kind: ApprovalSectionKind::Details,
-                                    heading: "Lifecycle details".to_owned(),
+                                    heading: "Record keeping".to_owned(),
                                     facts: document.request.facts.clone(),
                                 },
                                 &format!("activity-{request_id}-lifecycle"),
@@ -8121,38 +8331,13 @@ impl WalletWindow {
                             ));
                         }
                         if let Some(exact_plan) = document.exact_payloads.first() {
-                            detail = detail.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .child(
-                                        h_flex()
-                                            .w_full()
-                                            .justify_between()
-                                            .gap_2()
-                                            .child(
-                                                div().font_medium().child("Exact execution plan"),
-                                            )
-                                            .child(copy_button(
-                                                format!("copy-execution-plan-{request_id}"),
-                                                exact_plan.clone(),
-                                                "Copy exact execution plan",
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .max_h(px(320.0))
-                                            .overflow_y_scrollbar()
-                                            .p_3()
-                                            .rounded(cx.theme().radius_lg)
-                                            .bg(cx.theme().secondary)
-                                            .child(selectable_code_text(
-                                                format!("execution-plan-{request_id}"),
-                                                exact_plan,
-                                            )),
-                                    ),
-                            );
+                            detail = detail.child(self.render_exact_payload(
+                                request_id,
+                                "execution-plan",
+                                "the exact execution plan",
+                                exact_plan,
+                                cx,
+                            ));
                         }
                     }
                     None => {
@@ -8160,7 +8345,7 @@ impl WalletWindow {
                             app_button(SharedString::from(format!(
                                 "load-transaction-inspection-{request_id}"
                             )))
-                            .label("Load transaction details")
+                            .label("Show what this transaction did")
                             .on_click(cx.listener(
                                 move |view, _, _, cx| {
                                     view.load_transaction_inspection(request_id, cx);
@@ -8173,47 +8358,60 @@ impl WalletWindow {
             }
             OwnerActivityRecord::Message(item) => {
                 let document = self.cached_message_document(request_id);
-                let mut detail = GroupBox::new()
-                    .id(SharedString::from(format!("activity-detail-{request_id}")))
-                    .outline()
-                    .title("Message signature details")
-                    .child(header("Message signature", format!("{:?}", item.status)))
-                    .child(selectable_text(
-                        format!("activity-message-account-{request_id}"),
-                        &format!("Account: {}", item.wallet_id),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-message-chain-{request_id}"),
-                        &format!(
-                            "Chain context: {}",
-                            item.chain_id.as_deref().unwrap_or("Not specified")
+                let networks = self.network_display_names();
+                let mut facts = vec![
+                    ("Account", item.wallet_id.clone()),
+                    (
+                        "Asked by",
+                        item.requester
+                            .clone()
+                            .unwrap_or_else(|| "an unnamed requester".to_owned()),
+                    ),
+                    (
+                        "Network",
+                        chain_label(
+                            item.chain_id
+                                .as_deref()
+                                .and_then(|chain| chain.parse().ok()),
+                            &networks,
                         ),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-message-requester-{request_id}"),
-                        &format!(
-                            "Requester: {}",
-                            item.requester.as_deref().unwrap_or("Unknown requester")
-                        ),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-message-times-{request_id}"),
-                        &format!(
-                            "Created: {} · updated: {}",
-                            item.created_at, item.updated_at
-                        ),
-                    ))
-                    .child(copyable_value(
-                        format!("activity-message-digest-{request_id}"),
-                        "Digest",
-                        item.digest.clone(),
-                    ));
+                    ),
+                    ("Requested", absolute_time_label(item.created_at)),
+                ];
                 if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
-                    detail = detail.child(selectable_text(
-                        format!("activity-message-decision-{request_id}"),
-                        &format!("Decision recorded: {decided_at}"),
+                    facts.push((
+                        if item.approved_at.is_some() {
+                            "Approved"
+                        } else {
+                            "Rejected"
+                        },
+                        absolute_time_label(decided_at),
                     ));
                 }
+                let mut detail = div()
+                    .id(SharedString::from(format!("activity-detail-{request_id}")))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(header(
+                        "Message signature",
+                        item.status.label(),
+                        message_status_tone(item.status),
+                        message_status_explanation(item.status),
+                        format!(
+                            "{} · {}",
+                            item.wallet_id,
+                            relative_time_label(item.created_at, chrono::Utc::now())
+                        ),
+                    ))
+                    .child(Self::render_fact_list(
+                        "About this request",
+                        &format!("activity-message-{request_id}"),
+                        &facts,
+                        cx,
+                    ));
                 if let Some(signature) = item.signature.as_ref() {
                     detail = detail.child(copyable_value(
                         format!("activity-message-signature-{request_id}"),
@@ -8221,40 +8419,30 @@ impl WalletWindow {
                         signature.clone(),
                     ));
                 }
+                detail = detail.child(copyable_value(
+                    format!("activity-message-digest-{request_id}"),
+                    "Digest that was signed",
+                    item.digest.clone(),
+                ));
                 match document {
                     Ok(document) => {
-                        detail = detail.children(
-                            document.exact_payloads.iter().cloned().enumerate().map(
-                                |(index, payload)| {
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(h_flex().w_full().justify_end().child(copy_button(
-                                            format!("copy-message-payload-{request_id}-{index}"),
-                                            payload.clone(),
-                                            "Copy exact message payload",
-                                        )))
-                                        .max_h(px(360.0))
-                                        .overflow_y_scrollbar()
-                                        .p_3()
-                                        .rounded(cx.theme().radius_lg)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .bg(cx.theme().secondary)
-                                        .child(selectable_code_text(
-                                            format!("message-payload-{request_id}-{index}"),
-                                            &payload,
-                                        ))
-                                },
-                            ),
-                        );
+                        detail = detail.children(document.exact_payloads.iter().enumerate().map(
+                            |(index, payload)| {
+                                self.render_exact_payload(
+                                    request_id,
+                                    &format!("message-payload-{index}"),
+                                    "the exact message that was signed",
+                                    payload,
+                                    cx,
+                                )
+                            },
+                        ));
                     }
                     Err(error) => {
                         detail = detail.child(div().text_color(cx.theme().danger).child(
                             selectable_text(
                                 format!("message-payload-error-{request_id}"),
-                                &format!("Exact payload unavailable: {error:#}"),
+                                &format!("The exact message could not be read back: {error:#}"),
                             ),
                         ));
                     }
@@ -8263,44 +8451,55 @@ impl WalletWindow {
             }
             OwnerActivityRecord::TypedData(item) => {
                 let document = self.cached_typed_data_document(request_id);
-                let mut detail = GroupBox::new()
-                    .id(SharedString::from(format!("activity-detail-{request_id}")))
-                    .outline()
-                    .title("Typed-data signature details")
-                    .child(header("Typed-data signature", format!("{:?}", item.status)))
-                    .child(selectable_text(
-                        format!("activity-typed-data-account-{request_id}"),
-                        &format!("Account: {}", item.wallet_id),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-typed-data-chain-{request_id}"),
-                        &format!("Chain: {}", item.chain_id),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-typed-data-requester-{request_id}"),
-                        &format!(
-                            "Requester: {}",
-                            item.requester.as_deref().unwrap_or("Unknown requester")
-                        ),
-                    ))
-                    .child(selectable_text(
-                        format!("activity-typed-data-times-{request_id}"),
-                        &format!(
-                            "Created: {} · updated: {}",
-                            item.created_at, item.updated_at
-                        ),
-                    ))
-                    .child(copyable_value(
-                        format!("activity-typed-data-digest-{request_id}"),
-                        "Digest",
-                        item.digest.clone(),
-                    ));
+                let networks = self.network_display_names();
+                let mut facts = vec![
+                    ("Account", item.wallet_id.clone()),
+                    (
+                        "Asked by",
+                        item.requester
+                            .clone()
+                            .unwrap_or_else(|| "an unnamed requester".to_owned()),
+                    ),
+                    (
+                        "Network",
+                        chain_label(item.chain_id.parse().ok(), &networks),
+                    ),
+                    ("Requested", absolute_time_label(item.created_at)),
+                ];
                 if let Some(decided_at) = item.approved_at.or(item.rejected_at) {
-                    detail = detail.child(selectable_text(
-                        format!("activity-typed-data-decision-{request_id}"),
-                        &format!("Decision recorded: {decided_at}"),
+                    facts.push((
+                        if item.approved_at.is_some() {
+                            "Approved"
+                        } else {
+                            "Rejected"
+                        },
+                        absolute_time_label(decided_at),
                     ));
                 }
+                let mut detail = div()
+                    .id(SharedString::from(format!("activity-detail-{request_id}")))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(header(
+                        "Typed-data signature",
+                        item.status.label(),
+                        typed_data_status_tone(item.status),
+                        typed_data_status_explanation(item.status),
+                        format!(
+                            "{} · {}",
+                            item.wallet_id,
+                            relative_time_label(item.created_at, chrono::Utc::now())
+                        ),
+                    ))
+                    .child(Self::render_fact_list(
+                        "About this request",
+                        &format!("activity-typed-data-{request_id}"),
+                        &facts,
+                        cx,
+                    ));
                 if let Some(signature) = item.signature.as_ref() {
                     detail = detail.child(copyable_value(
                         format!("activity-typed-data-signature-{request_id}"),
@@ -8308,40 +8507,30 @@ impl WalletWindow {
                         signature.clone(),
                     ));
                 }
+                detail = detail.child(copyable_value(
+                    format!("activity-typed-data-digest-{request_id}"),
+                    "Digest that was signed",
+                    item.digest.clone(),
+                ));
                 match document {
                     Ok(document) => {
-                        detail = detail.children(
-                            document.exact_payloads.iter().cloned().enumerate().map(
-                                |(index, payload)| {
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .child(h_flex().w_full().justify_end().child(copy_button(
-                                            format!("copy-typed-data-payload-{request_id}-{index}"),
-                                            payload.clone(),
-                                            "Copy exact typed-data payload",
-                                        )))
-                                        .max_h(px(360.0))
-                                        .overflow_y_scrollbar()
-                                        .p_3()
-                                        .rounded(cx.theme().radius_lg)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .bg(cx.theme().secondary)
-                                        .child(selectable_code_text(
-                                            format!("typed-data-payload-{request_id}-{index}"),
-                                            &payload,
-                                        ))
-                                },
-                            ),
-                        );
+                        detail = detail.children(document.exact_payloads.iter().enumerate().map(
+                            |(index, payload)| {
+                                self.render_exact_payload(
+                                    request_id,
+                                    &format!("typed-data-payload-{index}"),
+                                    "the exact typed data that was signed",
+                                    payload,
+                                    cx,
+                                )
+                            },
+                        ));
                     }
                     Err(error) => {
                         detail = detail.child(div().text_color(cx.theme().danger).child(
                             selectable_text(
                                 format!("typed-data-payload-error-{request_id}"),
-                                &format!("Exact payload unavailable: {error:#}"),
+                                &format!("The exact typed data could not be read back: {error:#}"),
                             ),
                         ));
                     }
@@ -8351,20 +8540,188 @@ impl WalletWindow {
         }
     }
 
-    fn render_activity_history(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let panel = div()
-            .p_4()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
+    /// The selected record's full account of itself, over the inbox.
+    ///
+    /// This used to expand inline, between the row it belonged to and the next
+    /// one. A settled transaction's detail is taller than the window — effects,
+    /// every decoded call, the fee, the bookkeeping — so opening one pushed the
+    /// rest of the list out of sight and turned the inbox into a single record
+    /// viewer. A modal keeps the list where it was and gives the detail the
+    /// whole surface while it is open.
+    fn render_activity_detail_overlay(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(request_id) = self.selected_record else {
+            return div().into_any_element();
+        };
+        let Ok(records) = self.cached_activity_records() else {
+            return div().into_any_element();
+        };
+        let Some(record) = records
+            .iter()
+            .find(|record| record.request_id() == request_id)
+        else {
+            // The record left the snapshot — approved out of the queue, or
+            // aged past the retained history. Nothing to show over the list.
+            return div().into_any_element();
+        };
+        let detail = self.render_activity_detail(record, cx);
+        div()
+            .absolute()
+            .inset_0()
             .flex()
-            .flex_col()
-            .gap_3();
+            .items_center()
+            .justify_center()
+            // Dim the inbox rather than replace it: this is a detail about
+            // something on the list behind it, and it stays visible as
+            // context.
+            .bg(cx.theme().background.opacity(0.85))
+            // Swallow clicks so nothing underneath reacts to a press aimed at
+            // the modal or the scrim.
+            .on_mouse_down(MouseButton::Left, |_, _, _| {})
+            .p_4()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(920.0))
+                    .h_full()
+                    .min_h_0()
+                    .p_4()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "activity-detail-scroll-{request_id}"
+                            )))
+                            .flex_1()
+                            .min_h_0()
+                            .pr_2()
+                            .overflow_y_scrollbar()
+                            .child(detail),
+                    ),
+            )
+            .focus_trap("activity-detail-focus", &self.modal_focus)
+            .into_any_element()
+    }
+
+    /// A labelled key/value block, spelled the way the review sections are so
+    /// the inbox reads as one surface rather than two.
+    fn render_fact_list(
+        heading: &'static str,
+        id_prefix: &str,
+        facts: &[(&'static str, String)],
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        Self::render_review_section(
+            &ApprovalSection {
+                kind: ApprovalSectionKind::Details,
+                heading: heading.to_owned(),
+                facts: facts
+                    .iter()
+                    .map(|(label, value)| ApprovalFact {
+                        label: (*label).to_owned(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            },
+            id_prefix,
+            cx,
+        )
+    }
+
+    /// The machine-exact bytes, behind a disclosure.
+    ///
+    /// They are evidence rather than explanation: somebody auditing a signature
+    /// needs them verbatim, and everybody else needs them out of the way of the
+    /// account of what happened.
+    fn render_exact_payload(
+        &self,
+        request_id: uuid::Uuid,
+        slot: &str,
+        description: &'static str,
+        payload: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let key = (request_id, slot.to_owned());
+        let expanded = self.activity_payloads_expanded.contains(&key);
+        let mut block = div().w_full().min_w_0().flex().flex_col().gap_2().child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    app_button(SharedString::from(format!(
+                        "toggle-exact-payload-{request_id}-{slot}"
+                    )))
+                    .ghost()
+                    .label(if expanded {
+                        format!("Hide {description}")
+                    } else {
+                        format!("Show {description}")
+                    })
+                    .icon(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        if !view.activity_payloads_expanded.remove(&key) {
+                            view.activity_payloads_expanded.insert(key.clone());
+                        }
+                        cx.notify();
+                    })),
+                )
+                .when(expanded, |row| {
+                    row.child(copy_button(
+                        format!("copy-exact-payload-{request_id}-{slot}"),
+                        payload.to_owned(),
+                        "Copy",
+                    ))
+                }),
+        );
+        if expanded {
+            block = block.child(
+                // No height cap and no scroll region of its own. Nested inside
+                // the detail's scroll area, an inner one only swallowed the
+                // wheel: the plan would not move and neither would the modal
+                // under the pointer. The block runs to its full height and the
+                // one scroll area that owns the surface carries it.
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .p_3()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .child(selectable_code_text(
+                        format!("exact-payload-{request_id}-{slot}"),
+                        payload,
+                    )),
+            );
+        }
+        block
+    }
+
+    fn render_activity_history(&self, cx: &mut Context<Self>) -> gpui::Div {
+        // No panel around the rows. The section's `GroupBox` is already a
+        // bordered container, and wrapping a second one — same border, same
+        // `secondary` fill as the cards inside it — drew a box around a box
+        // around each row.
+        let panel = div().w_full().flex().flex_col().gap_3();
         let records = match self.cached_activity_records() {
             Ok(records) => records,
             Err(error) => {
-                return panel.child(selectable_label(format!("Inbox unavailable: {error:#}")));
+                return panel.child(selectable_error_alert(
+                    "activity-history-error",
+                    format!("This wallet's history could not be read: {error:#}"),
+                ));
             }
         };
         let records = Arc::<[OwnerActivityRecord]>::from(
@@ -8380,14 +8737,34 @@ impl WalletWindow {
         let items = records.as_ref();
         if items.is_empty() {
             return panel.child(
+                // Same card as the "Waiting on you" empty state, so the two
+                // halves of the inbox look like one screen.
                 div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("No Inbox history yet.")),
+                    .p_5()
+                    .rounded(cx.theme().radius_lg)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_semibold()
+                            .child(selectable_label("Nothing has happened yet")),
+                    )
+                    .child(div().text_color(cx.theme().muted_foreground).child(
+                        selectable_label(
+                            "Once this wallet signs or sends something, it stays here permanently — open any row to see what it did.",
+                        ),
+                    )),
             );
         }
         let selected_record = self.selected_record;
         let busy = Arc::new(self.activity_busy.clone());
         let feedback = Arc::new(self.activity_feedback.clone());
+        let networks = self.network_display_names();
+        let now = chrono::Utc::now();
         let editor = cx.entity().downgrade();
         let mut rows = div()
             .id("activity-records")
@@ -8397,18 +8774,19 @@ impl WalletWindow {
             .flex_col();
         for record in items {
             let request_id = record.request_id();
-            let selected = selected_record == Some(request_id);
+            // The detail is a modal now. Expanding it in place pushed every
+            // later row off the screen, so reading one receipt cost you the
+            // list you were reading it from.
             rows = rows.child(render_activity_row(
                 record,
-                selected,
+                selected_record == Some(request_id),
                 busy.contains(&request_id),
                 feedback.get(&request_id).cloned(),
+                &networks,
+                now,
                 editor.clone(),
                 cx,
             ));
-            if selected {
-                rows = rows.child(self.render_activity_detail(record, cx));
-            }
         }
         panel.child(rows)
     }
@@ -8422,14 +8800,14 @@ impl WalletWindow {
                 GroupBox::new()
                     .id("activity-needs-review")
                     .outline()
-                    .title("Needs review")
+                    .title("Waiting on you")
                     .child(self.render_reviews(cx)),
             )
             .child(
                 GroupBox::new()
                     .id("inbox-history")
                     .outline()
-                    .title("History")
+                    .title("Already decided")
                     .child(self.render_activity_history(cx)),
             )
     }
@@ -8559,8 +8937,9 @@ impl WalletWindow {
                                             selectable_text(
                                                 format!("managed-agent-title-{client_id}"),
                                                 &format!(
-                                                    "{} · {:?}",
-                                                    item.display_name, item.agent_kind
+                                                    "{} · {}",
+                                                    item.display_name,
+                                                    item.agent_kind.label()
                                                 ),
                                             ),
                                         ))
@@ -8919,9 +9298,9 @@ impl WalletWindow {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(selectable_label(if creating {
-                        "The wallet generates and protects a new key. New accounts require review for every transaction."
+                        "The wallet generates the key and hands it to this machine's secure storage; it is never shown or written to disk. A new account starts by asking you about every single transaction."
                     } else {
-                        "The private key is transferred directly to wallet core and cleared from this form before import begins."
+                        "The key goes straight into secure storage and is wiped from this form before the import starts. It is never logged and never leaves this machine."
                     })),
             );
         if let Some(input) = &self.account_id_input {
@@ -9026,8 +9405,17 @@ impl WalletWindow {
                     .border_1()
                     .border_color(cx.theme().border)
                     .text_color(cx.theme().muted_foreground)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .font_medium()
+                            .text_color(cx.theme().foreground)
+                            .child(selectable_label("No accounts yet")),
+                    )
                     .child(selectable_label(
-                        "No accounts are stored on this device yet.",
+                        "Create one above. Everything else in this wallet — connecting an agent, holding a balance, approving a request — starts here.",
                     )),
             ),
             Ok(items) => accounts.children(items.iter().map(|item| {
@@ -9126,7 +9514,9 @@ impl WalletWindow {
                     .border_color(cx.theme().danger)
                     .text_sm()
                     .text_color(cx.theme().danger)
-                    .child(selectable_label(format!("Accounts unavailable: {error:#}"))),
+                    .child(selectable_label(format!(
+                        "The accounts on this device could not be read: {error:#}"
+                    ))),
             ),
         };
 
@@ -10281,9 +10671,9 @@ impl WalletWindow {
                             selectable_text(
                                 format!("walletconnect-session-title-{session_id}"),
                                 &format!(
-                                    "{} · {:?}",
-                                    session.dapp_name.as_deref().unwrap_or("Pairing"),
-                                    session.status
+                                    "{} · {}",
+                                    session.dapp_name.as_deref().unwrap_or("Unnamed dapp"),
+                                    session.status.label()
                                 ),
                             ),
                         ))
@@ -10396,23 +10786,21 @@ impl WalletWindow {
                     ))
                 })
         };
+        // Twelve fields laid out one prose paragraph at a time did not fit any
+        // ordinary window, and the dialog it sits in is the wrong place to be
+        // scrolling: a form you cannot see the end of hides its own Save
+        // button. Fields sit three to a row, and the explanatory paragraphs
+        // that used to separate them are gone — a field whose label is clear
+        // does not need a sentence under it, and the two that carried real
+        // information now sit inline where they are read.
+        let row = || div().w_full().flex().flex_wrap().gap_3();
         div()
             .w_full()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label("RPC endpoints provide balances and transaction simulations. The wallet validates every field, verifies the live chain ID, then requires owner authentication before saving to the encrypted database.")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(field(
+                row().child(field(
                         if editing {
                             "Chain ID (fixed)"
                         } else {
@@ -10435,31 +10823,132 @@ impl WalletWindow {
                         false,
                     )),
             )
-            .child(field(
-                "Aliases (optional, comma-separated)",
-                aliases,
-                self.network_editor_errors.aliases.clone(),
-                false,
-            ))
+            .child(
+                row().child(field(
+                        "Other names it answers to (optional)",
+                        aliases,
+                        self.network_editor_errors.aliases.clone(),
+                        false,
+                    ))
+                    .child(field(
+                        "Block explorer URL",
+                        explorer,
+                        self.network_editor_errors.block_explorer_url.clone(),
+                        false,
+                    ))
+                    .child(field(
+                        "Documentation URL",
+                        documentation,
+                        self.network_editor_errors.documentation_url.clone(),
+                        false,
+                    )),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    // The endpoint-order choice belongs beside the endpoints
+                    // it orders, not in a row of its own below them.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .child(selectable_label("RPC endpoints, one per line")),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        app_button("network-strategy-ordered")
+                                            .small()
+                                            .label("Try in order")
+                                            .tooltip("Endpoints are tried from the top down; a failure moves to the next one.")
+                                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
+                                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
+                                            .disabled(busy)
+                                            .on_click({
+                                                let view = view.clone();
+                                                move |_, _, cx| {
+                                                    let _ = view.update(cx, |view, cx| {
+                                                        view.set_network_editor_strategy(RpcStrategy::Ordered, cx);
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                    .child(
+                                        app_button("network-strategy-random")
+                                            .small()
+                                            .label("Shuffle each request")
+                                            .tooltip("Endpoints are shuffled per request; a failure continues through that shuffled list.")
+                                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Random)
+                                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Random)
+                                            .disabled(busy)
+                                            .on_click({
+                                                let view = view.clone();
+                                                move |_, _, cx| {
+                                                    let _ = view.update(cx, |view, cx| {
+                                                        view.set_network_editor_strategy(RpcStrategy::Random, cx);
+                                                    });
+                                                }
+                                            }),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        app_input(rpc_urls, cx)
+                            .aria_label("RPC endpoints")
+                            .disabled(busy)
+                            .h(px(88.0)),
+                    )
+                    .when_some(self.network_editor_errors.rpc_urls.clone(), |field, error| {
+                        field.child(field_error("network-editor-rpc-urls-error", error, cx))
+                    }),
+            )
+            .child(
+                row().child(field("Currency name", native_name, None, false))
+                    .child(field("Symbol", native_symbol, None, false))
+                    .child(field("Decimals", native_decimals, None, false)),
+            )
+            .when_some(self.network_editor_errors.native_currency.clone(), |panel, error| {
+                panel.child(field_error("network-editor-native-currency-error", error, cx))
+            })
+            .child(
+                row().child(field(
+                        "Maximum gas limit (optional)",
+                        max_gas_limit,
+                        self.network_editor_errors.max_gas_limit.clone(),
+                        false,
+                    ))
+                    .child(field(
+                        "Maximum fee per gas, wei (optional)",
+                        max_fee_per_gas,
+                        self.network_editor_errors.max_fee_per_gas.clone(),
+                        false,
+                    )),
+            )
             .child(
                 h_flex()
                     .w_full()
+                    .items_center()
                     .justify_between()
                     .gap_4()
                     .child(
                         div()
                             .min_w_0()
                             .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().text_sm().font_medium().child("Test network"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(selectable_label("Hide this network and its linked balances, tokens, requests, and activity unless testnet mode is enabled.")),
-                            ),
+                            .text_sm()
+                            .child(selectable_label(
+                                "Test network — hidden along with its balances, tokens, and activity unless testnet mode is on.",
+                            )),
                     )
                     .child(
                         Switch::new("network-editor-testnet")
@@ -10478,128 +10967,10 @@ impl WalletWindow {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(selectable_label(
-                                "RPC URLs (one per line, comma-separated)",
-                            )),
-                    )
-                    .child(
-                        app_input(rpc_urls, cx)
-                            .aria_label("RPC URLs")
-                            .disabled(busy)
-                            .h(px(132.0)),
-                    )
-                    .when_some(self.network_editor_errors.rpc_urls.clone(), |field, error| {
-                        field.child(field_error("network-editor-rpc-urls-error", error, cx))
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(selectable_label("Endpoint order")),
-                    )
-                    .child(
-                        app_button("network-strategy-ordered")
-                            .label("Configured order")
-                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
-                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
-                            .disabled(busy)
-                            .on_click({
-                                let view = view.clone();
-                                move |_, _, cx| {
-                                    let _ = view.update(cx, |view, cx| {
-                                        view.set_network_editor_strategy(RpcStrategy::Ordered, cx);
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        app_button("network-strategy-random")
-                            .label("Random each request")
-                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Random)
-                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Random)
-                            .disabled(busy)
-                            .on_click({
-                                let view = view.clone();
-                                move |_, _, cx| {
-                                    let _ = view.update(cx, |view, cx| {
-                                        view.set_network_editor_strategy(RpcStrategy::Random, cx);
-                                    });
-                                }
-                            }),
-                    ),
-            )
-            .child(
-                div()
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
-                    .child(selectable_label(match self.network_editor_rpc_strategy {
-                        RpcStrategy::Ordered => "Endpoints are tried from top to bottom; failures continue to the next URL.",
-                        RpcStrategy::Random => "Endpoints are shuffled for each request; failures continue through that shuffled list.",
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(field(
-                        "Maximum gas limit (optional)",
-                        max_gas_limit,
-                        self.network_editor_errors.max_gas_limit.clone(),
-                        false,
-                    ))
-                    .child(field(
-                        "Maximum fee per gas, wei (optional)",
-                        max_fee_per_gas,
-                        self.network_editor_errors.max_fee_per_gas.clone(),
-                        false,
-                    )),
-            )
-            .child(
-                div()
-                    .font_semibold()
-                    .child(selectable_label("Native currency")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(field("Name", native_name, None, false))
-                    .child(field("Symbol", native_symbol, None, false))
-                    .child(field("Decimals", native_decimals, None, false)),
-            )
-            .when_some(self.network_editor_errors.native_currency.clone(), |panel, error| {
-                panel.child(field_error("network-editor-native-currency-error", error, cx))
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .child(field(
-                        "Block explorer URL",
-                        explorer,
-                        self.network_editor_errors.block_explorer_url.clone(),
-                        false,
-                    ))
-                    .child(field(
-                        "Documentation URL",
-                        documentation,
-                        self.network_editor_errors.documentation_url.clone(),
-                        false,
+                    .child(selectable_label(
+                        "Saving checks every field, confirms the live chain answers to this chain ID, and asks you to authenticate.",
                     )),
             )
             .when_some(self.network_editor_errors.form.clone(), |panel, error| {
@@ -10790,8 +11161,9 @@ impl WalletWindow {
                                             .to_owned()
                                     } else {
                                         format!(
-                                            "{} measured simulation endpoint(s) · {} fork-capable endpoint(s)",
-                                            profile.simulate_endpoints, profile.fork_endpoints
+                                            "{} measured · {} able to simulate a fork",
+                                            pluralize(profile.simulate_endpoints, "endpoint"),
+                                            profile.fork_endpoints
                                         )
                                     },
                                 )),
@@ -11750,7 +12122,10 @@ impl WalletWindow {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(format!("{count} token name(s) awaiting review")),
+                                        .child(format!(
+                                            "{} awaiting review",
+                                            pluralize(count, "token name")
+                                        )),
                                 ),
                             )
                             .child(
@@ -11846,7 +12221,8 @@ impl WalletWindow {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(selectable_label(format!(
-                        "Showing {visible} of {total} token(s)"
+                        "Showing {visible} of {}",
+                        pluralize(total, "token")
                     ))),
             )
             .child(
@@ -12396,8 +12772,8 @@ impl WalletWindow {
                                 .font_normal()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(format!(
-                                    "{} additional review(s) waiting",
-                                    self.queued_reviews.len()
+                                    "{} more waiting behind this one",
+                                    pluralize(self.queued_reviews.len(), "request")
                                 )),
                         )
                     },
@@ -12811,16 +13187,32 @@ impl WalletWindow {
                     .pb_3()
                     .bg(cx.theme().background)
                     .flex()
-                    .items_center()
+                    .items_start()
                     .gap_2()
                     .child(
                         div()
                             .min_w_0()
                             .flex_1()
-                            .truncate()
-                            .text_3xl()
-                            .font_medium()
-                            .child(self.route.label()),
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_3xl()
+                                    .font_medium()
+                                    .child(self.route.label()),
+                            )
+                            // A page title names the screen; this line says
+                            // what the screen is for, so nobody has to open a
+                            // tab to find out whether it is the one they want.
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .whitespace_normal()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(self.route.description()),
+                            ),
                     )
                     .when(self.desktop_snapshot_loading, |header| {
                         header.child(Spinner::new().small())
@@ -12931,7 +13323,8 @@ impl Render for WalletWindow {
         let modal_open = self.active_review.is_some()
             || self.pending_agent_install.is_some()
             || self.legal_review.is_some()
-            || self.account_export.is_some();
+            || self.account_export.is_some()
+            || self.selected_record.is_some();
         if modal_open && !self.modal_focus.contains_focused(window, cx) {
             self.modal_focus.focus(window, cx);
         }
@@ -12983,6 +13376,12 @@ impl Render for WalletWindow {
             .when(self.account_export.is_some(), |view| {
                 view.child(self.render_account_security_overlay(cx))
             })
+            // Below the decision surfaces: a security review that arrives
+            // while a receipt is open must be the thing in front.
+            .when(
+                self.selected_record.is_some() && self.active_review.is_none(),
+                |view| view.child(self.render_activity_detail_overlay(cx)),
+            )
     }
 }
 
@@ -13670,14 +14069,6 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                             let _ =
                                 cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
                         }
-                        TrayCommand::ConnectDapp => {
-                            tray_view.update(cx, |view, cx| {
-                                view.set_route(Route::WalletConnect);
-                                cx.notify();
-                            });
-                            let _ =
-                                cx.update(|cx| show_wallet_window(cx, &tray_view, &tray_window));
-                        }
                         TrayCommand::CheckForUpdates => {
                             tray_view.update(cx, |view, cx| {
                                 view.set_route(Route::Settings);
@@ -13707,15 +14098,17 @@ fn run_desktop_with_visibility(hidden_startup: bool) -> Result<()> {
                         Ok(event) => {
                             let preferences = NotificationPreferences;
                             let owner = notification_owner.clone();
-                            let visible = tokio::task::spawn_blocking(move || {
-                                transaction_notification_is_visible(&owner, &event).then_some(event)
+                            let described = tokio::task::spawn_blocking(move || {
+                                transaction_notification_context(&owner, &event)
+                                    .map(|context| (event, context))
                             })
                             .await
                             .ok()
                             .flatten();
-                            if let Some(notification) = visible
-                                .as_ref()
-                                .and_then(|event| notification_for(event, preferences))
+                            if let Some(notification) =
+                                described.as_ref().and_then(|(event, context)| {
+                                    notification_for(event, context, preferences)
+                                })
                             {
                                 notification_service.show(notification);
                             }

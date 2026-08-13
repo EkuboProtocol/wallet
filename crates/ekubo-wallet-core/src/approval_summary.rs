@@ -322,7 +322,22 @@ pub fn render_balance_changes(
         lines.push((label, delta_text));
         let incoming = &change.incoming_transfers;
         let outgoing = &change.outgoing_transfers;
-        if incoming != "0" || outgoing != "0" {
+        // The line above is already the net of these two. Repeating them when
+        // a token only moved one way says the same thing twice — "+0.187585
+        // USDC" over "+0.187585 USDC in, +0 USDC out" — and a reader who sees
+        // that once learns to skip the continuation line everywhere, including
+        // the two cases where it carries something the net cannot show.
+        let gross_differs_from_net = incoming != "0" && outgoing != "0";
+        // A measured balance change its own Transfer events do not add up to
+        // is the unusual-contract case worth naming: a rebase, a transfer fee,
+        // or a token that simply does not report what it does.
+        let events_do_not_explain_the_balance = change
+            .delta
+            .as_deref()
+            .and_then(parse_signed)
+            .zip(transfer_event_net(change))
+            .is_some_and(|(measured, from_events)| measured != from_events);
+        if gross_differs_from_net || events_do_not_explain_the_balance {
             let incoming_display = parse_signed(incoming).map_or_else(
                 || format!("+{incoming} base units"),
                 |amount| format_signed_amount(&amount, display.decimals, display.symbol.as_deref()),
@@ -336,7 +351,13 @@ pub fn render_balance_changes(
             // their own detail line.
             lines.push((
                 String::new(),
-                format!("standard Transfer events: {incoming_display} in, {outgoing_display} out"),
+                if events_do_not_explain_the_balance {
+                    format!(
+                        "{incoming_display} in and {outgoing_display} out, which does not account for the change above"
+                    )
+                } else {
+                    format!("{incoming_display} in and {outgoing_display} out")
+                },
             ));
         }
     }

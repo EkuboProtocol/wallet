@@ -23,6 +23,19 @@ pub enum SessionStatus {
     Disconnecting,
 }
 
+impl SessionStatus {
+    /// Owner-facing wording for the state of one dapp connection.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pairing => "Connecting",
+            Self::AwaitingProposal => "Waiting for the dapp",
+            Self::Connected => "Connected",
+            Self::Disconnecting => "Disconnecting",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: Uuid,

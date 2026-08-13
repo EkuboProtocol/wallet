@@ -68,6 +68,106 @@ fn native_menu_ids_map_to_the_expected_commands() {
         command_for_id(REVIEWS_ID),
         Some(TrayCommand::OpenRoute(Route::Activity))
     );
+    assert_eq!(
+        command_for_id(CONNECT_ID),
+        Some(TrayCommand::OpenRoute(Route::WalletConnect))
+    );
+    assert_eq!(
+        command_for_id(SETTINGS_ID),
+        Some(TrayCommand::OpenRoute(Route::Settings))
+    );
+    assert_eq!(
+        command_for_id(UPDATES_ID),
+        Some(TrayCommand::CheckForUpdates)
+    );
     assert_eq!(command_for_id(QUIT_ID), Some(TrayCommand::Quit));
     assert_eq!(command_for_id("unknown"), None);
+}
+
+#[test]
+fn no_two_menu_items_issue_the_same_command() {
+    // The agent-status line used to open Settings, which is what the
+    // `Settings` item is for. A menu with two ways to do one thing reads as
+    // though they differ.
+    let commands = [
+        OPEN_ID,
+        REVIEWS_ID,
+        CONNECT_ID,
+        SETTINGS_ID,
+        UPDATES_ID,
+        QUIT_ID,
+    ]
+    .map(command_for_id)
+    .to_vec();
+    for (index, command) in commands.iter().enumerate() {
+        assert!(command.is_some(), "menu item {index} does nothing");
+        assert!(
+            !commands[index + 1..].contains(command),
+            "two menu items issue {command:?}"
+        );
+    }
+    // The status line reports and nothing else.
+    assert_eq!(command_for_id(AGENTS_ID), None);
+}
+
+#[test]
+fn menu_labels_are_finished_sentences_without_trailing_ellipses() {
+    let idle = TraySnapshot {
+        pending_reviews: 0,
+        mcp_online: false,
+        connected_agents: 0,
+        walletconnect_sessions: 0,
+    };
+    let busy = TraySnapshot {
+        pending_reviews: 3,
+        mcp_online: true,
+        connected_agents: 2,
+        walletconnect_sessions: 1,
+    };
+
+    assert_eq!(review_menu_text(0), "Nothing waiting for you");
+    assert_eq!(review_menu_text(1), "1 request waiting for you");
+    assert_eq!(review_menu_text(3), "3 requests waiting for you");
+
+    assert_eq!(agent_menu_text(&idle), "Agents cannot connect right now");
+    assert_eq!(
+        agent_menu_text(&busy),
+        "Ready for agents · 2 agents and 1 dapp connected"
+    );
+    assert_eq!(
+        agent_menu_text(&TraySnapshot {
+            connected_agents: 1,
+            walletconnect_sessions: 0,
+            ..busy.clone()
+        }),
+        "Ready for agents · 1 agent connected"
+    );
+    assert_eq!(
+        agent_menu_text(&TraySnapshot {
+            connected_agents: 0,
+            walletconnect_sessions: 0,
+            ..busy.clone()
+        }),
+        "Ready for agents · nothing connected"
+    );
+
+    assert_eq!(tray_tooltip(&idle), "Ekubo Wallet");
+    assert_eq!(
+        tray_tooltip(&busy),
+        "Ekubo Wallet — 3 requests waiting for you"
+    );
+
+    for text in [
+        review_menu_text(0),
+        review_menu_text(2),
+        agent_menu_text(&idle),
+        agent_menu_text(&busy),
+        tray_tooltip(&busy),
+    ] {
+        assert!(!text.contains('…'), "{text} still trails an ellipsis");
+        assert!(
+            !text.contains("(s)"),
+            "{text} still uses a form-field plural"
+        );
+    }
 }
