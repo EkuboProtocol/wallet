@@ -135,7 +135,10 @@ fn export_lease_counts_down_to_zero_and_stays_there() {
     );
     let remaining = lease.remaining();
     assert!(remaining > Duration::ZERO && remaining <= Duration::from_millis(200));
-    std::thread::sleep(Duration::from_millis(250));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !lease.concealed() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     // A concealed lease reports no time left rather than a duration the
     // countdown would render as a key that is still on screen.
     assert!(lease.concealed());

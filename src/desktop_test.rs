@@ -140,6 +140,48 @@ fn login_instructions_only_include_installed_detected_agents() {
 }
 
 #[test]
+fn the_install_button_reflects_what_is_left_to_install() {
+    let agent = |kind, installed| DetectedAgent {
+        kind,
+        display_name: "Agent",
+        config_path: "agent.json".into(),
+        installed,
+    };
+
+    let mixed = AgentDetectionState::Ready(vec![
+        agent(AgentKind::Codex, Ok(true)),
+        agent(AgentKind::ClaudeCode, Ok(false)),
+    ]);
+    assert!(agents_need_install(&mixed));
+    assert!(!agents_all_installed(&mixed));
+
+    let done = AgentDetectionState::Ready(vec![agent(AgentKind::Codex, Ok(true))]);
+    assert!(!agents_need_install(&done));
+    assert!(agents_all_installed(&done));
+
+    // An unreadable configuration is not an installed one, so the button
+    // stays live and the reassurance stays off.
+    let broken =
+        AgentDetectionState::Ready(vec![agent(AgentKind::Cursor, Err("unreadable".into()))]);
+    assert!(agents_need_install(&broken));
+    assert!(!agents_all_installed(&broken));
+
+    // Nothing detected: nothing to install, and nothing to claim either.
+    let none = AgentDetectionState::Ready(Vec::new());
+    assert!(!agents_need_install(&none));
+    assert!(!agents_all_installed(&none));
+
+    // Still looking, or unable to look: offer the button, promise nothing.
+    for unknown in [
+        AgentDetectionState::Loading,
+        AgentDetectionState::Failed("detection failed".into()),
+    ] {
+        assert!(agents_need_install(&unknown));
+        assert!(!agents_all_installed(&unknown));
+    }
+}
+
+#[test]
 fn network_preset_search_prefers_exact_names_and_chain_ids() {
     let presets = ekubo_wallet_core::networks::known_networks();
     let configured = ekubo_wallet_core::config::default_networks();
