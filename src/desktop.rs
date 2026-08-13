@@ -8529,46 +8529,27 @@ impl WalletWindow {
                 .flex()
                 .flex_col()
                 .gap_2()
+                // No Close button in here. This header scrolls with the rest
+                // of the record, and a settled transaction's detail runs
+                // taller than the window — so the only way out sat above the
+                // top of the viewport for as long as anybody was reading. It
+                // lives in the modal's fixed footer instead.
                 .child(
-                    div()
+                    h_flex()
                         .w_full()
                         .min_w_0()
-                        .flex()
                         .flex_wrap()
                         .items_center()
-                        .justify_between()
-                        .gap_4()
+                        .gap_2()
                         .child(
-                            h_flex()
-                                .min_w_0()
-                                .flex_1()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    selectable_text(
-                                        SharedString::from(format!(
-                                            "activity-heading-{request_id}"
-                                        )),
-                                        title,
-                                    )
-                                    .text_lg()
-                                    .font_semibold(),
-                                )
-                                .child(status_pill(status, tone, cx)),
+                            selectable_text(
+                                SharedString::from(format!("activity-heading-{request_id}")),
+                                title,
+                            )
+                            .text_lg()
+                            .font_semibold(),
                         )
-                        .child(
-                            app_button(SharedString::from(format!(
-                                "close-activity-detail-{request_id}"
-                            )))
-                            .label("Close")
-                            .on_click(cx.listener(
-                                |view, _, _, cx| {
-                                    view.selected_record = None;
-                                    cx.notify();
-                                },
-                            )),
-                        ),
+                        .child(status_pill(status, tone, cx)),
                 )
                 .child(
                     selectable_text(
@@ -9030,6 +9011,37 @@ impl WalletWindow {
                             .pr_2()
                             .overflow_y_scrollbar()
                             .child(detail),
+                    )
+                    // Fixed chrome, the way the security review's decision row
+                    // is: the way out of a modal must not depend on how far
+                    // through it you have read.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .flex_shrink_0()
+                            .pt_3()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label(
+                                        "This is a record of what happened. Nothing here can be changed.",
+                                    )),
+                            )
+                            .child(
+                                app_button(SharedString::from(format!(
+                                    "close-activity-detail-{request_id}"
+                                )))
+                                .label("Close")
+                                .primary()
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.selected_record = None;
+                                    cx.notify();
+                                })),
+                            ),
                     ),
             )
             .focus_trap("activity-detail-focus", &self.modal_focus)
