@@ -49,8 +49,10 @@ use gpui_component::{
     ActiveTheme, Disableable, FocusTrapElement, Icon, IconName, IndexPath, Root, Selectable,
     Sizable, StyledExt, Theme, ThemeMode, ThemeTokens, WindowExt as _,
     alert::Alert,
-    button::{Button, ButtonVariant, ButtonVariants},
+    button::{Button, ButtonGroup, ButtonVariant, ButtonVariants},
+    collapsible::Collapsible,
     dialog::{DialogButtonProps, DialogFooter},
+    form::{field, v_form},
     h_flex,
     input::{Input, InputContentType, InputEvent, InputState},
     list::{List, ListDelegate, ListEvent, ListItem, ListState},
@@ -60,6 +62,7 @@ use gpui_component::{
     switch::Switch,
     tab::{Tab, TabBar},
     text::TextView,
+    v_flex,
 };
 use std::{
     borrow::Cow,
@@ -1251,6 +1254,10 @@ pub struct WalletWindow {
     network_editor_disabled: bool,
     network_editor_testnet: bool,
     network_editor_rpc_strategy: RpcStrategy,
+    /// The optional fields live behind a disclosure so the required ones fit
+    /// without scrolling. Edit opens it when the network already uses one,
+    /// because a gas cap nobody can see is worse than a longer form.
+    network_editor_advanced_open: bool,
     network_editor_busy: bool,
     network_editor_errors: NetworkEditorErrors,
     network_name_input: Option<Entity<InputState>>,
@@ -3938,6 +3945,7 @@ impl WalletWindow {
             network_editor_disabled: false,
             network_editor_testnet: false,
             network_editor_rpc_strategy: RpcStrategy::Ordered,
+            network_editor_advanced_open: false,
             network_editor_busy: false,
             network_editor_errors: NetworkEditorErrors::default(),
             network_name_input: None,
@@ -4224,19 +4232,13 @@ impl WalletWindow {
             }));
         }
         if self.network_documentation_url_input.is_none() {
-            let input = cx.new(|cx| {
+            // No per-input Enter subscription here: the network dialog's
+            // `on_ok` already saves on Enter from any of its single-line
+            // fields, so one field carrying its own submit handler would only
+            // run the same save twice.
+            self.network_documentation_url_input = Some(cx.new(|cx| {
                 InputState::new(window, cx).placeholder("https://docs.my-rollup.example")
-            });
-            self.form_input_subscriptions.push(cx.subscribe_in(
-                &input,
-                window,
-                |view, _, event: &InputEvent, _, cx| {
-                    if primary_enter(event) && view.network_editor_open {
-                        view.save_network_editor(cx);
-                    }
-                },
-            ));
-            self.network_documentation_url_input = Some(input);
+            }));
         }
         if self.policy_json_input.is_none() {
             self.policy_json_input = Some(cx.new(|cx| {
@@ -6143,6 +6145,7 @@ impl WalletWindow {
         self.network_editor_disabled = false;
         self.network_editor_testnet = false;
         self.network_editor_rpc_strategy = RpcStrategy::Ordered;
+        self.network_editor_advanced_open = false;
         self.network_editor_errors = NetworkEditorErrors::default();
         Self::open_network_editor_modal(&focus, window, cx);
         cx.notify();
@@ -6182,9 +6185,17 @@ impl WalletWindow {
                 // Preserve breathing room where possible without ever making
                 // the modal larger than the window that contains it.
                 let horizontal_inset = viewport.width.min(px(32.0));
-                let vertical_inset = viewport.height.min(px(32.0));
+                let vertical_inset = (viewport.height / 8.0).min(px(24.0));
                 let dialog_width = (viewport.width - horizontal_inset).min(px(760.0));
-                let dialog_height = viewport.height - vertical_inset;
+                // `Dialog` places its own top at a tenth of the viewport unless
+                // it is told otherwise, so a height capped at the viewport put
+                // the footer — Cancel and Save — below the bottom of the
+                // window, and the body's scroll never engaged because the
+                // dialog was never the thing that ran out of room. Pinning the
+                // top and subtracting both insets makes the cap real: the
+                // dialog stops inside the window, the footer stays put, and the
+                // form scrolls within it.
+                let dialog_height = (viewport.height - vertical_inset * 2.0).max(px(120.0));
                 let (busy, editing, form, footer) = {
                     let wallet = entity.read(cx);
                     (
@@ -6193,17 +6204,17 @@ impl WalletWindow {
                         // No scroll container here. `Dialog` already gives its
                         // body one, and a second nested inside it captured the
                         // wheel while the outer one was the one with anywhere
-                        // to go — which left the form unscrollable. The form
-                        // is laid out to fit without scrolling anyway; the
-                        // dialog's own area covers short windows.
+                        // to go — which left the form unscrollable.
                         wallet.render_network_editor_form(&view, cx),
                         wallet.render_network_editor_footer(&view),
                     )
                 };
                 let on_close_view = view.clone();
+                let on_ok_view = view.clone();
                 dialog
                     .w(dialog_width)
                     .max_w(dialog_width)
+                    .margin_top(vertical_inset)
                     .max_h(dialog_height)
                     .title(if editing {
                         "Edit network"
@@ -6213,6 +6224,18 @@ impl WalletWindow {
                     .overlay_closable(!busy)
                     .keyboard(!busy)
                     .close_button(!busy)
+                    // Enter in a single-line input propagates to the dialog,
+                    // whose default confirmation closes it. That discarded a
+                    // filled-in form. Route it to the same save the footer
+                    // runs and never let it close the dialog itself: the save
+                    // task closes on success and leaves it open on failure so
+                    // the field errors are still on screen.
+                    .on_ok(move |_, _, cx| {
+                        let _ = on_ok_view.update(cx, |view, cx| {
+                            view.save_network_editor(cx);
+                        });
+                        false
+                    })
                     .on_close(move |_, _, cx| {
                         let _ = on_close_view.update(cx, |view, cx| {
                             view.close_network_editor(cx);
@@ -6336,6 +6359,9 @@ impl WalletWindow {
         self.network_editor_disabled = network.disabled;
         self.network_editor_testnet = network.testnet;
         self.network_editor_rpc_strategy = network.rpc_strategy;
+        self.network_editor_advanced_open = !network.aliases.is_empty()
+            || network.max_gas_limit.is_some()
+            || network.max_fee_per_gas.is_some();
         self.network_editor_errors = NetworkEditorErrors::default();
         focus.update(cx, |input, cx| {
             input.set_selected_range(0..input.value().len(), cx);
@@ -6357,6 +6383,11 @@ impl WalletWindow {
             self.network_editor_testnet,
             self.network_editor_rpc_strategy,
         );
+        // An error under a collapsed disclosure is invisible, so a rejected
+        // save always reveals the field it is complaining about.
+        self.network_editor_advanced_open |= errors.aliases.is_some()
+            || errors.max_gas_limit.is_some()
+            || errors.max_fee_per_gas.is_some();
         self.network_editor_errors = errors;
         let Some(network) = network else {
             cx.notify();
@@ -10843,181 +10874,197 @@ impl WalletWindow {
         };
         let busy = self.network_editor_busy;
         let editing = self.network_editor_original.is_some();
-        let field = |label: &'static str,
-                     input: &Entity<InputState>,
-                     error: Option<String>,
-                     disabled: bool| {
-            div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().text_sm().font_medium().child(selectable_text(
-                    format!("network-editor-label-{label}"),
-                    label,
-                )))
+        let advanced_open = self.network_editor_advanced_open;
+        // Twelve inputs stacked one prose paragraph at a time did not fit any
+        // ordinary window, and laying them out as wrapping flex rows let a long
+        // label decide its own column's width and shove the field beside it
+        // onto the next line. `Form` is a grid: every column gets the same
+        // share whatever its label says, so a row stays a row. Required fields
+        // carry the component's asterisk rather than an "(optional)" suffix on
+        // everything else — shorter, and it agrees with what saving enforces.
+        let text_field = |label: &'static str,
+                          input: &Entity<InputState>,
+                          error: Option<String>,
+                          required: bool,
+                          disabled: bool,
+                          columns: u16| {
+            field()
+                .col_span(columns)
+                .required(required)
+                .label_fn(move |_, _| selectable_label(label))
                 .child(
-                    app_input(input, cx)
-                        .aria_label(label)
-                        .disabled(disabled || busy),
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(
+                            app_input(input, cx)
+                                .aria_label(label)
+                                .disabled(disabled || busy),
+                        )
+                        .when_some(error, |column, error| {
+                            column.child(field_error(
+                                SharedString::from(format!("network-editor-error-{label}")),
+                                error,
+                                cx,
+                            ))
+                        }),
                 )
-                .when_some(error, |field, error| {
-                    field.child(field_error(
-                        SharedString::from(format!("network-editor-error-{label}")),
-                        error,
-                        cx,
-                    ))
-                })
         };
-        // Twelve fields laid out one prose paragraph at a time did not fit any
-        // ordinary window, and the dialog it sits in is the wrong place to be
-        // scrolling: a form you cannot see the end of hides its own Save
-        // button. Fields sit three to a row, and the explanatory paragraphs
-        // that used to separate them are gone — a field whose label is clear
-        // does not need a sentence under it, and the two that carried real
-        // information now sit inline where they are read.
-        let row = || div().w_full().flex().flex_wrap().gap_3();
-        div()
+        v_flex()
             .w_full()
-            .flex()
-            .flex_col()
-            .gap_3()
+            .gap_5()
             .child(
-                row().child(field(
-                        if editing {
-                            "Chain ID (fixed)"
-                        } else {
-                            "Chain ID"
-                        },
-                        chain_id,
-                        self.network_editor_errors.chain_id.clone(),
-                        editing,
-                    ))
-                    .child(field(
+                v_form()
+                    .columns(6)
+                    .child(
+                        text_field(
+                            "Chain ID",
+                            chain_id,
+                            self.network_editor_errors.chain_id.clone(),
+                            true,
+                            editing,
+                            2,
+                        )
+                        .when(editing, |field| {
+                            field.description("Fixed once the network exists.")
+                        }),
+                    )
+                    .child(text_field(
                         "Internal name",
                         name,
                         self.network_editor_errors.name.clone(),
+                        true,
                         false,
+                        2,
                     ))
-                    .child(field(
-                        "Display name (optional)",
+                    .child(text_field(
+                        "Display name",
                         display_name,
                         self.network_editor_errors.display_name.clone(),
                         false,
-                    )),
-            )
-            .child(
-                row().child(field(
-                        "Other names it answers to (optional)",
-                        aliases,
-                        self.network_editor_errors.aliases.clone(),
                         false,
+                        2,
                     ))
-                    .child(field(
-                        "Block explorer URL",
+                    .child(text_field(
+                        "Block explorer",
                         explorer,
                         self.network_editor_errors.block_explorer_url.clone(),
+                        true,
                         false,
+                        3,
                     ))
-                    .child(field(
-                        "Documentation URL",
+                    .child(text_field(
+                        "Documentation",
                         documentation,
                         self.network_editor_errors.documentation_url.clone(),
+                        true,
                         false,
+                        3,
                     )),
             )
             .child(
-                div()
+                v_flex()
                     .w_full()
-                    .flex()
-                    .flex_col()
                     .gap_1()
-                    // The endpoint-order choice belongs beside the endpoints
-                    // it orders, not in a row of its own below them.
+                    // The endpoint-order choice belongs beside the endpoints it
+                    // orders, and as one segmented control rather than two
+                    // buttons that only look related when the right one
+                    // happens to be lit.
                     .child(
                         h_flex()
                             .w_full()
-                            .flex_wrap()
                             .items_center()
                             .justify_between()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_medium()
-                                    .child(selectable_label("RPC endpoints, one per line")),
-                            )
+                            .gap_3()
                             .child(
                                 h_flex()
-                                    .gap_2()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .text_sm()
+                                    .font_medium()
+                                    .child(selectable_label("RPC endpoints"))
+                                    .child(div().text_color(cx.theme().danger).child("*")),
+                            )
+                            .child(
+                                ButtonGroup::new("network-editor-rpc-strategy")
+                                    .small()
+                                    .outline()
+                                    .disabled(busy)
                                     .child(
-                                        app_button("network-strategy-ordered")
-                                            .small()
+                                        Button::new("network-strategy-ordered")
                                             .label("Try in order")
                                             .tooltip("Endpoints are tried from the top down; a failure moves to the next one.")
-                                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
-                                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Ordered)
-                                            .disabled(busy)
-                                            .on_click({
-                                                let view = view.clone();
-                                                move |_, _, cx| {
-                                                    let _ = view.update(cx, |view, cx| {
-                                                        view.set_network_editor_strategy(RpcStrategy::Ordered, cx);
-                                                    });
-                                                }
-                                            }),
+                                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Ordered),
                                     )
                                     .child(
-                                        app_button("network-strategy-random")
-                                            .small()
+                                        Button::new("network-strategy-random")
                                             .label("Shuffle each request")
                                             .tooltip("Endpoints are shuffled per request; a failure continues through that shuffled list.")
-                                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Random)
-                                            .toggled(self.network_editor_rpc_strategy == RpcStrategy::Random)
-                                            .disabled(busy)
-                                            .on_click({
-                                                let view = view.clone();
-                                                move |_, _, cx| {
-                                                    let _ = view.update(cx, |view, cx| {
-                                                        view.set_network_editor_strategy(RpcStrategy::Random, cx);
-                                                    });
-                                                }
-                                            }),
-                                    ),
+                                            .selected(self.network_editor_rpc_strategy == RpcStrategy::Random),
+                                    )
+                                    .on_click({
+                                        let view = view.clone();
+                                        move |clicked: &Vec<usize>, _, cx| {
+                                            let strategy = if clicked.contains(&1) {
+                                                RpcStrategy::Random
+                                            } else {
+                                                RpcStrategy::Ordered
+                                            };
+                                            let _ = view.update(cx, |view, cx| {
+                                                view.set_network_editor_strategy(strategy, cx);
+                                            });
+                                        }
+                                    }),
                             ),
                     )
                     .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selectable_label("One http:// or https:// URL per line.")),
+                    )
+                    // No height override here: the input already asks for five
+                    // rows, and a fixed pixel height fought that and clipped
+                    // the fifth.
+                    .child(
                         app_input(rpc_urls, cx)
                             .aria_label("RPC endpoints")
-                            .disabled(busy)
-                            .h(px(88.0)),
+                            .disabled(busy),
                     )
-                    .when_some(self.network_editor_errors.rpc_urls.clone(), |field, error| {
-                        field.child(field_error("network-editor-rpc-urls-error", error, cx))
-                    }),
+                    .when_some(
+                        self.network_editor_errors.rpc_urls.clone(),
+                        |section, error| {
+                            section.child(field_error("network-editor-rpc-urls-error", error, cx))
+                        },
+                    ),
             )
             .child(
-                row().child(field("Currency name", native_name, None, false))
-                    .child(field("Symbol", native_symbol, None, false))
-                    .child(field("Decimals", native_decimals, None, false)),
-            )
-            .when_some(self.network_editor_errors.native_currency.clone(), |panel, error| {
-                panel.child(field_error("network-editor-native-currency-error", error, cx))
-            })
-            .child(
-                row().child(field(
-                        "Maximum gas limit (optional)",
-                        max_gas_limit,
-                        self.network_editor_errors.max_gas_limit.clone(),
-                        false,
-                    ))
-                    .child(field(
-                        "Maximum fee per gas, wei (optional)",
-                        max_fee_per_gas,
-                        self.network_editor_errors.max_fee_per_gas.clone(),
-                        false,
-                    )),
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_semibold()
+                            .child(selectable_label("Native currency")),
+                    )
+                    .child(
+                        v_form()
+                            .columns(6)
+                            .child(text_field("Name", native_name, None, true, false, 2))
+                            .child(text_field("Symbol", native_symbol, None, true, false, 2))
+                            .child(text_field("Decimals", native_decimals, None, true, false, 2)),
+                    )
+                    .when_some(
+                        self.network_editor_errors.native_currency.clone(),
+                        |section, error| {
+                            section.child(field_error(
+                                "network-editor-native-currency-error",
+                                error,
+                                cx,
+                            ))
+                        },
+                    ),
             )
             .child(
                 h_flex()
@@ -11026,13 +11073,23 @@ impl WalletWindow {
                     .justify_between()
                     .gap_4()
                     .child(
-                        div()
+                        v_flex()
                             .min_w_0()
                             .flex_1()
-                            .text_sm()
-                            .child(selectable_label(
-                                "Test network — hidden along with its balances, tokens, and activity unless testnet mode is on.",
-                            )),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_medium()
+                                    .child(selectable_label("Test network")),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(selectable_label(
+                                        "Hidden, with its balances, tokens, and activity, unless testnet mode is on.",
+                                    )),
+                            ),
                     )
                     .child(
                         Switch::new("network-editor-testnet")
@@ -11047,6 +11104,74 @@ impl WalletWindow {
                                     });
                                 }
                             }),
+                    ),
+            )
+            // Four of the twelve fields are optional, and showing them all made
+            // the required ones hard to find. They open on demand — and open
+            // themselves when an existing network already sets one, so editing
+            // never hides a value that is in force.
+            .child(
+                Collapsible::new()
+                    .w_full()
+                    .gap_3()
+                    .open(advanced_open)
+                    .child(
+                        app_button("network-editor-advanced")
+                            .ghost()
+                            .self_start()
+                            .label("Optional details")
+                            .icon(if advanced_open {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .disabled(busy)
+                            .on_click({
+                                let view = view.clone();
+                                move |_, _, cx| {
+                                    let _ = view.update(cx, |wallet, cx| {
+                                        wallet.network_editor_advanced_open =
+                                            !wallet.network_editor_advanced_open;
+                                        cx.notify();
+                                    });
+                                }
+                            }),
+                    )
+                    .content(
+                        v_form()
+                            .columns(6)
+                            .child(
+                                text_field(
+                                    "Aliases",
+                                    aliases,
+                                    self.network_editor_errors.aliases.clone(),
+                                    false,
+                                    false,
+                                    6,
+                                )
+                                .description(
+                                    "Other names this network answers to, separated by commas.",
+                                ),
+                            )
+                            .child(text_field(
+                                "Max gas limit",
+                                max_gas_limit,
+                                self.network_editor_errors.max_gas_limit.clone(),
+                                false,
+                                false,
+                                3,
+                            ))
+                            .child(
+                                text_field(
+                                    "Max fee per gas",
+                                    max_fee_per_gas,
+                                    self.network_editor_errors.max_fee_per_gas.clone(),
+                                    false,
+                                    false,
+                                    3,
+                                )
+                                .description("In wei."),
+                            ),
                     ),
             )
             .child(
@@ -11064,9 +11189,13 @@ impl WalletWindow {
 
     fn render_network_editor_footer(&self, view: &WeakEntity<Self>) -> DialogFooter {
         let busy = self.network_editor_busy;
+        // No `flex_wrap` here. The footer is two buttons on one line; wrapping
+        // only ever fired because the primary label was a sentence, and it put
+        // Cancel on a row of its own under a right-aligned Save. The label is
+        // short now and the sentence it used to carry sits above the footer,
+        // where it is read before the click rather than on it.
         DialogFooter::new()
             .pt_2()
-            .flex_wrap()
             .child(
                 app_button("cancel-guided-network")
                     .label("Cancel")
@@ -11091,11 +11220,7 @@ impl WalletWindow {
             )
             .child(
                 app_button("save-guided-network")
-                    .label(if busy {
-                        "Verifying & authenticating…"
-                    } else {
-                        "Verify, authenticate & save"
-                    })
+                    .label(if busy { "Saving…" } else { "Save network" })
                     .primary()
                     .loading(busy)
                     .disabled(busy)
