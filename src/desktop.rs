@@ -680,6 +680,7 @@ fn account_required_panel(
         .child(selectable_label(message))
         .child(
             app_button(button_id)
+                .self_start()
                 .label("Go to Accounts")
                 .primary()
                 .on_click(cx.listener(|view, _, _, cx| {
@@ -7821,6 +7822,7 @@ impl WalletWindow {
                                     app_button(SharedString::from(format!(
                                         "retry-transaction-inspection-{request_id}"
                                     )))
+                                    .self_start()
                                     .label("Try again")
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.load_transaction_inspection(request_id, cx);
@@ -7962,6 +7964,7 @@ impl WalletWindow {
                             app_button(SharedString::from(format!(
                                 "load-transaction-inspection-{request_id}"
                             )))
+                            .self_start()
                             .label("Show what this transaction did")
                             .on_click(cx.listener(
                                 move |view, _, _, cx| {
@@ -9687,6 +9690,7 @@ impl WalletWindow {
                     )
                     .child(
                         app_button("validate-policy-draft")
+                            .self_start()
                             .label(if reviewed_exact_document {
                                 "Refresh preview"
                             } else {
@@ -9732,6 +9736,7 @@ impl WalletWindow {
                         .child(changes)
                         .child(
                             app_button("install-policy-draft")
+                            .self_start()
                                 .label(if self.policy_installing {
                                     "Authenticating…"
                                 } else {
@@ -10513,6 +10518,7 @@ impl WalletWindow {
         }
         content = content.child(
             app_button("open-custom-network-editor")
+                .self_start()
                 .label("Add custom network")
                 .primary()
                 .icon(IconName::Plus)
@@ -11030,6 +11036,7 @@ impl WalletWindow {
             });
         content = content.child(
             app_button("open-token-editor")
+                .self_start()
                 .label("Add token")
                 .primary()
                 .disabled(self.token_editor_open)
@@ -11040,6 +11047,7 @@ impl WalletWindow {
         if let Some(input) = self.token_list_url_input.as_ref() {
             content = content.child(
                 app_button("toggle-owner-token-list-import")
+                    .self_start()
                     .label(if self.token_list_import_open {
                         "Close token-list import"
                     } else {
@@ -11307,6 +11315,7 @@ impl WalletWindow {
         panel = match &self.release_state {
             ReleaseDisplayState::Idle => panel.child(
                 app_button("check-latest-release")
+                    .self_start()
                     .label("Check latest version")
                     .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
             ),
@@ -11337,6 +11346,7 @@ impl WalletWindow {
                 .when_some(update.as_ref(), |panel, update| {
                     panel.child(
                         app_button("install-signed-update")
+                            .self_start()
                             .label(format!("Install {}", update.version))
                             .primary()
                             .on_click(cx.listener(|view, _, window, cx| {
@@ -11347,12 +11357,14 @@ impl WalletWindow {
                 .when(check.update_available && update.is_none(), |panel| {
                     panel.child(
                         app_button("open-latest-release")
+                            .self_start()
                             .label("View latest release")
                             .on_click(|_, _, cx| cx.open_url(LATEST_RELEASE_URL)),
                     )
                 })
                 .child(
                     app_button("recheck-latest-release")
+                        .self_start()
                         .label("Check again")
                         .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
@@ -11364,6 +11376,7 @@ impl WalletWindow {
                 )
                 .child(
                     app_button("retry-latest-release")
+                        .self_start()
                         .label("Try again")
                         .on_click(cx.listener(|view, _, _, cx| view.check_latest_release(cx))),
                 ),
