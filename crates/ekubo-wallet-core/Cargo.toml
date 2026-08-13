@@ -1,6 +1,6 @@
 [package]
 name = "ekubo-wallet-core"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 edition = "2024"
 rust-version = "1.91"
 description = "The security kernel of the ekubo-wallet binary: policy, custody, signing, storage"
